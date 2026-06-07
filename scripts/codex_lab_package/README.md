@@ -26,6 +26,7 @@ in these locations, in order:
 
 The GitHub workflow uploads `codex-lab-distribution.json` beside the app zip,
 shim zip, and `SHA256SUMS`. The manifest records artifact roles, sizes,
-checksums, source workflow metadata, supported install layouts, and the current
-signing state. Codex Lab artifacts are currently marked `signed: false` and
-`notarized: false` until a later signing/notarization stage is implemented.
+checksums, source workflow metadata, supported install layouts, release tags,
+download URLs when published, and the current signing state. Codex Lab artifacts
+are currently marked `signed: false` and `notarized: false` until a later
+signing/notarization stage is implemented.

@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
@@ -19,6 +20,10 @@ PLATFORM = "aarch64-apple-darwin"
 APP_ZIP = "codex-lab-app-aarch64-apple-darwin.zip"
 SHIM_ZIP = "codex-lab-shim-aarch64-apple-darwin.zip"
 MANIFEST_NAME = "codex-lab-distribution.json"
+RELEASE_TAG_PATTERN = re.compile(
+    r"^codex-lab-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)"
+    r"(-[A-Za-z0-9][A-Za-z0-9.-]*)?$"
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,8 @@ def parse_args() -> argparse.Namespace:
     generate.add_argument("--workflow", default="codex-lab-app")
     generate.add_argument("--run-id", required=True)
     generate.add_argument("--run-attempt", required=True)
+    generate.add_argument("--release-tag")
+    generate.add_argument("--download-base-url")
     generate.add_argument("--generated-at")
     generate.set_defaults(func=cmd_generate)
 
@@ -96,6 +103,8 @@ def cmd_generate(args: argparse.Namespace) -> None:
         workflow=args.workflow,
         run_id=args.run_id,
         run_attempt=args.run_attempt,
+        release_tag=args.release_tag,
+        download_base_url=args.download_base_url,
         generated_at=args.generated_at,
     )
     validate_manifest(manifest, dist_dir=args.dist_dir, checksums=checksums)
@@ -122,9 +131,14 @@ def build_manifest(
     workflow: str,
     run_id: str,
     run_attempt: str,
+    release_tag: str | None = None,
+    download_base_url: str | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     timestamp = generated_at or utc_timestamp()
+    base_url = normalize_download_base_url(download_base_url)
+    if (release_tag is None) != (base_url is None):
+        raise ValueError("release tag and download base URL must be provided together")
     artifacts = {}
     for artifact in ARTIFACTS:
         path = dist_dir / artifact.file_name
@@ -147,8 +161,10 @@ def build_manifest(
             "signed": False,
             "sizeBytes": path.stat().st_size,
         }
+        if base_url is not None:
+            artifacts[artifact.role]["downloadUrl"] = f"{base_url}/{artifact.file_name}"
 
-    return {
+    manifest = {
         "artifacts": artifacts,
         "bundleVersion": bundle_version,
         "channel": CHANNEL,
@@ -185,6 +201,11 @@ def build_manifest(
         ],
         "version": version,
     }
+    if release_tag is not None:
+        manifest["release"] = {
+            "tag": release_tag,
+        }
+    return manifest
 
 
 def utc_timestamp() -> str:
@@ -226,6 +247,10 @@ def validate_manifest(
         raise ValueError(f"Unexpected channel: {manifest['channel']}")
     if manifest["platform"] != PLATFORM:
         raise ValueError(f"Unexpected platform: {manifest['platform']}")
+    version = manifest["version"]
+    if not isinstance(version, str) or not version:
+        raise ValueError("Manifest version must be a non-empty string")
+    validate_release(manifest.get("release"), version)
     validate_supported_layouts(manifest["supportedLayouts"])
     artifacts = manifest["artifacts"]
     if not isinstance(artifacts, dict):
@@ -242,6 +267,7 @@ def validate_manifest(
         if not isinstance(entry, dict):
             raise ValueError(f"{artifact.role} must be an object")
         validate_artifact_entry(artifact, entry, dist_dir=dist_dir, checksums=checksums)
+    validate_release_download_urls(manifest.get("release"), artifacts)
 
 
 def validate_supported_layouts(layouts: object) -> None:
@@ -263,6 +289,61 @@ def validate_supported_layouts(layouts: object) -> None:
         raise ValueError(
             f"Manifest supportedLayouts mismatch: {actual_kinds} != {expected_kinds}"
         )
+
+
+def validate_release(release: object, version: str) -> None:
+    if release is None:
+        return
+    if not isinstance(release, dict):
+        raise ValueError("Manifest release must be an object")
+    tag = release.get("tag")
+    if not isinstance(tag, str) or not tag:
+        raise ValueError("Manifest release tag must be a non-empty string")
+    match = RELEASE_TAG_PATTERN.fullmatch(tag)
+    if match is None:
+        raise ValueError(f"Manifest release tag has invalid format: {tag}")
+    if match.group("version") != version:
+        raise ValueError(
+            f"Manifest release tag version does not match manifest version: {tag} != {version}"
+        )
+
+
+def validate_release_download_urls(
+    release: object,
+    artifacts: dict[str, object],
+) -> None:
+    has_release = release is not None
+    missing_download_url_roles = [
+        role
+        for role, entry in artifacts.items()
+        if not isinstance(entry, dict) or entry.get("downloadUrl") is None
+    ]
+    has_download_urls = len(missing_download_url_roles) != len(artifacts)
+    if not has_release and has_download_urls:
+        raise ValueError(
+            "Manifest release metadata and artifact download URLs must be provided together"
+        )
+    if has_release and not has_download_urls:
+        raise ValueError(
+            "Manifest release metadata and artifact download URLs must be provided together"
+        )
+    if has_release and missing_download_url_roles:
+        raise ValueError(
+            "Manifest release metadata requires download URLs for every artifact: "
+            f"{sorted(missing_download_url_roles)}"
+        )
+    if isinstance(release, dict):
+        tag = release["tag"]
+        for role, entry in artifacts.items():
+            if not isinstance(entry, dict):
+                raise ValueError(f"{role} must be an object")
+            file_name = entry["fileName"]
+            download_url = entry["downloadUrl"]
+            expected_suffix = f"/releases/download/{tag}/{file_name}"
+            if not download_url.endswith(expected_suffix):
+                raise ValueError(
+                    f"{role} downloadUrl must target release artifact: {download_url}"
+                )
 
 
 def validate_artifact_entry(
@@ -298,6 +379,9 @@ def validate_artifact_entry(
         raise ValueError(f"{artifact.role} has invalid sha256: {entry['sha256']}")
     if not isinstance(entry["sizeBytes"], int) or entry["sizeBytes"] <= 0:
         raise ValueError(f"{artifact.role} has invalid sizeBytes: {entry['sizeBytes']}")
+    download_url = entry.get("downloadUrl")
+    if download_url is not None and not is_https_url(download_url):
+        raise ValueError(f"{artifact.role} has invalid downloadUrl: {download_url}")
     if checksums is not None and checksums.get(artifact.file_name) != entry["sha256"]:
         raise ValueError(f"{artifact.role} checksum does not match SHA256SUMS")
     if dist_dir is not None:
@@ -339,6 +423,18 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def normalize_download_base_url(url: str | None) -> str | None:
+    if url is None:
+        return None
+    if not is_https_url(url):
+        raise ValueError(f"download base URL must be an HTTPS URL: {url}")
+    return url.rstrip("/")
+
+
+def is_https_url(value: object) -> bool:
+    return isinstance(value, str) and value.startswith("https://") and len(value) > 8
 
 
 def is_sha256(value: object) -> bool:
