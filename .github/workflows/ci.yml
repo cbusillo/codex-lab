@@ -29,6 +29,23 @@ jobs:
       - name: Test Codex package builder
         run: python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
 
+      - name: Test Codex Lab app package builder
+        run: python3 -m unittest discover -s scripts/codex_lab_package -p 'test_*.py'
+
+      - name: Smoke test Codex Lab app package layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="${RUNNER_TEMP}/codex-lab-smoke"
+          python3 scripts/build_codex_lab_app.py \
+            --codex-bin /bin/sh \
+            --app-dir "${output_dir}/Codex Lab.app" \
+            --shim-dir "${output_dir}/bin" \
+            --force
+          python3 scripts/codex_lab_package/smoke.py \
+            "${output_dir}/Codex Lab.app" \
+            --shim-path "${output_dir}/bin/codex-lab"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
         with:
