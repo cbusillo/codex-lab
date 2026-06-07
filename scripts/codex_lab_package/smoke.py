@@ -47,6 +47,7 @@ def smoke_check(app_dir: Path, shim_path: Path | None) -> None:
     _require_contains(launcher, "CODEX_CLI_PATH", launcher_path)
     _require_contains(launcher, "Resources/codex-lab", launcher_path)
     _require_contains(launcher, "open -n", launcher_path)
+    _require_contains(launcher, "--env", launcher_path)
 
     if shim_path is not None:
         _require_executable(shim_path)

@@ -66,8 +66,8 @@ jobs:
           mkdir -p "$dist_dir"
           app_zip="${dist_dir}/codex-lab-app-aarch64-apple-darwin.zip"
           shim_zip="${dist_dir}/codex-lab-shim-aarch64-apple-darwin.zip"
-          ditto -c -k --keepParent "${output_root}/Codex Lab.app" "$app_zip"
-          ditto -c -k --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
+          ditto -c -k --norsrc --keepParent "${output_root}/Codex Lab.app" "$app_zip"
+          ditto -c -k --norsrc --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
           (cd "$dist_dir" && shasum -a 256 -- *.zip > SHA256SUMS)
           cat "${dist_dir}/SHA256SUMS"
           echo "dist_dir=$dist_dir" >> "$GITHUB_OUTPUT"

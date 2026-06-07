@@ -119,7 +119,7 @@ if [ ! -d "$CODEX_APP" ]; then
 fi
 
 export CODEX_CLI_PATH="$LAB_CLI"
-exec open -n "$CODEX_APP"
+exec open -n --env "CODEX_CLI_PATH=$LAB_CLI" "$CODEX_APP"
 """
 
 

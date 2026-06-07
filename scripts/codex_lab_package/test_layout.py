@@ -67,6 +67,7 @@ class BuildCodexLabAppTest(unittest.TestCase):
             self.assertIn("APP_CONTENTS_DIR", launcher)
             self.assertIn("Resources/codex-lab", launcher)
             self.assertIn("open -n", launcher)
+            self.assertIn("--env", launcher)
 
             shim = result.shim_path.read_text(encoding="utf-8")
             self.assertIn(str(result.embedded_cli_path), shim)
