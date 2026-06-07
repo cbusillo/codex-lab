@@ -6,7 +6,9 @@ on:
     paths:
       - ".github/workflows/codex-lab-app.yml"
       - "scripts/build_codex_lab_app.py"
+      - "scripts/build_codex_lab_distribution_manifest.py"
       - "scripts/codex_lab_package/**"
+      - "scripts/codex_package/**"
       - "codex-rs/**"
 
 concurrency:
@@ -46,11 +48,14 @@ jobs:
           output_root="${RUNNER_TEMP}/codex-lab-app"
           app_dir="${output_root}/Codex Lab.app"
           shim_dir="${output_root}/bin"
+          lab_version="$(PYTHONPATH=scripts python3 -c 'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
           mkdir -p "$output_root"
           python3 scripts/build_codex_lab_app.py \
             --codex-bin codex-rs/target/release/codex \
             --app-dir "$app_dir" \
             --shim-dir "$shim_dir" \
+            --short-version "$lab_version" \
+            --bundle-version "$GITHUB_RUN_NUMBER" \
             --force
           python3 scripts/codex_lab_package/smoke.py \
             "$app_dir" \
@@ -67,10 +72,31 @@ jobs:
           mkdir -p "$dist_dir"
           app_zip="${dist_dir}/codex-lab-app-aarch64-apple-darwin.zip"
           shim_zip="${dist_dir}/codex-lab-shim-aarch64-apple-darwin.zip"
+          source_commit="$(git rev-parse HEAD)"
           ditto -c -k --norsrc --keepParent "${output_root}/Codex Lab.app" "$app_zip"
           ditto -c -k --norsrc --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
+          unzip -l "$app_zip" | grep -F "Codex Lab.app/Contents/Resources/codex-lab"
+          unzip -l "$shim_zip" | grep -F "bin/codex-lab"
+          if { unzip -l "$app_zip"; unzip -l "$shim_zip"; } | grep -E '/\._|(^|[[:space:]])\._'; then
+            echo "unexpected AppleDouble file in archive" >&2
+            exit 1
+          fi
           (cd "$dist_dir" && shasum -a 256 -- *.zip > SHA256SUMS)
+          python3 scripts/build_codex_lab_distribution_manifest.py generate \
+            --dist-dir "$dist_dir" \
+            --output "${dist_dir}/codex-lab-distribution.json" \
+            --bundle-version "$GITHUB_RUN_NUMBER" \
+            --commit "$source_commit" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+          python3 scripts/build_codex_lab_distribution_manifest.py validate \
+            "${dist_dir}/codex-lab-distribution.json" \
+            --dist-dir "$dist_dir" \
+            --sha256sums "${dist_dir}/SHA256SUMS"
           cat "${dist_dir}/SHA256SUMS"
+          cat "${dist_dir}/codex-lab-distribution.json"
           echo "dist_dir=$dist_dir" >> "$GITHUB_OUTPUT"
 
       - name: Upload Codex Lab app artifact

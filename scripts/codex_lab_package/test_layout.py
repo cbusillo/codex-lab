@@ -75,6 +75,7 @@ class BuildCodexLabAppTest(unittest.TestCase):
 
             shim = result.shim_path.read_text(encoding="utf-8")
             self.assertNotIn(str(result.embedded_cli_path), shim)
+            self.assertIn("../Codex Lab.app", shim)
             self.assertIn("CODEX_LAB_APP_PATH", shim)
             self.assertIn("/Applications/Codex Lab.app", shim)
             self.assertIn('exec "$LAB_CLI" "$@"', shim)
@@ -87,6 +88,27 @@ class BuildCodexLabAppTest(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.stdout, "shim-ok")
+
+            override_cli = root / "Override Codex Lab.app/Contents/Resources/codex-lab"
+            override_cli.parent.mkdir(parents=True)
+            override_cli.write_text("#!/bin/sh\nprintf override-ok\n", encoding="utf-8")
+            os.chmod(override_cli, 0o755)
+            completed = subprocess.run(
+                [str(result.shim_path), "-c", "printf sibling-was-used"],
+                check=True,
+                env={**os.environ, "CODEX_LAB_APP_PATH": str(override_cli.parents[2])},
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.stdout, "override-ok")
+
+            completed = subprocess.run(
+                [str(result.shim_path), "-c", "printf sibling-ok"],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.stdout, "sibling-ok")
 
     def test_refuses_to_replace_existing_app_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

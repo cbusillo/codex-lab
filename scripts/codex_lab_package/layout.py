@@ -164,9 +164,12 @@ def _shim_script() -> str:
     return """#!/bin/sh
 set -eu
 
+SHIM_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+home_app="${HOME:+$HOME/Applications/Codex Lab.app}"
 candidate_apps="${CODEX_LAB_APP_PATH:-}
+$SHIM_DIR/../Codex Lab.app
 /Applications/Codex Lab.app
-$HOME/Applications/Codex Lab.app"
+$home_app"
 
 LAB_CLI=
 while IFS= read -r app_path; do
