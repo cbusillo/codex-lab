@@ -1,34 +1,40 @@
-# Workflow Strategy
+# Codex Lab Workflow Strategy
 
-The workflows in this directory are split so that pull requests get fast, review-friendly signal while `main` still gets the full cross-platform verification pass.
+This fork keeps upstream workflows available, but the automatic PR signal is
+owned by Codex Lab. Upstream's full CI and release workflows assume OpenAI
+runner groups, secrets, and release infrastructure that this fork does not own.
 
 ## Pull Requests
 
-- `bazel.yml` is the main pre-merge verification path for Rust code.
-  It runs Bazel `test` and Bazel `clippy` on the supported Bazel targets,
-  including the generated Rust test binaries needed to lint inline `#[cfg(test)]`
-  code.
-- `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
-  - `cargo fmt --check`
-  - `cargo shear`
-  - `argument-comment-lint` on Linux, macOS, and Windows
-  - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
+- `ci.yml` runs cheap repository sanity checks plus Codex Lab package-builder
+  unit and smoke tests.
+- `codex-lab-app.yml` builds the macOS ARM64 `Codex Lab.app` artifact on the
+  self-hosted macOS runner when packaging files or the workflow change.
+- `blob-size-policy.yml`, `codespell.yml`, and `cargo-deny.yml` are retained as
+  lightweight inherited checks while they remain fork-safe.
 
-## Post-Merge On `main`
+## Manual Upstream Parity Checks
 
-- `bazel.yml` also runs on pushes to `main`.
-  This re-verifies the merged Bazel path and helps keep the BuildBuddy caches warm.
-- `rust-ci-full.yml` is the full Cargo-native verification workflow.
-  It keeps the heavier checks off the PR path while still validating them after merge:
-  - the full Cargo `clippy` matrix
-  - the full Cargo `nextest` matrix via per-platform archive-backed shards
-  - Windows ARM64 nextest archives cross-compiled on Windows x64, then replayed on native Windows ARM64 shards
-  - release-profile Cargo builds
-  - cross-platform `argument-comment-lint`
-  - Linux remote-env tests
+The inherited heavyweight workflows are `workflow_dispatch` only in this fork:
 
-## Rule Of Thumb
+- `bazel.yml`
+- `rust-ci.yml`
+- `sdk.yml`
+- `v8-canary.yml`
 
-- If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
-- Keep `rust-ci.yml` fast enough that it usually does not dominate PR latency.
-- Reserve `rust-ci-full.yml` for heavyweight Cargo-native coverage that Bazel does not replace yet.
+Run these manually when a change needs upstream-style validation or touches the
+areas those workflows own. Keep them out of the default PR path until this fork
+has matching runner capacity, secrets, and branch-protection expectations.
+
+## Local Runner Contract
+
+`codex-lab-app.yml` expects a self-hosted macOS ARM64 runner with these labels:
+
+- `self-hosted`
+- `macOS`
+- `ARM64`
+- `codex-lab-app`
+
+The current local runner is `chris-mac-codex-release-1`. It must have Rust,
+Python 3, Xcode command line tools, and macOS `ditto` available. The generated
+Codex Lab app artifact is currently unsigned.

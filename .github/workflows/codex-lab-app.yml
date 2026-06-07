@@ -7,7 +7,6 @@ on:
       - ".github/workflows/codex-lab-app.yml"
       - "scripts/build_codex_lab_app.py"
       - "scripts/codex_lab_package/**"
-      - "codex-rs/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
