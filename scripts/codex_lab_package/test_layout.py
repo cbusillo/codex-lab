@@ -76,6 +76,7 @@ class BuildCodexLabAppTest(unittest.TestCase):
             shim = result.shim_path.read_text(encoding="utf-8")
             self.assertNotIn(str(result.embedded_cli_path), shim)
             self.assertIn("../Codex Lab.app", shim)
+            self.assertIn(str(result.app_dir), shim)
             self.assertIn("CODEX_LAB_APP_PATH", shim)
             self.assertIn("/Applications/Codex Lab.app", shim)
             self.assertIn('exec "$LAB_CLI" "$@"', shim)
@@ -109,6 +110,31 @@ class BuildCodexLabAppTest(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.stdout, "sibling-ok")
+
+    def test_shim_falls_back_to_exact_build_app_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_bin = root / "fake-codex"
+            codex_bin.write_text("#!/bin/sh\nprintf built-app-ok\n", encoding="utf-8")
+            os.chmod(codex_bin, 0o755)
+
+            result = build_codex_lab_app(
+                CodexLabAppOptions(
+                    app_dir=root / "staging" / "Codex Lab.app",
+                    codex_bin=codex_bin,
+                    shim_dir=root / "bin",
+                )
+            )
+            self.assertIsNotNone(result.shim_path)
+            assert result.shim_path is not None
+
+            completed = subprocess.run(
+                [str(result.shim_path)],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.stdout, "built-app-ok")
 
     def test_refuses_to_replace_existing_app_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -52,6 +52,7 @@ def smoke_check(app_dir: Path, shim_path: Path | None) -> None:
         _check_shell_syntax(shim_path)
         shim = shim_path.read_text(encoding="utf-8")
         _require_contains(shim, "../Codex Lab.app", shim_path)
+        _require_contains(shim, "built_app=", shim_path)
         _require_contains(shim, "CODEX_LAB_APP_PATH", shim_path)
         _require_contains(shim, "/Applications/Codex Lab.app", shim_path)
 

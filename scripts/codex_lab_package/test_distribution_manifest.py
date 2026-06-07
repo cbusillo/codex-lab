@@ -38,6 +38,8 @@ class DistributionManifestTest(unittest.TestCase):
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
+                release_tag="codex-lab-v1.2.3-lab.42",
+                download_base_url="https://github.com/cbusillo/codex/releases/download/codex-lab-v1.2.3-lab.42/",
                 generated_at="2026-06-07T00:00:00Z",
             )
 
@@ -48,6 +50,7 @@ class DistributionManifestTest(unittest.TestCase):
             self.assertEqual(manifest["platform"], "aarch64-apple-darwin")
             self.assertEqual(manifest["schemaVersion"], 1)
             self.assertEqual(manifest["source"]["commit"], "abc123")
+            self.assertEqual(manifest["release"], {"tag": "codex-lab-v1.2.3-lab.42"})
             self.assertEqual(
                 {layout["kind"] for layout in manifest["supportedLayouts"]},
                 {"applicationsFolder", "envOverride", "extractedSibling"},
@@ -67,6 +70,8 @@ class DistributionManifestTest(unittest.TestCase):
                     "archiveRoot": "Codex Lab.app",
                     "description": "Canonical app update unit containing the embedded Codex Lab CLI.",
                     "fileName": APP_ZIP,
+                    "downloadUrl": "https://github.com/cbusillo/codex/releases/download/codex-lab-v1.2.3-lab.42/"
+                    + APP_ZIP,
                     "notarized": False,
                     "sha256": sha256_file(app_zip),
                     "signed": False,
@@ -79,6 +84,8 @@ class DistributionManifestTest(unittest.TestCase):
                     "archiveRoot": "bin/codex-lab",
                     "description": "Companion CLI wrapper that resolves an installed or sibling Codex Lab.app.",
                     "fileName": SHIM_ZIP,
+                    "downloadUrl": "https://github.com/cbusillo/codex/releases/download/codex-lab-v1.2.3-lab.42/"
+                    + SHIM_ZIP,
                     "notarized": False,
                     "sha256": sha256_file(shim_zip),
                     "signed": False,
@@ -133,6 +140,207 @@ class DistributionManifestTest(unittest.TestCase):
             manifest["artifacts"]["appZip"]["signed"] = True
 
             with self.assertRaisesRegex(ValueError, "unsigned and not notarized"):
+                validate_manifest(manifest)
+
+    def test_rejects_invalid_download_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir)
+            app_zip = dist_dir / APP_ZIP
+            shim_zip = dist_dir / SHIM_ZIP
+            _copy_fixture(app_zip)
+            _copy_fixture(shim_zip)
+            checksums = {APP_ZIP: sha256_file(app_zip), SHIM_ZIP: sha256_file(shim_zip)}
+            manifest = build_manifest(
+                dist_dir=dist_dir,
+                checksums=checksums,
+                version="1.2.3",
+                bundle_version="42",
+                commit="abc123",
+                repository="cbusillo/codex",
+                workflow="codex-lab-app",
+                run_id="100",
+                run_attempt="2",
+                generated_at="2026-06-07T00:00:00Z",
+            )
+            manifest["artifacts"]["appZip"]["downloadUrl"] = (
+                "http://example.invalid/app.zip"
+            )
+
+            with self.assertRaisesRegex(ValueError, "invalid downloadUrl"):
+                validate_manifest(manifest)
+
+    def test_rejects_download_url_for_wrong_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir)
+            app_zip = dist_dir / APP_ZIP
+            shim_zip = dist_dir / SHIM_ZIP
+            _copy_fixture(app_zip)
+            _copy_fixture(shim_zip)
+            checksums = {APP_ZIP: sha256_file(app_zip), SHIM_ZIP: sha256_file(shim_zip)}
+            manifest = build_manifest(
+                dist_dir=dist_dir,
+                checksums=checksums,
+                version="1.2.3",
+                bundle_version="42",
+                commit="abc123",
+                repository="cbusillo/codex",
+                workflow="codex-lab-app",
+                run_id="100",
+                run_attempt="2",
+                release_tag="codex-lab-v1.2.3",
+                download_base_url="https://github.com/cbusillo/codex/releases/download/codex-lab-v1.2.3",
+                generated_at="2026-06-07T00:00:00Z",
+            )
+            manifest["artifacts"]["appZip"]["downloadUrl"] = (
+                "https://github.com/cbusillo/codex/releases/download/codex-lab-v9.9.9/"
+                + APP_ZIP
+            )
+
+            with self.assertRaisesRegex(ValueError, "must target release artifact"):
+                validate_manifest(manifest)
+
+    def test_rejects_release_without_download_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir)
+            app_zip = dist_dir / APP_ZIP
+            shim_zip = dist_dir / SHIM_ZIP
+            _copy_fixture(app_zip)
+            _copy_fixture(shim_zip)
+            checksums = {APP_ZIP: sha256_file(app_zip), SHIM_ZIP: sha256_file(shim_zip)}
+            manifest = build_manifest(
+                dist_dir=dist_dir,
+                checksums=checksums,
+                version="1.2.3",
+                bundle_version="42",
+                commit="abc123",
+                repository="cbusillo/codex",
+                workflow="codex-lab-app",
+                run_id="100",
+                run_attempt="2",
+                generated_at="2026-06-07T00:00:00Z",
+            )
+            manifest["release"] = {"tag": "codex-lab-v1.2.3"}
+
+            with self.assertRaisesRegex(ValueError, "provided together"):
+                validate_manifest(manifest)
+
+    def test_rejects_partial_release_download_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir)
+            app_zip = dist_dir / APP_ZIP
+            shim_zip = dist_dir / SHIM_ZIP
+            _copy_fixture(app_zip)
+            _copy_fixture(shim_zip)
+            checksums = {APP_ZIP: sha256_file(app_zip), SHIM_ZIP: sha256_file(shim_zip)}
+            manifest = build_manifest(
+                dist_dir=dist_dir,
+                checksums=checksums,
+                version="1.2.3",
+                bundle_version="42",
+                commit="abc123",
+                repository="cbusillo/codex",
+                workflow="codex-lab-app",
+                run_id="100",
+                run_attempt="2",
+                release_tag="codex-lab-v1.2.3",
+                download_base_url="https://example.invalid/downloads",
+                generated_at="2026-06-07T00:00:00Z",
+            )
+            del manifest["artifacts"]["shimZip"]["downloadUrl"]
+
+            with self.assertRaisesRegex(ValueError, "every artifact"):
+                validate_manifest(manifest)
+
+    def test_requires_release_tag_with_download_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir)
+            app_zip = dist_dir / APP_ZIP
+            shim_zip = dist_dir / SHIM_ZIP
+            _copy_fixture(app_zip)
+            _copy_fixture(shim_zip)
+            checksums = {APP_ZIP: sha256_file(app_zip), SHIM_ZIP: sha256_file(shim_zip)}
+
+            with self.assertRaisesRegex(ValueError, "provided together"):
+                build_manifest(
+                    dist_dir=dist_dir,
+                    checksums=checksums,
+                    version="1.2.3",
+                    bundle_version="42",
+                    commit="abc123",
+                    repository="cbusillo/codex",
+                    workflow="codex-lab-app",
+                    run_id="100",
+                    run_attempt="2",
+                    download_base_url="https://example.invalid/downloads",
+                    generated_at="2026-06-07T00:00:00Z",
+                )
+
+            with self.assertRaisesRegex(ValueError, "provided together"):
+                build_manifest(
+                    dist_dir=dist_dir,
+                    checksums=checksums,
+                    version="1.2.3",
+                    bundle_version="42",
+                    commit="abc123",
+                    repository="cbusillo/codex",
+                    workflow="codex-lab-app",
+                    run_id="100",
+                    run_attempt="2",
+                    release_tag="codex-lab-v1.2.3",
+                    generated_at="2026-06-07T00:00:00Z",
+                )
+
+    def test_rejects_malformed_release_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir)
+            app_zip = dist_dir / APP_ZIP
+            shim_zip = dist_dir / SHIM_ZIP
+            _copy_fixture(app_zip)
+            _copy_fixture(shim_zip)
+            checksums = {APP_ZIP: sha256_file(app_zip), SHIM_ZIP: sha256_file(shim_zip)}
+            manifest = build_manifest(
+                dist_dir=dist_dir,
+                checksums=checksums,
+                version="1.2.3",
+                bundle_version="42",
+                commit="abc123",
+                repository="cbusillo/codex",
+                workflow="codex-lab-app",
+                run_id="100",
+                run_attempt="2",
+                release_tag="codex-lab-v1.2.3",
+                download_base_url="https://example.invalid/downloads",
+                generated_at="2026-06-07T00:00:00Z",
+            )
+            manifest["release"]["tag"] = "not a codex lab release tag"
+
+            with self.assertRaisesRegex(ValueError, "invalid format"):
+                validate_manifest(manifest)
+
+    def test_rejects_release_tag_version_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist_dir = Path(temp_dir)
+            app_zip = dist_dir / APP_ZIP
+            shim_zip = dist_dir / SHIM_ZIP
+            _copy_fixture(app_zip)
+            _copy_fixture(shim_zip)
+            checksums = {APP_ZIP: sha256_file(app_zip), SHIM_ZIP: sha256_file(shim_zip)}
+            manifest = build_manifest(
+                dist_dir=dist_dir,
+                checksums=checksums,
+                version="1.2.3",
+                bundle_version="42",
+                commit="abc123",
+                repository="cbusillo/codex",
+                workflow="codex-lab-app",
+                run_id="100",
+                run_attempt="2",
+                release_tag="codex-lab-v9.9.9",
+                download_base_url="https://example.invalid/downloads",
+                generated_at="2026-06-07T00:00:00Z",
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not match"):
                 validate_manifest(manifest)
 
 

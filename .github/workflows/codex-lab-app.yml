@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/codex-lab-app.yml"
+      - ".github/workflows/codex-lab-release.yml"
       - "scripts/build_codex_lab_app.py"
       - "scripts/build_codex_lab_distribution_manifest.py"
       - "scripts/codex_lab_package/**"

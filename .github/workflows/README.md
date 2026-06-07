@@ -55,3 +55,30 @@ It marks the app zip as the canonical app update unit, the shim zip as a
 companion wrapper, and records supported layouts for extracted sibling installs,
 `CODEX_LAB_APP_PATH` overrides, and `/Applications` installs. Artifacts remain
 `signed: false` and `notarized: false` until the signing pipeline exists.
+
+## Codex Lab Release Publication
+
+`codex-lab-release.yml` builds the same macOS ARM64 distribution files and
+stages them for GitHub Releases. It separates trust boundaries deliberately:
+
+- the self-hosted macOS runner builds and uploads a workflow artifact with
+  `contents: read` permissions;
+- an `ubuntu-latest` validation job downloads the staged artifact, verifies
+  checksums, and checks that the manifest has release metadata and download
+  URLs. This validates internal consistency, not artifact provenance;
+- a separate `ubuntu-latest` publish job has `contents: write` and creates a
+  draft prerelease only for explicit manual dispatches with `publish: true`.
+
+Manual dispatch with `publish: false` is the dry-run path: it builds and
+validates the release artifact set, including checking that the release tag is
+available, without creating a GitHub Release. Publishing is restricted to manual
+dispatches from the repository default branch. Published Codex Lab releases are
+draft prereleases and are not marked as latest while the artifacts remain
+unsigned and unnotarized.
+
+Release IDs use this namespace:
+
+```shell
+codex-lab-vX.Y.Z
+codex-lab-vX.Y.Z-lab.N
+```

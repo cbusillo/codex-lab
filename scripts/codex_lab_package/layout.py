@@ -69,6 +69,7 @@ def build_codex_lab_app(options: CodexLabAppOptions) -> CodexLabAppResult:
     _write_info_plist(contents_dir / "Info.plist", options)
     shim_path = _install_shim(
         options.shim_dir,
+        app_dir,
         options.force,
     )
 
@@ -142,6 +143,7 @@ def _write_info_plist(path: Path, options: CodexLabAppOptions) -> None:
 
 def _install_shim(
     shim_dir: Path | None,
+    app_dir: Path,
     force: bool,
 ) -> Path | None:
     if shim_dir is None:
@@ -155,19 +157,21 @@ def _install_shim(
         _prepare_output_path(shim_path, force)
 
     with shim_path.open("w", encoding="utf-8") as handle:
-        print(_shim_script(), end="", file=handle)
+        print(_shim_script(app_dir), end="", file=handle)
     _make_executable(shim_path)
     return shim_path
 
 
-def _shim_script() -> str:
-    return """#!/bin/sh
+def _shim_script(app_dir: Path) -> str:
+    return f"""#!/bin/sh
 set -eu
 
 SHIM_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
-home_app="${HOME:+$HOME/Applications/Codex Lab.app}"
-candidate_apps="${CODEX_LAB_APP_PATH:-}
+built_app={_shell_quote(str(app_dir))}
+home_app="${{HOME:+$HOME/Applications/Codex Lab.app}}"
+candidate_apps="${{CODEX_LAB_APP_PATH:-}}
 $SHIM_DIR/../Codex Lab.app
+$built_app
 /Applications/Codex Lab.app
 $home_app"
 
