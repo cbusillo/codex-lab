@@ -40,3 +40,18 @@ has matching runner capacity, secrets, and branch-protection expectations.
 The current local runner is `chris-mac-codex-release-1`. It must have Rust,
 Python 3, Xcode command line tools, and macOS `ditto` available. The generated
 Codex Lab app artifact is currently unsigned.
+
+## Codex Lab Distribution Contract
+
+`codex-lab-app.yml` uploads these files in one artifact:
+
+- `codex-lab-app-aarch64-apple-darwin.zip`
+- `codex-lab-shim-aarch64-apple-darwin.zip`
+- `SHA256SUMS`
+- `codex-lab-distribution.json`
+
+The distribution manifest is the contract for future installers and updaters.
+It marks the app zip as the canonical app update unit, the shim zip as a
+companion wrapper, and records supported layouts for extracted sibling installs,
+`CODEX_LAB_APP_PATH` overrides, and `/Applications` installs. Artifacts remain
+`signed: false` and `notarized: false` until the signing pipeline exists.

@@ -16,4 +16,16 @@ scripts/build_codex_lab_app.py \
 ```
 
 The optional shim directory receives a `codex-lab` wrapper that executes the
-same embedded binary used by Desktop mode.
+same embedded binary used by Desktop mode. The shim searches for `Codex Lab.app`
+in these locations, in order:
+
+1. `CODEX_LAB_APP_PATH`, for explicit overrides.
+2. `../Codex Lab.app` relative to the shim, for extracted artifact layouts.
+3. `/Applications/Codex Lab.app`.
+4. `~/Applications/Codex Lab.app`.
+
+The GitHub workflow uploads `codex-lab-distribution.json` beside the app zip,
+shim zip, and `SHA256SUMS`. The manifest records artifact roles, sizes,
+checksums, source workflow metadata, supported install layouts, and the current
+signing state. Codex Lab artifacts are currently marked `signed: false` and
+`notarized: false` until a later signing/notarization stage is implemented.
