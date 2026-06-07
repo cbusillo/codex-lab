@@ -1,7 +1,5 @@
 """Build the macOS Codex Lab launcher app bundle layout."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 import plistlib
@@ -71,7 +69,6 @@ def build_codex_lab_app(options: CodexLabAppOptions) -> CodexLabAppResult:
     _write_info_plist(contents_dir / "Info.plist", options)
     shim_path = _install_shim(
         options.shim_dir,
-        app_dir,
         options.force,
     )
 
@@ -145,7 +142,6 @@ def _write_info_plist(path: Path, options: CodexLabAppOptions) -> None:
 
 def _install_shim(
     shim_dir: Path | None,
-    app_dir: Path,
     force: bool,
 ) -> Path | None:
     if shim_dir is None:
@@ -156,22 +152,38 @@ def _install_shim(
     if shim_path.exists() or shim_path.is_symlink():
         if not force:
             raise FileExistsError(f"Shim already exists: {shim_path}")
-        shim_path.unlink()
+        _prepare_output_path(shim_path, force)
 
     with shim_path.open("w", encoding="utf-8") as handle:
-        print(_shim_script(app_dir), end="", file=handle)
+        print(_shim_script(), end="", file=handle)
     _make_executable(shim_path)
     return shim_path
 
 
-def _shim_script(app_dir: Path) -> str:
-    return f"""#!/bin/sh
+def _shim_script() -> str:
+    return """#!/bin/sh
 set -eu
 
-LAB_CLI={_shell_quote(str(app_dir / "Contents" / "Resources" / EMBEDDED_CLI_NAME))}
+candidate_apps="${CODEX_LAB_APP_PATH:-}
+/Applications/Codex Lab.app
+$HOME/Applications/Codex Lab.app"
 
-if [ ! -x "$LAB_CLI" ]; then
-  echo "Codex Lab CLI is not executable: $LAB_CLI" >&2
+LAB_CLI=
+while IFS= read -r app_path; do
+  if [ -z "$app_path" ]; then
+    continue
+  fi
+  candidate_cli="$app_path/Contents/Resources/codex-lab"
+  if [ -x "$candidate_cli" ]; then
+    LAB_CLI="$candidate_cli"
+    break
+  fi
+done <<EOF
+$candidate_apps
+EOF
+
+if [ -z "$LAB_CLI" ]; then
+  echo "Codex Lab CLI was not found. Install Codex Lab.app in /Applications or set CODEX_LAB_APP_PATH." >&2
   exit 1
 fi
 

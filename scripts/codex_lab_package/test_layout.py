@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import plistlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,11 +18,14 @@ class BuildCodexLabAppTest(unittest.TestCase):
     def test_builds_launcher_bundle_with_embedded_cli_and_shim(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            codex_bin = root / "fake-codex"
+            codex_bin.write_text('#!/bin/sh\nexec /bin/sh "$@"\n', encoding="utf-8")
+            os.chmod(codex_bin, 0o755)
 
             result = build_codex_lab_app(
                 CodexLabAppOptions(
                     app_dir=root / "Codex Lab.app",
-                    codex_bin=Path("/bin/sh"),
+                    codex_bin=codex_bin,
                     codex_app_path=Path("/Applications/Codex.app"),
                     shim_dir=root / "bin",
                     bundle_identifier="dev.example.codex-lab-test",
@@ -70,8 +74,19 @@ class BuildCodexLabAppTest(unittest.TestCase):
             self.assertIn("--env", launcher)
 
             shim = result.shim_path.read_text(encoding="utf-8")
-            self.assertIn(str(result.embedded_cli_path), shim)
+            self.assertNotIn(str(result.embedded_cli_path), shim)
+            self.assertIn("CODEX_LAB_APP_PATH", shim)
+            self.assertIn("/Applications/Codex Lab.app", shim)
             self.assertIn('exec "$LAB_CLI" "$@"', shim)
+
+            completed = subprocess.run(
+                [str(result.shim_path), "-c", "printf shim-ok"],
+                check=True,
+                env={**os.environ, "CODEX_LAB_APP_PATH": str(result.app_dir)},
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.stdout, "shim-ok")
 
     def test_refuses_to_replace_existing_app_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

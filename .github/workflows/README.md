@@ -9,7 +9,9 @@ runner groups, secrets, and release infrastructure that this fork does not own.
 - `ci.yml` runs cheap repository sanity checks plus Codex Lab package-builder
   unit and smoke tests.
 - `codex-lab-app.yml` builds the macOS ARM64 `Codex Lab.app` artifact on the
-  self-hosted macOS runner when packaging files or the workflow change.
+  self-hosted macOS runner when packaging files, Rust CLI code, or the workflow
+  change. The self-hosted job is guarded so it runs automatically only for
+  branches in this repository or manual dispatches.
 - `blob-size-policy.yml`, `codespell.yml`, and `cargo-deny.yml` are retained as
   lightweight inherited checks while they remain fork-safe.
 
