@@ -1,0 +1,80 @@
+name: codex-lab-app
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/codex-lab-app.yml"
+      - "scripts/build_codex_lab_app.py"
+      - "scripts/codex_lab_package/**"
+      - "codex-rs/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-aarch64:
+    name: Build macOS ARM64 Codex Lab app
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - codex-lab-app
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Build Codex Lab CLI
+        working-directory: codex-rs
+        shell: bash
+        run: cargo build --release -p codex-cli --bin codex
+
+      - name: Build Codex Lab app bundle
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_root="${RUNNER_TEMP}/codex-lab-app"
+          app_dir="${output_root}/Codex Lab.app"
+          shim_dir="${output_root}/bin"
+          mkdir -p "$output_root"
+          python3 scripts/build_codex_lab_app.py \
+            --codex-bin codex-rs/target/release/codex \
+            --app-dir "$app_dir" \
+            --shim-dir "$shim_dir" \
+            --force
+          python3 scripts/codex_lab_package/smoke.py \
+            "$app_dir" \
+            --shim-path "${shim_dir}/codex-lab"
+          echo "output_root=$output_root" >> "$GITHUB_OUTPUT"
+
+      - name: Archive Codex Lab app artifact
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_root="${{ steps.package.outputs.output_root }}"
+          dist_dir="${RUNNER_TEMP}/codex-lab-dist"
+          mkdir -p "$dist_dir"
+          app_zip="${dist_dir}/codex-lab-app-aarch64-apple-darwin.zip"
+          shim_zip="${dist_dir}/codex-lab-shim-aarch64-apple-darwin.zip"
+          ditto -c -k --keepParent "${output_root}/Codex Lab.app" "$app_zip"
+          ditto -c -k --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
+          (cd "$dist_dir" && shasum -a 256 -- *.zip > SHA256SUMS)
+          cat "${dist_dir}/SHA256SUMS"
+          echo "dist_dir=$dist_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Codex Lab app artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-lab-app-aarch64-apple-darwin
+          path: ${{ steps.archive.outputs.dist_dir }}/*
+          if-no-files-found: error
