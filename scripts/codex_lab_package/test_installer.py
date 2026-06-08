@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import BadZipFile
 from zipfile import ZIP_DEFLATED
 from zipfile import ZipFile
 from zipfile import ZipInfo
@@ -414,6 +415,85 @@ class CodexLabInstallerTest(unittest.TestCase):
             "State: /tmp/state.json\n",
         )
         self.assertEqual(stderr, "")
+
+    def test_update_command_reports_bad_zip_failure(self) -> None:
+        with mock.patch.object(
+            install_codex_lab_cli,
+            "update_from_latest_release",
+            side_effect=BadZipFile("File is not a zip file"),
+        ):
+            exit_code, stdout, stderr = run_install_cli("--update")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "Could not update Codex Lab: File is not a zip file\n",
+        )
+        self.assertNotIn("Traceback", stderr)
+
+    def test_install_command_reports_invalid_manifest_url(self) -> None:
+        exit_code, stdout, stderr = run_install_cli(
+            "--manifest-url", "http://example.test/manifest.json"
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "Could not install Codex Lab: manifest URL must be an HTTPS URL: "
+            "http://example.test/manifest.json\n",
+        )
+        self.assertNotIn("Traceback", stderr)
+
+    def test_install_command_reports_release_tag_install_failure(self) -> None:
+        with mock.patch.object(
+            install_codex_lab_cli,
+            "install_from_manifest_url",
+            side_effect=OSError("download failed"),
+        ):
+            exit_code, stdout, stderr = run_install_cli(
+                "--release-tag", "codex-lab-v1.2.3-lab.1"
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "Could not install Codex Lab: download failed\n")
+        self.assertNotIn("Traceback", stderr)
+
+    def test_install_command_reports_latest_resolution_failure(self) -> None:
+        with mock.patch.object(
+            install_codex_lab_cli,
+            "manifest_url_for_latest_release",
+            side_effect=ValueError("No published Codex Lab release found"),
+        ):
+            exit_code, stdout, stderr = run_install_cli("--latest")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "Could not install Codex Lab: No published Codex Lab release found\n",
+        )
+        self.assertNotIn("Traceback", stderr)
+
+    def test_install_command_reports_bad_zip_failure(self) -> None:
+        with mock.patch.object(
+            install_codex_lab_cli,
+            "install_from_manifest_url",
+            side_effect=BadZipFile("File is not a zip file"),
+        ):
+            exit_code, stdout, stderr = run_install_cli(
+                "--release-tag", "codex-lab-v1.2.3-lab.1"
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "Could not install Codex Lab: File is not a zip file\n",
+        )
+        self.assertNotIn("Traceback", stderr)
 
     def test_check_for_update_reports_current_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -3,7 +3,9 @@
 
 from pathlib import Path
 import argparse
+import subprocess
 import sys
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -133,7 +135,13 @@ def main() -> int:
             )
         except CodexLabInstallStateError as exc:
             return print_install_state_error(exc)
-        except (CodexLabUpdateError, OSError, ValueError) as exc:
+        except (
+            CodexLabUpdateError,
+            OSError,
+            subprocess.CalledProcessError,
+            ValueError,
+            zipfile.BadZipFile,
+        ) as exc:
             return print_command_error("Could not update Codex Lab", exc)
         if update.install is None:
             print(f"Codex Lab is up to date: {update.check.installed.release_tag}")
@@ -148,22 +156,30 @@ def main() -> int:
         print(f"State: {update.install.state_path}")
         return 0
 
-    if args.manifest_url:
-        manifest_url = args.manifest_url
-    elif args.latest:
-        manifest_url = manifest_url_for_latest_release(repository=args.repository)
-    else:
-        manifest_url = manifest_url_for_release_tag(
-            args.release_tag,
-            repository=args.repository,
+    try:
+        if args.manifest_url:
+            manifest_url = args.manifest_url
+        elif args.latest:
+            manifest_url = manifest_url_for_latest_release(repository=args.repository)
+        else:
+            manifest_url = manifest_url_for_release_tag(
+                args.release_tag,
+                repository=args.repository,
+            )
+        result = install_from_manifest_url(
+            manifest_url,
+            app_dir=args.app_dir,
+            shim_dir=None if args.no_shim else args.shim_dir,
+            state_path=args.state_path,
+            force=args.force,
         )
-    result = install_from_manifest_url(
-        manifest_url,
-        app_dir=args.app_dir,
-        shim_dir=None if args.no_shim else args.shim_dir,
-        state_path=args.state_path,
-        force=args.force,
-    )
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        ValueError,
+        zipfile.BadZipFile,
+    ) as exc:
+        return print_command_error("Could not install Codex Lab", exc)
     print(f"Installed Codex Lab {result.version} from {result.release_tag}")
     print(f"App: {result.app_dir}")
     if result.shim_path is not None:
