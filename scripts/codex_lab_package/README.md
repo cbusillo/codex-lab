@@ -52,6 +52,12 @@ By default this installs `Codex Lab.app` into `~/Applications`, installs the
 `--shim-dir`, and `--state-path` to choose different user-writable locations, or
 `--no-shim` to skip shim installation.
 
+To see which Codex Lab release is installed, read the recorded install state:
+
+```shell
+scripts/install_codex_lab.py --status
+```
+
 The installer downloads the manifest, `SHA256SUMS`, app zip, and shim zip into a
 temporary staging directory. It validates the manifest shape, requires artifact
 URLs to be siblings of the manifest URL, checks artifact sizes and SHA-256
