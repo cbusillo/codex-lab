@@ -39,9 +39,12 @@ published release manifest:
 
 ```shell
 scripts/install_codex_lab.py \
-  --release-tag codex-lab-v0.0.0-lab.1 \
+  --latest \
   --force
 ```
+
+Use `--release-tag codex-lab-v0.0.0-lab.2` instead of `--latest` to pin a
+specific release.
 
 By default this installs `Codex Lab.app` into `~/Applications`, installs the
 `codex-lab` shim into `~/.local/bin`, and writes installer state to

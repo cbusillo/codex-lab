@@ -7,6 +7,7 @@ import json
 import shutil
 import stat
 import tempfile
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -31,6 +32,8 @@ DEFAULT_STATE_PATH = (
 SHA256SUMS_NAME = "SHA256SUMS"
 USER_AGENT = "codex-lab-installer/0"
 DOWNLOAD_TIMEOUT_SECONDS = 60
+LAB_RELEASE_TAG_PREFIX = "codex-lab-v"
+MAX_LATEST_RELEASE_PAGES = 10
 
 DownloadFunc = Callable[[str, Path], None]
 
@@ -56,6 +59,29 @@ def manifest_url_for_release_tag(
     repository: str = DEFAULT_REPOSITORY,
 ) -> str:
     return f"https://github.com/{repository}/releases/download/{release_tag}/{MANIFEST_NAME}"
+
+
+def manifest_url_for_latest_release(
+    *,
+    repository: str = DEFAULT_REPOSITORY,
+) -> str:
+    return manifest_url_for_release_tag(
+        latest_release_tag(repository=repository), repository=repository
+    )
+
+
+def latest_release_tag(*, repository: str = DEFAULT_REPOSITORY) -> str:
+    candidates: list[object] = []
+    for page in range(1, MAX_LATEST_RELEASE_PAGES + 1):
+        releases = download_json_url(github_releases_url(repository, page=page))
+        if not isinstance(releases, list):
+            raise ValueError("GitHub releases response must be a list")
+        if not releases:
+            break
+        candidates.extend(
+            release for release in releases if is_lab_distribution_release(release)
+        )
+    return select_latest_lab_release_tag(candidates)
 
 
 def install_from_manifest_url(
@@ -175,6 +201,69 @@ def download_url(url: str, dest: Path) -> None:
         dest.open("wb") as output,
     ):
         shutil.copyfileobj(response, output)
+
+
+def download_json_url(url: str) -> object:
+    if not is_https_url(url):
+        raise ValueError(f"download URL must be an HTTPS URL: {url}")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": USER_AGENT,
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+        return json.load(response)
+
+
+def github_releases_url(repository: str, *, page: int = 1) -> str:
+    parts = repository.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError(f"GitHub repository must be OWNER/REPO: {repository}")
+    if page < 1:
+        raise ValueError(f"GitHub releases page must be positive: {page}")
+    owner, repo = (urllib.parse.quote(part, safe="") for part in parts)
+    return (
+        f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=100&page={page}"
+    )
+
+
+def select_latest_lab_release_tag(releases: object) -> str:
+    if not isinstance(releases, list):
+        raise ValueError("GitHub releases response must be a list")
+    candidates = [
+        release for release in releases if is_lab_distribution_release(release)
+    ]
+    if not candidates:
+        raise ValueError(
+            "No published Codex Lab release with a distribution manifest found"
+        )
+    latest = max(
+        candidates,
+        key=lambda release: (release.get("published_at") or "", release["tag_name"]),
+    )
+    return latest["tag_name"]
+
+
+def is_lab_distribution_release(release: object) -> bool:
+    if not isinstance(release, dict):
+        return False
+    tag_name = release.get("tag_name")
+    assets = release.get("assets")
+    return (
+        isinstance(tag_name, str)
+        and tag_name.startswith(LAB_RELEASE_TAG_PREFIX)
+        and not release.get("draft", False)
+        and isinstance(assets, list)
+        and any(
+            isinstance(asset, dict)
+            and asset.get("name") == MANIFEST_NAME
+            and asset.get("state") == "uploaded"
+            for asset in assets
+        )
+    )
 
 
 def sibling_url(url: str, file_name: str) -> str:

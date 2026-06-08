@@ -22,10 +22,15 @@ from codex_lab_package.distribution_manifest import SHIM_ZIP
 from codex_lab_package.distribution_manifest import build_manifest
 from codex_lab_package.distribution_manifest import sha256_file
 from codex_lab_package.installer import DOWNLOAD_TIMEOUT_SECONDS
+from codex_lab_package.installer import download_json_url
 from codex_lab_package.installer import download_url
+from codex_lab_package.installer import github_releases_url
 from codex_lab_package.installer import install_from_manifest_url
+from codex_lab_package.installer import latest_release_tag
+from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
 from codex_lab_package.installer import replace_path
+from codex_lab_package.installer import select_latest_lab_release_tag
 from codex_lab_package.layout import CodexLabAppOptions
 from codex_lab_package.layout import build_codex_lab_app
 
@@ -46,6 +51,135 @@ class CodexLabInstallerTest(unittest.TestCase):
             _, kwargs = urlopen.call_args
             self.assertEqual(kwargs["timeout"], DOWNLOAD_TIMEOUT_SECONDS)
             self.assertEqual(dest.read_bytes(), b"artifact bytes")
+
+    def test_download_json_url_uses_github_headers_and_timeout(self) -> None:
+        response = FakeHttpResponse(b'{"ok": true}')
+
+        with mock.patch(
+            "codex_lab_package.installer.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            body = download_json_url(
+                "https://api.github.com/repos/example/repo/releases"
+            )
+
+        urlopen.assert_called_once()
+        request = urlopen.call_args.args[0]
+        _, kwargs = urlopen.call_args
+        self.assertEqual(kwargs["timeout"], DOWNLOAD_TIMEOUT_SECONDS)
+        self.assertEqual(request.get_header("Accept"), "application/vnd.github+json")
+        self.assertEqual(request.get_header("User-agent"), "codex-lab-installer/0")
+        self.assertEqual(body, {"ok": True})
+
+    def test_select_latest_lab_release_tag_prefers_newest_uploaded_manifest(
+        self,
+    ) -> None:
+        releases = [
+            lab_release("codex-lab-v0.0.0-lab.1", "2026-06-08T01:00:00Z"),
+            lab_release("codex-lab-v0.0.0-lab.2", "2026-06-08T02:00:00Z"),
+            lab_release("codex-lab-v0.0.0-lab.3", "2026-06-08T03:00:00Z", draft=True),
+            lab_release("codex-v0.0.0", "2026-06-08T04:00:00Z"),
+            lab_release(
+                "codex-lab-v0.0.0-lab.4",
+                "2026-06-08T05:00:00Z",
+                asset_name="notes.txt",
+            ),
+        ]
+
+        self.assertEqual(
+            select_latest_lab_release_tag(releases), "codex-lab-v0.0.0-lab.2"
+        )
+
+    def test_select_latest_lab_release_tag_rejects_missing_manifest(self) -> None:
+        with self.assertRaisesRegex(ValueError, "No published Codex Lab release"):
+            select_latest_lab_release_tag(
+                [
+                    lab_release(
+                        "codex-lab-v0.0.0-lab.1",
+                        "2026-06-08T01:00:00Z",
+                        asset_name="notes.txt",
+                    )
+                ]
+            )
+
+    def test_select_latest_lab_release_tag_includes_prereleases(self) -> None:
+        releases = [
+            lab_release(
+                "codex-lab-v0.0.0-lab.2",
+                "2026-06-08T02:00:00Z",
+                prerelease=True,
+            )
+        ]
+
+        self.assertEqual(
+            select_latest_lab_release_tag(releases), "codex-lab-v0.0.0-lab.2"
+        )
+
+    def test_github_releases_url_quotes_repository_parts(self) -> None:
+        self.assertEqual(
+            github_releases_url("owner space/repo+name"),
+            "https://api.github.com/repos/owner%20space/repo%2Bname/releases?per_page=100&page=1",
+        )
+
+    def test_github_releases_url_accepts_page(self) -> None:
+        self.assertEqual(
+            github_releases_url("example/repo", page=2),
+            "https://api.github.com/repos/example/repo/releases?per_page=100&page=2",
+        )
+
+    def test_manifest_url_for_latest_release_uses_selected_tag(self) -> None:
+        releases = [lab_release("codex-lab-v0.0.0-lab.2", "2026-06-08T02:00:00Z")]
+
+        with mock.patch(
+            "codex_lab_package.installer.download_json_url",
+            return_value=releases,
+        ):
+            self.assertEqual(
+                manifest_url_for_latest_release(repository="example/repo"),
+                "https://github.com/example/repo/releases/download/codex-lab-v0.0.0-lab.2/codex-lab-distribution.json",
+            )
+
+    def test_latest_release_tag_scans_release_pages(self) -> None:
+        calls: list[str] = []
+
+        def fake_download(url: str) -> object:
+            calls.append(url)
+            if url.endswith("&page=1"):
+                return [
+                    lab_release("codex-v0.0.0", "2026-06-08T01:00:00Z"),
+                    lab_release("codex-lab-v0.0.0-lab.1", "2026-06-08T02:00:00Z"),
+                ]
+            if url.endswith("&page=2"):
+                return [lab_release("codex-lab-v0.0.0-lab.2", "2026-06-08T03:00:00Z")]
+            if url.endswith("&page=3"):
+                return []
+            raise AssertionError(f"unexpected release page URL: {url}")
+
+        with mock.patch(
+            "codex_lab_package.installer.download_json_url",
+            side_effect=fake_download,
+        ):
+            self.assertEqual(
+                latest_release_tag(repository="example/repo"),
+                "codex-lab-v0.0.0-lab.2",
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                "https://api.github.com/repos/example/repo/releases?per_page=100&page=1",
+                "https://api.github.com/repos/example/repo/releases?per_page=100&page=2",
+                "https://api.github.com/repos/example/repo/releases?per_page=100&page=3",
+            ],
+        )
+
+    def test_latest_release_tag_rejects_non_list_release_page(self) -> None:
+        with mock.patch(
+            "codex_lab_package.installer.download_json_url",
+            return_value={"message": "not a release list"},
+        ):
+            with self.assertRaisesRegex(ValueError, "response must be a list"):
+                latest_release_tag(repository="example/repo")
 
     def test_installs_verified_release_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -414,6 +548,28 @@ class FakeHttpResponse:
         chunk = self.body[self.offset : self.offset + size]
         self.offset += len(chunk)
         return chunk
+
+
+def lab_release(
+    tag_name: str,
+    published_at: str,
+    *,
+    asset_name: str = MANIFEST_NAME,
+    draft: bool = False,
+    prerelease: bool = True,
+) -> dict:
+    return {
+        "assets": [
+            {
+                "name": asset_name,
+                "state": "uploaded",
+            }
+        ],
+        "draft": draft,
+        "published_at": published_at,
+        "prerelease": prerelease,
+        "tag_name": tag_name,
+    }
 
 
 def build_test_release(root: Path) -> TestRelease:

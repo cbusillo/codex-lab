@@ -12,6 +12,7 @@ from codex_lab_package.installer import DEFAULT_REPOSITORY
 from codex_lab_package.installer import DEFAULT_SHIM_DIR
 from codex_lab_package.installer import DEFAULT_STATE_PATH
 from codex_lab_package.installer import install_from_manifest_url
+from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
 
 
@@ -25,10 +26,15 @@ def parse_args() -> argparse.Namespace:
         "--manifest-url", help="Published codex-lab-distribution.json URL."
     )
     source.add_argument("--release-tag", help="Codex Lab release tag to install.")
+    source.add_argument(
+        "--latest",
+        action="store_true",
+        help="Install the newest published Codex Lab release for the repository.",
+    )
     parser.add_argument(
         "--repository",
         default=DEFAULT_REPOSITORY,
-        help="GitHub OWNER/REPO used with --release-tag.",
+        help="GitHub OWNER/REPO used with --release-tag or --latest.",
     )
     parser.add_argument(
         "--app-dir",
@@ -63,10 +69,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    manifest_url = args.manifest_url or manifest_url_for_release_tag(
-        args.release_tag,
-        repository=args.repository,
-    )
+    if args.manifest_url:
+        manifest_url = args.manifest_url
+    elif args.latest:
+        manifest_url = manifest_url_for_latest_release(repository=args.repository)
+    else:
+        manifest_url = manifest_url_for_release_tag(
+            args.release_tag,
+            repository=args.repository,
+        )
     result = install_from_manifest_url(
         manifest_url,
         app_dir=args.app_dir,
