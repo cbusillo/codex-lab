@@ -1,0 +1,3 @@
+interface:
+  display_name: "Change Size Review"
+  short_description: "Assess diff size and staging options"
