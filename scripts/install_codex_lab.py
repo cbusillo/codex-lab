@@ -11,10 +11,14 @@ from codex_lab_package.installer import DEFAULT_APP_DIR
 from codex_lab_package.installer import DEFAULT_REPOSITORY
 from codex_lab_package.installer import DEFAULT_SHIM_DIR
 from codex_lab_package.installer import DEFAULT_STATE_PATH
+from codex_lab_package.installer import CodexLabInstallStateError
+from codex_lab_package.installer import CodexLabUpdateError
+from codex_lab_package.installer import check_for_update
 from codex_lab_package.installer import install_from_manifest_url
 from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
 from codex_lab_package.installer import read_install_state
+from codex_lab_package.installer import update_from_latest_release
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +40,16 @@ def parse_args() -> argparse.Namespace:
         "--status",
         action="store_true",
         help="Print installed Codex Lab release metadata from the state file.",
+    )
+    source.add_argument(
+        "--check",
+        action="store_true",
+        help="Check whether the installed Codex Lab release is current.",
+    )
+    source.add_argument(
+        "--update",
+        action="store_true",
+        help="Update the recorded Codex Lab install to the newest release.",
     )
     parser.add_argument(
         "--repository",
@@ -78,14 +92,8 @@ def main() -> int:
     if args.status:
         try:
             status = read_install_state(args.state_path)
-        except FileNotFoundError:
-            print(
-                f"Codex Lab install state not found: {args.state_path}", file=sys.stderr
-            )
-            return 1
-        except (OSError, ValueError) as exc:
-            print(f"Could not read Codex Lab install state: {exc}", file=sys.stderr)
-            return 1
+        except CodexLabInstallStateError as exc:
+            return print_install_state_error(exc)
         print(f"Codex Lab {status.version} from {status.release_tag}")
         print(f"Bundle version: {status.bundle_version}")
         if status.source_commit:
@@ -96,6 +104,48 @@ def main() -> int:
         else:
             print("Shim: not installed")
         print(f"State: {status.state_path}")
+        return 0
+
+    if args.check:
+        try:
+            check = check_for_update(
+                repository=args.repository,
+                state_path=args.state_path,
+            )
+        except CodexLabInstallStateError as exc:
+            return print_install_state_error(exc)
+        except (CodexLabUpdateError, OSError, ValueError) as exc:
+            return print_command_error("Could not check Codex Lab updates", exc)
+        if check.update_available:
+            print(
+                "Codex Lab update available: "
+                f"{check.installed.release_tag} -> {check.latest_release_tag}"
+            )
+        else:
+            print(f"Codex Lab is up to date: {check.installed.release_tag}")
+        return 0
+
+    if args.update:
+        try:
+            update = update_from_latest_release(
+                repository=args.repository,
+                state_path=args.state_path,
+            )
+        except CodexLabInstallStateError as exc:
+            return print_install_state_error(exc)
+        except (CodexLabUpdateError, OSError, ValueError) as exc:
+            return print_command_error("Could not update Codex Lab", exc)
+        if update.install is None:
+            print(f"Codex Lab is up to date: {update.check.installed.release_tag}")
+            return 0
+        print(
+            "Updated Codex Lab "
+            f"{update.check.installed.release_tag} -> {update.install.release_tag}"
+        )
+        print(f"App: {update.install.app_dir}")
+        if update.install.shim_path is not None:
+            print(f"Shim: {update.install.shim_path}")
+        print(f"State: {update.install.state_path}")
         return 0
 
     if args.manifest_url:
@@ -120,6 +170,16 @@ def main() -> int:
         print(f"Shim: {result.shim_path}")
     print(f"State: {result.state_path}")
     return 0
+
+
+def print_install_state_error(exc: BaseException) -> int:
+    print(str(exc), file=sys.stderr)
+    return 1
+
+
+def print_command_error(prefix: str, exc: BaseException) -> int:
+    print(f"{prefix}: {exc}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
