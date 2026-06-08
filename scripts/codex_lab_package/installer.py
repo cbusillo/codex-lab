@@ -71,9 +71,9 @@ def install_from_manifest_url(
         raise ValueError(f"manifest URL must be an HTTPS URL: {manifest_url}")
     download = download or download_url
 
-    app_dir = absolute_path(app_dir)
-    shim_dir = absolute_path(shim_dir) if shim_dir is not None else None
-    state_path = absolute_path(state_path)
+    app_dir = resolve_destination(app_dir)
+    shim_path = resolve_destination(shim_dir / "codex-lab") if shim_dir else None
+    state_path = resolve_destination(state_path)
 
     with tempfile.TemporaryDirectory(prefix="codex-lab-install-") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
@@ -117,9 +117,10 @@ def install_from_manifest_url(
 
         preflight_install_parent(app_dir.parent)
         preflight_install_target(app_dir, force=force)
-        if shim_dir is not None:
-            preflight_install_parent(shim_dir)
-            preflight_install_target(shim_dir / "codex-lab", force=force)
+        if shim_path is not None:
+            preflight_install_parent(shim_path.parent)
+            preflight_install_target(shim_path, force=force)
+        preflight_install_parent(state_path.parent)
 
         replacements = []
         installed_shim = None
@@ -131,10 +132,10 @@ def install_from_manifest_url(
             )
             replacements.append(app_replacement)
             installed_app = app_replacement.target
-            if shim_dir is not None:
+            if shim_path is not None:
                 shim_replacement = replace_path(
                     shim_source,
-                    shim_dir / "codex-lab",
+                    shim_path,
                     force=force,
                 )
                 replacements.append(shim_replacement)
@@ -188,6 +189,11 @@ def absolute_path(path: Path) -> Path:
     if path.is_absolute():
         return path
     return Path.cwd() / path
+
+
+def resolve_destination(path: Path) -> Path:
+    path = absolute_path(path)
+    return path.parent.resolve(strict=False) / path.name
 
 
 def require_sibling_download_url(
@@ -328,6 +334,7 @@ def write_install_state(
     app_dir: Path,
     shim_path: Path | None,
 ) -> None:
+    state_path = resolve_destination(state_path)
     state = {
         "appPath": str(app_dir),
         "artifacts": {
@@ -344,6 +351,7 @@ def write_install_state(
         "source": manifest["source"],
         "version": manifest["version"],
     }
+    preflight_install_parent(state_path.parent)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
     with temp_path.open("w", encoding="utf-8") as handle:
