@@ -1,0 +1,3 @@
+interface:
+  display_name: "Testing Review"
+  short_description: "Check test coverage for agent changes"

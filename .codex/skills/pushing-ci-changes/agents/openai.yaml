@@ -1,0 +1,3 @@
+interface:
+  display_name: "Pushing CI Changes"
+  short_description: "Handle GitHub Actions push restrictions"
