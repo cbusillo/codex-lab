@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import re
 import shutil
 import stat
 import tempfile
@@ -33,9 +34,27 @@ SHA256SUMS_NAME = "SHA256SUMS"
 USER_AGENT = "codex-lab-installer/0"
 DOWNLOAD_TIMEOUT_SECONDS = 60
 LAB_RELEASE_TAG_PREFIX = "codex-lab-v"
+LAB_RELEASE_ORDER_PATTERN = re.compile(
+    r"^codex-lab-v(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)"
+    r"(?:-lab\.(?P<lab>[0-9]+))?$"
+)
 MAX_LATEST_RELEASE_PAGES = 10
 
 DownloadFunc = Callable[[str, Path], None]
+
+
+class CodexLabInstallStateError(Exception):
+    pass
+
+
+class CodexLabUpdateError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class CodexLabReleaseSummary:
+    published_at: str
+    tag_name: str
 
 
 @dataclass(frozen=True)
@@ -56,6 +75,19 @@ class CodexLabInstallStatus:
     source_commit: str | None
     state_path: Path
     version: str
+
+
+@dataclass(frozen=True)
+class CodexLabUpdateCheck:
+    installed: CodexLabInstallStatus
+    latest_release_tag: str
+    update_available: bool
+
+
+@dataclass(frozen=True)
+class CodexLabUpdateResult:
+    check: CodexLabUpdateCheck
+    install: CodexLabInstallResult | None
 
 
 @dataclass(frozen=True)
@@ -82,6 +114,14 @@ def manifest_url_for_latest_release(
 
 
 def latest_release_tag(*, repository: str = DEFAULT_REPOSITORY) -> str:
+    return select_latest_lab_release_summary(
+        lab_distribution_release_summaries(repository=repository)
+    ).tag_name
+
+
+def lab_distribution_release_summaries(
+    *, repository: str = DEFAULT_REPOSITORY
+) -> list[CodexLabReleaseSummary]:
     candidates: list[object] = []
     for page in range(1, MAX_LATEST_RELEASE_PAGES + 1):
         releases = download_json_url(github_releases_url(repository, page=page))
@@ -89,10 +129,12 @@ def latest_release_tag(*, repository: str = DEFAULT_REPOSITORY) -> str:
             raise ValueError("GitHub releases response must be a list")
         if not releases:
             break
-        candidates.extend(
-            release for release in releases if is_lab_distribution_release(release)
-        )
-    return select_latest_lab_release_tag(candidates)
+        candidates.extend(releases)
+    return [
+        summary
+        for release in candidates
+        if (summary := lab_distribution_release_summary(release)) is not None
+    ]
 
 
 def install_from_manifest_url(
@@ -204,9 +246,20 @@ def install_from_manifest_url(
 
 def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstallStatus:
     state_path = resolve_destination(state_path)
-    state = json.loads(state_path.read_text(encoding="utf-8"))
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise CodexLabInstallStateError(
+            f"Codex Lab install state not found: {state_path}"
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CodexLabInstallStateError(
+            f"Could not read Codex Lab install state: {exc}"
+        ) from exc
     if not isinstance(state, dict):
-        raise ValueError(f"Install state must be a JSON object: {state_path}")
+        raise CodexLabInstallStateError(
+            f"Install state must be a JSON object: {state_path}"
+        )
 
     source = state.get("source")
     source_commit = None
@@ -217,7 +270,7 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
 
     shim_path = state.get("shimPath")
     if shim_path is not None and not isinstance(shim_path, str):
-        raise ValueError(
+        raise CodexLabInstallStateError(
             f"Install state field shimPath must be a string or null: {state_path}"
         )
     return CodexLabInstallStatus(
@@ -231,10 +284,66 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
     )
 
 
+def check_for_update(
+    *,
+    repository: str = DEFAULT_REPOSITORY,
+    state_path: Path = DEFAULT_STATE_PATH,
+) -> CodexLabUpdateCheck:
+    installed = read_install_state(state_path)
+    releases = lab_distribution_release_summaries(repository=repository)
+    if not any(release.tag_name == installed.release_tag for release in releases):
+        raise CodexLabUpdateError(
+            f"Installed Codex Lab release is not in the published Lab release list: {installed.release_tag}"
+        )
+    latest = select_latest_ordered_lab_release_summary(releases)
+    installed_order = codex_lab_release_order(installed.release_tag)
+    if installed_order is None:
+        raise CodexLabUpdateError(
+            f"Installed Codex Lab release tag cannot be ordered safely: {installed.release_tag}"
+        )
+    latest_order = codex_lab_release_order(latest.tag_name)
+    assert latest_order is not None
+    return CodexLabUpdateCheck(
+        installed=installed,
+        latest_release_tag=latest.tag_name,
+        update_available=latest_order > installed_order,
+    )
+
+
+def update_from_latest_release(
+    *,
+    repository: str = DEFAULT_REPOSITORY,
+    state_path: Path = DEFAULT_STATE_PATH,
+    download: DownloadFunc | None = None,
+) -> CodexLabUpdateResult:
+    check = check_for_update(repository=repository, state_path=state_path)
+    if not check.update_available:
+        return CodexLabUpdateResult(check=check, install=None)
+
+    manifest_url = manifest_url_for_release_tag(
+        check.latest_release_tag,
+        repository=repository,
+    )
+    installed = check.installed
+    return CodexLabUpdateResult(
+        check=check,
+        install=install_from_manifest_url(
+            manifest_url,
+            app_dir=installed.app_path,
+            shim_dir=installed.shim_path.parent
+            if installed.shim_path is not None
+            else None,
+            state_path=installed.state_path,
+            force=True,
+            download=download,
+        ),
+    )
+
+
 def required_state_string(state: dict, field: str, state_path: Path) -> str:
     value = state.get(field)
     if not isinstance(value, str) or not value:
-        raise ValueError(
+        raise CodexLabInstallStateError(
             f"Install state field {field} must be a non-empty string: {state_path}"
         )
     return value
@@ -294,6 +403,58 @@ def select_latest_lab_release_tag(releases: object) -> str:
         key=lambda release: (release.get("published_at") or "", release["tag_name"]),
     )
     return latest["tag_name"]
+
+
+def select_latest_lab_release_summary(
+    releases: list[CodexLabReleaseSummary],
+) -> CodexLabReleaseSummary:
+    if not releases:
+        raise ValueError(
+            "No published Codex Lab release with a distribution manifest found"
+        )
+    return max(releases, key=lambda release: (release.published_at, release.tag_name))
+
+
+def select_latest_ordered_lab_release_summary(
+    releases: list[CodexLabReleaseSummary],
+) -> CodexLabReleaseSummary:
+    ordered = [
+        (release_order, release)
+        for release in releases
+        if (release_order := codex_lab_release_order(release.tag_name)) is not None
+    ]
+    if not ordered:
+        raise CodexLabUpdateError(
+            "No published Codex Lab release tag can be ordered safely"
+        )
+    _, release = max(ordered, key=lambda item: (item[0], item[1].published_at))
+    return release
+
+
+def codex_lab_release_order(tag_name: str) -> tuple[int, int, int, int, int] | None:
+    match = LAB_RELEASE_ORDER_PATTERN.fullmatch(tag_name)
+    if match is None:
+        return None
+    major = int(match.group("major"))
+    minor = int(match.group("minor"))
+    patch = int(match.group("patch"))
+    lab = match.group("lab")
+    if lab is None:
+        return (major, minor, patch, 1, 0)
+    return (major, minor, patch, 0, int(lab))
+
+
+def lab_distribution_release_summary(
+    release: object,
+) -> CodexLabReleaseSummary | None:
+    if not is_lab_distribution_release(release):
+        return None
+    assert isinstance(release, dict)
+    tag_name = release["tag_name"]
+    published_at = release.get("published_at") or ""
+    if not isinstance(published_at, str):
+        published_at = ""
+    return CodexLabReleaseSummary(published_at=published_at, tag_name=tag_name)
 
 
 def is_lab_distribution_release(release: object) -> bool:

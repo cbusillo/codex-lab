@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED
 from zipfile import ZipFile
 from zipfile import ZipInfo
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -22,6 +25,10 @@ from codex_lab_package.distribution_manifest import SHIM_ZIP
 from codex_lab_package.distribution_manifest import build_manifest
 from codex_lab_package.distribution_manifest import sha256_file
 from codex_lab_package.installer import DOWNLOAD_TIMEOUT_SECONDS
+from codex_lab_package.installer import CodexLabReleaseSummary
+from codex_lab_package.installer import CodexLabUpdateError
+from codex_lab_package.installer import check_for_update
+from codex_lab_package.installer import codex_lab_release_order
 from codex_lab_package.installer import download_json_url
 from codex_lab_package.installer import download_url
 from codex_lab_package.installer import github_releases_url
@@ -32,8 +39,10 @@ from codex_lab_package.installer import manifest_url_for_release_tag
 from codex_lab_package.installer import read_install_state
 from codex_lab_package.installer import replace_path
 from codex_lab_package.installer import select_latest_lab_release_tag
+from codex_lab_package.installer import update_from_latest_release
 from codex_lab_package.layout import CodexLabAppOptions
 from codex_lab_package.layout import build_codex_lab_app
+import install_codex_lab as install_codex_lab_cli
 
 
 class CodexLabInstallerTest(unittest.TestCase):
@@ -115,6 +124,18 @@ class CodexLabInstallerTest(unittest.TestCase):
         self.assertEqual(
             select_latest_lab_release_tag(releases), "codex-lab-v0.0.0-lab.2"
         )
+
+    def test_codex_lab_release_order_sorts_lab_tags_before_stable_tags(self) -> None:
+        self.assertEqual(
+            codex_lab_release_order("codex-lab-v1.2.3-lab.99"),
+            (1, 2, 3, 0, 99),
+        )
+        self.assertEqual(codex_lab_release_order("codex-lab-v1.2.3"), (1, 2, 3, 1, 0))
+        self.assertEqual(
+            codex_lab_release_order("codex-lab-v1.2.4-lab.1"),
+            (1, 2, 4, 0, 1),
+        )
+        self.assertIsNone(codex_lab_release_order("codex-lab-v1.2.3-custom.1"))
 
     def test_github_releases_url_quotes_repository_parts(self) -> None:
         self.assertEqual(
@@ -283,26 +304,396 @@ class CodexLabInstallerTest(unittest.TestCase):
     def test_status_command_reports_missing_install_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "missing-state.json"
+            resolved_state_path = (
+                state_path.parent.resolve(strict=False) / state_path.name
+            )
 
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve().parents[1] / "install_codex_lab.py"),
-                    "--status",
-                    "--state-path",
-                    str(state_path),
+            for command in ["--status", "--check", "--update"]:
+                with self.subTest(command=command):
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(
+                                Path(__file__).resolve().parents[1]
+                                / "install_codex_lab.py"
+                            ),
+                            command,
+                            "--state-path",
+                            str(state_path),
+                        ],
+                        stderr=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        text=True,
+                    )
+
+                    self.assertEqual(completed.returncode, 1)
+                    self.assertEqual(completed.stdout, "")
+                    self.assertEqual(
+                        completed.stderr,
+                        f"Codex Lab install state not found: {resolved_state_path}\n",
+                    )
+
+    def test_check_command_reports_current_install(self) -> None:
+        check = SimpleNamespace(
+            installed=SimpleNamespace(release_tag="codex-lab-v1.2.3-lab.1"),
+            latest_release_tag="codex-lab-v1.2.3-lab.1",
+            update_available=False,
+        )
+
+        with mock.patch.object(
+            install_codex_lab_cli, "check_for_update", return_value=check
+        ):
+            exit_code, stdout, stderr = run_install_cli("--check")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout, "Codex Lab is up to date: codex-lab-v1.2.3-lab.1\n")
+        self.assertEqual(stderr, "")
+
+    def test_check_command_reports_available_update(self) -> None:
+        check = SimpleNamespace(
+            installed=SimpleNamespace(release_tag="codex-lab-v1.2.3-lab.1"),
+            latest_release_tag="codex-lab-v1.2.4-lab.1",
+            update_available=True,
+        )
+
+        with mock.patch.object(
+            install_codex_lab_cli, "check_for_update", return_value=check
+        ):
+            exit_code, stdout, stderr = run_install_cli("--check")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            stdout,
+            "Codex Lab update available: "
+            "codex-lab-v1.2.3-lab.1 -> codex-lab-v1.2.4-lab.1\n",
+        )
+        self.assertEqual(stderr, "")
+
+    def test_update_command_skips_current_install(self) -> None:
+        update = SimpleNamespace(
+            check=SimpleNamespace(
+                installed=SimpleNamespace(release_tag="codex-lab-v1.2.3-lab.1")
+            ),
+            install=None,
+        )
+
+        with mock.patch.object(
+            install_codex_lab_cli, "update_from_latest_release", return_value=update
+        ):
+            exit_code, stdout, stderr = run_install_cli("--update")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout, "Codex Lab is up to date: codex-lab-v1.2.3-lab.1\n")
+        self.assertEqual(stderr, "")
+
+    def test_update_command_reports_installed_update(self) -> None:
+        update = SimpleNamespace(
+            check=SimpleNamespace(
+                installed=SimpleNamespace(release_tag="codex-lab-v1.2.3-lab.1")
+            ),
+            install=SimpleNamespace(
+                app_dir=Path("/tmp/Codex Lab.app"),
+                release_tag="codex-lab-v1.2.4-lab.1",
+                shim_path=Path("/tmp/bin/codex-lab"),
+                state_path=Path("/tmp/state.json"),
+            ),
+        )
+
+        with mock.patch.object(
+            install_codex_lab_cli, "update_from_latest_release", return_value=update
+        ):
+            exit_code, stdout, stderr = run_install_cli("--update")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            stdout,
+            "Updated Codex Lab "
+            "codex-lab-v1.2.3-lab.1 -> codex-lab-v1.2.4-lab.1\n"
+            "App: /tmp/Codex Lab.app\n"
+            "Shim: /tmp/bin/codex-lab\n"
+            "State: /tmp/state.json\n",
+        )
+        self.assertEqual(stderr, "")
+
+    def test_check_for_update_reports_current_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[lab_release_summary("codex-lab-v1.2.3-lab.1")],
+            ):
+                check = check_for_update(state_path=result.state_path)
+
+            self.assertFalse(check.update_available)
+            self.assertEqual(check.installed.release_tag, "codex-lab-v1.2.3-lab.1")
+            self.assertEqual(check.latest_release_tag, "codex-lab-v1.2.3-lab.1")
+
+    def test_check_for_update_reports_available_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[
+                    lab_release_summary("codex-lab-v1.2.3-lab.1"),
+                    lab_release_summary(
+                        "codex-lab-v1.2.4-lab.1",
+                        published_at="2026-06-08T02:00:00Z",
+                    ),
                 ],
-                stderr=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                text=True,
+            ):
+                check = check_for_update(state_path=result.state_path)
+
+            self.assertTrue(check.update_available)
+            self.assertEqual(check.installed.release_tag, "codex-lab-v1.2.3-lab.1")
+            self.assertEqual(check.latest_release_tag, "codex-lab-v1.2.4-lab.1")
+
+    def test_check_for_update_does_not_downgrade_to_later_published_lower_tag(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(
+                root,
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+            )
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
             )
 
-            self.assertEqual(completed.returncode, 1)
-            self.assertEqual(completed.stdout, "")
-            self.assertEqual(
-                completed.stderr,
-                f"Codex Lab install state not found: {state_path}\n",
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[
+                    lab_release_summary("codex-lab-v1.2.4-lab.1"),
+                    lab_release_summary(
+                        "codex-lab-v1.2.3-lab.99",
+                        published_at="2026-06-08T02:00:00Z",
+                    ),
+                ],
+            ):
+                check = check_for_update(state_path=result.state_path)
+
+            self.assertFalse(check.update_available)
+            self.assertEqual(check.installed.release_tag, "codex-lab-v1.2.4-lab.1")
+            self.assertEqual(check.latest_release_tag, "codex-lab-v1.2.4-lab.1")
+
+    def test_check_for_update_chooses_highest_ordered_tag_over_later_published_tag(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
             )
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[
+                    lab_release_summary("codex-lab-v1.2.3-lab.1"),
+                    lab_release_summary(
+                        "codex-lab-v1.2.4-lab.1",
+                        published_at="2026-06-08T01:30:00Z",
+                    ),
+                    lab_release_summary(
+                        "codex-lab-v1.2.3-lab.99",
+                        published_at="2026-06-08T02:00:00Z",
+                    ),
+                ],
+            ):
+                check = check_for_update(state_path=result.state_path)
+
+            self.assertTrue(check.update_available)
+            self.assertEqual(check.installed.release_tag, "codex-lab-v1.2.3-lab.1")
+            self.assertEqual(check.latest_release_tag, "codex-lab-v1.2.4-lab.1")
+
+    def test_check_for_update_rejects_unpublished_installed_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[lab_release_summary("codex-lab-v1.2.4-lab.1")],
+            ):
+                with self.assertRaisesRegex(
+                    CodexLabUpdateError, "not in the published"
+                ):
+                    check_for_update(state_path=result.state_path)
+
+    def test_update_from_latest_release_skips_current_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[lab_release_summary("codex-lab-v1.2.3-lab.1")],
+            ):
+                update = update_from_latest_release(
+                    state_path=result.state_path,
+                    download=mock.Mock(),
+                )
+
+            self.assertFalse(update.check.update_available)
+            self.assertIsNone(update.install)
+
+    def test_update_from_latest_release_preserves_recorded_install_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_root = root / "old-release"
+            new_root = root / "new-release"
+            old_root.mkdir()
+            new_root.mkdir()
+            old_release = build_test_release(old_root)
+            new_release = build_test_release(
+                new_root,
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+            )
+            app_dir = root / "custom" / "Apps" / "Codex Lab.app"
+            shim_dir = root / "custom" / "bin"
+            state_path = root / "custom" / "state" / "install-state.json"
+            install_from_manifest_url(
+                old_release.manifest_url,
+                app_dir=app_dir,
+                shim_dir=shim_dir,
+                state_path=state_path,
+                download=old_release.download,
+            )
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[
+                    lab_release_summary("codex-lab-v1.2.3-lab.1"),
+                    lab_release_summary(
+                        "codex-lab-v1.2.4-lab.1",
+                        published_at="2026-06-08T02:00:00Z",
+                    ),
+                ],
+            ):
+                update = update_from_latest_release(
+                    state_path=state_path,
+                    download=new_release.download,
+                )
+
+            assert update.install is not None
+            self.assertTrue(update.check.update_available)
+            self.assertEqual(
+                update.check.installed.release_tag, "codex-lab-v1.2.3-lab.1"
+            )
+            self.assertEqual(update.install.app_dir, app_dir.resolve(strict=False))
+            self.assertEqual(update.install.release_tag, "codex-lab-v1.2.4-lab.1")
+            self.assertEqual(
+                update.install.shim_path, shim_dir.resolve(strict=False) / "codex-lab"
+            )
+            self.assertEqual(
+                update.install.state_path, state_path.resolve(strict=False)
+            )
+            self.assertEqual(update.install.version, "1.2.4")
+
+            status = read_install_state(state_path)
+            self.assertEqual(status.app_path, app_dir.resolve(strict=False))
+            self.assertEqual(status.bundle_version, "43")
+            self.assertEqual(status.release_tag, "codex-lab-v1.2.4-lab.1")
+            self.assertEqual(
+                status.shim_path, shim_dir.resolve(strict=False) / "codex-lab"
+            )
+            self.assertEqual(status.source_commit, "def456")
+            self.assertEqual(status.version, "1.2.4")
+
+    def test_update_from_latest_release_preserves_no_shim_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_root = root / "old-release"
+            new_root = root / "new-release"
+            old_root.mkdir()
+            new_root.mkdir()
+            old_release = build_test_release(old_root)
+            new_release = build_test_release(
+                new_root,
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+            )
+            app_dir = root / "custom" / "Apps" / "Codex Lab.app"
+            state_path = root / "custom" / "state" / "install-state.json"
+            install_from_manifest_url(
+                old_release.manifest_url,
+                app_dir=app_dir,
+                shim_dir=None,
+                state_path=state_path,
+                download=old_release.download,
+            )
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[
+                    lab_release_summary("codex-lab-v1.2.3-lab.1"),
+                    lab_release_summary(
+                        "codex-lab-v1.2.4-lab.1",
+                        published_at="2026-06-08T02:00:00Z",
+                    ),
+                ],
+            ):
+                update = update_from_latest_release(
+                    state_path=state_path,
+                    download=new_release.download,
+                )
+
+            assert update.install is not None
+            self.assertEqual(update.install.app_dir, app_dir.resolve(strict=False))
+            self.assertEqual(update.install.release_tag, "codex-lab-v1.2.4-lab.1")
+            self.assertIsNone(update.install.shim_path)
+
+            status = read_install_state(state_path)
+            self.assertEqual(status.release_tag, "codex-lab-v1.2.4-lab.1")
+            self.assertIsNone(status.shim_path)
 
     def test_rejects_artifact_url_that_is_not_manifest_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -654,7 +1045,34 @@ def lab_release(
     }
 
 
-def build_test_release(root: Path) -> TestRelease:
+def lab_release_summary(
+    tag_name: str,
+    *,
+    published_at: str = "2026-06-08T01:00:00Z",
+) -> CodexLabReleaseSummary:
+    return CodexLabReleaseSummary(published_at=published_at, tag_name=tag_name)
+
+
+def run_install_cli(*args: str) -> tuple[int, str, str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        mock.patch.object(sys, "argv", ["install_codex_lab.py", *args]),
+        contextlib.redirect_stdout(stdout),
+        contextlib.redirect_stderr(stderr),
+    ):
+        exit_code = install_codex_lab_cli.main()
+    return exit_code, stdout.getvalue(), stderr.getvalue()
+
+
+def build_test_release(
+    root: Path,
+    *,
+    release_tag: str = "codex-lab-v1.2.3-lab.1",
+    version: str = "1.2.3",
+    bundle_version: str = "42",
+    commit: str = "abc123",
+) -> TestRelease:
     build_root = root / "build"
     dist_dir = root / "dist"
     dist_dir.mkdir()
@@ -666,8 +1084,8 @@ def build_test_release(root: Path) -> TestRelease:
             app_dir=build_root / "Codex Lab.app",
             codex_bin=codex_bin,
             shim_dir=build_root / "bin",
-            short_version="1.2.3",
-            bundle_version="42",
+            short_version=version,
+            bundle_version=bundle_version,
         )
     )
     assert result.shim_path is not None
@@ -679,7 +1097,6 @@ def build_test_release(root: Path) -> TestRelease:
         f"{sha256_file(dist_dir / SHIM_ZIP)}  {SHIM_ZIP}\n",
     )
 
-    release_tag = "codex-lab-v1.2.3-lab.1"
     manifest_url = manifest_url_for_release_tag(release_tag)
     manifest = build_manifest(
         dist_dir=dist_dir,
@@ -687,9 +1104,9 @@ def build_test_release(root: Path) -> TestRelease:
             APP_ZIP: sha256_file(dist_dir / APP_ZIP),
             SHIM_ZIP: sha256_file(dist_dir / SHIM_ZIP),
         },
-        version="1.2.3",
-        bundle_version="42",
-        commit="abc123",
+        version=version,
+        bundle_version=bundle_version,
+        commit=commit,
         repository="cbusillo/codex",
         workflow="codex-lab-release",
         run_id="100",

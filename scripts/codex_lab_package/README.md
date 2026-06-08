@@ -58,6 +58,21 @@ To see which Codex Lab release is installed, read the recorded install state:
 scripts/install_codex_lab.py --status
 ```
 
+To check for a newer published Lab release without changing the install, run:
+
+```shell
+scripts/install_codex_lab.py --check
+```
+
+To update an existing install in place, run:
+
+```shell
+scripts/install_codex_lab.py --update
+```
+
+`--update` reads the recorded install state, preserves the installed app path and
+shim path, and replaces only when a newer published Lab release is available.
+
 The installer downloads the manifest, `SHA256SUMS`, app zip, and shim zip into a
 temporary staging directory. It validates the manifest shape, requires artifact
 URLs to be siblings of the manifest URL, checks artifact sizes and SHA-256
