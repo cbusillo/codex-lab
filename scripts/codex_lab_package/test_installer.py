@@ -21,6 +21,8 @@ from codex_lab_package.distribution_manifest import MANIFEST_NAME
 from codex_lab_package.distribution_manifest import SHIM_ZIP
 from codex_lab_package.distribution_manifest import build_manifest
 from codex_lab_package.distribution_manifest import sha256_file
+from codex_lab_package.installer import DOWNLOAD_TIMEOUT_SECONDS
+from codex_lab_package.installer import download_url
 from codex_lab_package.installer import install_from_manifest_url
 from codex_lab_package.installer import manifest_url_for_release_tag
 from codex_lab_package.installer import replace_path
@@ -29,6 +31,22 @@ from codex_lab_package.layout import build_codex_lab_app
 
 
 class CodexLabInstallerTest(unittest.TestCase):
+    def test_download_url_uses_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dest = Path(temp_dir) / "artifact.zip"
+            response = FakeHttpResponse(b"artifact bytes")
+
+            with mock.patch(
+                "codex_lab_package.installer.urllib.request.urlopen",
+                return_value=response,
+            ) as urlopen:
+                download_url("https://github.com/example/release/artifact.zip", dest)
+
+            urlopen.assert_called_once()
+            _, kwargs = urlopen.call_args
+            self.assertEqual(kwargs["timeout"], DOWNLOAD_TIMEOUT_SECONDS)
+            self.assertEqual(dest.read_bytes(), b"artifact bytes")
+
     def test_installs_verified_release_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -321,6 +339,25 @@ class TestRelease:
             )
             return
         shutil.copyfile(self.dist_dir / file_name, dest)
+
+
+class FakeHttpResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.offset = 0
+
+    def __enter__(self) -> "FakeHttpResponse":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = len(self.body) - self.offset
+        chunk = self.body[self.offset : self.offset + size]
+        self.offset += len(chunk)
+        return chunk
 
 
 def build_test_release(root: Path) -> TestRelease:
