@@ -30,6 +30,7 @@ DEFAULT_STATE_PATH = (
 )
 SHA256SUMS_NAME = "SHA256SUMS"
 USER_AGENT = "codex-lab-installer/0"
+DOWNLOAD_TIMEOUT_SECONDS = 60
 
 DownloadFunc = Callable[[str, Path], None]
 
@@ -168,7 +169,10 @@ def download_url(url: str, dest: Path) -> None:
         raise ValueError(f"download URL must be an HTTPS URL: {url}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request) as response, dest.open("wb") as output:
+    with (
+        urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response,
+        dest.open("wb") as output,
+    ):
         shutil.copyfileobj(response, output)
 
 
