@@ -67,14 +67,15 @@ stages them for GitHub Releases. It separates trust boundaries deliberately:
   checksums, and checks that the manifest has release metadata and download
   URLs. This validates internal consistency, not artifact provenance;
 - a separate `ubuntu-latest` publish job has `contents: write` and creates a
-  draft prerelease only for explicit manual dispatches with `publish: true`.
+  public prerelease only for explicit manual dispatches with `publish: true`.
 
 Manual dispatch with `publish: false` is the dry-run path: it builds and
 validates the release artifact set, including checking that the release tag is
 available, without creating a GitHub Release. Publishing is restricted to manual
 dispatches from the repository default branch. Published Codex Lab releases are
-draft prereleases and are not marked as latest while the artifacts remain
-unsigned and unnotarized.
+public prereleases and are not marked as latest while the artifacts remain
+unsigned and unnotarized. Public prereleases are used so manifest `downloadUrl`
+entries are immediately usable by installers and updaters.
 
 Release IDs use this namespace:
 

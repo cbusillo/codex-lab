@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       publish:
-        description: "Create a draft GitHub prerelease when true; otherwise validate artifacts and release preconditions."
+        description: "Create a public GitHub prerelease when true; otherwise validate artifacts and release preconditions."
         required: true
         default: false
         type: boolean
@@ -196,8 +196,8 @@ jobs:
             exit "$tag_status"
           fi
 
-  publish-draft-release:
-    name: Publish draft GitHub prerelease
+  publish-prerelease:
+    name: Publish GitHub prerelease
     needs:
       - build-macos-aarch64
       - validate-release-artifacts
@@ -219,7 +219,7 @@ jobs:
           cat > release-notes.md <<'EOF'
           Codex Lab macOS ARM64 distribution artifact.
 
-          This draft prerelease is unsigned and not notarized. It is intended for Codex Lab validation before the signing and updater pipeline exists.
+          This prerelease is unsigned and not notarized. It is intended for Codex Lab validation before the signing and updater pipeline exists.
 
           Assets:
           - codex-lab-app-aarch64-apple-darwin.zip
@@ -228,7 +228,7 @@ jobs:
           - SHA256SUMS
           EOF
 
-      - name: Publish draft release
+      - name: Publish prerelease
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
@@ -265,7 +265,6 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$release_tag" \
             --notes-file release-notes.md \
-            --draft \
             --prerelease \
             --latest=false \
             dist/codex-lab-app-aarch64-apple-darwin.zip \
