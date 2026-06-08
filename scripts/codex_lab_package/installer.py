@@ -48,6 +48,17 @@ class CodexLabInstallResult:
 
 
 @dataclass(frozen=True)
+class CodexLabInstallStatus:
+    app_path: Path
+    bundle_version: str
+    release_tag: str
+    shim_path: Path | None
+    source_commit: str | None
+    state_path: Path
+    version: str
+
+
+@dataclass(frozen=True)
 class Replacement:
     target: Path
     backup_path: Path
@@ -189,6 +200,44 @@ def install_from_manifest_url(
             state_path=state_path,
             version=manifest["version"],
         )
+
+
+def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstallStatus:
+    state_path = resolve_destination(state_path)
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise ValueError(f"Install state must be a JSON object: {state_path}")
+
+    source = state.get("source")
+    source_commit = None
+    if isinstance(source, dict):
+        commit = source.get("commit")
+        if isinstance(commit, str):
+            source_commit = commit
+
+    shim_path = state.get("shimPath")
+    if shim_path is not None and not isinstance(shim_path, str):
+        raise ValueError(
+            f"Install state field shimPath must be a string or null: {state_path}"
+        )
+    return CodexLabInstallStatus(
+        app_path=Path(required_state_string(state, "appPath", state_path)),
+        bundle_version=required_state_string(state, "bundleVersion", state_path),
+        release_tag=required_state_string(state, "releaseTag", state_path),
+        shim_path=Path(shim_path) if isinstance(shim_path, str) else None,
+        source_commit=source_commit,
+        state_path=state_path,
+        version=required_state_string(state, "version", state_path),
+    )
+
+
+def required_state_string(state: dict, field: str, state_path: Path) -> str:
+    value = state.get(field)
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"Install state field {field} must be a non-empty string: {state_path}"
+        )
+    return value
 
 
 def download_url(url: str, dest: Path) -> None:

@@ -14,6 +14,7 @@ from codex_lab_package.installer import DEFAULT_STATE_PATH
 from codex_lab_package.installer import install_from_manifest_url
 from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
+from codex_lab_package.installer import read_install_state
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +31,11 @@ def parse_args() -> argparse.Namespace:
         "--latest",
         action="store_true",
         help="Install the newest published Codex Lab release for the repository.",
+    )
+    source.add_argument(
+        "--status",
+        action="store_true",
+        help="Print installed Codex Lab release metadata from the state file.",
     )
     parser.add_argument(
         "--repository",
@@ -69,6 +75,29 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.status:
+        try:
+            status = read_install_state(args.state_path)
+        except FileNotFoundError:
+            print(
+                f"Codex Lab install state not found: {args.state_path}", file=sys.stderr
+            )
+            return 1
+        except (OSError, ValueError) as exc:
+            print(f"Could not read Codex Lab install state: {exc}", file=sys.stderr)
+            return 1
+        print(f"Codex Lab {status.version} from {status.release_tag}")
+        print(f"Bundle version: {status.bundle_version}")
+        if status.source_commit:
+            print(f"Source commit: {status.source_commit}")
+        print(f"App: {status.app_path}")
+        if status.shim_path is not None:
+            print(f"Shim: {status.shim_path}")
+        else:
+            print("Shim: not installed")
+        print(f"State: {status.state_path}")
+        return 0
+
     if args.manifest_url:
         manifest_url = args.manifest_url
     elif args.latest:

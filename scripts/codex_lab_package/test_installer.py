@@ -29,6 +29,7 @@ from codex_lab_package.installer import install_from_manifest_url
 from codex_lab_package.installer import latest_release_tag
 from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
+from codex_lab_package.installer import read_install_state
 from codex_lab_package.installer import replace_path
 from codex_lab_package.installer import select_latest_lab_release_tag
 from codex_lab_package.layout import CodexLabAppOptions
@@ -221,6 +222,87 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(state["releaseTag"], "codex-lab-v1.2.3-lab.1")
             self.assertEqual(state["shimPath"], str(result.shim_path))
             self.assertEqual(state["version"], "1.2.3")
+
+    def test_reads_install_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+
+            status = read_install_state(result.state_path)
+
+            self.assertEqual(status.app_path, result.app_dir)
+            self.assertEqual(status.bundle_version, "42")
+            self.assertEqual(status.release_tag, "codex-lab-v1.2.3-lab.1")
+            self.assertEqual(status.shim_path, result.shim_path)
+            self.assertEqual(status.source_commit, "abc123")
+            self.assertEqual(status.state_path, result.state_path)
+            self.assertEqual(status.version, "1.2.3")
+
+    def test_status_command_prints_install_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve().parents[1] / "install_codex_lab.py"),
+                    "--status",
+                    "--state-path",
+                    str(result.state_path),
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(
+                completed.stdout,
+                f"Codex Lab 1.2.3 from codex-lab-v1.2.3-lab.1\n"
+                "Bundle version: 42\n"
+                "Source commit: abc123\n"
+                f"App: {result.app_dir}\n"
+                f"Shim: {result.shim_path}\n"
+                f"State: {result.state_path}\n",
+            )
+
+    def test_status_command_reports_missing_install_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "missing-state.json"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve().parents[1] / "install_codex_lab.py"),
+                    "--status",
+                    "--state-path",
+                    str(state_path),
+                ],
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.stdout, "")
+            self.assertEqual(
+                completed.stderr,
+                f"Codex Lab install state not found: {state_path}\n",
+            )
 
     def test_rejects_artifact_url_that_is_not_manifest_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
