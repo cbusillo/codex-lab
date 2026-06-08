@@ -157,12 +157,14 @@ def _install_shim(
         _prepare_output_path(shim_path, force)
 
     with shim_path.open("w", encoding="utf-8") as handle:
-        print(_shim_script(app_dir), end="", file=handle)
+        print(build_shim_script(app_dir), end="", file=handle)
     _make_executable(shim_path)
     return shim_path
 
 
-def _shim_script(app_dir: Path) -> str:
+def build_shim_script(app_dir: Path) -> str:
+    """Return the codex-lab shell shim for an installed app bundle."""
+
     return f"""#!/bin/sh
 set -eu
 
