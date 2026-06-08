@@ -63,10 +63,12 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(result.version, "1.2.3")
             self.assertEqual(result.release_tag, "codex-lab-v1.2.3-lab.1")
             self.assertEqual(
-                result.app_dir, install_root.absolute() / "Custom Codex Lab.app"
+                result.app_dir,
+                install_root.resolve(strict=False) / "Custom Codex Lab.app",
             )
             self.assertEqual(
-                result.shim_path, install_root.absolute() / "bin" / "codex-lab"
+                result.shim_path,
+                (install_root / "bin").resolve(strict=False) / "codex-lab",
             )
 
             assert result.shim_path is not None
@@ -195,7 +197,7 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertTrue(symlink_target.is_symlink())
             self.assertTrue(real_target.is_dir())
 
-    def test_rejects_symlink_app_parent_before_resolving_it(self) -> None:
+    def test_resolves_symlink_app_parent_before_installing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             release = build_test_release(root)
@@ -205,20 +207,46 @@ class CodexLabInstallerTest(unittest.TestCase):
             app_parent.parent.mkdir()
             app_parent.symlink_to(real_apps)
 
-            with self.assertRaisesRegex(ValueError, "parent must not be a symlink"):
-                install_from_manifest_url(
-                    release.manifest_url,
-                    app_dir=app_parent / "Codex Lab.app",
-                    shim_dir=root / "install" / "bin",
-                    state_path=root / "install" / "state.json",
-                    force=True,
-                    download=release.download,
-                )
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=app_parent / "Codex Lab.app",
+                shim_dir=None,
+                state_path=root / "install" / "state.json",
+                force=True,
+                download=release.download,
+            )
 
             self.assertTrue(app_parent.is_symlink())
-            self.assertFalse((real_apps / "Codex Lab.app").exists())
+            self.assertEqual(
+                result.app_dir, real_apps.resolve(strict=False) / "Codex Lab.app"
+            )
+            self.assertTrue((real_apps / "Codex Lab.app").is_dir())
 
-    def test_rejects_symlink_shim_parent_before_resolving_it(self) -> None:
+    def test_resolves_symlink_app_ancestor_before_installing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            real_install = root / "real-install"
+            real_install.mkdir()
+            install_link = root / "install"
+            install_link.symlink_to(real_install)
+
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=install_link / "Apps" / "Codex Lab.app",
+                shim_dir=None,
+                state_path=root / "state" / "install-state.json",
+                force=True,
+                download=release.download,
+            )
+
+            self.assertEqual(
+                result.app_dir,
+                (real_install / "Apps").resolve(strict=False) / "Codex Lab.app",
+            )
+            self.assertTrue((real_install / "Apps" / "Codex Lab.app").is_dir())
+
+    def test_resolves_symlink_shim_parent_before_installing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             release = build_test_release(root)
@@ -228,18 +256,46 @@ class CodexLabInstallerTest(unittest.TestCase):
             shim_dir.parent.mkdir()
             shim_dir.symlink_to(real_bin)
 
-            with self.assertRaisesRegex(ValueError, "parent must not be a symlink"):
-                install_from_manifest_url(
-                    release.manifest_url,
-                    app_dir=root / "install" / "Codex Lab.app",
-                    shim_dir=shim_dir,
-                    state_path=root / "install" / "state.json",
-                    force=True,
-                    download=release.download,
-                )
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=shim_dir,
+                state_path=root / "install" / "state.json",
+                force=True,
+                download=release.download,
+            )
 
             self.assertTrue(shim_dir.is_symlink())
-            self.assertFalse((real_bin / "codex-lab").exists())
+            self.assertEqual(
+                result.shim_path, real_bin.resolve(strict=False) / "codex-lab"
+            )
+            self.assertTrue((real_bin / "codex-lab").is_file())
+
+    def test_resolves_symlink_state_parent_before_writing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            real_state = root / "real-state"
+            real_state.mkdir()
+            state_parent = root / "install" / "state"
+            state_parent.parent.mkdir()
+            state_parent.symlink_to(real_state)
+
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=None,
+                state_path=state_parent / "install-state.json",
+                force=True,
+                download=release.download,
+            )
+
+            self.assertTrue(state_parent.is_symlink())
+            self.assertEqual(
+                result.state_path,
+                real_state.resolve(strict=False) / "install-state.json",
+            )
+            self.assertTrue((real_state / "install-state.json").is_file())
 
     def test_preflights_all_targets_before_installing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
