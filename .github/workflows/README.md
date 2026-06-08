@@ -12,8 +12,8 @@ runner groups, secrets, and release infrastructure that this fork does not own.
   self-hosted macOS runner when packaging files, Rust CLI code, or the workflow
   change. The self-hosted job is guarded so it runs automatically only for
   branches in this repository or manual dispatches.
-- `blob-size-policy.yml`, `codespell.yml`, and `cargo-deny.yml` are retained as
-  lightweight inherited checks while they remain fork-safe.
+- `codespell.yml` and `cargo-deny.yml` are retained as lightweight inherited
+  checks while they remain fork-safe.
 
 ## Manual Upstream Parity Checks
 
