@@ -6,6 +6,7 @@ set windows-shell := ["python", "-c", 'import os, runpy; runpy.run_path(os.envir
 
 rust_min_stack := "8388608" # 8 MiB
 python := if os_family() == "windows" { "python" } else { "python3" }
+exec_harness_output_root := env_var_or_default("CODEX_EXEC_HARNESS_OUTPUT_ROOT", justfile_directory() / ".tmp/codex-exec-harness")
 
 # Display help
 help:
@@ -39,8 +40,13 @@ app-server-test-client *args:
 # Build the local Codex CLI and run every exec harness scenario.
 [no-cd]
 exec-harness-test:
+    eval "$({{ justfile_directory() }}/scripts/local/exec-harness-env.sh)"
     cargo build --manifest-path {{ justfile_directory() }}/codex-rs/Cargo.toml -p codex-cli --bin codex
-    {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin {{ justfile_directory() }}/codex-rs/target/debug/codex
+    codex_bin="${CARGO_TARGET_DIR:-{{ justfile_directory() }}/codex-rs/target}/debug/codex"; {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin "$codex_bin" --output-root {{ exec_harness_output_root }}
+
+[no-cd]
+local-cleanup-space *args:
+    {{ justfile_directory() }}/scripts/local/cleanup-space.sh "$@"
 
 # Format the justfile, Rust, Python SDK code, and Python scripts.
 fmt:

@@ -20,6 +20,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=str(DEFAULT_CODEX_BIN),
         help="Path to the codex binary under test",
     )
+    parser.add_argument(
+        "--output-root",
+        default=None,
+        help="Directory for isolated runs and artifacts",
+    )
     return parser.parse_args(argv)
 
 
@@ -32,8 +37,17 @@ def main(argv: list[str]) -> int:
 
     for scenario in scenarios:
         print(f"== {scenario.relative_to(ROOT)}", flush=True)
+        command = [
+            sys.executable,
+            str(HARNESS),
+            str(scenario),
+            "--codex-bin",
+            args.codex_bin,
+        ]
+        if args.output_root is not None:
+            command.extend(["--output-root", args.output_root])
         result = subprocess.run(
-            [sys.executable, str(HARNESS), str(scenario), "--codex-bin", args.codex_bin],
+            command,
             cwd=ROOT,
         )
         if result.returncode != 0:

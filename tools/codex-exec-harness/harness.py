@@ -5,6 +5,7 @@ import argparse
 import http.server
 import json
 import os
+import re
 import shutil
 import socketserver
 import subprocess
@@ -22,6 +23,22 @@ DEFAULT_OUTPUT_ROOT = ROOT / ".tmp" / "codex-exec-harness"
 
 class HarnessError(Exception):
     pass
+
+
+def safe_path_component(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-")
+    return sanitized or "scenario"
+
+
+def resolve_under(root: Path, rel_path: str, description: str) -> Path:
+    path = Path(rel_path)
+    if path.is_absolute():
+        raise HarnessError(f"{description} must be relative: {rel_path}")
+    resolved_root = root.resolve()
+    resolved_path = (root / path).resolve()
+    if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
+        raise HarnessError(f"{description} escapes workspace: {rel_path}")
+    return resolved_path
 
 
 @dataclass(frozen=True)
@@ -129,6 +146,8 @@ class FakeResponsesServer:
         responses = fixture.get("responses", [{}])
         if not isinstance(responses, list):
             raise HarnessError("responses_api.responses must be a list")
+        if not responses:
+            raise HarnessError("responses_api.responses must not be empty")
         self._responses = [r if isinstance(r, dict) else {} for r in responses]
         self.requests: list[dict[str, Any]] = []
         self._httpd: socketserver.TCPServer | None = None
@@ -188,11 +207,12 @@ class FakeResponsesServer:
 
 def make_paths(output_root: Path, scenario_name: str) -> RunPaths:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    run_dir = output_root / f"{stamp}-{scenario_name}"
+    safe_name = safe_path_component(scenario_name)
+    run_dir = output_root / f"{stamp}-{safe_name}"
     suffix = 1
     while run_dir.exists():
         suffix += 1
-        run_dir = output_root / f"{stamp}-{scenario_name}-{suffix}"
+        run_dir = output_root / f"{stamp}-{safe_name}-{suffix}"
     return RunPaths(
         run_dir=run_dir,
         workspace=run_dir / "workspace",
@@ -210,7 +230,7 @@ def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
     for rel_path, content in files.items():
         if not isinstance(rel_path, str):
             raise HarnessError("file paths must be strings")
-        save_text(paths.workspace / rel_path, str(content))
+        save_text(resolve_under(paths.workspace, rel_path, "file path"), str(content))
 
     if scenario.get("git_init", True):
         subprocess.run(
@@ -330,29 +350,45 @@ def run_codex(
     paths.home.mkdir(parents=True, exist_ok=True)
     paths.codex_home.mkdir(parents=True, exist_ok=True)
 
-    completed = subprocess.run(
-        command,
-        cwd=paths.workspace,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=int(scenario.get("timeout_seconds", 90)),
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=paths.workspace,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=int(scenario.get("timeout_seconds", 90)),
+        )
+        stdout = completed.stdout
+        stderr = completed.stderr
+        returncode = completed.returncode
+        timed_out = False
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        stderr += f"\nharness: command timed out after {exc.timeout}s\n"
+        returncode = 124
+        timed_out = True
 
-    save_text(artifact_dir / "stdout.jsonl", completed.stdout)
-    save_text(artifact_dir / "stderr.log", completed.stderr)
+    save_text(artifact_dir / "stdout.jsonl", stdout)
+    save_text(artifact_dir / "stderr.log", stderr)
     events = []
-    for line in completed.stdout.splitlines():
+    for line in stdout.splitlines():
         try:
             events.append(json.loads(line))
         except json.JSONDecodeError:
             events.append({"unparsed": line})
 
     return {
-        "returncode": completed.returncode,
+        "returncode": returncode,
         "events": events,
-        "stderr": completed.stderr,
+        "stderr": stderr,
+        "timed_out": timed_out,
     }
 
 
@@ -484,6 +520,20 @@ def evaluate_expectations(
 
     if expect.get("thread_id") == "required" and not run.get("thread_id"):
         failures.append("expected a captured thread_id")
+
+    if expect.get("same_thread_id") is True:
+        expected_thread_id = run.get("thread_id")
+        if not expected_thread_id:
+            failures.append("expected a captured thread_id for same_thread_id")
+        for index, turn in enumerate(run.get("turns", [])):
+            if not isinstance(turn, dict):
+                continue
+            actual_thread_id = turn.get("thread_id")
+            if actual_thread_id != expected_thread_id:
+                failures.append(
+                    f"turn {index}: expected thread_id {expected_thread_id!r}, "
+                    f"found {actual_thread_id!r}"
+                )
 
     event_types = expect.get("event_types", {})
     if not isinstance(event_types, dict):
