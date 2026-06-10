@@ -36,6 +36,12 @@ app-server-test-client *args:
     cargo build -p codex-cli
     cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
 
+# Build the local Codex CLI and run every exec harness scenario.
+[no-cd]
+exec-harness-test:
+    cargo build --manifest-path {{ justfile_directory() }}/codex-rs/Cargo.toml -p codex-cli --bin codex
+    {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin {{ justfile_directory() }}/codex-rs/target/debug/codex
+
 # Format the justfile, Rust, Python SDK code, and Python scripts.
 fmt:
     {{ python }} ../scripts/format.py

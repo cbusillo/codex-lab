@@ -1,0 +1,37 @@
+{
+  "name": "skills-guidance-binding-triggers",
+  "model": "gpt-5.1-codex",
+  "prompt": "Reply with exactly: ok",
+  "files": {
+    ".codex/skills/mandatory/SKILL.md": "---\nname: mandatory-skill\ndescription: Use when the task involves mandatory trigger checks. This skill MUST be used for mandatory trigger checks.\n---\nMANDATORY_SKILL_BODY_MARKER\n",
+    ".codex/skills/delegating/SKILL.md": "---\nname: delegating-skill\ndescription: Use when delegated skill routing is mentioned. For local model mechanics, use local-llm.\n---\nDELEGATING_SKILL_BODY_MARKER\n",
+    ".codex/skills/local-llm/SKILL.md": "---\nname: local-llm\ndescription: Use when the user asks about local LLMs or LM Studio.\n---\nLOCAL_LLM_SKILL_BODY_MARKER\n",
+    "README.md": "# Skills guidance fixture\n"
+  },
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-skills-guidance"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 1,
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "contains": "If a skill description says it MUST be used",
+        "not_contains": "After deciding to use a skill",
+        "count": {
+          "Mandatory triggers": 1,
+          "Delegated triggers": 1,
+          "Match skills independently against every part of the request": 1,
+          "use all relevant mandatory or delegated skills": 1
+        }
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}

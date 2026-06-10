@@ -26,15 +26,19 @@ pub const SKILLS_INTRO_WITH_ABSOLUTE_PATHS: &str = "A skill is a set of local in
 pub const SKILLS_INTRO_WITH_ALIASES: &str = "A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.";
 pub const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r###"- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
+- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement in the described context. Open its `SKILL.md` before taking other investigative or implementation actions for that turn.
+- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, find that delegated skill in the Available Skills list above and open its `SKILL.md` before taking actions in that subdomain.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
-  1) After deciding to use a skill, open its `SKILL.md`. Read only enough to follow the workflow.
+  1) Open the selected skill's `SKILL.md`. Read only enough to follow the workflow.
   2) When `SKILL.md` references relative paths (e.g., `scripts/foo.py`), resolve them relative to the skill directory listed above first, and only consider other paths if needed.
   3) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
   4) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
   5) If `assets/` or templates exist, reuse them instead of recreating from scratch.
 - Coordination and sequencing:
-  - If multiple skills apply, choose the minimal set that covers the request and state the order you'll use them.
+  - Match skills independently against every part of the request. One relevant skill does not suppress another: for example, regression investigation and durable GitHub planning can require separate skills in the same turn.
+  - If multiple skills apply, use all relevant mandatory or delegated skills before ordinary work. Do not choose only one when another skill also matches the user's request.
+  - For non-binding matches, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
 - Context hygiene:
   - Keep context small: summarize long sections instead of pasting them; only load extra files when needed.
@@ -43,15 +47,19 @@ pub const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r###"- Discovery: The li
 - Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue."###;
 pub const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r###"- Discovery: The list above is the skills available in this session (name + description + short path). Skill bodies live on disk at the listed paths after expanding the matching alias from `### Skill roots`.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
+- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement in the described context. Expand the listed short `path` with the matching alias from `### Skill roots`, then open its `SKILL.md` before taking other investigative or implementation actions for that turn.
+- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, find that delegated skill in the Available Skills list above and open its `SKILL.md` before taking actions in that subdomain.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
-  1) After deciding to use a skill, expand the listed short `path` with the matching alias from `### Skill roots`, then open its `SKILL.md`. Read only enough to follow the workflow.
+  1) Expand the listed short `path` with the matching alias from `### Skill roots`, then open the selected skill's `SKILL.md`. Read only enough to follow the workflow.
   2) When `SKILL.md` references relative paths (e.g., `scripts/foo.py`), resolve them relative to the directory containing that expanded `SKILL.md` first, and only consider other paths if needed.
   3) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
   4) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
   5) If `assets/` or templates exist, reuse them instead of recreating from scratch.
 - Coordination and sequencing:
-  - If multiple skills apply, choose the minimal set that covers the request and state the order you'll use them.
+  - Match skills independently against every part of the request. One relevant skill does not suppress another: for example, regression investigation and durable GitHub planning can require separate skills in the same turn.
+  - If multiple skills apply, use all relevant mandatory or delegated skills before ordinary work. Do not choose only one when another skill also matches the user's request.
+  - For non-binding matches, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
 - Context hygiene:
   - Keep context small: summarize long sections instead of pasting them; only load extra files when needed.
@@ -980,6 +988,25 @@ mod tests {
             budget,
             SkillPathAliases::default(),
         )
+    }
+
+    #[test]
+    fn available_skills_guidance_preserves_binding_trigger_rules() {
+        let absolute = render_available_skills_body(&[], &[]);
+        assert!(absolute.contains("If a skill description says it MUST be used"));
+        assert!(absolute.contains("Open its `SKILL.md` before taking other investigative"));
+        assert!(absolute.contains("find that delegated skill in the Available Skills list"));
+        assert!(absolute.contains("Match skills independently against every part of the request"));
+        assert!(absolute.contains("use all relevant mandatory or delegated skills"));
+        assert!(!absolute.contains("After deciding to use a skill"));
+
+        let aliased = render_available_skills_body(&["- `r0` = `/tmp/skills`".to_string()], &[]);
+        assert!(aliased.contains("If a skill description says it MUST be used"));
+        assert!(aliased.contains("Expand the listed short `path`"));
+        assert!(aliased.contains("find that delegated skill in the Available Skills list"));
+        assert!(aliased.contains("Match skills independently against every part of the request"));
+        assert!(aliased.contains("use all relevant mandatory or delegated skills"));
+        assert!(!aliased.contains("After deciding to use a skill"));
     }
 
     #[test]

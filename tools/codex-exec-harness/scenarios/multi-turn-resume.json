@@ -1,0 +1,75 @@
+{
+  "name": "multi-turn-resume",
+  "model": "gpt-5.1-codex",
+  "turns": [
+    {
+      "prompt": "Reply with exactly: first. FIRST_TURN_MARKER"
+    },
+    {
+      "prompt": "Reply with exactly: second. SECOND_TURN_MARKER"
+    }
+  ],
+  "files": {
+    "AGENTS.md": "# Multi-turn harness fixture\n\nKeep this guidance available across resumed turns.\n",
+    "README.md": "# Multi-turn resume fixture\n"
+  },
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-first-turn"
+      },
+      {
+        "response_id": "resp-second-turn"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 2,
+    "turn_count": 2,
+    "thread_id": "required",
+    "event_types": {
+      "thread.started": 2,
+      "turn.started": 2,
+      "turn.completed": 2
+    },
+    "turns": [
+      {
+        "returncode": 0,
+        "event_count": 3,
+        "responses_request_count": 1,
+        "thread_id": "required",
+        "event_types": {
+          "thread.started": 1,
+          "turn.started": 1,
+          "turn.completed": 1
+        }
+      },
+      {
+        "returncode": 0,
+        "event_count": 3,
+        "responses_request_count": 1,
+        "thread_id": "required",
+        "event_types": {
+          "thread.started": 1,
+          "turn.started": 1,
+          "turn.completed": 1
+        }
+      }
+    ],
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "contains": "FIRST_TURN_MARKER",
+        "not_contains": "SECOND_TURN_MARKER"
+      },
+      {
+        "request": 1,
+        "scope": "input",
+        "contains": "SECOND_TURN_MARKER"
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}
