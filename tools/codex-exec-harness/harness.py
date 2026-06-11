@@ -99,20 +99,21 @@ def sse_event(event_type: str, payload: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
 
-def completed_sse(response_id: str) -> str:
+def completed_sse(response_id: str, usage: dict[str, Any] | None = None) -> str:
+    usage_payload = usage or {
+        "input_tokens": 0,
+        "input_tokens_details": None,
+        "output_tokens": 0,
+        "output_tokens_details": None,
+        "total_tokens": 0,
+    }
     return sse_event(
         "response.completed",
         {
             "type": "response.completed",
             "response": {
                 "id": response_id,
-                "usage": {
-                    "input_tokens": 0,
-                    "input_tokens_details": None,
-                    "output_tokens": 0,
-                    "output_tokens_details": None,
-                    "total_tokens": 0,
-                },
+                "usage": usage_payload,
                 "output": [],
             },
         },
@@ -137,7 +138,12 @@ def response_sse_body(response: dict[str, Any]) -> str:
         chunks.append(sse_event(event_type, payload))
 
     if response.get("completed", True):
-        chunks.append(completed_sse(str(response.get("response_id", "resp_harness"))))
+        usage = response.get("usage")
+        if usage is not None and not isinstance(usage, dict):
+            raise HarnessError("responses_api response usage must be an object")
+        chunks.append(
+            completed_sse(str(response.get("response_id", "resp_harness")), usage)
+        )
     return "".join(chunks)
 
 
@@ -549,6 +555,24 @@ def add_text_assertion_failures(
                 )
 
 
+def add_token_usage_failures(
+    failures: list[str], actual: Any, expected: Any, label: str
+) -> None:
+    if expected is None:
+        return
+    if not isinstance(expected, dict):
+        raise HarnessError(f"{label}.token_usage must be an object")
+    if not isinstance(actual, dict):
+        actual = {}
+    for field, expected_value in expected.items():
+        actual_value = actual.get(str(field), 0)
+        if actual_value != int(expected_value):
+            failures.append(
+                f"{label}: expected token_usage.{field} {expected_value}, "
+                f"found {actual_value}"
+            )
+
+
 def evaluate_expectations(
     scenario: dict[str, Any], run: dict[str, Any], requests: list[dict[str, Any]]
 ) -> list[str]:
@@ -574,6 +598,10 @@ def evaluate_expectations(
         failures.append(
             f"expected {expected_turn_count} turns, found {len(run.get('turns', []))}"
         )
+
+    add_token_usage_failures(
+        failures, run.get("token_usage"), expect.get("token_usage"), "run"
+    )
 
     if expect.get("thread_id") == "required" and not run.get("thread_id"):
         failures.append("expected a captured thread_id")
@@ -626,6 +654,18 @@ def evaluate_expectations(
                 )
         if assertion.get("thread_id") == "required" and not actual_turn.get("thread_id"):
             failures.append(f"turn {index}: expected a captured thread_id")
+        add_token_usage_failures(
+            failures,
+            actual_turn.get("token_usage"),
+            assertion.get("token_usage"),
+            f"turn {index}",
+        )
+        add_token_usage_failures(
+            failures,
+            actual_turn.get("token_usage_snapshot"),
+            assertion.get("token_usage_snapshot"),
+            f"turn {index} snapshot",
+        )
         turn_event_types = assertion.get("event_types", {})
         if not isinstance(turn_event_types, dict):
             raise HarnessError("turn event_types assertions must be objects")
@@ -666,7 +706,7 @@ def run_scenario(args: argparse.Namespace) -> int:
     if not codex_bin:
         raise HarnessError("codex binary not found; pass --codex-bin")
 
-    paths = make_paths(Path(args.output_root), name)
+    paths = make_paths(Path(args.output_root).resolve(), name)
     paths.artifacts.mkdir(parents=True, exist_ok=True)
     materialize_workspace(scenario, paths)
 
