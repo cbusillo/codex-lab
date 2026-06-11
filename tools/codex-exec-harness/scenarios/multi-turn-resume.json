@@ -28,6 +28,7 @@
     "responses_request_count": 2,
     "turn_count": 2,
     "thread_id": "required",
+    "same_thread_id": true,
     "event_types": {
       "thread.started": 2,
       "turn.started": 2,
