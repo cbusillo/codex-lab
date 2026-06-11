@@ -408,6 +408,56 @@ def event_type_counts(events: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+TOKEN_USAGE_FIELDS = [
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+]
+
+
+def empty_token_usage() -> dict[str, int]:
+    return {field: 0 for field in TOKEN_USAGE_FIELDS}
+
+
+def normalize_token_usage(usage: Any) -> dict[str, int]:
+    tokens = empty_token_usage()
+    if not isinstance(usage, dict):
+        return tokens
+
+    for field in TOKEN_USAGE_FIELDS:
+        value = usage.get(field)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            tokens[field] = value
+
+    if tokens["total_tokens"] == 0:
+        tokens["total_tokens"] = tokens["input_tokens"] + tokens["output_tokens"]
+    return tokens
+
+
+def add_token_usage(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
+    return {field: left.get(field, 0) + right.get(field, 0) for field in TOKEN_USAGE_FIELDS}
+
+
+def subtract_token_usage(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
+    return {
+        field: max(0, left.get(field, 0) - right.get(field, 0))
+        for field in TOKEN_USAGE_FIELDS
+    }
+
+
+def token_usage_snapshot_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
+    snapshot = empty_token_usage()
+    for event in events:
+        if event.get("type") != "turn.completed":
+            continue
+        snapshot = normalize_token_usage(event.get("usage"))
+    return snapshot
+
+
 def run_turns(
     scenario: dict[str, Any],
     codex_bin: str,
@@ -418,6 +468,7 @@ def run_turns(
     turn_results = []
     all_events = []
     thread_id: str | None = None
+    previous_token_usage = empty_token_usage()
 
     for index, turn in enumerate(turns):
         artifact_dir = turn_artifacts(paths, len(turns), index)
@@ -434,6 +485,9 @@ def run_turns(
             raise HarnessError(f"turn {index + 1} did not emit a thread.started event")
 
         all_events.extend(result["events"])
+        token_usage_snapshot = token_usage_snapshot_from_events(result["events"])
+        token_usage_delta = subtract_token_usage(token_usage_snapshot, previous_token_usage)
+        previous_token_usage = token_usage_snapshot
         turn_results.append(
             {
                 "index": index,
@@ -442,6 +496,8 @@ def run_turns(
                 "event_types": event_type_counts(result["events"]),
                 "responses_request_count": request_count_after - request_count_before,
                 "thread_id": result_thread_id,
+                "token_usage": token_usage_delta,
+                "token_usage_snapshot": token_usage_snapshot,
                 "artifact_dir": str(artifact_dir),
             }
         )
@@ -454,6 +510,7 @@ def run_turns(
         "event_types": event_type_counts(all_events),
         "turns": turn_results,
         "thread_id": thread_id,
+        "token_usage": previous_token_usage,
     }
 
 
@@ -631,13 +688,16 @@ def run_scenario(args: argparse.Namespace) -> int:
     save_json(paths.artifacts / "responses-requests.json", requests)
     summary = {
         "scenario": name,
+        "scenario_path": str(scenario_path),
         "run_dir": str(paths.run_dir),
         "returncode": run["returncode"],
+        "passed": not failures,
         "failures": failures,
         "event_count": len(run["events"]),
         "event_types": run.get("event_types", {}),
         "responses_request_count": len(requests),
         "thread_id": run.get("thread_id"),
+        "token_usage": run.get("token_usage", empty_token_usage()),
         "turns": run.get("turns", []),
     }
     save_json(paths.artifacts / "summary.json", summary)
