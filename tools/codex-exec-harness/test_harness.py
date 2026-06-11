@@ -82,6 +82,72 @@ class HarnessSafetyTest(unittest.TestCase):
             self.assertIn("turn.started", (artifact_dir / "stdout.jsonl").read_text())
             self.assertIn("timed out", (artifact_dir / "stderr.log").read_text())
 
+    def test_token_usage_snapshot_from_events_uses_last_turn_completed_usage(self) -> None:
+        usage = HARNESS.token_usage_snapshot_from_events(
+            [
+                {"type": "turn.started"},
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 10,
+                        "cached_input_tokens": 4,
+                        "output_tokens": 3,
+                        "reasoning_output_tokens": 2,
+                    },
+                },
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 7,
+                        "cached_input_tokens": 5,
+                        "output_tokens": 1,
+                        "reasoning_output_tokens": 0,
+                        "total_tokens": 9,
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(
+            {
+                "input_tokens": 7,
+                "cached_input_tokens": 5,
+                "output_tokens": 1,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 9,
+            },
+            usage,
+        )
+
+    def test_subtract_token_usage_derives_turn_delta(self) -> None:
+        delta = HARNESS.subtract_token_usage(
+            {
+                "input_tokens": 10,
+                "cached_input_tokens": 6,
+                "output_tokens": 3,
+                "reasoning_output_tokens": 1,
+                "total_tokens": 13,
+            },
+            {
+                "input_tokens": 7,
+                "cached_input_tokens": 2,
+                "output_tokens": 1,
+                "reasoning_output_tokens": 1,
+                "total_tokens": 8,
+            },
+        )
+
+        self.assertEqual(
+            {
+                "input_tokens": 3,
+                "cached_input_tokens": 4,
+                "output_tokens": 2,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 5,
+            },
+            delta,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
