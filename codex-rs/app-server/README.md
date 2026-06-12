@@ -6,6 +6,7 @@
 
 - [Protocol](#protocol)
 - [Message Schema](#message-schema)
+- [Desktop Compatibility Gate](#desktop-compatibility-gate)
 - [Core Primitives](#core-primitives)
 - [Lifecycle Overview](#lifecycle-overview)
 - [Initialization](#initialization)
@@ -60,6 +61,58 @@ Currently, you can dump a TypeScript version of the schema using `codex app-serv
 codex app-server generate-ts --out DIR
 codex app-server generate-json-schema --out DIR
 ```
+
+## Desktop Compatibility Gate
+
+Before changing the app-server protocol or adding Desktop-facing overlays such
+as bridge, browser, review, or automation integrations, validate the current
+Desktop compatibility surface:
+
+- Regenerate vendored protocol fixtures and confirm the working tree stays clean
+  with `just write-app-server-schema` from the repository root.
+- Run `just test -p codex-app-server-protocol` from the repository root. This
+  verifies generated TypeScript and JSON schema fixtures match the vendored
+  artifacts.
+- Run targeted app-server tests for initialization, thread start/read/resume,
+  app list, and CLI startup behavior. These tests cover the
+  assumptions Desktop clients depend on most: the `initialize` handshake with
+  `clientInfo`, client name validation before metadata propagation, returned
+  `codexHome` and platform fields, thread start/read/resume serialization and
+  notifications, app listing, and `codex app-server` startup config handling.
+
+Evidence commands for that gate:
+
+```sh
+set -e
+schema_path=codex-rs/app-server-protocol/schema
+just write-app-server-schema
+git diff --exit-code -- "$schema_path"
+schema_status=$(git status --short --untracked-files=all -- "$schema_path")
+test -z "$schema_status"
+just test -p codex-app-server-protocol
+just test -p codex-app-server \
+  initialize_uses_client_info_name_as_originator \
+  initialize_probe_does_not_override_originator \
+  initialize_codex_backend_does_not_override_originator \
+  initialize_rejects_invalid_client_name \
+  initialize_opt_out_notification_methods_filters_notifications \
+  thread_start_creates_thread_and_emits_started \
+  thread_read_returns_summary_without_turns \
+  thread_read_can_include_turns \
+  thread_resume_returns_rollout_history \
+  thread_resume_rejects_unmaterialized_thread \
+  list_apps_returns_empty_when_connectors_disabled
+just test -p codex-cli \
+  strict_config_rejects_unknown_config_fields_for_app_server
+```
+
+The `clientInfo.version` value is accepted as client metadata. The app-server
+does not perform version negotiation or reject clients based on a minimum
+client version during initialization.
+
+If any of those checks uncover an incompatibility, land it as a focused
+follow-up before building higher-level Desktop integrations on top of
+app-server.
 
 ## Core Primitives
 
