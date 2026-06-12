@@ -6,6 +6,9 @@ on:
     paths:
       - ".github/workflows/exec-harness.yml"
       - "justfile"
+      - "scripts/just-shell.py"
+      - "scripts/local/cleanup-space.sh"
+      - "scripts/local/exec-harness-env.sh"
       - "tools/codex-exec-harness/**"
       - "codex-rs/**"
 

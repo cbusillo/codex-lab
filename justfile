@@ -47,7 +47,7 @@ exec-harness-test:
 
 [no-cd]
 local-cleanup-space *args:
-    {{ justfile_directory() }}/scripts/local/cleanup-space.sh "$@"
+    {{ justfile_directory() }}/scripts/local/cleanup-space.sh {args}
 
 # Format the justfile, Rust, Python SDK code, and Python scripts.
 fmt:

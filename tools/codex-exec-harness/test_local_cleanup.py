@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class LocalCleanupSpaceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        if shutil.which("just") is None:
+            self.skipTest("just is required for local-cleanup-space recipe tests")
+
+    def test_local_cleanup_space_dry_run_keeps_paths(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            completed = run_local_cleanup(workspace)
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("Local space cleanup (dry run)", completed.stdout)
+            self.assertTrue((workspace / "codex-rs" / "target").exists())
+            self.assertTrue((workspace / ".tmp" / "codex-exec-harness").exists())
+            self.assertTrue((workspace / ".tmp" / "codex-exec-harness-ci").exists())
+
+    def test_local_cleanup_space_apply_deletes_paths(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            completed = run_local_cleanup(workspace, "--apply")
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("Local space cleanup (apply)", completed.stdout)
+            self.assertFalse((workspace / "codex-rs" / "target").exists())
+            self.assertFalse((workspace / ".tmp" / "codex-exec-harness").exists())
+            self.assertFalse((workspace / ".tmp" / "codex-exec-harness-ci").exists())
+            self.assertFalse((workspace / "exec-harness-target").exists())
+
+    def test_local_cleanup_space_can_preserve_exec_harness_cache(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            completed = run_local_cleanup(
+                workspace, "--apply", "--keep-exec-harness-cache"
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("Local space cleanup (apply)", completed.stdout)
+            self.assertFalse((workspace / "codex-rs" / "target").exists())
+            self.assertFalse((workspace / ".tmp" / "codex-exec-harness").exists())
+            self.assertFalse((workspace / ".tmp" / "codex-exec-harness-ci").exists())
+            self.assertTrue((workspace / "exec-harness-target").exists())
+
+
+def run_local_cleanup(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["CODEX_EXEC_HARNESS_CARGO_TARGET_DIR"] = str(
+        workspace / "exec-harness-target"
+    )
+    return subprocess.run(
+        [
+            "just",
+            "--justfile",
+            str(workspace / "justfile"),
+            "--working-directory",
+            str(workspace),
+            "local-cleanup-space",
+            *args,
+        ],
+        check=False,
+        env=env,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+
+class copied_cleanup_workspace:
+    def __enter__(self) -> Path:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        workspace = Path(self._temp_dir.name)
+
+        copy_file("justfile", workspace)
+        copy_file("scripts/just-shell.py", workspace)
+        copy_file("scripts/local/cleanup-space.sh", workspace)
+        copy_file("scripts/local/exec-harness-env.sh", workspace)
+
+        make_probe_dir(workspace / "codex-rs" / "target")
+        make_probe_dir(workspace / ".tmp" / "codex-exec-harness")
+        make_probe_dir(workspace / ".tmp" / "codex-exec-harness-ci")
+        make_probe_dir(workspace / "exec-harness-target")
+
+        return workspace
+
+    def __exit__(self, *args: object) -> None:
+        self._temp_dir.cleanup()
+
+
+def copy_file(relative_path: str, workspace: Path) -> None:
+    source = REPO_ROOT / relative_path
+    destination = workspace / relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+
+
+def make_probe_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+if __name__ == "__main__":
+    unittest.main()
