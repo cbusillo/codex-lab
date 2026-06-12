@@ -36,10 +36,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
-      - name: Use short cargo target path
-        shell: bash
-        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/codex-lab-cargo-target" >> "$GITHUB_ENV"
-
       - name: Build Codex Lab CLI
         working-directory: codex-rs
         shell: bash
@@ -56,7 +52,7 @@ jobs:
           lab_version="$(PYTHONPATH=scripts python3 -c 'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
           mkdir -p "$output_root"
           python3 scripts/build_codex_lab_app.py \
-            --codex-bin "${CARGO_TARGET_DIR}/release/codex" \
+            --codex-bin codex-rs/target/release/codex \
             --app-dir "$app_dir" \
             --shim-dir "$shim_dir" \
             --short-version "$lab_version" \
