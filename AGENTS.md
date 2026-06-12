@@ -1,4 +1,17 @@
-# Rust/codex-rs
+# Codex Lab
+
+## Planning
+
+- Treat [cbusillo/codex-lab#28](https://github.com/cbusillo/codex-lab/issues/28)
+  as the durable recovery point for Codex Lab MVP planning.
+- Use GitHub issues labeled `plan` and `plan:active` for active cross-session
+  work. Do not rely on local handoff files or local plan drafts as the source of
+  truth for GitHub-backed work.
+- `cbusillo/code` is restored Every Code history and source material only. New
+  implementation work belongs in `cbusillo/codex-lab` unless the user explicitly
+  says otherwise.
+
+## Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:
 
