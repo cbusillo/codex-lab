@@ -3,6 +3,10 @@
 Use this harness for black-box `codex exec` proof when a change affects prompt
 assembly, skills, project instructions, config loading, or request shape.
 
+For Auto Review proof-loop work, prefer scenarios or helpers that prove artifact
+freshness, target applicability, bounded detail recovery, and quiet clean runs
+before adding runtime review features.
+
 Keep scenarios narrow and deterministic. Prefer fake `/v1/responses` assertions
 when the behavior can be proven from the outbound request body. Use live or
 local model runs separately when model behavior is the actual question.
