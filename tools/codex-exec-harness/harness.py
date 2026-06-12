@@ -99,24 +99,90 @@ def sse_event(event_type: str, payload: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
 
-def completed_sse(response_id: str) -> str:
+def completed_sse(response_id: str, usage: Any = None) -> str:
     return sse_event(
         "response.completed",
         {
             "type": "response.completed",
             "response": {
                 "id": response_id,
-                "usage": {
-                    "input_tokens": 0,
-                    "input_tokens_details": None,
-                    "output_tokens": 0,
-                    "output_tokens_details": None,
-                    "total_tokens": 0,
-                },
+                "usage": response_usage_payload(usage),
                 "output": [],
             },
         },
     )
+
+
+def response_usage_payload(usage: Any) -> dict[str, Any]:
+    if not isinstance(usage, dict):
+        usage = {}
+
+    input_tokens = usage_token_value(usage, "input_tokens")
+    output_tokens = usage_token_value(usage, "output_tokens")
+    if "total_tokens" in usage:
+        total_tokens = usage_token_value(usage, "total_tokens")
+    else:
+        total_tokens = input_tokens + output_tokens
+
+    input_tokens_details = usage.get("input_tokens_details")
+    if input_tokens_details is None and "cached_input_tokens" in usage:
+        input_tokens_details = {
+            "cached_tokens": usage_token_value(usage, "cached_input_tokens")
+        }
+
+    output_tokens_details = usage.get("output_tokens_details")
+    if output_tokens_details is None and "reasoning_output_tokens" in usage:
+        output_tokens_details = {
+            "reasoning_tokens": usage_token_value(usage, "reasoning_output_tokens")
+        }
+
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": input_tokens_details,
+        "output_tokens": output_tokens,
+        "output_tokens_details": output_tokens_details,
+        "total_tokens": total_tokens,
+    }
+
+
+def usage_token_value(usage: dict[str, Any], field: str) -> int:
+    value = usage.get(field)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HarnessError(f"responses_api usage {field} must be an integer")
+    return value
+
+
+def scenario_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HarnessError(f"{label} must be an integer")
+    return value
+
+
+def scenario_float(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise HarnessError(f"{label} must be a number")
+    return float(value)
+
+
+def maybe_scenario_int(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    return scenario_int(value, label)
+
+
+def maybe_scenario_float(value: Any, label: str) -> float | None:
+    if value is None:
+        return None
+    return scenario_float(value, label)
+
+
+def assert_not_self_prefix_match(
+    request_index: int, other_request_index: int, label: str
+) -> None:
+    if request_index == other_request_index:
+        raise HarnessError(f"{label} prefix_matches_request cannot reference itself")
 
 
 def response_sse_body(response: dict[str, Any]) -> str:
@@ -137,7 +203,11 @@ def response_sse_body(response: dict[str, Any]) -> str:
         chunks.append(sse_event(event_type, payload))
 
     if response.get("completed", True):
-        chunks.append(completed_sse(str(response.get("response_id", "resp_harness"))))
+        chunks.append(
+            completed_sse(
+                str(response.get("response_id", "resp_harness")), response.get("usage")
+            )
+        )
     return "".join(chunks)
 
 
@@ -523,6 +593,12 @@ def scoped_request_body(request: dict[str, Any], scope: str) -> Any:
     return None
 
 
+def canonical_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def add_text_assertion_failures(
     failures: list[str], subject: Any, assertion: dict[str, Any], label: str
 ) -> None:
@@ -543,10 +619,108 @@ def add_text_assertion_failures(
     if isinstance(counts, dict):
         for needle, expected in counts.items():
             actual = count_text(subject, str(needle))
-            if actual != int(expected):
+            expected_count = scenario_int(expected, f"{label} count for {needle!r}")
+            if actual != expected_count:
                 failures.append(
                     f"{label}: expected {needle!r} {expected} times, found {actual}"
                 )
+
+
+def add_token_usage_assertion_failures(
+    failures: list[str], usage: Any, assertion: Any, label: str
+) -> None:
+    if not isinstance(assertion, dict):
+        raise HarnessError(f"{label} token_usage assertion must be an object")
+    if not isinstance(usage, dict):
+        usage = {}
+
+    normalized = normalize_token_usage(usage)
+    for field in TOKEN_USAGE_FIELDS:
+        exact = maybe_scenario_int(assertion.get(field), f"{label}.{field}")
+        if exact is not None and normalized[field] != exact:
+            failures.append(
+                f"{label}: expected {field} {exact}, found {normalized[field]}"
+            )
+
+        minimum = maybe_scenario_int(
+            assertion.get(f"{field}_min"), f"{label}.{field}_min"
+        )
+        if minimum is not None and normalized[field] < minimum:
+            failures.append(
+                f"{label}: expected {field} >= {minimum}, found {normalized[field]}"
+            )
+
+        maximum = maybe_scenario_int(
+            assertion.get(f"{field}_max"), f"{label}.{field}_max"
+        )
+        if maximum is not None and normalized[field] > maximum:
+            failures.append(
+                f"{label}: expected {field} <= {maximum}, found {normalized[field]}"
+            )
+
+    input_tokens = normalized["input_tokens"]
+    cached_input_tokens = normalized["cached_input_tokens"]
+    cache_ratio = cached_input_tokens / input_tokens if input_tokens > 0 else 0.0
+    cache_ratio_min = maybe_scenario_float(
+        assertion.get("cache_ratio_min"), f"{label}.cache_ratio_min"
+    )
+    if cache_ratio_min is not None and cache_ratio < cache_ratio_min:
+        failures.append(
+            f"{label}: expected cache_ratio >= {cache_ratio_min}, "
+            f"found {cache_ratio:.3f}"
+        )
+    cache_ratio_max = maybe_scenario_float(
+        assertion.get("cache_ratio_max"), f"{label}.cache_ratio_max"
+    )
+    if cache_ratio_max is not None and cache_ratio > cache_ratio_max:
+        failures.append(
+            f"{label}: expected cache_ratio <= {cache_ratio_max}, "
+            f"found {cache_ratio:.3f}"
+        )
+
+
+def add_prefix_assertion_failures(
+    failures: list[str],
+    subject: Any,
+    assertion: dict[str, Any],
+    requests: list[dict[str, Any]],
+    request_index: int,
+    label: str,
+) -> None:
+    prefix_request = assertion.get("prefix_matches_request")
+    if prefix_request is None:
+        return
+
+    other_request_index = scenario_int(prefix_request, f"{label}.prefix_matches_request")
+    assert_not_self_prefix_match(request_index, other_request_index, label)
+    if other_request_index < 0:
+        failures.append(f"{label}: missing prefix request {other_request_index}")
+        return
+    if other_request_index >= len(requests):
+        failures.append(f"{label}: missing prefix request {other_request_index}")
+        return
+
+    prefix_length = scenario_int(assertion.get("prefix_length", 0), f"{label}.prefix_length")
+    if prefix_length <= 0:
+        raise HarnessError(f"{label} prefix_length must be a positive integer")
+
+    other_scope = str(assertion.get("prefix_scope", assertion.get("scope", "body")))
+    other_subject = scoped_request_body(requests[other_request_index], other_scope)
+    if subject is None:
+        failures.append(f"{label}: missing prefix subject")
+        return
+    if other_subject is None:
+        failures.append(
+            f"{label}: missing prefix reference responses[{other_request_index}].{other_scope}"
+        )
+        return
+    actual_prefix = canonical_text(subject)[:prefix_length]
+    expected_prefix = canonical_text(other_subject)[:prefix_length]
+    if actual_prefix != expected_prefix:
+        failures.append(
+            f"{label}: expected first {prefix_length} characters to match "
+            f"responses[{other_request_index}].{other_scope}"
+        )
 
 
 def evaluate_expectations(
@@ -557,20 +731,22 @@ def evaluate_expectations(
     if not isinstance(expect, dict):
         raise HarnessError("expect must be an object")
 
-    expected_returncode = expect.get("returncode")
-    if expected_returncode is not None and run["returncode"] != int(expected_returncode):
+    expected_returncode = maybe_scenario_int(expect.get("returncode"), "expect.returncode")
+    if expected_returncode is not None and run["returncode"] != expected_returncode:
         failures.append(
             f"expected returncode {expected_returncode}, found {run['returncode']}"
         )
 
-    expected_count = expect.get("responses_request_count")
-    if expected_count is not None and len(requests) != int(expected_count):
+    expected_count = maybe_scenario_int(
+        expect.get("responses_request_count"), "expect.responses_request_count"
+    )
+    if expected_count is not None and len(requests) != expected_count:
         failures.append(
             f"expected {expected_count} responses requests, found {len(requests)}"
         )
 
-    expected_turn_count = expect.get("turn_count")
-    if expected_turn_count is not None and len(run.get("turns", [])) != int(expected_turn_count):
+    expected_turn_count = maybe_scenario_int(expect.get("turn_count"), "expect.turn_count")
+    if expected_turn_count is not None and len(run.get("turns", [])) != expected_turn_count:
         failures.append(
             f"expected {expected_turn_count} turns, found {len(run.get('turns', []))}"
         )
@@ -600,7 +776,8 @@ def evaluate_expectations(
         actual_event_types = {}
     for event_type, expected in event_types.items():
         actual = actual_event_types.get(str(event_type), 0)
-        if actual != int(expected):
+        expected_count = scenario_int(expected, f"expect.event_types.{event_type}")
+        if actual != expected_count:
             failures.append(
                 f"expected event type {event_type!r} {expected} times, found {actual}"
             )
@@ -619,13 +796,21 @@ def evaluate_expectations(
             continue
         actual_turn = actual_turns[index]
         for key in ["returncode", "event_count", "responses_request_count"]:
-            expected = assertion.get(key)
-            if expected is not None and actual_turn.get(key) != int(expected):
+            expected = maybe_scenario_int(assertion.get(key), f"turn {index}.{key}")
+            if expected is not None and actual_turn.get(key) != expected:
                 failures.append(
                     f"turn {index}: expected {key} {expected}, found {actual_turn.get(key)}"
                 )
         if assertion.get("thread_id") == "required" and not actual_turn.get("thread_id"):
             failures.append(f"turn {index}: expected a captured thread_id")
+        token_usage_assertion = assertion.get("token_usage")
+        if token_usage_assertion is not None:
+            add_token_usage_assertion_failures(
+                failures,
+                actual_turn.get("token_usage"),
+                token_usage_assertion,
+                f"turn {index}.token_usage",
+            )
         turn_event_types = assertion.get("event_types", {})
         if not isinstance(turn_event_types, dict):
             raise HarnessError("turn event_types assertions must be objects")
@@ -634,7 +819,10 @@ def evaluate_expectations(
             actual_turn_event_types = {}
         for event_type, expected in turn_event_types.items():
             actual = actual_turn_event_types.get(str(event_type), 0)
-            if actual != int(expected):
+            expected_count = scenario_int(
+                expected, f"turn {index}.event_types.{event_type}"
+            )
+            if actual != expected_count:
                 failures.append(
                     f"turn {index}: expected event type {event_type!r} {expected} times, found {actual}"
                 )
@@ -645,14 +833,22 @@ def evaluate_expectations(
     for index, assertion in enumerate(response_assertions):
         if not isinstance(assertion, dict):
             raise HarnessError("response assertions must be objects")
-        request_index = int(assertion.get("request", index))
-        if request_index >= len(requests):
+        request_index = scenario_int(assertion.get("request", index), f"responses[{index}].request")
+        if request_index < 0 or request_index >= len(requests):
             failures.append(f"response assertion {index}: missing request {request_index}")
             continue
         scope = str(assertion.get("scope", "body"))
         subject = scoped_request_body(requests[request_index], scope)
         add_text_assertion_failures(
             failures, subject, assertion, f"responses[{request_index}].{scope}"
+        )
+        add_prefix_assertion_failures(
+            failures,
+            subject,
+            assertion,
+            requests,
+            request_index,
+            f"responses[{request_index}].{scope}",
         )
 
     return failures

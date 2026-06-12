@@ -89,3 +89,50 @@ under `expect.responses`.
 
 Use `expect.turns` to assert per-turn metadata such as `returncode`,
 `event_count`, `responses_request_count`, and `thread_id = "required"`.
+
+Fake Responses fixtures may include per-response `usage` values. The harness
+forwards them through `response.completed` so scenarios can make deterministic
+token and cache assertions without calling a real model:
+
+```json
+{
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-1",
+        "usage": {
+          "input_tokens": 500,
+          "cached_input_tokens": 250,
+          "output_tokens": 20
+        }
+      }
+    ]
+  }
+}
+```
+
+Under `expect.turns[].token_usage`, use exact field names for equality,
+`*_min` / `*_max` for bounds, and `cache_ratio_min` / `cache_ratio_max` for the
+derived `cached_input_tokens / input_tokens` ratio. For example:
+
+```json
+{
+  "expect": {
+    "turns": [
+      {
+        "token_usage": {
+          "input_tokens_max": 12000,
+          "cached_input_tokens_min": 3000,
+          "cache_ratio_min": 0.25
+        }
+      }
+    ]
+  }
+}
+```
+
+Use `expect.responses[].prefix_matches_request` with `prefix_length` to compare
+the first characters of one captured request scope with another. This is useful
+for prompt-prefix stability checks across resumed turns. By default the
+reference request uses the same `scope`; set `prefix_scope` when the reference
+request should use a different scope.
