@@ -57,6 +57,33 @@ The fake Responses API is for request-shape proof only. Use live or local model
 runs separately when the question depends on model behavior rather than prompt
 assembly.
 
+## Auto Review Proof Loop
+
+Issue #35 uses this harness as the first Codex-native Auto Review proof loop.
+The runtime review systems still live in `codex-rs`, but the harness owns the
+artifact semantics that make Auto Review safe to consume in later readiness,
+Code Bridge, and Auto Drive work:
+
+- findings are classified against the active branch and head SHA as `current`,
+  `stale`, or `detached`;
+- only `current` findings are surfaced by the summary helper, with a hard
+  summary byte cap and finding-count cap;
+- clean runs and stale/detached runs render no noisy summary;
+- finding details are recovered by stable id and bounded by a caller-supplied
+  byte cap;
+- run ids must be safe path components before sidecar save/load.
+
+The focused unit gate is:
+
+```sh
+python3 -m unittest discover -s tools/codex-exec-harness -p 'test_harness.py'
+```
+
+If a future implementation injects Auto Review artifacts into model-visible
+context, move that payload into a `codex-rs/core/src/context` fragment that
+implements `ContextualUserFragment` and keep the fragment bounded per the
+repository `AGENTS.md` context rules.
+
 When a scenario needs to own its provider config, put the provider in
 `config_toml` and use `{responses_base_url}` as the fake Responses server URL:
 

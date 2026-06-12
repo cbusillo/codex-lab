@@ -17,6 +17,183 @@ SPEC.loader.exec_module(HARNESS)
 
 
 class HarnessSafetyTest(unittest.TestCase):
+    def test_auto_review_run_target_classification(self) -> None:
+        active_branch = "plan/auto-review-proof-loop-mvp"
+        active_head = "abc123"
+
+        self.assertEqual(
+            "current",
+            HARNESS.classify_auto_review_run(
+                {"target": {"branch": active_branch, "head_sha": active_head}},
+                active_branch,
+                active_head,
+            ),
+        )
+        self.assertEqual(
+            "detached",
+            HARNESS.classify_auto_review_run({}, active_branch, active_head),
+        )
+        self.assertEqual(
+            "stale",
+            HARNESS.classify_auto_review_run(
+                {"target": {"branch": active_branch, "head_sha": "old123"}},
+                active_branch,
+                active_head,
+            ),
+        )
+        self.assertEqual(
+            "detached",
+            HARNESS.classify_auto_review_run(
+                {"target": {"branch": "auto-review", "head_sha": active_head}},
+                active_branch,
+                active_head,
+            ),
+        )
+
+    def test_auto_review_clean_or_stale_runs_render_no_summary(self) -> None:
+        active_branch = "main"
+        active_head = "abc123"
+
+        self.assertEqual(
+            "",
+            HARNESS.render_auto_review_summary(
+                {"target": {"branch": active_branch, "head_sha": active_head}, "findings": []},
+                active_branch,
+                active_head,
+            ),
+        )
+        self.assertEqual(
+            "",
+            HARNESS.render_auto_review_summary(
+                {
+                    "target": {"branch": active_branch, "head_sha": "old123"},
+                    "findings": [{"id": "f1", "title": "stale", "priority": "P1"}],
+                },
+                active_branch,
+                active_head,
+            ),
+        )
+
+    def test_auto_review_current_summary_and_bounded_detail(self) -> None:
+        run = {
+            "target": {"branch": "main", "head_sha": "abc123"},
+            "findings": [
+                {
+                    "id": "f1",
+                    "priority": "P1",
+                    "title": "Use current head",
+                    "location": "src/lib.rs:12",
+                    "body": "x" * 200,
+                }
+            ],
+        }
+
+        self.assertEqual(
+            "[P1] f1: Use current head (src/lib.rs:12)",
+            HARNESS.render_auto_review_summary(run, "main", "abc123"),
+        )
+
+        detail = HARNESS.auto_review_finding_detail(run, "f1", max_bytes=80)
+
+        self.assertEqual("f1", detail["finding_id"])
+        self.assertEqual(80, detail["max_bytes"])
+        self.assertTrue(detail["truncated"])
+        self.assertEqual(len(detail["content"].encode("utf-8")), detail["bytes"])
+        self.assertLessEqual(len(detail["content"].encode("utf-8")), 80)
+
+    def test_auto_review_summary_is_bounded(self) -> None:
+        run = {
+            "target": {"branch": "main", "head_sha": "abc123"},
+            "findings": [
+                {
+                    "id": f"f{index}",
+                    "priority": "P2",
+                    "title": "long title " * 80,
+                    "location": "long/path/" * 80,
+                }
+                for index in range(30)
+            ],
+        }
+
+        summary = HARNESS.render_auto_review_summary(run, "main", "abc123")
+
+        self.assertLessEqual(
+            len(summary.encode("utf-8")), HARNESS.AUTO_REVIEW_SUMMARY_MAX_BYTES
+        )
+        self.assertIn("more finding(s) omitted", summary)
+
+    def test_auto_review_detail_matches_numeric_finding_id(self) -> None:
+        detail = HARNESS.auto_review_finding_detail(
+            {"findings": [{"id": 7, "title": "numeric id"}]},
+            "7",
+            max_bytes=1_000,
+        )
+
+        self.assertEqual("7", detail["finding_id"])
+        self.assertFalse(detail["truncated"])
+
+    def test_auto_review_run_recovers_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar_root = Path(tmp)
+            run = {
+                "run_id": "run-1",
+                "target": {"branch": "main", "head_sha": "abc123"},
+                "findings": [
+                    {
+                        "id": "f1",
+                        "priority": "P2",
+                        "title": "Recovered finding",
+                        "location": "src/main.rs:4",
+                    }
+                ],
+            }
+
+            path = HARNESS.save_auto_review_run(sidecar_root, run)
+            recovered = HARNESS.load_auto_review_run(sidecar_root, "run-1")
+
+        self.assertEqual(path.name, "run-1.json")
+        self.assertEqual(
+            "current", HARNESS.classify_auto_review_run(recovered, "main", "abc123")
+        )
+        self.assertEqual(
+            "[P2] f1: Recovered finding (src/main.rs:4)",
+            HARNESS.render_auto_review_summary(recovered, "main", "abc123"),
+        )
+
+    def test_auto_review_run_id_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar_root = Path(tmp)
+            with self.assertRaisesRegex(
+                HARNESS.HarnessError,
+                "auto review run_id contains unsafe path characters",
+            ):
+                HARNESS.save_auto_review_run(
+                    sidecar_root,
+                    {"run_id": "../outside", "target": {}, "findings": []},
+                )
+            with self.assertRaisesRegex(
+                HARNESS.HarnessError,
+                "auto review run_id contains unsafe path characters",
+            ):
+                HARNESS.load_auto_review_run(sidecar_root, "/tmp/outside")
+
+    def test_auto_review_missing_run_id_is_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                HARNESS.HarnessError, "unknown auto review run id: missing"
+            ):
+                HARNESS.load_auto_review_run(Path(tmp), "missing")
+
+    def test_auto_review_unknown_detail_id_is_error(self) -> None:
+        with self.assertRaisesRegex(
+            HARNESS.HarnessError, "unknown auto review finding id: f2"
+        ):
+            HARNESS.auto_review_finding_detail(
+                {"findings": [{"id": "f1", "title": "one"}]},
+                "f2",
+                max_bytes=100,
+            )
+
     def test_make_paths_sanitizes_scenario_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = HARNESS.make_paths(Path(tmp), "../../bad name")

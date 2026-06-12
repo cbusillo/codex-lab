@@ -19,6 +19,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_ROOT = ROOT / ".tmp" / "codex-exec-harness"
+AUTO_REVIEW_SUMMARY_MAX_FINDINGS = 20
+AUTO_REVIEW_SUMMARY_MAX_FIELD_BYTES = 240
+AUTO_REVIEW_SUMMARY_MAX_BYTES = 4096
 
 
 class HarnessError(Exception):
@@ -28,6 +31,21 @@ class HarnessError(Exception):
 def safe_path_component(value: str) -> str:
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-")
     return sanitized or "scenario"
+
+
+def require_safe_id(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise HarnessError(f"{label} must be a non-empty string")
+    if safe_path_component(value) != value:
+        raise HarnessError(f"{label} contains unsafe path characters: {value!r}")
+    return value
+
+
+def truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def resolve_under(root: Path, rel_path: str, description: str) -> Path:
@@ -183,6 +201,113 @@ def assert_not_self_prefix_match(
 ) -> None:
     if request_index == other_request_index:
         raise HarnessError(f"{label} prefix_matches_request cannot reference itself")
+
+
+def classify_auto_review_run(
+    run: dict[str, Any], active_branch: str, active_head_sha: str
+) -> str:
+    target = run.get("target")
+    if not isinstance(target, dict):
+        return "detached"
+    if target.get("branch") != active_branch:
+        return "detached"
+    if target.get("head_sha") != active_head_sha:
+        return "stale"
+    return "current"
+
+
+def current_auto_review_findings(
+    run: dict[str, Any], active_branch: str, active_head_sha: str
+) -> list[dict[str, Any]]:
+    if classify_auto_review_run(run, active_branch, active_head_sha) != "current":
+        return []
+    findings = run.get("findings")
+    if not isinstance(findings, list):
+        return []
+    return [finding for finding in findings if isinstance(finding, dict)]
+
+
+def render_auto_review_summary(
+    run: dict[str, Any], active_branch: str, active_head_sha: str
+) -> str:
+    findings = current_auto_review_findings(run, active_branch, active_head_sha)
+    if not findings:
+        return ""
+    lines: list[str] = []
+    omitted = len(findings) > AUTO_REVIEW_SUMMARY_MAX_FINDINGS
+    omitted_line = ""
+    if omitted:
+        omitted_line = (
+            f"... {len(findings) - AUTO_REVIEW_SUMMARY_MAX_FINDINGS} more finding(s) omitted"
+        )
+    reserved_bytes = len(omitted_line.encode("utf-8")) + (1 if omitted_line else 0)
+    remaining_bytes = max(0, AUTO_REVIEW_SUMMARY_MAX_BYTES - reserved_bytes)
+
+    for finding in findings[:AUTO_REVIEW_SUMMARY_MAX_FINDINGS]:
+        finding_id = truncate_utf8(str(finding.get("id", "unknown")), 80)
+        title = truncate_utf8(
+            str(finding.get("title", "Untitled finding")),
+            AUTO_REVIEW_SUMMARY_MAX_FIELD_BYTES,
+        )
+        priority = truncate_utf8(str(finding.get("priority", "unknown")), 20)
+        location = truncate_utf8(
+            str(finding.get("location", "unknown location")),
+            AUTO_REVIEW_SUMMARY_MAX_FIELD_BYTES,
+        )
+        line = f"[{priority}] {finding_id}: {title} ({location})"
+        candidate_lines = [*lines, line]
+        candidate = "\n".join(candidate_lines)
+        if len(candidate.encode("utf-8")) > remaining_bytes:
+            break
+        lines = candidate_lines
+
+    if omitted_line:
+        lines.append(omitted_line)
+    return truncate_utf8("\n".join(lines), AUTO_REVIEW_SUMMARY_MAX_BYTES)
+
+
+def save_auto_review_run(sidecar_root: Path, run: dict[str, Any]) -> Path:
+    run_id = require_safe_id(run.get("run_id"), "auto review run_id")
+    path = sidecar_root / f"{run_id}.json"
+    save_json(path, run)
+    return path
+
+
+def load_auto_review_run(sidecar_root: Path, run_id: str) -> dict[str, Any]:
+    run_id = require_safe_id(run_id, "auto review run_id")
+    path = sidecar_root / f"{run_id}.json"
+    if not path.exists():
+        raise HarnessError(f"unknown auto review run id: {run_id}")
+    return load_json(path)
+
+
+def auto_review_finding_detail(
+    run: dict[str, Any], finding_id: str, max_bytes: int
+) -> dict[str, Any]:
+    if max_bytes <= 0:
+        raise HarnessError("auto review detail max_bytes must be positive")
+    findings = run.get("findings")
+    if not isinstance(findings, list):
+        raise HarnessError("auto review run has no findings")
+    finding_id = str(finding_id)
+    for finding in findings:
+        if not isinstance(finding, dict) or str(finding.get("id")) != finding_id:
+            continue
+        payload = json.dumps(finding, indent=2, sort_keys=True)
+        encoded = payload.encode("utf-8")
+        truncated = len(encoded) > max_bytes
+        if truncated:
+            payload = truncate_utf8(payload, max_bytes)
+        content_bytes = len(payload.encode("utf-8"))
+        return {
+            "finding_id": finding_id,
+            "bytes": content_bytes,
+            "original_bytes": len(encoded),
+            "max_bytes": max_bytes,
+            "truncated": truncated,
+            "content": payload,
+        }
+    raise HarnessError(f"unknown auto review finding id: {finding_id}")
 
 
 def response_sse_body(response: dict[str, Any]) -> str:
