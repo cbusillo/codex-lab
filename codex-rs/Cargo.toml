@@ -509,6 +509,14 @@ strip = "symbols"
 # See https://github.com/openai/codex/issues/1411 for details.
 codegen-units = 1
 
+[profile.release.package.sqlx-macros]
+# rustc must dlopen proc-macro crates during the build. On macOS 27 / Xcode 27,
+# stripped sqlx-macros dylibs can fail to load with a mis-aligned LINKEDIT
+# string pool, so keep this build-time dylib unstripped while final binaries
+# still inherit the workspace release stripping above. Revisit this when #43 is
+# resolved.
+strip = "none"
+
 [profile.profiling]
 inherits = "release"
 debug = "full"
