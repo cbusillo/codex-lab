@@ -122,6 +122,74 @@ class HarnessSafetyTest(unittest.TestCase):
         )
         self.assertIn("more finding(s) omitted", summary)
 
+    def test_auto_review_summary_marks_byte_budget_omissions(self) -> None:
+        run = {
+            "target": {"branch": "main", "head_sha": "abc123"},
+            "findings": [
+                {
+                    "id": f"f{index}",
+                    "priority": "P2",
+                    "title": "title " * 60,
+                    "location": "src/very/long/path/" * 20,
+                }
+                for index in range(20)
+            ],
+        }
+
+        summary = HARNESS.render_auto_review_summary(run, "main", "abc123")
+
+        self.assertLessEqual(
+            len(summary.encode("utf-8")), HARNESS.AUTO_REVIEW_SUMMARY_MAX_BYTES
+        )
+        self.assertIn("more finding(s) omitted", summary)
+        self.assertNotIn("f19", summary)
+
+    def test_auto_review_summary_marks_count_cap_omissions(self) -> None:
+        run = {
+            "target": {"branch": "main", "head_sha": "abc123"},
+            "findings": [
+                {
+                    "id": f"f{index}",
+                    "priority": "P2",
+                    "title": "short",
+                    "location": f"src/main.rs:{index}",
+                }
+                for index in range(21)
+            ],
+        }
+
+        summary = HARNESS.render_auto_review_summary(run, "main", "abc123")
+
+        self.assertIn("[P2] f19: short (src/main.rs:19)", summary)
+        self.assertNotIn("f20", summary)
+        self.assertIn("... 1 more finding(s) omitted", summary)
+
+    def test_auto_review_summary_does_not_mark_fully_rendered_findings(self) -> None:
+        run = {
+            "target": {"branch": "main", "head_sha": "abc123"},
+            "findings": [
+                {
+                    "id": "f1",
+                    "priority": "P2",
+                    "title": "one",
+                    "location": "src/main.rs:1",
+                },
+                {
+                    "id": "f2",
+                    "priority": "P3",
+                    "title": "two",
+                    "location": "src/main.rs:2",
+                },
+            ],
+        }
+
+        summary = HARNESS.render_auto_review_summary(run, "main", "abc123")
+
+        self.assertEqual(
+            "[P2] f1: one (src/main.rs:1)\n[P3] f2: two (src/main.rs:2)",
+            summary,
+        )
+
     def test_auto_review_detail_matches_numeric_finding_id(self) -> None:
         detail = HARNESS.auto_review_finding_detail(
             {"findings": [{"id": 7, "title": "numeric id"}]},

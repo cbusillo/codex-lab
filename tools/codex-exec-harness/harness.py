@@ -22,6 +22,7 @@ DEFAULT_OUTPUT_ROOT = ROOT / ".tmp" / "codex-exec-harness"
 AUTO_REVIEW_SUMMARY_MAX_FINDINGS = 20
 AUTO_REVIEW_SUMMARY_MAX_FIELD_BYTES = 240
 AUTO_REVIEW_SUMMARY_MAX_BYTES = 4096
+AUTO_REVIEW_SUMMARY_OMITTED_TEMPLATE = "... {count} more finding(s) omitted"
 
 
 class HarnessError(Exception):
@@ -234,16 +235,9 @@ def render_auto_review_summary(
     if not findings:
         return ""
     lines: list[str] = []
-    omitted = len(findings) > AUTO_REVIEW_SUMMARY_MAX_FINDINGS
-    omitted_line = ""
-    if omitted:
-        omitted_line = (
-            f"... {len(findings) - AUTO_REVIEW_SUMMARY_MAX_FINDINGS} more finding(s) omitted"
-        )
-    reserved_bytes = len(omitted_line.encode("utf-8")) + (1 if omitted_line else 0)
-    remaining_bytes = max(0, AUTO_REVIEW_SUMMARY_MAX_BYTES - reserved_bytes)
+    max_rendered_findings = min(len(findings), AUTO_REVIEW_SUMMARY_MAX_FINDINGS)
 
-    for finding in findings[:AUTO_REVIEW_SUMMARY_MAX_FINDINGS]:
+    for finding in findings[:max_rendered_findings]:
         finding_id = truncate_utf8(str(finding.get("id", "unknown")), 80)
         title = truncate_utf8(
             str(finding.get("title", "Untitled finding")),
@@ -255,13 +249,23 @@ def render_auto_review_summary(
             AUTO_REVIEW_SUMMARY_MAX_FIELD_BYTES,
         )
         line = f"[{priority}] {finding_id}: {title} ({location})"
+        omitted_after_candidate = len(findings) - (len(lines) + 1)
+        reserved_bytes = 0
+        if omitted_after_candidate > 0:
+            omitted_line = AUTO_REVIEW_SUMMARY_OMITTED_TEMPLATE.format(
+                count=omitted_after_candidate
+            )
+            reserved_bytes = len(omitted_line.encode("utf-8")) + 1
+        remaining_bytes = max(0, AUTO_REVIEW_SUMMARY_MAX_BYTES - reserved_bytes)
         candidate_lines = [*lines, line]
         candidate = "\n".join(candidate_lines)
         if len(candidate.encode("utf-8")) > remaining_bytes:
             break
         lines = candidate_lines
 
-    if omitted_line:
+    omitted_count = len(findings) - len(lines)
+    if omitted_count > 0:
+        omitted_line = AUTO_REVIEW_SUMMARY_OMITTED_TEMPLATE.format(count=omitted_count)
         lines.append(omitted_line)
     return truncate_utf8("\n".join(lines), AUTO_REVIEW_SUMMARY_MAX_BYTES)
 
