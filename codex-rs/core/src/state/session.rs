@@ -6,11 +6,15 @@ use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use super::AdditionalContextStore;
 use super::auto_compact_window::AutoCompactWindow;
 use super::auto_compact_window::AutoCompactWindowSnapshot;
 use crate::context_manager::ContextManager;
+use crate::review_persistence::ReviewPersistenceContext;
 use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
@@ -19,6 +23,7 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 const UNKNOWN_WORKTREE_DIFF_FINGERPRINT: &str = "unknown";
@@ -47,6 +52,43 @@ enum BackgroundAutoReviewStartFingerprint {
 struct BackgroundAutoReviewRunning {
     generation: u64,
     cancellation_token: CancellationToken,
+    completion: Arc<BackgroundAutoReviewCompletion>,
+    persistence: ReviewPersistenceContext,
+}
+
+#[derive(Debug)]
+pub(crate) struct BackgroundAutoReviewCompletion {
+    done: AtomicBool,
+    notify: Notify,
+}
+
+impl BackgroundAutoReviewCompletion {
+    fn new() -> Self {
+        Self {
+            done: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    pub(crate) fn mark_done(&self) {
+        self.done.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BackgroundAutoReviewRunningHandle {
+    pub(crate) cancellation_token: CancellationToken,
+    pub(crate) completion: Arc<BackgroundAutoReviewCompletion>,
+    pub(crate) persistence: ReviewPersistenceContext,
 }
 
 impl BackgroundAutoReviewSchedulerState {
@@ -108,7 +150,8 @@ impl BackgroundAutoReviewSchedulerState {
         &mut self,
         generation: u64,
         fingerprint: &str,
-    ) -> Option<CancellationToken> {
+        persistence: ReviewPersistenceContext,
+    ) -> Option<BackgroundAutoReviewRunningHandle> {
         if !self.is_current_schedule(generation, fingerprint) {
             return None;
         }
@@ -116,18 +159,29 @@ impl BackgroundAutoReviewSchedulerState {
             running_review.cancellation_token.cancel();
         }
         let cancellation_token = CancellationToken::new();
+        let completion = Arc::new(BackgroundAutoReviewCompletion::new());
         self.last_started_fingerprint = Some(fingerprint.to_string());
         self.running_review = Some(BackgroundAutoReviewRunning {
             generation,
             cancellation_token: cancellation_token.clone(),
+            completion: Arc::clone(&completion),
+            persistence: persistence.clone(),
         });
-        Some(cancellation_token)
+        Some(BackgroundAutoReviewRunningHandle {
+            cancellation_token,
+            completion,
+            persistence,
+        })
     }
 
-    pub(crate) fn cancel_running_review(&mut self) {
-        if let Some(running_review) = self.running_review.take() {
-            running_review.cancellation_token.cancel();
-        }
+    pub(crate) fn take_running_review(&mut self) -> Option<BackgroundAutoReviewRunningHandle> {
+        self.running_review
+            .take()
+            .map(|running_review| BackgroundAutoReviewRunningHandle {
+                cancellation_token: running_review.cancellation_token,
+                completion: running_review.completion,
+                persistence: running_review.persistence,
+            })
     }
 
     pub(crate) fn clear_running_review(&mut self, generation: u64) {

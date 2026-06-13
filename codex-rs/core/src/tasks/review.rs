@@ -46,6 +46,10 @@ impl ReviewTask {
             persistence: Some(persistence),
         }
     }
+
+    pub(crate) fn persistence_context(&self) -> Option<ReviewPersistenceContext> {
+        self.persistence.clone()
+    }
 }
 
 impl SessionTask for ReviewTask {
@@ -127,25 +131,24 @@ async fn run_review_task(
         Some(receiver) => process_review_events(session.clone(), ctx.clone(), receiver).await,
         None => None,
     };
-    if !cancellation_token.is_cancelled() {
-        let should_exit_review_mode = persistence
-            .as_ref()
-            .is_none_or(ReviewPersistenceContext::is_manual);
-        if should_exit_review_mode {
-            exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
-        }
-        if let Some(persistence) = persistence {
-            let codex_home = session.codex_home().await;
-            if cancellation_token.is_cancelled() {
-                persistence.save_cancelled(codex_home);
-            } else if let Some(output) = output.as_ref() {
-                persistence.save_completed(codex_home, output);
-            } else {
-                persistence.save_failed(
-                    codex_home,
-                    "review ended without producing review output".to_string(),
-                );
-            }
+    let cancelled = cancellation_token.is_cancelled();
+    let should_exit_review_mode = persistence
+        .as_ref()
+        .is_none_or(ReviewPersistenceContext::is_manual);
+    if !cancelled && should_exit_review_mode {
+        exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
+    }
+    if let Some(persistence) = persistence {
+        let codex_home = session.codex_home().await;
+        if cancelled {
+            persistence.save_cancelled(codex_home);
+        } else if let Some(output) = output.as_ref() {
+            persistence.save_completed(codex_home, output);
+        } else {
+            persistence.save_failed(
+                codex_home,
+                "review ended without producing review output".to_string(),
+            );
         }
     }
     None

@@ -6,7 +6,6 @@ use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::warn;
 
@@ -15,6 +14,7 @@ use super::review::spawn_detached_review_thread;
 use super::session::Session;
 use super::turn_context::TurnContext;
 use crate::review_prompts::resolve_review_request;
+use crate::state::BackgroundAutoReviewRunningHandle;
 
 const BACKGROUND_AUTO_REVIEW_DEBOUNCE: Duration = Duration::from_secs(2);
 
@@ -153,8 +153,12 @@ impl Session {
             Some(ReviewPersistence::BackgroundAutoReview),
         )
         .await;
-        let Some(cancellation_token) = self
-            .record_started_background_auto_review(generation, &fingerprint)
+        let Some(persistence) = prepared.task.persistence_context() else {
+            debug!("background auto review skipped after prepare: missing persistence context");
+            return;
+        };
+        let Some(running_review) = self
+            .record_started_background_auto_review(generation, &fingerprint, persistence)
             .await
         else {
             debug!("background auto review skipped after prepare: schedule superseded");
@@ -166,27 +170,51 @@ impl Session {
             debug!(
                 "background auto review skipped after prepare: foreground work pending or active"
             );
-            cancellation_token.cancel();
+            running_review.cancellation_token.cancel();
             self.clear_background_auto_review(generation).await;
+            running_review.completion.mark_done();
             return;
         }
-        spawn_detached_review_thread(Arc::clone(self), prepared, cancellation_token, generation);
+        spawn_detached_review_thread(Arc::clone(self), prepared, running_review, generation);
     }
 
     async fn record_started_background_auto_review(
         &self,
         generation: u64,
         fingerprint: &str,
-    ) -> Option<CancellationToken> {
+        persistence: crate::review_persistence::ReviewPersistenceContext,
+    ) -> Option<BackgroundAutoReviewRunningHandle> {
         let mut state = self.state.lock().await;
         state
             .background_auto_review
-            .record_started(generation, fingerprint)
+            .record_started(generation, fingerprint, persistence)
     }
 
     pub(crate) async fn cancel_background_auto_review(self: &Arc<Self>) {
-        let mut state = self.state.lock().await;
-        state.background_auto_review.cancel_running_review();
+        let running_review = {
+            let mut state = self.state.lock().await;
+            state.background_auto_review.take_running_review()
+        };
+        let Some(running_review) = running_review else {
+            return;
+        };
+        let codex_home = self.codex_home().await;
+        running_review.persistence.save_cancelled(codex_home);
+        let completion = running_review.completion;
+        if completion.is_done() {
+            return;
+        }
+        let notified = completion.notified();
+        running_review.cancellation_token.cancel();
+        if completion.is_done() {
+            return;
+        }
+        if tokio::time::timeout(Duration::from_millis(100), notified)
+            .await
+            .is_err()
+        {
+            warn!("background auto review did not finish promptly after cancellation");
+        }
     }
 
     pub(crate) async fn clear_background_auto_review(self: &Arc<Self>, generation: u64) {

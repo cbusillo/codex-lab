@@ -98,7 +98,19 @@ async fn review_op_emits_lifecycle_and_review_output() {
         .unwrap();
 
     // Verify lifecycle: Entered -> Exited(Some(review)) -> TurnComplete.
-    let _entered = wait_for_event(&codex, |ev| matches!(ev, EventMsg::EnteredReviewMode(_))).await;
+    let first_lifecycle = wait_for_event(&codex, |ev| {
+        matches!(
+            ev,
+            EventMsg::EnteredReviewMode(_)
+                | EventMsg::ExitedReviewMode(_)
+                | EventMsg::TurnComplete(_)
+        )
+    })
+    .await;
+    assert!(
+        matches!(first_lifecycle, EventMsg::EnteredReviewMode(_)),
+        "expected EnteredReviewMode before review terminal lifecycle event, got {first_lifecycle:?}"
+    );
     let closed = wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExitedReviewMode(_))).await;
     let review = match closed {
         EventMsg::ExitedReviewMode(ev) => ev
@@ -689,6 +701,82 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         "background review request should use the uncommitted-changes review prompt"
     );
     harness.server().verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_shutdown_persists_cancelled_run() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let call_id = "auto-bg-shutdown-apply-patch";
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_shutdown.txt\n+review shutdown\n*** End Patch";
+    let (gate_background_completed_tx, gate_background_completed_rx) = oneshot::channel();
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call(call_id, patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let background_review = vec![
+        StreamingSseChunk {
+            gate: None,
+            body: streaming_sse_event(responses::ev_response_created("resp-3")),
+        },
+        StreamingSseChunk {
+            gate: Some(gate_background_completed_rx),
+            body: streaming_sse_event(responses::ev_completed("resp-3")),
+        },
+    ];
+    let (server, _completions) = start_streaming_sse_server(vec![
+        foreground_tool,
+        foreground_complete,
+        background_review,
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file to review").await?;
+    server.wait_for_request_count(3).await;
+    let running = wait_for_auto_review_run_status(
+        test.codex.as_ref(),
+        codex_home.path(),
+        AutoReviewRunStatus::Running,
+    )
+    .await;
+    assert_eq!(running.source, AutoReviewRunSource::Background);
+    assert_eq!(running.review_target, ReviewTarget::UncommittedChanges);
+
+    test.codex.submit(Op::Shutdown {}).await?;
+    let _shutdown =
+        wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
+    let run = load_single_auto_review_run(codex_home.path())
+        .unwrap_or_else(|err| panic!("load cancelled auto review run: {err}"));
+    assert_eq!(run.run_id, running.run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert!(run.completed_at_unix_secs.is_some());
+    assert_eq!(
+        run.error_summary.as_deref(),
+        Some("review was interrupted before producing structured output")
+    );
+
+    drop(gate_background_completed_tx);
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
     Ok(())
 }
 
@@ -1360,6 +1448,40 @@ async fn wait_for_background_auto_review_run_without_review_mode_events(
             },
             Ok(Err(err)) => {
                 panic!("stream ended while waiting for automatic background auto-review: {err}")
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+async fn wait_for_auto_review_run_status(
+    codex: &CodexThread,
+    codex_home: &std::path::Path,
+    expected_status: AutoReviewRunStatus,
+) -> codex_auto_review::AutoReviewRun {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(run) = load_single_auto_review_run(codex_home)
+            && run.status == expected_status
+        {
+            return run;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timeout waiting for auto-review run status {expected_status:?}"
+        );
+        match tokio::time::timeout(Duration::from_millis(50), codex.next_event()).await {
+            Ok(Ok(event)) => match event.msg {
+                EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {
+                    panic!(
+                        "background review emitted review mode event while waiting for {expected_status:?}: {:?}",
+                        event.msg
+                    )
+                }
+                _ => {}
+            },
+            Ok(Err(err)) => {
+                panic!("stream ended while waiting for auto-review run status: {err}")
             }
             Err(_) => {}
         }

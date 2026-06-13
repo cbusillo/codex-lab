@@ -2,8 +2,8 @@ use super::*;
 use codex_core_skills::HostLoadedSkills;
 use codex_protocol::openai_models::ToolMode;
 use std::sync::atomic::AtomicBool;
-use tokio_util::sync::CancellationToken;
 
+use crate::state::BackgroundAutoReviewRunningHandle;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
 
@@ -34,16 +34,21 @@ pub(super) async fn spawn_review_thread(
     .await;
 
     let manual_review_request = prepared.manual_review_request.clone();
-    sess.spawn_task(
-        Arc::clone(&prepared.turn_context),
-        prepared.input,
-        prepared.task,
-    )
-    .await;
     if let Some(review_request) = manual_review_request {
+        sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+        sess.clear_connector_selection().await;
         sess.send_event(
             prepared.turn_context.as_ref(),
             EventMsg::EnteredReviewMode(review_request),
+        )
+        .await;
+        sess.start_task(prepared.turn_context, prepared.input, prepared.task)
+            .await;
+    } else {
+        sess.spawn_task(
+            Arc::clone(&prepared.turn_context),
+            prepared.input,
+            prepared.task,
         )
         .await;
     }
@@ -261,7 +266,7 @@ pub(super) async fn prepare_review_thread(
 pub(super) fn spawn_detached_review_thread(
     sess: Arc<Session>,
     prepared: PreparedReviewThread,
-    cancellation_token: CancellationToken,
+    running_review: BackgroundAutoReviewRunningHandle,
     generation: u64,
 ) {
     let turn_extension_data = Arc::clone(&prepared.turn_context.extension_data);
@@ -272,9 +277,12 @@ pub(super) fn spawn_detached_review_thread(
     let task = Arc::new(prepared.task);
     let turn_context = prepared.turn_context;
     let input = prepared.input;
+    let cancellation_token = running_review.cancellation_token;
+    let completion = running_review.completion;
     tokio::spawn(async move {
         task.run(session_ctx, turn_context, input, cancellation_token)
             .await;
         sess.clear_background_auto_review(generation).await;
+        completion.mark_done();
     });
 }
