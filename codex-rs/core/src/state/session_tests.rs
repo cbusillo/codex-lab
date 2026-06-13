@@ -6,6 +6,162 @@ use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SpendControlLimitSnapshot;
 use pretty_assertions::assert_eq;
 
+#[test]
+fn background_auto_review_schedules_only_changed_dirty_fingerprint() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+
+    let schedule = state.complete_regular_turn("turn-1", Some("sha256:new".to_string()));
+
+    let schedule = schedule.expect("changed dirty fingerprint should schedule review");
+    assert_eq!(schedule.generation, 1);
+    assert_eq!(schedule.fingerprint, "sha256:new");
+    assert!(state.is_current_schedule(1, "sha256:new"));
+}
+
+#[test]
+fn background_auto_review_skips_when_start_fingerprint_is_pending() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+
+    let schedule = state.complete_regular_turn("turn-1", Some("sha256:new".to_string()));
+
+    assert_eq!(schedule, None);
+}
+
+#[test]
+fn background_auto_review_start_update_does_not_reinsert_completed_turn() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    assert_eq!(
+        state.complete_regular_turn("turn-1", Some("sha256:new".to_string())),
+        None
+    );
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+
+    assert_eq!(
+        state.complete_regular_turn("turn-1", Some("sha256:new".to_string())),
+        None
+    );
+}
+
+#[test]
+fn background_auto_review_remove_regular_turn_clears_pending_snapshot() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.remove_regular_turn("turn-1");
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+
+    assert_eq!(
+        state.complete_regular_turn("turn-1", Some("sha256:new".to_string())),
+        None
+    );
+}
+
+#[test]
+fn background_auto_review_running_review_can_be_cancelled_and_cleared() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+    let schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed dirty fingerprint should schedule review");
+    let token = state
+        .record_started(schedule.generation, &schedule.fingerprint)
+        .expect("current schedule should start");
+
+    state.cancel_running_review();
+    assert!(token.is_cancelled());
+    state.clear_running_review(schedule.generation);
+}
+
+#[test]
+fn background_auto_review_duplicate_check_starts_after_review_starts() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+    let first = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed dirty fingerprint should schedule review");
+
+    state.begin_regular_turn("turn-2".to_string());
+    state.update_regular_turn_start_fingerprint("turn-2", Some("sha256:old".to_string()));
+    let second = state.complete_regular_turn("turn-2", Some("sha256:new".to_string()));
+
+    let second = second.expect("abandoned schedule should not suppress same fingerprint");
+    assert!(
+        state
+            .record_started(first.generation, &first.fingerprint)
+            .is_none()
+    );
+    assert!(
+        state
+            .record_started(second.generation, &second.fingerprint)
+            .is_some()
+    );
+}
+
+#[test]
+fn background_auto_review_skips_unchanged_dirty_fingerprint() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", Some("sha256:old".to_string()));
+
+    let schedule = state.complete_regular_turn("turn-1", Some("sha256:old".to_string()));
+
+    assert_eq!(schedule, None);
+}
+
+#[test]
+fn background_auto_review_skips_duplicate_fingerprint() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+    let schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed dirty fingerprint should schedule review");
+    assert!(
+        state
+            .record_started(schedule.generation, &schedule.fingerprint)
+            .is_some()
+    );
+    state.begin_regular_turn("turn-2".to_string());
+    state.update_regular_turn_start_fingerprint("turn-2", Some("sha256:old".to_string()));
+
+    let schedule = state.complete_regular_turn("turn-2", Some("sha256:new".to_string()));
+
+    assert_eq!(schedule, None);
+}
+
+#[test]
+fn background_auto_review_mismatched_completion_preserves_other_turn_snapshot() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-2".to_string());
+    state.update_regular_turn_start_fingerprint("turn-2", Some("sha256:old".to_string()));
+
+    assert_eq!(
+        state.complete_regular_turn("turn-1", Some("sha256:new".to_string())),
+        None
+    );
+    assert!(
+        state
+            .complete_regular_turn("turn-2", Some("sha256:new".to_string()))
+            .is_some()
+    );
+}
+
+#[test]
+fn background_auto_review_skips_unknown_fingerprint() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+
+    let schedule = state.complete_regular_turn("turn-1", Some("unknown".to_string()));
+
+    assert_eq!(schedule, None);
+}
+
 #[tokio::test]
 // Verifies connector merging deduplicates repeated IDs.
 async fn merge_connector_selection_deduplicates_entries() {

@@ -19,6 +19,127 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
+use tokio_util::sync::CancellationToken;
+
+const UNKNOWN_WORKTREE_DIFF_FINGERPRINT: &str = "unknown";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BackgroundAutoReviewSchedule {
+    pub(crate) generation: u64,
+    pub(crate) fingerprint: String,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BackgroundAutoReviewSchedulerState {
+    active_regular_turns: HashMap<String, BackgroundAutoReviewStartFingerprint>,
+    generation: u64,
+    last_started_fingerprint: Option<String>,
+    running_review: Option<BackgroundAutoReviewRunning>,
+}
+
+#[derive(Debug)]
+enum BackgroundAutoReviewStartFingerprint {
+    Pending,
+    Ready(Option<String>),
+}
+
+#[derive(Debug)]
+struct BackgroundAutoReviewRunning {
+    generation: u64,
+    cancellation_token: CancellationToken,
+}
+
+impl BackgroundAutoReviewSchedulerState {
+    pub(crate) fn begin_regular_turn(&mut self, turn_id: String) {
+        self.active_regular_turns
+            .insert(turn_id, BackgroundAutoReviewStartFingerprint::Pending);
+    }
+
+    pub(crate) fn update_regular_turn_start_fingerprint(
+        &mut self,
+        turn_id: &str,
+        fingerprint: Option<String>,
+    ) {
+        if let Some(start_fingerprint) = self.active_regular_turns.get_mut(turn_id) {
+            *start_fingerprint = BackgroundAutoReviewStartFingerprint::Ready(fingerprint);
+        }
+    }
+
+    pub(crate) fn remove_regular_turn(&mut self, turn_id: &str) {
+        self.active_regular_turns.remove(turn_id);
+    }
+
+    pub(crate) fn complete_regular_turn(
+        &mut self,
+        turn_id: &str,
+        after_fingerprint: Option<String>,
+    ) -> Option<BackgroundAutoReviewSchedule> {
+        let Some(start_fingerprint) = self.active_regular_turns.remove(turn_id) else {
+            return None;
+        };
+        let BackgroundAutoReviewStartFingerprint::Ready(start_fingerprint) = start_fingerprint
+        else {
+            return None;
+        };
+
+        let Some(after_fingerprint) = after_fingerprint else {
+            return None;
+        };
+        if after_fingerprint == UNKNOWN_WORKTREE_DIFF_FINGERPRINT
+            || start_fingerprint.as_deref() == Some(after_fingerprint.as_str())
+            || self.last_started_fingerprint.as_deref() == Some(after_fingerprint.as_str())
+        {
+            return None;
+        }
+
+        self.generation = self.generation.saturating_add(1);
+        Some(BackgroundAutoReviewSchedule {
+            generation: self.generation,
+            fingerprint: after_fingerprint,
+        })
+    }
+
+    pub(crate) fn is_current_schedule(&self, generation: u64, fingerprint: &str) -> bool {
+        self.generation == generation
+            && self.last_started_fingerprint.as_deref() != Some(fingerprint)
+    }
+
+    pub(crate) fn record_started(
+        &mut self,
+        generation: u64,
+        fingerprint: &str,
+    ) -> Option<CancellationToken> {
+        if !self.is_current_schedule(generation, fingerprint) {
+            return None;
+        }
+        if let Some(running_review) = self.running_review.take() {
+            running_review.cancellation_token.cancel();
+        }
+        let cancellation_token = CancellationToken::new();
+        self.last_started_fingerprint = Some(fingerprint.to_string());
+        self.running_review = Some(BackgroundAutoReviewRunning {
+            generation,
+            cancellation_token: cancellation_token.clone(),
+        });
+        Some(cancellation_token)
+    }
+
+    pub(crate) fn cancel_running_review(&mut self) {
+        if let Some(running_review) = self.running_review.take() {
+            running_review.cancellation_token.cancel();
+        }
+    }
+
+    pub(crate) fn clear_running_review(&mut self, generation: u64) {
+        if self
+            .running_review
+            .as_ref()
+            .is_some_and(|running_review| running_review.generation == generation)
+        {
+            self.running_review = None;
+        }
+    }
+}
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
@@ -36,6 +157,7 @@ pub(crate) struct SessionState {
     auto_compact_window: AutoCompactWindow,
     /// Startup prewarmed session prepared during session initialization.
     pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
+    pub(crate) background_auto_review: BackgroundAutoReviewSchedulerState,
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_sources: VecDeque<codex_hooks::SessionStartSource>,
     granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
@@ -56,6 +178,7 @@ impl SessionState {
             previous_turn_settings: None,
             auto_compact_window: AutoCompactWindow::new(),
             startup_prewarm: None,
+            background_auto_review: BackgroundAutoReviewSchedulerState::default(),
             active_connector_selection: HashSet::new(),
             pending_session_start_sources: VecDeque::new(),
             granted_permissions_by_environment_id: HashMap::new(),

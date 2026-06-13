@@ -136,7 +136,9 @@ async fn run_review_task(
         }
         if let Some(persistence) = persistence {
             let codex_home = session.codex_home().await;
-            if let Some(output) = output.as_ref() {
+            if cancellation_token.is_cancelled() {
+                persistence.save_cancelled(codex_home);
+            } else if let Some(output) = output.as_ref() {
                 persistence.save_completed(codex_home, output);
             } else {
                 persistence.save_failed(

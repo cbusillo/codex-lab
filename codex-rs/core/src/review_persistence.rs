@@ -104,10 +104,16 @@ impl ReviewPersistenceContext {
             None
         };
         let store = AutoReviewStore::new(codex_home);
-        if is_terminal_status(&status)
-            && let Ok(existing) = store.load_run(&self.run_id)
+        if let Ok(existing) = store.load_run(&self.run_id)
             && is_terminal_status(&existing.status)
         {
+            if !is_terminal_status(&status) {
+                tracing::debug!(
+                    run_id = %self.run_id,
+                    existing_status = ?existing.status,
+                    "skipping non-terminal auto review run write after terminal status"
+                );
+            }
             return;
         }
         let run = AutoReviewRun {
@@ -190,4 +196,34 @@ fn finding_records(
 
 fn now_unix_secs() -> i64 {
     now_unix_timestamp_ms() / 1000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::protocol::ReviewPersistence;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn save_running_does_not_overwrite_terminal_run() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "late-running".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            cwd.path(),
+            Some("test-model".to_string()),
+        )
+        .await;
+
+        persistence.save_cancelled(codex_home.path());
+        persistence.save_running(codex_home.path());
+
+        let store = AutoReviewStore::new(codex_home.path());
+        let run = store
+            .load_run("late-running")
+            .expect("load persisted review run");
+        assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    }
 }
