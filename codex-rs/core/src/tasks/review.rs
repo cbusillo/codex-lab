@@ -75,11 +75,17 @@ impl SessionTask for ReviewTask {
     }
 
     async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
+        let should_exit_review_mode = self
+            .persistence
+            .as_ref()
+            .is_none_or(ReviewPersistenceContext::is_manual);
         if let Some(persistence) = self.persistence.clone() {
             let codex_home = session.codex_home().await;
             persistence.save_cancelled(codex_home);
         }
-        exit_review_mode(session.clone_session(), /*review_output*/ None, ctx).await;
+        if should_exit_review_mode {
+            exit_review_mode(session.clone_session(), /*review_output*/ None, ctx).await;
+        }
     }
 }
 
@@ -104,6 +110,11 @@ async fn run_review_task(
         }
     }
 
+    if let Some(persistence) = persistence.as_ref() {
+        let codex_home = session.codex_home().await;
+        persistence.save_running(codex_home);
+    }
+
     // Start sub-codex conversation and get the receiver for events.
     let output = match start_review_conversation(
         session.clone(),
@@ -117,7 +128,12 @@ async fn run_review_task(
         None => None,
     };
     if !cancellation_token.is_cancelled() {
-        exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
+        let should_exit_review_mode = persistence
+            .as_ref()
+            .is_none_or(ReviewPersistenceContext::is_manual);
+        if should_exit_review_mode {
+            exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
+        }
         if let Some(persistence) = persistence {
             let codex_home = session.codex_home().await;
             if let Some(output) = output.as_ref() {

@@ -10,6 +10,8 @@ use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::process::Command;
 use tokio::time::Duration as TokioDuration;
 use tokio::time::timeout;
@@ -285,6 +287,20 @@ pub async fn get_has_changes(cwd: &Path) -> Option<bool> {
     }
 
     Some(!output.stdout.is_empty())
+}
+
+pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
+    get_git_repo_root(cwd)?;
+    let Some(diff) = diff_against_sha(cwd, &GitSha::new("HEAD")).await else {
+        return Some("unknown".to_string());
+    };
+    if diff.is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(diff.as_bytes());
+    Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, String>> {
@@ -695,43 +711,44 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
     }
     let mut diff = String::from_utf8(output.stdout).ok()?;
 
-    if let Some(untracked_output) =
-        run_git_command_with_timeout(&["ls-files", "--others", "--exclude-standard"], cwd).await
-        && untracked_output.status.success()
-    {
-        let untracked: Vec<String> = String::from_utf8(untracked_output.stdout)
-            .ok()?
-            .lines()
-            .map(str::to_string)
-            .filter(|s| !s.is_empty())
-            .collect();
+    let untracked_output =
+        run_git_command_with_timeout(&["ls-files", "--others", "--exclude-standard"], cwd).await?;
+    if !untracked_output.status.success() {
+        return None;
+    }
+    let untracked: Vec<String> = String::from_utf8(untracked_output.stdout)
+        .ok()?
+        .lines()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .collect();
 
-        if !untracked.is_empty() {
-            // Use platform-appropriate null device and guard paths with `--`.
-            let null_device: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
-            let futures_iter = untracked.into_iter().map(|file| async move {
-                let file_owned = file;
-                let args_vec: Vec<&str> = vec![
-                    "diff",
-                    "--no-textconv",
-                    "--no-ext-diff",
-                    "--binary",
-                    "--no-index",
-                    // -- ensures that filenames that start with - are not treated as options.
-                    "--",
-                    null_device,
-                    &file_owned,
-                ];
-                run_git_command_with_timeout(&args_vec, cwd).await
-            });
-            let results = join_all(futures_iter).await;
-            for extra in results.into_iter().flatten() {
-                if extra.status.code().is_some_and(|c| c == 0 || c == 1)
-                    && let Ok(s) = String::from_utf8(extra.stdout)
-                {
-                    diff.push_str(&s);
-                }
+    if !untracked.is_empty() {
+        // Use platform-appropriate null device and guard paths with `--`.
+        let null_device: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let futures_iter = untracked.into_iter().map(|file| async move {
+            let file_owned = file;
+            let args_vec: Vec<&str> = vec![
+                "diff",
+                "--no-textconv",
+                "--no-ext-diff",
+                "--binary",
+                "--no-index",
+                // -- ensures that filenames that start with - are not treated as options.
+                "--",
+                null_device,
+                &file_owned,
+            ];
+            run_git_command_with_timeout(&args_vec, cwd).await
+        });
+        let results = join_all(futures_iter).await;
+        for extra in results {
+            let extra = extra?;
+            if !extra.status.code().is_some_and(|c| c == 0 || c == 1) {
+                return None;
             }
+            let s = String::from_utf8(extra.stdout).ok()?;
+            diff.push_str(&s);
         }
     }
 

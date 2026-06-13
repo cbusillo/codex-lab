@@ -173,6 +173,18 @@ pub(super) async fn spawn_review_thread(
     // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
     // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
     // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
+    let should_emit_review_mode =
+        persistence.is_none_or(|mode| matches!(mode, ReviewPersistence::ManualAutoReview));
+    if should_emit_review_mode {
+        // Announce entering review mode before spawning the task so lifecycle
+        // events cannot be inverted by a fast review failure or completion.
+        let review_request = ReviewRequest {
+            target: resolved.target.clone(),
+            user_facing_hint: Some(resolved.user_facing_hint.clone()),
+        };
+        sess.send_event(&tc, EventMsg::EnteredReviewMode(review_request))
+            .await;
+    }
     if let Some(persistence) = persistence {
         let target_cwd = tc
             .environments
@@ -192,12 +204,4 @@ pub(super) async fn spawn_review_thread(
     } else {
         sess.spawn_task(tc.clone(), input, ReviewTask::new()).await;
     }
-
-    // Announce entering review mode so UIs can switch modes.
-    let review_request = ReviewRequest {
-        target: resolved.target,
-        user_facing_hint: Some(resolved.user_facing_hint),
-    };
-    sess.send_event(&tc, EventMsg::EnteredReviewMode(review_request))
-        .await;
 }

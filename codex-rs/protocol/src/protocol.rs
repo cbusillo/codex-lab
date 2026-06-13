@@ -3006,6 +3006,7 @@ pub enum ReviewDelivery {
 #[serde(rename_all = "snake_case")]
 pub enum ReviewPersistence {
     ManualAutoReview,
+    BackgroundAutoReview,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
