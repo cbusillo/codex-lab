@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use codex_auto_review::AutoReviewFindingRecord;
 use codex_auto_review::AutoReviewRun;
@@ -17,6 +18,11 @@ use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewTarget;
 
 use crate::turn_timing::now_unix_timestamp_ms;
+
+static AUTO_REVIEW_RUN_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) const AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY: &str =
+    "review was interrupted before producing structured output";
 
 #[derive(Clone, Debug)]
 pub(crate) struct ReviewPersistenceContext {
@@ -54,40 +60,56 @@ impl ReviewPersistenceContext {
         self.source == AutoReviewRunSource::Manual
     }
 
-    pub(crate) fn save_running(&self, codex_home: impl AsRef<Path>) {
+    pub(crate) fn is_background(&self) -> bool {
+        self.source == AutoReviewRunSource::Background
+    }
+
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub(crate) fn review_target(&self) -> &ReviewTarget {
+        &self.review_target
+    }
+
+    pub(crate) fn save_running(&self, codex_home: impl AsRef<Path>) -> bool {
         self.save_run(
             codex_home,
             AutoReviewRunStatus::Running,
             /*output*/ None,
             /*error_summary*/ None,
-        );
+        )
     }
 
-    pub(crate) fn save_completed(&self, codex_home: impl AsRef<Path>, output: &ReviewOutputEvent) {
+    pub(crate) fn save_completed(
+        &self,
+        codex_home: impl AsRef<Path>,
+        output: &ReviewOutputEvent,
+    ) -> bool {
         self.save_run(
             codex_home,
             AutoReviewRunStatus::Completed,
             Some(output),
             None,
-        );
+        )
     }
 
-    pub(crate) fn save_cancelled(&self, codex_home: impl AsRef<Path>) {
+    pub(crate) fn save_cancelled(&self, codex_home: impl AsRef<Path>) -> bool {
         self.save_run(
             codex_home,
             AutoReviewRunStatus::Cancelled,
             /*output*/ None,
-            Some("review was interrupted before producing structured output".to_string()),
-        );
+            Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+        )
     }
 
-    pub(crate) fn save_failed(&self, codex_home: impl AsRef<Path>, error_summary: String) {
+    pub(crate) fn save_failed(&self, codex_home: impl AsRef<Path>, error_summary: String) -> bool {
         self.save_run(
             codex_home,
             AutoReviewRunStatus::Failed,
             /*output*/ None,
             Some(error_summary),
-        );
+        )
     }
 
     fn save_run(
@@ -96,7 +118,7 @@ impl ReviewPersistenceContext {
         status: AutoReviewRunStatus,
         output: Option<&ReviewOutputEvent>,
         error_summary: Option<String>,
-    ) {
+    ) -> bool {
         let codex_home = codex_home.as_ref();
         let completed_at_unix_secs = if is_terminal_status(&status) {
             Some(now_unix_secs())
@@ -104,6 +126,10 @@ impl ReviewPersistenceContext {
             None
         };
         let store = AutoReviewStore::new(codex_home);
+        let _guard = AUTO_REVIEW_RUN_WRITE_LOCK.lock().unwrap_or_else(|err| {
+            tracing::warn!("auto review run write lock was poisoned; continuing");
+            err.into_inner()
+        });
         if let Ok(existing) = store.load_run(&self.run_id)
             && is_terminal_status(&existing.status)
         {
@@ -114,7 +140,7 @@ impl ReviewPersistenceContext {
                     "skipping non-terminal auto review run write after terminal status"
                 );
             }
-            return;
+            return false;
         }
         let run = AutoReviewRun {
             schema_version: SCHEMA_VERSION,
@@ -137,7 +163,9 @@ impl ReviewPersistenceContext {
                 error = %err,
                 "failed to persist auto review run"
             );
+            return false;
         }
+        true
     }
 }
 

@@ -1292,6 +1292,9 @@ pub enum EventMsg {
     /// Entered review mode.
     EnteredReviewMode(ReviewRequest),
 
+    /// Automatic background review lifecycle status changed.
+    BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent),
+
     /// Exited review mode with an optional final result to apply.
     ExitedReviewMode(ExitedReviewModeEvent),
 
@@ -3007,6 +3010,25 @@ pub enum ReviewDelivery {
 pub enum ReviewPersistence {
     ManualAutoReview,
     BackgroundAutoReview,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundAutoReviewStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+pub struct BackgroundAutoReviewStatusEvent {
+    pub run_id: String,
+    pub status: BackgroundAutoReviewStatus,
+    pub review_target: ReviewTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_summary: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]

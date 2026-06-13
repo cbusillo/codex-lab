@@ -11,6 +11,23 @@ v2_enum_from_core!(
     }
 );
 
+v2_enum_from_core!(
+    pub enum BackgroundAutoReviewStatus from codex_protocol::protocol::BackgroundAutoReviewStatus {
+        Running, Completed, Failed, Cancelled
+    }
+);
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct BackgroundAutoReviewStatusChangedNotification {
+    pub thread_id: String,
+    pub run_id: String,
+    pub status: BackgroundAutoReviewStatus,
+    pub review_target: ReviewTarget,
+    pub error_summary: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -62,4 +79,23 @@ pub enum ReviewTarget {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     Custom { instructions: String },
+}
+
+impl From<codex_protocol::protocol::ReviewTarget> for ReviewTarget {
+    fn from(value: codex_protocol::protocol::ReviewTarget) -> Self {
+        match value {
+            codex_protocol::protocol::ReviewTarget::UncommittedChanges => {
+                ReviewTarget::UncommittedChanges
+            }
+            codex_protocol::protocol::ReviewTarget::BaseBranch { branch } => {
+                ReviewTarget::BaseBranch { branch }
+            }
+            codex_protocol::protocol::ReviewTarget::Commit { sha, title } => {
+                ReviewTarget::Commit { sha, title }
+            }
+            codex_protocol::protocol::ReviewTarget::Custom { instructions } => {
+                ReviewTarget::Custom { instructions }
+            }
+        }
+    }
 }

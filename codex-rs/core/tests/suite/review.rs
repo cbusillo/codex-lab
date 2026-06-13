@@ -8,6 +8,8 @@ use codex_core::review_format::render_review_output_text;
 use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::BackgroundAutoReviewStatus;
+use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
 use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExitedReviewModeEvent;
@@ -543,14 +545,21 @@ async fn background_review_persistence_writes_background_run_without_review_mode
         .await
         .unwrap();
 
-    let complete = wait_for_terminal_without_review_mode_event(&codex, |ev| {
-        matches!(ev, EventMsg::TurnComplete(_))
-    })
+    let running_status =
+        wait_for_background_auto_review_status(&codex, BackgroundAutoReviewStatus::Running, None)
+            .await;
+    let completed_status = wait_for_background_auto_review_status(
+        &codex,
+        BackgroundAutoReviewStatus::Completed,
+        Some(running_status.run_id.as_str()),
+    )
     .await;
-    assert!(matches!(complete, EventMsg::TurnComplete(_)));
+    assert_eq!(completed_status.review_target, review_target);
+    assert_eq!(completed_status.error_summary, None);
 
     let run = load_single_auto_review_run(codex_home.path())
         .unwrap_or_else(|err| panic!("load single auto review run: {err}"));
+    assert_eq!(run.run_id, completed_status.run_id);
     assert_eq!(run.status, AutoReviewRunStatus::Completed);
     assert_eq!(run.source, AutoReviewRunSource::Background);
     assert_eq!(run.review_target, review_target);
@@ -599,20 +608,31 @@ async fn background_review_persistence_writes_cancelled_run_without_review_mode_
         .await
         .unwrap();
 
+    let running_status =
+        wait_for_background_auto_review_status(&codex, BackgroundAutoReviewStatus::Running, None)
+            .await;
+
     server.wait_for_request_count(1).await;
     let running = load_single_auto_review_run(codex_home.path())
         .unwrap_or_else(|err| panic!("load running auto review run: {err}"));
+    assert_eq!(running.run_id, running_status.run_id);
     assert_eq!(running.status, AutoReviewRunStatus::Running);
     assert_eq!(running.source, AutoReviewRunSource::Background);
     assert_eq!(running.completed_at_unix_secs, None);
 
     codex.submit(Op::Interrupt).await.unwrap();
 
-    let aborted = wait_for_terminal_without_review_mode_event(&codex, |ev| {
-        matches!(ev, EventMsg::TurnAborted(_))
-    })
+    let cancelled_status = wait_for_background_auto_review_status(
+        &codex,
+        BackgroundAutoReviewStatus::Cancelled,
+        Some(running_status.run_id.as_str()),
+    )
     .await;
-    assert!(matches!(aborted, EventMsg::TurnAborted(_)));
+    assert_eq!(cancelled_status.review_target, review_target);
+    assert_eq!(
+        cancelled_status.error_summary.as_deref(),
+        Some("review was interrupted before producing structured output")
+    );
     let _ = gate_completed_tx.send(());
 
     let run = load_single_auto_review_run(codex_home.path())
@@ -670,11 +690,26 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         .submit_turn("create a file to review")
         .await?;
 
-    let run = wait_for_background_auto_review_run_without_review_mode_events(
+    let running_status = wait_for_background_auto_review_status(
         harness.test().codex.as_ref(),
-        &codex_home,
+        BackgroundAutoReviewStatus::Running,
+        None,
     )
     .await;
+    let completed_status = wait_for_background_auto_review_status(
+        harness.test().codex.as_ref(),
+        BackgroundAutoReviewStatus::Completed,
+        Some(running_status.run_id.as_str()),
+    )
+    .await;
+    assert_eq!(
+        completed_status.review_target,
+        ReviewTarget::UncommittedChanges
+    );
+    assert_eq!(completed_status.error_summary, None);
+    let run = load_single_auto_review_run(&codex_home)
+        .unwrap_or_else(|err| panic!("load completed auto review run: {err}"));
+    assert_eq!(run.run_id, completed_status.run_id);
     assert_eq!(run.status, AutoReviewRunStatus::Completed);
     assert_eq!(run.source, AutoReviewRunSource::Background);
     assert_eq!(run.review_target, ReviewTarget::UncommittedChanges);
@@ -753,16 +788,37 @@ async fn automatic_background_review_shutdown_persists_cancelled_run() -> anyhow
 
     test.submit_turn("create a file to review").await?;
     server.wait_for_request_count(3).await;
+    let running_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Running,
+        None,
+    )
+    .await;
     let running = wait_for_auto_review_run_status(
         test.codex.as_ref(),
         codex_home.path(),
         AutoReviewRunStatus::Running,
     )
     .await;
+    assert_eq!(running.run_id, running_status.run_id);
     assert_eq!(running.source, AutoReviewRunSource::Background);
     assert_eq!(running.review_target, ReviewTarget::UncommittedChanges);
 
     test.codex.submit(Op::Shutdown {}).await?;
+    let cancelled_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Cancelled,
+        Some(running_status.run_id.as_str()),
+    )
+    .await;
+    assert_eq!(
+        cancelled_status.review_target,
+        ReviewTarget::UncommittedChanges
+    );
+    assert_eq!(
+        cancelled_status.error_summary.as_deref(),
+        Some("review was interrupted before producing structured output")
+    );
     let _shutdown =
         wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
     let run = load_single_auto_review_run(codex_home.path())
@@ -1758,6 +1814,46 @@ async fn wait_for_auto_review_run_status(
     }
 }
 
+async fn wait_for_background_auto_review_status(
+    codex: &CodexThread,
+    expected_status: BackgroundAutoReviewStatus,
+    expected_run_id: Option<&str>,
+) -> BackgroundAutoReviewStatusEvent {
+    loop {
+        let event = match tokio::time::timeout(Duration::from_secs(10), codex.next_event()).await {
+            Ok(Ok(event)) => event,
+            Ok(Err(err)) => {
+                panic!(
+                    "stream ended unexpectedly while waiting for background auto-review status: {err}"
+                )
+            }
+            Err(_) => {
+                panic!("timeout waiting for background auto-review status {expected_status:?}")
+            }
+        };
+        match event.msg {
+            EventMsg::BackgroundAutoReviewStatus(status_event)
+                if status_event.status == expected_status
+                    && expected_run_id.is_none_or(|run_id| run_id == status_event.run_id) =>
+            {
+                return status_event;
+            }
+            EventMsg::BackgroundAutoReviewStatus(status_event) => {
+                panic!(
+                    "unexpected background auto-review status while waiting for {expected_status:?}: {status_event:?}"
+                );
+            }
+            EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {
+                panic!(
+                    "background review emitted review mode event while waiting for status {expected_status:?}: {:?}",
+                    event.msg
+                )
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn drain_pending_events_without_review_mode(codex: &CodexThread) {
     loop {
         match tokio::time::timeout(Duration::from_millis(50), codex.next_event()).await {
@@ -1801,36 +1897,6 @@ fn run_git(repo_path: &std::path::Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-async fn wait_for_terminal_without_review_mode_event<F>(
-    codex: &CodexThread,
-    mut terminal_predicate: F,
-) -> EventMsg
-where
-    F: FnMut(&EventMsg) -> bool,
-{
-    loop {
-        let event = match tokio::time::timeout(Duration::from_secs(10), codex.next_event()).await {
-            Ok(Ok(event)) => event,
-            Ok(Err(err)) => {
-                panic!(
-                    "stream ended unexpectedly while waiting for background review terminal event: {err}"
-                )
-            }
-            Err(_) => panic!("timeout waiting for background review terminal event"),
-        };
-        match event.msg {
-            EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {
-                panic!(
-                    "background review emitted review mode event: {:?}",
-                    event.msg
-                )
-            }
-            msg if terminal_predicate(&msg) => return msg,
-            _ => {}
-        }
-    }
 }
 
 /// Start a mock Responses API server and mount the given SSE events.

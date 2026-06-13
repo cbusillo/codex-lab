@@ -359,6 +359,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::ViewImageToolCall(_)
                     | EventMsg::RawResponseItem(_)
                     | EventMsg::EnteredReviewMode(_)
+                    | EventMsg::BackgroundAutoReviewStatus(_)
                     | EventMsg::ItemStarted(_)
                     | EventMsg::ItemCompleted(_)
                     | EventMsg::HookStarted(_)
