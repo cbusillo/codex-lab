@@ -11,6 +11,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use tracing::debug;
 use tracing::warn;
 
+use super::review::ReviewPersistenceSpec;
 use super::review::prepare_review_thread;
 use super::review::record_background_review_status;
 use super::review::spawn_detached_review_thread;
@@ -19,7 +20,6 @@ use super::turn_context::TurnContext;
 use crate::review_persistence::AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY;
 use crate::review_persistence::ReviewPersistenceContext;
 use crate::review_prompts::resolve_review_request;
-use crate::state::BackgroundAutoReviewRunningHandle;
 
 const BACKGROUND_AUTO_REVIEW_DEBOUNCE: Duration = Duration::from_secs(2);
 
@@ -74,6 +74,55 @@ impl Session {
             debug!(turn_id = %turn_context.sub_id, "background auto review skipped: unchanged or duplicate fingerprint");
             return;
         };
+        let Some(cwd) = turn_context
+            .environments
+            .single_local_environment_cwd()
+            .cloned()
+        else {
+            debug!("background auto review skipped: no single local worktree");
+            return;
+        };
+        let model = turn_context
+            .config
+            .review_model
+            .clone()
+            .unwrap_or_else(|| turn_context.model_info.slug.clone());
+        let persistence = ReviewPersistenceContext::new(
+            uuid::Uuid::new_v4().to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            cwd.as_ref(),
+            Some(model),
+        )
+        .await;
+        if !self
+            .record_pending_background_auto_review(
+                schedule.generation,
+                &schedule.fingerprint,
+                persistence.clone(),
+            )
+            .await
+        {
+            self.record_skipped_background_auto_review(
+                &persistence,
+                schedule.generation,
+                &schedule.fingerprint,
+                "background auto review schedule was superseded before pending".to_string(),
+            )
+            .await;
+            debug!("background auto review skipped before debounce: schedule superseded");
+            return;
+        }
+        let codex_home = self.codex_home().await;
+        if persistence.save_pending(codex_home) {
+            record_background_review_status(
+                Arc::clone(self),
+                &persistence,
+                BackgroundAutoReviewStatus::Pending,
+                None,
+            )
+            .await;
+        }
 
         let sess = Arc::clone(self);
         tokio::spawn(async move {
@@ -85,18 +134,40 @@ impl Session {
                 )
                 .await
             {
+                sess.record_skipped_background_auto_review(
+                    &persistence,
+                    schedule.generation,
+                    &schedule.fingerprint,
+                    "background auto review schedule was superseded during debounce".to_string(),
+                )
+                .await;
                 debug!("background auto review debounce superseded");
                 return;
             }
             let Some(current_fingerprint) =
                 background_review_fingerprint(turn_context.as_ref()).await
             else {
+                sess.record_skipped_background_auto_review(
+                    &persistence,
+                    schedule.generation,
+                    &schedule.fingerprint,
+                    "worktree became clean or unsupported before background auto review started"
+                        .to_string(),
+                )
+                .await;
                 debug!(
                     "background auto review skipped after debounce: clean or unsupported worktree"
                 );
                 return;
             };
             if current_fingerprint != schedule.fingerprint {
+                sess.record_skipped_background_auto_review(
+                    &persistence,
+                    schedule.generation,
+                    &schedule.fingerprint,
+                    "worktree diff changed before background auto review started".to_string(),
+                )
+                .await;
                 debug!("background auto review skipped after debounce: fingerprint changed");
                 return;
             }
@@ -104,6 +175,7 @@ impl Session {
                 turn_context,
                 schedule.generation,
                 schedule.fingerprint,
+                persistence,
             )
             .await;
         });
@@ -125,10 +197,19 @@ impl Session {
         turn_context: Arc<TurnContext>,
         generation: u64,
         fingerprint: String,
+        persistence: ReviewPersistenceContext,
     ) {
         if self.input_queue.has_trigger_turn_mailbox_items().await
             || self.active_turn.lock().await.is_some()
         {
+            self.record_skipped_background_auto_review(
+                &persistence,
+                generation,
+                &fingerprint,
+                "foreground work was pending or active before background auto review could start"
+                    .to_string(),
+            )
+            .await;
             debug!("background auto review skipped: foreground work pending or active");
             return;
         }
@@ -137,7 +218,7 @@ impl Session {
             debug!("background auto review skipped: no single local worktree");
             return;
         };
-        let sub_id = uuid::Uuid::new_v4().to_string();
+        let sub_id = persistence.run_id().to_string();
         let review_request = ReviewRequest {
             target: ReviewTarget::UncommittedChanges,
             user_facing_hint: None,
@@ -160,29 +241,13 @@ impl Session {
                     None => "failed to measure diff size for background review".to_string(),
                 };
                 debug!(%error_summary, "background auto review skipped: oversized diff");
-                let model = turn_context
-                    .config
-                    .review_model
-                    .clone()
-                    .unwrap_or_else(|| turn_context.model_info.slug.clone());
-                let persistence = ReviewPersistenceContext::new(
-                    sub_id,
-                    ReviewPersistence::BackgroundAutoReview,
-                    resolved.target.clone(),
-                    cwd.as_ref(),
-                    Some(model),
+                self.record_skipped_background_auto_review(
+                    &persistence,
+                    generation,
+                    &fingerprint,
+                    error_summary,
                 )
                 .await;
-                let codex_home = self.codex_home().await;
-                if persistence.save_skipped(codex_home, error_summary.clone()) {
-                    record_background_review_status(
-                        Arc::clone(self),
-                        &persistence,
-                        BackgroundAutoReviewStatus::Skipped,
-                        error_summary,
-                    )
-                    .await;
-                }
                 return;
             }
         }
@@ -193,7 +258,7 @@ impl Session {
             turn_context,
             sub_id,
             resolved,
-            Some(ReviewPersistence::BackgroundAutoReview),
+            Some(ReviewPersistenceSpec::Context(persistence.clone())),
         )
         .await;
         let Some(persistence) = prepared.task.persistence_context() else {
@@ -209,44 +274,111 @@ impl Session {
             let error_summary =
                 "foreground work became active before background auto review could start"
                     .to_string();
-            if persistence.save_skipped(self.codex_home().await, error_summary.clone()) {
-                record_background_review_status(
-                    Arc::clone(self),
-                    &persistence,
-                    BackgroundAutoReviewStatus::Skipped,
-                    error_summary,
-                )
-                .await;
-            }
+            self.record_skipped_background_auto_review(
+                &persistence,
+                generation,
+                &fingerprint,
+                error_summary,
+            )
+            .await;
             return;
         }
-        let Some(running_review) = self
-            .record_started_background_auto_review(generation, &fingerprint, persistence.clone())
+        let Some(started_review) = self
+            .record_started_background_auto_review_if_idle(
+                generation,
+                &fingerprint,
+                persistence.clone(),
+            )
             .await
         else {
             let error_summary =
-                "background auto review schedule was superseded before start".to_string();
-            if persistence.save_skipped(self.codex_home().await, error_summary.clone()) {
-                record_background_review_status(
-                    Arc::clone(self),
-                    &persistence,
-                    BackgroundAutoReviewStatus::Skipped,
-                    error_summary,
-                )
-                .await;
-            }
-            debug!("background auto review skipped after prepare: schedule superseded");
+                "background auto review schedule was superseded or foreground work became active \
+                 before start"
+                    .to_string();
+            self.record_skipped_background_auto_review(
+                &persistence,
+                generation,
+                &fingerprint,
+                error_summary,
+            )
+            .await;
+            debug!(
+                "background auto review skipped after prepare: schedule superseded or foreground \
+                 work active"
+            );
             return;
         };
-        spawn_detached_review_thread(Arc::clone(self), prepared, running_review, generation);
+        if let Some(displaced_running_review) = started_review.displaced_running_review
+            && displaced_running_review
+                .persistence
+                .save_cancelled(self.codex_home().await)
+        {
+            record_background_review_status(
+                Arc::clone(self),
+                &displaced_running_review.persistence,
+                BackgroundAutoReviewStatus::Cancelled,
+                Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+            )
+            .await;
+        }
+        spawn_detached_review_thread(
+            Arc::clone(self),
+            prepared,
+            started_review.running_review,
+            generation,
+        );
     }
 
-    async fn record_started_background_auto_review(
+    async fn record_pending_background_auto_review(
+        &self,
+        generation: u64,
+        fingerprint: &str,
+        persistence: ReviewPersistenceContext,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        state
+            .background_auto_review
+            .record_pending(generation, fingerprint, persistence)
+    }
+
+    async fn record_skipped_background_auto_review(
+        self: &Arc<Self>,
+        persistence: &ReviewPersistenceContext,
+        generation: u64,
+        fingerprint: &str,
+        error_summary: String,
+    ) {
+        let codex_home = self.codex_home().await;
+        let mut state = self.state.lock().await;
+        state
+            .background_auto_review
+            .clear_pending_review(generation, fingerprint);
+        drop(state);
+        if persistence.save_skipped(codex_home, error_summary.clone()) {
+            record_background_review_status(
+                Arc::clone(self),
+                persistence,
+                BackgroundAutoReviewStatus::Skipped,
+                Some(error_summary),
+            )
+            .await;
+        }
+    }
+
+    async fn record_started_background_auto_review_if_idle(
         &self,
         generation: u64,
         fingerprint: &str,
         persistence: crate::review_persistence::ReviewPersistenceContext,
-    ) -> Option<BackgroundAutoReviewRunningHandle> {
+    ) -> Option<crate::state::BackgroundAutoReviewStart> {
+        let trigger_turn_mailbox = self.input_queue.lock_trigger_turn_mailbox_items().await;
+        if trigger_turn_mailbox.has_trigger_turn_items() {
+            return None;
+        }
+        let active_turn = self.active_turn.lock().await;
+        if active_turn.is_some() {
+            return None;
+        }
         let mut state = self.state.lock().await;
         state
             .background_auto_review
@@ -254,22 +386,33 @@ impl Session {
     }
 
     pub(crate) async fn cancel_background_auto_review(self: &Arc<Self>) {
-        let running_review = {
+        let cancellation = {
             let mut state = self.state.lock().await;
             state
                 .background_auto_review
-                .cancel_pending_and_take_running_review()
-        };
-        let Some(running_review) = running_review else {
-            return;
+                .cancel_pending_and_take_reviews()
         };
         let codex_home = self.codex_home().await;
+        if let Some(pending_review) = cancellation.pending_review
+            && pending_review.persistence.save_cancelled(&codex_home)
+        {
+            record_background_review_status(
+                Arc::clone(self),
+                &pending_review.persistence,
+                BackgroundAutoReviewStatus::Cancelled,
+                Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+            )
+            .await;
+        }
+        let Some(running_review) = cancellation.running_review else {
+            return;
+        };
         if running_review.persistence.save_cancelled(codex_home) {
             record_background_review_status(
                 Arc::clone(self),
                 &running_review.persistence,
                 BackgroundAutoReviewStatus::Cancelled,
-                AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+                Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
             )
             .await;
         }

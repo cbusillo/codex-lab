@@ -81,6 +81,15 @@ impl ReviewPersistenceContext {
         )
     }
 
+    pub(crate) fn save_pending(&self, codex_home: impl AsRef<Path>) -> bool {
+        self.save_run(
+            codex_home,
+            AutoReviewRunStatus::Pending,
+            /*output*/ None,
+            /*error_summary*/ None,
+        )
+    }
+
     pub(crate) fn save_completed(
         &self,
         codex_home: impl AsRef<Path>,
@@ -179,7 +188,10 @@ impl ReviewPersistenceContext {
 }
 
 fn is_terminal_status(status: &AutoReviewRunStatus) -> bool {
-    !matches!(status, AutoReviewRunStatus::Running)
+    !matches!(
+        status,
+        AutoReviewRunStatus::Pending | AutoReviewRunStatus::Running
+    )
 }
 
 async fn collect_target(cwd: &Path, review_target: &ReviewTarget) -> AutoReviewRunTarget {
@@ -262,6 +274,30 @@ mod tests {
             .load_run("late-running")
             .expect("load persisted review run");
         assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn save_pending_can_advance_to_running() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "pending-running".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            cwd.path(),
+            Some("test-model".to_string()),
+        )
+        .await;
+
+        persistence.save_pending(codex_home.path());
+        persistence.save_running(codex_home.path());
+
+        let store = AutoReviewStore::new(codex_home.path());
+        let run = store
+            .load_run("pending-running")
+            .expect("load persisted review run");
+        assert_eq!(run.status, AutoReviewRunStatus::Running);
+        assert_eq!(run.completed_at_unix_secs, None);
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
   "definitions": {
     "BackgroundAutoReviewStatus": {
       "enum": [
+        "pending",
         "running",
         "completed",
         "failed",

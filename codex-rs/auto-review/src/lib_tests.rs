@@ -220,6 +220,7 @@ fn visible_findings_require_completed_run_status() {
     let active_review_target = ReviewTarget::UncommittedChanges;
 
     for status in [
+        AutoReviewRunStatus::Pending,
         AutoReviewRunStatus::Running,
         AutoReviewRunStatus::Failed,
         AutoReviewRunStatus::Cancelled,

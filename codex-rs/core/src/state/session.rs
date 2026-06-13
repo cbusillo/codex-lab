@@ -39,6 +39,7 @@ pub(crate) struct BackgroundAutoReviewSchedulerState {
     active_regular_turns: HashMap<String, BackgroundAutoReviewStartFingerprint>,
     generation: u64,
     last_started_fingerprint: Option<String>,
+    pending_review: Option<BackgroundAutoReviewPending>,
     running_review: Option<BackgroundAutoReviewRunning>,
 }
 
@@ -53,6 +54,13 @@ struct BackgroundAutoReviewRunning {
     generation: u64,
     cancellation_token: CancellationToken,
     completion: Arc<BackgroundAutoReviewCompletion>,
+    persistence: ReviewPersistenceContext,
+}
+
+#[derive(Debug)]
+struct BackgroundAutoReviewPending {
+    generation: u64,
+    fingerprint: String,
     persistence: ReviewPersistenceContext,
 }
 
@@ -89,6 +97,23 @@ pub(crate) struct BackgroundAutoReviewRunningHandle {
     pub(crate) cancellation_token: CancellationToken,
     pub(crate) completion: Arc<BackgroundAutoReviewCompletion>,
     pub(crate) persistence: ReviewPersistenceContext,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BackgroundAutoReviewStart {
+    pub(crate) running_review: BackgroundAutoReviewRunningHandle,
+    pub(crate) displaced_running_review: Option<BackgroundAutoReviewRunningHandle>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BackgroundAutoReviewPendingHandle {
+    pub(crate) persistence: ReviewPersistenceContext,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BackgroundAutoReviewCancellation {
+    pub(crate) pending_review: Option<BackgroundAutoReviewPendingHandle>,
+    pub(crate) running_review: Option<BackgroundAutoReviewRunningHandle>,
 }
 
 impl BackgroundAutoReviewSchedulerState {
@@ -146,17 +171,40 @@ impl BackgroundAutoReviewSchedulerState {
             && self.last_started_fingerprint.as_deref() != Some(fingerprint)
     }
 
+    pub(crate) fn record_pending(
+        &mut self,
+        generation: u64,
+        fingerprint: &str,
+        persistence: ReviewPersistenceContext,
+    ) -> bool {
+        if !self.is_current_schedule(generation, fingerprint) {
+            return false;
+        }
+        self.pending_review = Some(BackgroundAutoReviewPending {
+            generation,
+            fingerprint: fingerprint.to_string(),
+            persistence,
+        });
+        true
+    }
+
     pub(crate) fn record_started(
         &mut self,
         generation: u64,
         fingerprint: &str,
         persistence: ReviewPersistenceContext,
-    ) -> Option<BackgroundAutoReviewRunningHandle> {
+    ) -> Option<BackgroundAutoReviewStart> {
         if !self.is_current_schedule(generation, fingerprint) {
             return None;
         }
-        if let Some(running_review) = self.running_review.take() {
-            running_review.cancellation_token.cancel();
+        if self.pending_review.as_ref().is_some_and(|pending| {
+            pending.generation == generation && pending.fingerprint == fingerprint
+        }) {
+            self.pending_review = None;
+        }
+        let displaced_running_review = self.running_review.take().map(running_review_handle);
+        if let Some(displaced_running_review) = &displaced_running_review {
+            displaced_running_review.cancellation_token.cancel();
         }
         let cancellation_token = CancellationToken::new();
         let completion = Arc::new(BackgroundAutoReviewCompletion::new());
@@ -167,29 +215,39 @@ impl BackgroundAutoReviewSchedulerState {
             completion: Arc::clone(&completion),
             persistence: persistence.clone(),
         });
-        Some(BackgroundAutoReviewRunningHandle {
-            cancellation_token,
-            completion,
-            persistence,
+        Some(BackgroundAutoReviewStart {
+            running_review: BackgroundAutoReviewRunningHandle {
+                cancellation_token,
+                completion,
+                persistence,
+            },
+            displaced_running_review,
         })
     }
 
-    pub(crate) fn take_running_review(&mut self) -> Option<BackgroundAutoReviewRunningHandle> {
-        self.running_review
-            .take()
-            .map(|running_review| BackgroundAutoReviewRunningHandle {
-                cancellation_token: running_review.cancellation_token,
-                completion: running_review.completion,
-                persistence: running_review.persistence,
-            })
+    pub(crate) fn clear_pending_review(&mut self, generation: u64, fingerprint: &str) {
+        if self.pending_review.as_ref().is_some_and(|pending| {
+            pending.generation == generation && pending.fingerprint == fingerprint
+        }) {
+            self.pending_review = None;
+        }
     }
 
-    pub(crate) fn cancel_pending_and_take_running_review(
-        &mut self,
-    ) -> Option<BackgroundAutoReviewRunningHandle> {
+    pub(crate) fn take_running_review(&mut self) -> Option<BackgroundAutoReviewRunningHandle> {
+        self.running_review.take().map(running_review_handle)
+    }
+
+    pub(crate) fn cancel_pending_and_take_reviews(&mut self) -> BackgroundAutoReviewCancellation {
         self.generation = self.generation.saturating_add(1);
         self.active_regular_turns.clear();
-        self.take_running_review()
+        BackgroundAutoReviewCancellation {
+            pending_review: self.pending_review.take().map(|pending_review| {
+                BackgroundAutoReviewPendingHandle {
+                    persistence: pending_review.persistence,
+                }
+            }),
+            running_review: self.take_running_review(),
+        }
     }
 
     pub(crate) fn clear_running_review(&mut self, generation: u64) {
@@ -200,6 +258,16 @@ impl BackgroundAutoReviewSchedulerState {
         {
             self.running_review = None;
         }
+    }
+}
+
+fn running_review_handle(
+    running_review: BackgroundAutoReviewRunning,
+) -> BackgroundAutoReviewRunningHandle {
+    BackgroundAutoReviewRunningHandle {
+        cancellation_token: running_review.cancellation_token,
+        completion: running_review.completion,
+        persistence: running_review.persistence,
     }
 }
 

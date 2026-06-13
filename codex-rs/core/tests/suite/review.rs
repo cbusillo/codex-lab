@@ -690,10 +690,21 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         .submit_turn("create a file to review")
         .await?;
 
+    let pending_status = wait_for_background_auto_review_status(
+        harness.test().codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+    assert_eq!(
+        pending_status.review_target,
+        ReviewTarget::UncommittedChanges
+    );
+    assert_eq!(pending_status.error_summary, None);
     let running_status = wait_for_background_auto_review_status(
         harness.test().codex.as_ref(),
         BackgroundAutoReviewStatus::Running,
-        None,
+        Some(pending_status.run_id.as_str()),
     )
     .await;
     let completed_status = wait_for_background_auto_review_status(
@@ -709,6 +720,7 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
     assert_eq!(completed_status.error_summary, None);
     let run = load_single_auto_review_run(&codex_home)
         .unwrap_or_else(|err| panic!("load completed auto review run: {err}"));
+    assert_eq!(run.run_id, pending_status.run_id);
     assert_eq!(run.run_id, completed_status.run_id);
     assert_eq!(run.status, AutoReviewRunStatus::Completed);
     assert_eq!(run.source, AutoReviewRunSource::Background);
@@ -788,10 +800,16 @@ async fn automatic_background_review_shutdown_persists_cancelled_run() -> anyhow
 
     test.submit_turn("create a file to review").await?;
     server.wait_for_request_count(3).await;
+    let pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
     let running_status = wait_for_background_auto_review_status(
         test.codex.as_ref(),
         BackgroundAutoReviewStatus::Running,
-        None,
+        Some(pending_status.run_id.as_str()),
     )
     .await;
     let running = wait_for_auto_review_run_status(
@@ -879,13 +897,42 @@ async fn automatic_background_review_shutdown_cancels_pending_debounce() -> anyh
     test.submit_turn("create a file to review").await?;
     server.wait_for_request_count(2).await;
 
+    let pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+
     test.codex.submit(Op::Shutdown {}).await?;
+    let cancelled_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Cancelled,
+        Some(pending_status.run_id.as_str()),
+    )
+    .await;
+    assert_eq!(
+        cancelled_status.review_target,
+        ReviewTarget::UncommittedChanges
+    );
+    assert_eq!(
+        cancelled_status.error_summary.as_deref(),
+        Some("review was interrupted before producing structured output")
+    );
     let _shutdown =
         wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
     server
         .assert_request_count_stays(2, Duration::from_millis(2500))
         .await;
-    assert_eq!(load_auto_review_runs(codex_home.path())?.len(), 0);
+    let run = load_single_auto_review_run(codex_home.path())?;
+    assert_eq!(run.run_id, pending_status.run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert!(run.completed_at_unix_secs.is_some());
+    assert_eq!(
+        run.error_summary.as_deref(),
+        Some("review was interrupted before producing structured output")
+    );
 
     let _codex_home_guard = codex_home;
     server.shutdown().await;
@@ -927,10 +974,16 @@ async fn automatic_background_review_skips_oversized_diff() -> anyhow::Result<()
     test.submit_turn("create a file too large for background review")
         .await?;
 
+    let pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
     let skipped_status = wait_for_background_auto_review_status(
         test.codex.as_ref(),
         BackgroundAutoReviewStatus::Skipped,
-        None,
+        Some(pending_status.run_id.as_str()),
     )
     .await;
     assert_eq!(
@@ -1821,9 +1874,10 @@ async fn wait_for_background_auto_review_run_without_review_mode_events(
 ) -> codex_auto_review::AutoReviewRun {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(run) = load_single_auto_review_run(codex_home)
-            && run.status == AutoReviewRunStatus::Completed
-        {
+        if let Ok(Some(run)) = load_auto_review_runs(codex_home).map(|runs| {
+            runs.into_iter()
+                .find(|run| run.status == AutoReviewRunStatus::Completed)
+        }) {
             drain_pending_events_without_review_mode(codex).await;
             return run;
         }
