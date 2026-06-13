@@ -17,6 +17,11 @@ pub(super) struct PreparedReviewThread {
     manual_review_request: Option<ReviewRequest>,
 }
 
+pub(super) enum ReviewPersistenceSpec {
+    Mode(ReviewPersistence),
+    Context(ReviewPersistenceContext),
+}
+
 /// Spawn a review thread using the given prompt.
 pub(super) async fn spawn_review_thread(
     sess: Arc<Session>,
@@ -32,7 +37,7 @@ pub(super) async fn spawn_review_thread(
         parent_turn_context,
         sub_id,
         resolved,
-        persistence,
+        persistence.map(ReviewPersistenceSpec::Mode),
     )
     .await;
 
@@ -63,7 +68,7 @@ pub(super) async fn prepare_review_thread(
     parent_turn_context: Arc<TurnContext>,
     sub_id: String,
     resolved: crate::review_prompts::ResolvedReviewRequest,
-    persistence: Option<ReviewPersistence>,
+    persistence: Option<ReviewPersistenceSpec>,
 ) -> PreparedReviewThread {
     let model = config
         .review_model
@@ -226,8 +231,12 @@ pub(super) async fn prepare_review_thread(
     // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
     // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
     // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
-    let should_emit_review_mode =
-        persistence.is_none_or(|mode| matches!(mode, ReviewPersistence::ManualAutoReview));
+    let should_emit_review_mode = persistence.as_ref().is_none_or(|persistence| {
+        matches!(
+            persistence,
+            ReviewPersistenceSpec::Mode(ReviewPersistence::ManualAutoReview)
+        )
+    });
     let manual_review_request = if should_emit_review_mode {
         Some(ReviewRequest {
             target: resolved.target.clone(),
@@ -237,19 +246,24 @@ pub(super) async fn prepare_review_thread(
         None
     };
     if let Some(persistence) = persistence {
-        let target_cwd = tc
-            .environments
-            .single_local_environment_cwd()
-            .map(std::convert::AsRef::as_ref)
-            .unwrap_or_else(|| tc.config.cwd.as_ref());
-        let persistence = crate::review_persistence::ReviewPersistenceContext::new(
-            review_turn_id.clone(),
-            persistence,
-            resolved.target.clone(),
-            target_cwd,
-            Some(model),
-        )
-        .await;
+        let persistence = match persistence {
+            ReviewPersistenceSpec::Mode(mode) => {
+                let target_cwd = tc
+                    .environments
+                    .single_local_environment_cwd()
+                    .map(std::convert::AsRef::as_ref)
+                    .unwrap_or_else(|| tc.config.cwd.as_ref());
+                crate::review_persistence::ReviewPersistenceContext::new(
+                    review_turn_id.clone(),
+                    mode,
+                    resolved.target.clone(),
+                    target_cwd,
+                    Some(model),
+                )
+                .await
+            }
+            ReviewPersistenceSpec::Context(persistence) => persistence,
+        };
         PreparedReviewThread {
             turn_context: tc,
             input,
@@ -294,7 +308,7 @@ pub(super) async fn record_background_review_status(
     sess: Arc<Session>,
     persistence: &ReviewPersistenceContext,
     status: BackgroundAutoReviewStatus,
-    error_summary: String,
+    error_summary: Option<String>,
 ) {
     sess.send_event_raw(Event {
         id: persistence.run_id().to_string(),
@@ -302,7 +316,7 @@ pub(super) async fn record_background_review_status(
             run_id: persistence.run_id().to_string(),
             status,
             review_target: persistence.review_target().clone(),
-            error_summary: Some(error_summary),
+            error_summary,
         }),
     })
     .await;

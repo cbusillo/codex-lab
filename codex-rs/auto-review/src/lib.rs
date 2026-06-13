@@ -148,6 +148,7 @@ impl AutoReviewRun {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoReviewRunStatus {
+    Pending,
     Running,
     Completed,
     Failed,

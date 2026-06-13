@@ -79,7 +79,7 @@ fn background_auto_review_running_review_can_be_cancelled_and_cleared() {
         .take_running_review()
         .expect("running review should be tracked");
     running.cancellation_token.cancel();
-    assert!(token.cancellation_token.is_cancelled());
+    assert!(token.running_review.cancellation_token.is_cancelled());
 
     assert!(state.take_running_review().is_none());
 }
@@ -95,7 +95,9 @@ fn background_auto_review_cancel_invalidates_pending_schedule() {
         .expect("changed dirty fingerprint should schedule review");
 
     assert!(state.is_current_schedule(schedule.generation, &schedule.fingerprint));
-    assert!(state.cancel_pending_and_take_running_review().is_none());
+    let cancellation = state.cancel_pending_and_take_reviews();
+    assert!(cancellation.pending_review.is_none());
+    assert!(cancellation.running_review.is_none());
 
     assert!(!state.is_current_schedule(schedule.generation, &schedule.fingerprint));
     assert_eq!(
@@ -137,7 +139,7 @@ fn background_auto_review_clear_running_review_honors_generation() {
             persistence,
         )
         .expect("newer schedule should start after mismatched clear");
-    assert!(first_token.cancellation_token.is_cancelled());
+    assert!(first_token.running_review.cancellation_token.is_cancelled());
     state.clear_running_review(second_schedule.generation);
     assert!(state.take_running_review().is_none());
 }
