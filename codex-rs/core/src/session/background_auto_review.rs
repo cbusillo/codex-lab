@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use codex_git_utils::get_worktree_diff_byte_count;
 use codex_git_utils::get_worktree_diff_fingerprint;
+use codex_protocol::protocol::BackgroundAutoReviewControlAction;
+use codex_protocol::protocol::BackgroundAutoReviewControlReason;
 use codex_protocol::protocol::BackgroundAutoReviewStatus;
 use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
@@ -20,6 +22,8 @@ use super::turn_context::TurnContext;
 use crate::review_persistence::AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY;
 use crate::review_persistence::ReviewPersistenceContext;
 use crate::review_prompts::resolve_review_request;
+use crate::state::BackgroundAutoReviewControlledRun;
+use crate::state::BackgroundAutoReviewRunningHandle;
 
 const BACKGROUND_AUTO_REVIEW_DEBOUNCE: Duration = Duration::from_secs(2);
 
@@ -407,12 +411,65 @@ impl Session {
         let Some(running_review) = cancellation.running_review else {
             return;
         };
-        if running_review.persistence.save_cancelled(codex_home) {
+        self.cancel_running_background_auto_review(
+            running_review,
+            AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+        )
+        .await;
+    }
+
+    pub(crate) async fn control_background_auto_review(
+        self: &Arc<Self>,
+        run_id: &str,
+        action: BackgroundAutoReviewControlAction,
+        reason: BackgroundAutoReviewControlReason,
+    ) {
+        let controlled_run = {
+            let mut state = self.state.lock().await;
+            state.background_auto_review.take_review_by_run_id(run_id)
+        };
+        let Some(controlled_run) = controlled_run else {
+            debug!(%run_id, ?action, ?reason, "background auto review control ignored: run is not active");
+            return;
+        };
+        let error_summary = background_auto_review_control_summary(&action, &reason);
+        let codex_home = self.codex_home().await;
+        match controlled_run {
+            BackgroundAutoReviewControlledRun::Pending(pending_review) => {
+                if pending_review
+                    .persistence
+                    .save_cancelled_with_summary(codex_home, error_summary.clone())
+                {
+                    record_background_review_status(
+                        Arc::clone(self),
+                        &pending_review.persistence,
+                        BackgroundAutoReviewStatus::Cancelled,
+                        Some(error_summary),
+                    )
+                    .await;
+                }
+            }
+            BackgroundAutoReviewControlledRun::Running(running_review) => {
+                self.cancel_running_background_auto_review(running_review, error_summary)
+                    .await;
+            }
+        }
+    }
+
+    async fn cancel_running_background_auto_review(
+        self: &Arc<Self>,
+        running_review: BackgroundAutoReviewRunningHandle,
+        error_summary: String,
+    ) {
+        if running_review
+            .persistence
+            .save_cancelled_with_summary(self.codex_home().await, error_summary.clone())
+        {
             record_background_review_status(
                 Arc::clone(self),
                 &running_review.persistence,
                 BackgroundAutoReviewStatus::Cancelled,
-                Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+                Some(error_summary),
             )
             .await;
         }
@@ -421,11 +478,13 @@ impl Session {
             return;
         }
         let notified = completion.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         running_review.cancellation_token.cancel();
         if completion.is_done() {
             return;
         }
-        if tokio::time::timeout(Duration::from_millis(100), notified)
+        if tokio::time::timeout(Duration::from_millis(100), notified.as_mut())
             .await
             .is_err()
         {
@@ -449,6 +508,34 @@ impl Session {
 async fn background_review_fingerprint(turn_context: &TurnContext) -> Option<String> {
     let cwd = turn_context.environments.single_local_environment_cwd()?;
     background_review_fingerprint_for_cwd(cwd).await
+}
+
+fn background_auto_review_control_summary(
+    action: &BackgroundAutoReviewControlAction,
+    reason: &BackgroundAutoReviewControlReason,
+) -> String {
+    match (action, reason) {
+        (
+            BackgroundAutoReviewControlAction::Supersede,
+            BackgroundAutoReviewControlReason::SupersededByRun { run_id },
+        ) => format!("background auto review was superseded by run {run_id}"),
+        (BackgroundAutoReviewControlAction::Supersede, _) => {
+            "background auto review was superseded".to_string()
+        }
+        (
+            BackgroundAutoReviewControlAction::Cancel,
+            BackgroundAutoReviewControlReason::SupersededByRun { run_id },
+        ) => format!("background auto review was cancelled after run {run_id} superseded it"),
+        (_, BackgroundAutoReviewControlReason::UserRequested) => {
+            "background auto review was cancelled by request".to_string()
+        }
+        (_, BackgroundAutoReviewControlReason::ForegroundWorkStarted) => {
+            "foreground work started before background auto review could continue".to_string()
+        }
+        (_, BackgroundAutoReviewControlReason::ThreadClosing) => {
+            "thread closed before background auto review could finish".to_string()
+        }
+    }
 }
 
 async fn background_review_fingerprint_for_cwd(cwd: &AbsolutePathBuf) -> Option<String> {

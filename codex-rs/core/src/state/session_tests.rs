@@ -107,6 +107,80 @@ fn background_auto_review_cancel_invalidates_pending_schedule() {
 }
 
 #[test]
+fn background_auto_review_control_takes_pending_by_run_id() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-pending".to_string());
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+    let schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed dirty fingerprint should schedule review");
+    let (persistence, _cwd) = test_background_review_persistence("pending-control");
+    assert!(state.record_pending(schedule.generation, &schedule.fingerprint, persistence));
+
+    let controlled_run = state
+        .take_review_by_run_id("pending-control")
+        .expect("pending run should be controlled by run id");
+    assert!(matches!(
+        controlled_run,
+        BackgroundAutoReviewControlledRun::Pending(_)
+    ));
+    assert!(!state.is_current_schedule(schedule.generation, &schedule.fingerprint));
+    assert_eq!(
+        state.complete_regular_turn("turn-pending", Some("sha256:late".to_string())),
+        None
+    );
+}
+
+#[test]
+fn background_auto_review_control_ignores_unknown_run_id() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+    let schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed dirty fingerprint should schedule review");
+    let (persistence, _cwd) = test_background_review_persistence("pending-control");
+    assert!(state.record_pending(schedule.generation, &schedule.fingerprint, persistence));
+
+    assert!(state.take_review_by_run_id("missing-control").is_none());
+    assert!(state.is_current_schedule(schedule.generation, &schedule.fingerprint));
+    assert!(
+        state
+            .record_started(
+                schedule.generation,
+                &schedule.fingerprint,
+                test_background_review_persistence("pending-control").0,
+            )
+            .is_some()
+    );
+}
+
+#[test]
+fn background_auto_review_control_takes_running_by_run_id() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+    let schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed dirty fingerprint should schedule review");
+    let (persistence, _cwd) = test_background_review_persistence("running-control");
+    let start = state
+        .record_started(schedule.generation, &schedule.fingerprint, persistence)
+        .expect("current schedule should start");
+
+    let controlled_run = state
+        .take_review_by_run_id("running-control")
+        .expect("running run should be controlled by run id");
+    let BackgroundAutoReviewControlledRun::Running(running_review) = controlled_run else {
+        panic!("expected running review control handle");
+    };
+    running_review.cancellation_token.cancel();
+    assert!(start.running_review.cancellation_token.is_cancelled());
+    assert!(state.take_running_review().is_none());
+}
+
+#[test]
 fn background_auto_review_clear_running_review_honors_generation() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
     state.begin_regular_turn("turn-1".to_string());

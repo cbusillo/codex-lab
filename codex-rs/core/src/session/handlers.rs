@@ -870,6 +870,15 @@ pub(super) async fn submission_loop(
                     review(&sess, &config, sub.id.clone(), review_request, persistence).await;
                     false
                 }
+                Op::BackgroundAutoReviewControl {
+                    run_id,
+                    action,
+                    reason,
+                } => {
+                    sess.control_background_auto_review(&run_id, action, reason)
+                        .await;
+                    false
+                }
                 Op::ApproveGuardianDeniedAction { event } => {
                     approve_guardian_denied_action(&sess, event).await;
                     false
