@@ -184,6 +184,14 @@ impl BackgroundAutoReviewSchedulerState {
             })
     }
 
+    pub(crate) fn cancel_pending_and_take_running_review(
+        &mut self,
+    ) -> Option<BackgroundAutoReviewRunningHandle> {
+        self.generation = self.generation.saturating_add(1);
+        self.active_regular_turns.clear();
+        self.take_running_review()
+    }
+
     pub(crate) fn clear_running_review(&mut self, generation: u64) {
         if self
             .running_review
