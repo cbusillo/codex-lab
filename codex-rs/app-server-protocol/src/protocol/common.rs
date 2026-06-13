@@ -814,6 +814,11 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ReviewStartResponse,
     },
+    BackgroundAutoReviewControl => "review/background/control" {
+        params: v2::BackgroundAutoReviewControlParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::BackgroundAutoReviewControlResponse,
+    },
 
     ModelList => "model/list" {
         params: v2::ModelListParams,

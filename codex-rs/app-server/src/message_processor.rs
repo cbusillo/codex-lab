@@ -1257,6 +1257,11 @@ impl MessageProcessor {
             ClientRequest::ReviewStart { params, .. } => {
                 self.turn_processor.review_start(&request_id, params).await
             }
+            ClientRequest::BackgroundAutoReviewControl { params, .. } => {
+                self.turn_processor
+                    .background_auto_review_control(&request_id, params)
+                    .await
+            }
             ClientRequest::McpServerOauthLogin { params, .. } => {
                 self.mcp_processor.mcp_server_oauth_login(params).await
             }

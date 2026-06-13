@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "BackgroundAutoReviewControlAction": {
+      "enum": [
+        "cancel",
+        "supersede"
+      ],
+      "type": "string"
+    },
+    "BackgroundAutoReviewControlReason": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "userRequested"
+              ],
+              "title": "UserRequestedBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UserRequestedBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "supersededByRun"
+              ],
+              "title": "SupersededByRunBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "runId",
+            "type"
+          ],
+          "title": "SupersededByRunBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "foregroundWorkStarted"
+              ],
+              "title": "ForegroundWorkStartedBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ForegroundWorkStartedBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "threadClosing"
+              ],
+              "title": "ThreadClosingBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ThreadClosingBackgroundAutoReviewControlReason",
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/BackgroundAutoReviewControlAction"
+    },
+    "reason": {
+      "$ref": "#/definitions/BackgroundAutoReviewControlReason"
+    },
+    "runId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "action",
+    "reason",
+    "runId",
+    "threadId"
+  ],
+  "title": "BackgroundAutoReviewControlParams",
+  "type": "object"
+}
