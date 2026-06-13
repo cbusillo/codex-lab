@@ -1,8 +1,11 @@
-use super::*;
 use codex_core_skills::HostLoadedSkills;
 use codex_protocol::openai_models::ToolMode;
+use codex_protocol::protocol::BackgroundAutoReviewStatus;
+use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
 use std::sync::atomic::AtomicBool;
 
+use super::*;
+use crate::review_persistence::ReviewPersistenceContext;
 use crate::state::BackgroundAutoReviewRunningHandle;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
@@ -285,4 +288,22 @@ pub(super) fn spawn_detached_review_thread(
         sess.clear_background_auto_review(generation).await;
         completion.mark_done();
     });
+}
+
+pub(super) async fn record_background_review_status(
+    sess: Arc<Session>,
+    persistence: &ReviewPersistenceContext,
+    status: BackgroundAutoReviewStatus,
+    error_summary: String,
+) {
+    sess.send_event_raw(Event {
+        id: persistence.run_id().to_string(),
+        msg: EventMsg::BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent {
+            run_id: persistence.run_id().to_string(),
+            status,
+            review_target: persistence.review_target().clone(),
+            error_summary: Some(error_summary),
+        }),
+    })
+    .await;
 }

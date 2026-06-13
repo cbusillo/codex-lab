@@ -112,6 +112,15 @@ impl ReviewPersistenceContext {
         )
     }
 
+    pub(crate) fn save_skipped(&self, codex_home: impl AsRef<Path>, error_summary: String) -> bool {
+        self.save_run(
+            codex_home,
+            AutoReviewRunStatus::Skipped,
+            /*output*/ None,
+            Some(error_summary),
+        )
+    }
+
     fn save_run(
         &self,
         codex_home: impl AsRef<Path>,
@@ -253,5 +262,29 @@ mod tests {
             .load_run("late-running")
             .expect("load persisted review run");
         assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn save_skipped_blocks_late_running() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "skipped-running".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            cwd.path(),
+            Some("test-model".to_string()),
+        )
+        .await;
+
+        persistence.save_skipped(codex_home.path(), "duplicate fingerprint".to_string());
+        persistence.save_running(codex_home.path());
+
+        let store = AutoReviewStore::new(codex_home.path());
+        let run = store
+            .load_run("skipped-running")
+            .expect("load persisted review run");
+        assert_eq!(run.status, AutoReviewRunStatus::Skipped);
+        assert_eq!(run.error_summary.as_deref(), Some("duplicate fingerprint"));
     }
 }

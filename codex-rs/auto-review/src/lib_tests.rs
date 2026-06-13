@@ -223,6 +223,7 @@ fn visible_findings_require_completed_run_status() {
         AutoReviewRunStatus::Running,
         AutoReviewRunStatus::Failed,
         AutoReviewRunStatus::Cancelled,
+        AutoReviewRunStatus::Skipped,
     ] {
         let run = AutoReviewRun {
             status,

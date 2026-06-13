@@ -6,7 +6,8 @@
         "running",
         "completed",
         "failed",
-        "cancelled"
+        "cancelled",
+        "skipped"
       ],
       "type": "string"
     },

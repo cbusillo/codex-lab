@@ -542,6 +542,10 @@ pub enum ThreadStoreToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
+    /// Maximum diff size in bytes for automatic background reviews. Defaults
+    /// to 120000. Reviews whose diff exceeds this limit are recorded as
+    /// skipped rather than launched.
+    pub background_max_diff_bytes: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]

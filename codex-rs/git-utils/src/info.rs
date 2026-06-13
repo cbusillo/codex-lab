@@ -303,6 +303,12 @@ pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
     Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
+pub async fn get_worktree_diff_byte_count(cwd: &Path) -> Option<usize> {
+    get_git_repo_root(cwd)?;
+    let diff = diff_against_sha(cwd, &GitSha::new("HEAD")).await?;
+    Some(diff.len())
+}
+
 fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, String>> {
     let mut remotes = BTreeMap::new();
     for line in stdout.lines() {

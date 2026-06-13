@@ -164,6 +164,7 @@ pub(crate) use resolved_permission_profile::PermissionProfileState;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES: usize = 120_000;
 
 /// Compatibility-only config retained so legacy `ghost_snapshot` settings
 /// continue to load even though snapshots are no longer produced.
@@ -597,6 +598,12 @@ pub struct Config {
 
     /// Model used specifically for review sessions.
     pub review_model: Option<String>,
+
+    /// Maximum diff size (in bytes) for automatic background reviews. Reviews
+    /// whose diff exceeds this limit are recorded as skipped rather than
+    /// launched. Corresponds to `[auto_review] background_max_diff_bytes` in
+    /// config.toml.
+    pub background_auto_review_max_diff_bytes: Option<usize>,
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
@@ -3428,6 +3435,11 @@ impl Config {
             model,
             service_tier,
             review_model,
+            background_auto_review_max_diff_bytes: cfg
+                .auto_review
+                .as_ref()
+                .and_then(|ar| ar.background_max_diff_bytes)
+                .or(Some(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES)),
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_auto_compact_token_limit_scope: cfg

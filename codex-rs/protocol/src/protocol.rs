@@ -3019,6 +3019,7 @@ pub enum BackgroundAutoReviewStatus {
     Completed,
     Failed,
     Cancelled,
+    Skipped,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
