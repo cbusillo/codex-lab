@@ -220,6 +220,7 @@ Example with notification opt-out:
 - `thread/realtime/appendText` — append text input to the active realtime session (experimental); returns `{}`.
 - `thread/realtime/stop` — stop the active realtime session for the thread (experimental); returns `{}`.
 - `review/start` — kick off Codex’s automated reviewer for a thread; responds like `turn/start` and emits `item/started`/`item/completed` notifications with `enteredReviewMode` and `exitedReviewMode` items, plus a final assistant `agentMessage` containing the review.
+- `review/background/control` — request control of an active background auto-review run by `runId`; supports `cancel` and `supersede`, returns `{}` when accepted, and any status change is emitted through `review/backgroundStatus/changed`.
 - `command/exec` — run a single command under the server sandbox without starting a thread/turn (handy for utilities and validation).
 - `command/exec/write` — write base64-decoded stdin bytes to a running `command/exec` session or close stdin; returns `{}`.
 - `command/exec/resize` — resize a running PTY-backed `command/exec` session by `processId`; returns `{}`.
@@ -998,6 +999,20 @@ containing an `exitedReviewMode` item with the final review text:
 ```
 
 The `review` string is plain text that already bundles the overall explanation plus a bullet list for each structured finding (matching `ThreadItem::ExitedReviewMode` in the generated schema). Use this notification to render the reviewer output in your client.
+
+Background auto-review runs can be controlled separately from foreground review turns. Use `review/background/control` with the `runId` from `review/backgroundStatus/changed` to cancel or supersede an active background run. The request is idempotent: an unknown or already terminal `runId` still returns `{}`, while any resulting status transition is reported through the background status notification stream.
+
+```json
+{ "method": "review/background/control", "id": 41, "params": {
+    "threadId": "thr_123",
+    "runId": "turn_901",
+    "action": "supersede",
+    "reason": { "type": "supersededByRun", "runId": "turn_902" }
+} }
+{ "id": 41, "result": {} }
+```
+
+For a user-initiated cancellation, set `action` to `"cancel"` and `reason` to `{ "type": "userRequested" }`.
 
 ### Example: One-off command execution
 

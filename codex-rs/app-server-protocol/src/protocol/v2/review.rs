@@ -17,6 +17,47 @@ v2_enum_from_core!(
     }
 );
 
+v2_enum_from_core!(
+    pub enum BackgroundAutoReviewControlAction from codex_protocol::protocol::BackgroundAutoReviewControlAction {
+        Cancel, Supersede
+    }
+);
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type", export_to = "v2/")]
+pub enum BackgroundAutoReviewControlReason {
+    UserRequested,
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    SupersededByRun {
+        run_id: String,
+    },
+    ForegroundWorkStarted,
+    ThreadClosing,
+}
+
+impl BackgroundAutoReviewControlReason {
+    pub fn to_core(self) -> codex_protocol::protocol::BackgroundAutoReviewControlReason {
+        match self {
+            Self::UserRequested => {
+                codex_protocol::protocol::BackgroundAutoReviewControlReason::UserRequested
+            }
+            Self::SupersededByRun { run_id } => {
+                codex_protocol::protocol::BackgroundAutoReviewControlReason::SupersededByRun {
+                    run_id,
+                }
+            }
+            Self::ForegroundWorkStarted => {
+                codex_protocol::protocol::BackgroundAutoReviewControlReason::ForegroundWorkStarted
+            }
+            Self::ThreadClosing => {
+                codex_protocol::protocol::BackgroundAutoReviewControlReason::ThreadClosing
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -53,6 +94,21 @@ pub struct ReviewStartResponse {
     /// For detached reviews, this is the id of the new review thread.
     pub review_thread_id: String,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct BackgroundAutoReviewControlParams {
+    pub thread_id: String,
+    pub run_id: String,
+    pub action: BackgroundAutoReviewControlAction,
+    pub reason: BackgroundAutoReviewControlReason,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct BackgroundAutoReviewControlResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]

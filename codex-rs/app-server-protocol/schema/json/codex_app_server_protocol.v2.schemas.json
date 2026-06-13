@@ -1035,6 +1035,115 @@
       ],
       "type": "string"
     },
+    "BackgroundAutoReviewControlAction": {
+      "enum": [
+        "cancel",
+        "supersede"
+      ],
+      "type": "string"
+    },
+    "BackgroundAutoReviewControlParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/BackgroundAutoReviewControlAction"
+        },
+        "reason": {
+          "$ref": "#/definitions/BackgroundAutoReviewControlReason"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "reason",
+        "runId",
+        "threadId"
+      ],
+      "title": "BackgroundAutoReviewControlParams",
+      "type": "object"
+    },
+    "BackgroundAutoReviewControlReason": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "userRequested"
+              ],
+              "title": "UserRequestedBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UserRequestedBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "supersededByRun"
+              ],
+              "title": "SupersededByRunBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "runId",
+            "type"
+          ],
+          "title": "SupersededByRunBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "foregroundWorkStarted"
+              ],
+              "title": "ForegroundWorkStartedBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ForegroundWorkStartedBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "threadClosing"
+              ],
+              "title": "ThreadClosingBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ThreadClosingBackgroundAutoReviewControlReason",
+          "type": "object"
+        }
+      ]
+    },
+    "BackgroundAutoReviewControlResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "BackgroundAutoReviewControlResponse",
+      "type": "object"
+    },
     "BackgroundAutoReviewStatus": {
       "enum": [
         "pending",
@@ -2402,6 +2511,30 @@
             "params"
           ],
           "title": "Review/startRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "review/background/control"
+              ],
+              "title": "Review/background/controlRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/BackgroundAutoReviewControlParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/background/controlRequest",
           "type": "object"
         },
         {

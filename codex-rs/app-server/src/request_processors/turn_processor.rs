@@ -207,6 +207,16 @@ impl TurnRequestProcessor {
             .map(|()| None)
     }
 
+    pub(crate) async fn background_auto_review_control(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: BackgroundAutoReviewControlParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.background_auto_review_control_inner(request_id, params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     fn track_error_response(
         &self,
         request_id: &ConnectionRequestId,
@@ -1177,6 +1187,40 @@ impl TurnRequestProcessor {
             }
         }
         Ok(())
+    }
+
+    async fn background_auto_review_control_inner(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: BackgroundAutoReviewControlParams,
+    ) -> Result<BackgroundAutoReviewControlResponse, JSONRPCErrorError> {
+        let BackgroundAutoReviewControlParams {
+            thread_id,
+            run_id,
+            action,
+            reason,
+        } = params;
+        let run_id = run_id.trim().to_string();
+        if run_id.is_empty() {
+            return Err(invalid_request("runId must not be empty"));
+        }
+
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        self.submit_core_op(
+            request_id,
+            thread.as_ref(),
+            Op::BackgroundAutoReviewControl {
+                run_id,
+                action: action.to_core(),
+                reason: reason.to_core(),
+            },
+        )
+        .await
+        .map_err(|err| {
+            internal_error(format!("failed to control background auto-review: {err}"))
+        })?;
+
+        Ok(BackgroundAutoReviewControlResponse {})
     }
 
     async fn turn_interrupt_inner(
