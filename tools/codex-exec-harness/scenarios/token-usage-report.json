@@ -1,0 +1,121 @@
+{
+  "name": "token-usage-report",
+  "model": "gpt-5.1-codex",
+  "turns": [
+    {
+      "prompt": "Reply with exactly: token one. TOKEN_USAGE_FIRST"
+    },
+    {
+      "prompt": "Reply with exactly: token two. TOKEN_USAGE_SECOND"
+    }
+  ],
+  "files": {
+    "AGENTS.md": "# Token usage fixture\n\nKeep this guidance available across resumed turns.\n",
+    "README.md": "# Token usage fixture\n"
+  },
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-token-first",
+        "usage": {
+          "input_tokens": 100,
+          "input_tokens_details": {
+            "cached_tokens": 40
+          },
+          "output_tokens": 20,
+          "output_tokens_details": {
+            "reasoning_tokens": 5
+          },
+          "total_tokens": 120
+        }
+      },
+      {
+        "response_id": "resp-token-second",
+        "usage": {
+          "input_tokens": 180,
+          "input_tokens_details": {
+            "cached_tokens": 120
+          },
+          "output_tokens": 35,
+          "output_tokens_details": {
+            "reasoning_tokens": 8
+          },
+          "total_tokens": 215
+        }
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 2,
+    "turn_count": 2,
+    "thread_id": "required",
+    "same_thread_id": true,
+    "token_usage": {
+      "input_tokens": 280,
+      "cached_input_tokens": 160,
+      "output_tokens": 55,
+      "reasoning_output_tokens": 13,
+      "total_tokens": 335
+    },
+    "event_types": {
+      "thread.started": 2,
+      "turn.started": 2,
+      "turn.completed": 2
+    },
+    "turns": [
+      {
+        "returncode": 0,
+        "responses_request_count": 1,
+        "thread_id": "required",
+        "token_usage": {
+          "input_tokens": 100,
+          "cached_input_tokens": 40,
+          "output_tokens": 20,
+          "reasoning_output_tokens": 5,
+          "total_tokens": 120
+        },
+        "token_usage_snapshot": {
+          "input_tokens": 100,
+          "cached_input_tokens": 40,
+          "output_tokens": 20,
+          "reasoning_output_tokens": 5,
+          "total_tokens": 120
+        }
+      },
+      {
+        "returncode": 0,
+        "responses_request_count": 1,
+        "thread_id": "required",
+        "token_usage": {
+          "input_tokens": 180,
+          "cached_input_tokens": 120,
+          "output_tokens": 35,
+          "reasoning_output_tokens": 8,
+          "total_tokens": 215
+        },
+        "token_usage_snapshot": {
+          "input_tokens": 280,
+          "cached_input_tokens": 160,
+          "output_tokens": 55,
+          "reasoning_output_tokens": 13,
+          "total_tokens": 335
+        }
+      }
+    ],
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "contains": "TOKEN_USAGE_FIRST",
+        "not_contains": "TOKEN_USAGE_SECOND"
+      },
+      {
+        "request": 1,
+        "scope": "input",
+        "contains": "TOKEN_USAGE_SECOND"
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}
