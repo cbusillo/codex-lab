@@ -1035,6 +1035,46 @@
       ],
       "type": "string"
     },
+    "BackgroundAutoReviewStatus": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "BackgroundAutoReviewStatusChangedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "errorSummary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewTarget": {
+          "$ref": "#/definitions/ReviewTarget"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatus"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewTarget",
+        "runId",
+        "status",
+        "threadId"
+      ],
+      "title": "BackgroundAutoReviewStatusChangedNotification",
+      "type": "object"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -11846,6 +11886,26 @@
             "params"
           ],
           "title": "Turn/startedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "review/backgroundStatus/changed"
+              ],
+              "title": "Review/backgroundStatus/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/BackgroundAutoReviewStatusChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Review/backgroundStatus/changedNotification",
           "type": "object"
         },
         {

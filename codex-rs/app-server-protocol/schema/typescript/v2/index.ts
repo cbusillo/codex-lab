@@ -36,6 +36,8 @@ export type { AskForApproval } from "./AskForApproval";
 export type { AttestationGenerateParams } from "./AttestationGenerateParams";
 export type { AttestationGenerateResponse } from "./AttestationGenerateResponse";
 export type { AutoReviewDecisionSource } from "./AutoReviewDecisionSource";
+export type { BackgroundAutoReviewStatus } from "./BackgroundAutoReviewStatus";
+export type { BackgroundAutoReviewStatusChangedNotification } from "./BackgroundAutoReviewStatusChangedNotification";
 export type { ByteRange } from "./ByteRange";
 export type { CancelLoginAccountParams } from "./CancelLoginAccountParams";
 export type { CancelLoginAccountResponse } from "./CancelLoginAccountResponse";

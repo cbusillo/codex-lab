@@ -8,6 +8,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::BackgroundAutoReviewStatus;
+use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExitedReviewModeEvent;
@@ -20,6 +22,7 @@ use crate::codex_delegate::run_codex_thread_one_shot;
 use crate::config::Constrained;
 use crate::review_format::format_review_findings_block;
 use crate::review_format::render_review_output_text;
+use crate::review_persistence::AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY;
 use crate::review_persistence::ReviewPersistenceContext;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -85,7 +88,15 @@ impl SessionTask for ReviewTask {
             .is_none_or(ReviewPersistenceContext::is_manual);
         if let Some(persistence) = self.persistence.clone() {
             let codex_home = session.codex_home().await;
-            persistence.save_cancelled(codex_home);
+            if persistence.save_cancelled(codex_home) {
+                send_background_auto_review_status(
+                    session.clone_session(),
+                    &persistence,
+                    BackgroundAutoReviewStatus::Cancelled,
+                    Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+                )
+                .await;
+            }
         }
         if should_exit_review_mode {
             exit_review_mode(session.clone_session(), /*review_output*/ None, ctx).await;
@@ -116,7 +127,15 @@ async fn run_review_task(
 
     if let Some(persistence) = persistence.as_ref() {
         let codex_home = session.codex_home().await;
-        persistence.save_running(codex_home);
+        if persistence.save_running(codex_home) {
+            send_background_auto_review_status(
+                session.clone_session(),
+                persistence,
+                BackgroundAutoReviewStatus::Running,
+                None,
+            )
+            .await;
+        }
     }
 
     // Start sub-codex conversation and get the receiver for events.
@@ -141,17 +160,61 @@ async fn run_review_task(
     if let Some(persistence) = persistence {
         let codex_home = session.codex_home().await;
         if cancelled {
-            persistence.save_cancelled(codex_home);
+            if persistence.save_cancelled(codex_home) {
+                send_background_auto_review_status(
+                    session.clone_session(),
+                    &persistence,
+                    BackgroundAutoReviewStatus::Cancelled,
+                    Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+                )
+                .await;
+            }
         } else if let Some(output) = output.as_ref() {
-            persistence.save_completed(codex_home, output);
+            if persistence.save_completed(codex_home, output) {
+                send_background_auto_review_status(
+                    session.clone_session(),
+                    &persistence,
+                    BackgroundAutoReviewStatus::Completed,
+                    None,
+                )
+                .await;
+            }
         } else {
-            persistence.save_failed(
-                codex_home,
-                "review ended without producing review output".to_string(),
-            );
+            let error_summary = "review ended without producing review output".to_string();
+            if persistence.save_failed(codex_home, error_summary.clone()) {
+                send_background_auto_review_status(
+                    session.clone_session(),
+                    &persistence,
+                    BackgroundAutoReviewStatus::Failed,
+                    Some(error_summary),
+                )
+                .await;
+            }
         }
     }
     None
+}
+
+async fn send_background_auto_review_status(
+    session: Arc<Session>,
+    persistence: &ReviewPersistenceContext,
+    status: BackgroundAutoReviewStatus,
+    error_summary: Option<String>,
+) {
+    if !persistence.is_background() {
+        return;
+    }
+    session
+        .send_event_raw(Event {
+            id: persistence.run_id().to_string(),
+            msg: EventMsg::BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent {
+                run_id: persistence.run_id().to_string(),
+                status,
+                review_target: persistence.review_target().clone(),
+                error_summary,
+            }),
+        })
+        .await;
 }
 
 async fn start_review_conversation(

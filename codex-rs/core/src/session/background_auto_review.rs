@@ -2,6 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codex_git_utils::get_worktree_diff_fingerprint;
+use codex_protocol::protocol::BackgroundAutoReviewStatus;
+use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
@@ -13,6 +17,7 @@ use super::review::prepare_review_thread;
 use super::review::spawn_detached_review_thread;
 use super::session::Session;
 use super::turn_context::TurnContext;
+use crate::review_persistence::AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY;
 use crate::review_prompts::resolve_review_request;
 use crate::state::BackgroundAutoReviewRunningHandle;
 
@@ -201,7 +206,18 @@ impl Session {
             return;
         };
         let codex_home = self.codex_home().await;
-        running_review.persistence.save_cancelled(codex_home);
+        if running_review.persistence.save_cancelled(codex_home) {
+            self.send_event_raw(Event {
+                id: running_review.persistence.run_id().to_string(),
+                msg: EventMsg::BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent {
+                    run_id: running_review.persistence.run_id().to_string(),
+                    status: BackgroundAutoReviewStatus::Cancelled,
+                    review_target: running_review.persistence.review_target().clone(),
+                    error_summary: Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+                }),
+            })
+            .await;
+        }
         let completion = running_review.completion;
         if completion.is_done() {
             return;
