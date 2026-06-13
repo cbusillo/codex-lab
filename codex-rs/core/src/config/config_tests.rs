@@ -6634,6 +6634,7 @@ fn config_toml_deserializes_auto_review_policy() {
         r#"
 [auto_review]
 policy = "Use the user-configured guardian policy."
+background_max_diff_bytes = 64000
 "#,
     )
     .expect("TOML deserialization should succeed");
@@ -6644,6 +6645,53 @@ policy = "Use the user-configured guardian policy."
             .and_then(|auto_review| auto_review.policy.as_deref()),
         Some("Use the user-configured guardian policy.")
     );
+    assert_eq!(
+        cfg.auto_review
+            .as_ref()
+            .and_then(|auto_review| auto_review.background_max_diff_bytes),
+        Some(64000)
+    );
+}
+
+#[tokio::test]
+async fn load_config_sets_background_auto_review_diff_limit() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let default_config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+    assert_eq!(
+        default_config.background_auto_review_max_diff_bytes,
+        Some(crate::config::DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES)
+    );
+
+    let configured = ConfigToml {
+        auto_review: Some(AutoReviewToml {
+            policy: None,
+            background_max_diff_bytes: Some(64_000),
+        }),
+        ..Default::default()
+    };
+    let configured_config = Config::load_from_base_config_with_overrides(
+        configured,
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+    assert_eq!(
+        configured_config.background_auto_review_max_diff_bytes,
+        Some(64_000)
+    );
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -6652,6 +6700,7 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
+            background_max_diff_bytes: None,
         }),
         ..Default::default()
     };
@@ -6689,6 +6738,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("Use the user-configured guardian policy.".to_string()),
+            background_max_diff_bytes: None,
         }),
         ..Default::default()
     };
@@ -6719,6 +6769,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("   ".to_string()),
+            background_max_diff_bytes: None,
         }),
         ..Default::default()
     };

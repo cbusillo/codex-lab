@@ -338,6 +338,12 @@
     },
     "AutoReviewToml": {
       "properties": {
+        "background_max_diff_bytes": {
+          "description": "Maximum diff size in bytes for automatic background reviews. Defaults to 120000. Reviews whose diff exceeds this limit are recorded as skipped rather than launched.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"

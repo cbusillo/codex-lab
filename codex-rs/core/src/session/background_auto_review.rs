@@ -1,11 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use codex_git_utils::get_worktree_diff_byte_count;
 use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::protocol::BackgroundAutoReviewStatus;
-use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
-use codex_protocol::protocol::Event;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
@@ -14,10 +12,12 @@ use tracing::debug;
 use tracing::warn;
 
 use super::review::prepare_review_thread;
+use super::review::record_background_review_status;
 use super::review::spawn_detached_review_thread;
 use super::session::Session;
 use super::turn_context::TurnContext;
 use crate::review_persistence::AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY;
+use crate::review_persistence::ReviewPersistenceContext;
 use crate::review_prompts::resolve_review_request;
 use crate::state::BackgroundAutoReviewRunningHandle;
 
@@ -149,6 +149,44 @@ impl Session {
                 return;
             }
         };
+        if let Some(max_diff_bytes) = turn_context.config.background_auto_review_max_diff_bytes {
+            let diff_byte_count = get_worktree_diff_byte_count(cwd.as_ref()).await;
+            if diff_byte_count.is_none_or(|diff_bytes| diff_bytes > max_diff_bytes) {
+                let error_summary = match diff_byte_count {
+                    Some(diff_bytes) => format!(
+                        "diff exceeds background review size limit: {diff_bytes} bytes > \
+                         {max_diff_bytes} bytes"
+                    ),
+                    None => "failed to measure diff size for background review".to_string(),
+                };
+                debug!(%error_summary, "background auto review skipped: oversized diff");
+                let model = turn_context
+                    .config
+                    .review_model
+                    .clone()
+                    .unwrap_or_else(|| turn_context.model_info.slug.clone());
+                let persistence = ReviewPersistenceContext::new(
+                    sub_id,
+                    ReviewPersistence::BackgroundAutoReview,
+                    resolved.target.clone(),
+                    cwd.as_ref(),
+                    Some(model),
+                )
+                .await;
+                let codex_home = self.codex_home().await;
+                if persistence.save_skipped(codex_home, error_summary.clone()) {
+                    record_background_review_status(
+                        Arc::clone(self),
+                        &persistence,
+                        BackgroundAutoReviewStatus::Skipped,
+                        error_summary,
+                    )
+                    .await;
+                }
+                return;
+            }
+        }
+
         let prepared = prepare_review_thread(
             Arc::clone(self),
             Arc::clone(&turn_context.config),
@@ -162,24 +200,44 @@ impl Session {
             debug!("background auto review skipped after prepare: missing persistence context");
             return;
         };
-        let Some(running_review) = self
-            .record_started_background_auto_review(generation, &fingerprint, persistence)
-            .await
-        else {
-            debug!("background auto review skipped after prepare: schedule superseded");
-            return;
-        };
         if self.input_queue.has_trigger_turn_mailbox_items().await
             || self.active_turn.lock().await.is_some()
         {
             debug!(
                 "background auto review skipped after prepare: foreground work pending or active"
             );
-            running_review.cancellation_token.cancel();
-            self.clear_background_auto_review(generation).await;
-            running_review.completion.mark_done();
+            let error_summary =
+                "foreground work became active before background auto review could start"
+                    .to_string();
+            if persistence.save_skipped(self.codex_home().await, error_summary.clone()) {
+                record_background_review_status(
+                    Arc::clone(self),
+                    &persistence,
+                    BackgroundAutoReviewStatus::Skipped,
+                    error_summary,
+                )
+                .await;
+            }
             return;
         }
+        let Some(running_review) = self
+            .record_started_background_auto_review(generation, &fingerprint, persistence.clone())
+            .await
+        else {
+            let error_summary =
+                "background auto review schedule was superseded before start".to_string();
+            if persistence.save_skipped(self.codex_home().await, error_summary.clone()) {
+                record_background_review_status(
+                    Arc::clone(self),
+                    &persistence,
+                    BackgroundAutoReviewStatus::Skipped,
+                    error_summary,
+                )
+                .await;
+            }
+            debug!("background auto review skipped after prepare: schedule superseded");
+            return;
+        };
         spawn_detached_review_thread(Arc::clone(self), prepared, running_review, generation);
     }
 
@@ -207,15 +265,12 @@ impl Session {
         };
         let codex_home = self.codex_home().await;
         if running_review.persistence.save_cancelled(codex_home) {
-            self.send_event_raw(Event {
-                id: running_review.persistence.run_id().to_string(),
-                msg: EventMsg::BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent {
-                    run_id: running_review.persistence.run_id().to_string(),
-                    status: BackgroundAutoReviewStatus::Cancelled,
-                    review_target: running_review.persistence.review_target().clone(),
-                    error_summary: Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
-                }),
-            })
+            record_background_review_status(
+                Arc::clone(self),
+                &running_review.persistence,
+                BackgroundAutoReviewStatus::Cancelled,
+                AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+            )
             .await;
         }
         let completion = running_review.completion;

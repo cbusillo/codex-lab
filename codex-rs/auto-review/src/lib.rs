@@ -152,6 +152,7 @@ pub enum AutoReviewRunStatus {
     Completed,
     Failed,
     Cancelled,
+    Skipped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
