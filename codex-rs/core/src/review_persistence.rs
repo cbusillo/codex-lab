@@ -104,11 +104,22 @@ impl ReviewPersistenceContext {
     }
 
     pub(crate) fn save_cancelled(&self, codex_home: impl AsRef<Path>) -> bool {
+        self.save_cancelled_with_summary(
+            codex_home,
+            AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+        )
+    }
+
+    pub(crate) fn save_cancelled_with_summary(
+        &self,
+        codex_home: impl AsRef<Path>,
+        error_summary: String,
+    ) -> bool {
         self.save_run(
             codex_home,
             AutoReviewRunStatus::Cancelled,
             /*output*/ None,
-            Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+            Some(error_summary),
         )
     }
 
@@ -274,6 +285,35 @@ mod tests {
             .load_run("late-running")
             .expect("load persisted review run");
         assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn save_cancelled_with_summary_records_custom_reason() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "custom-cancelled".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            cwd.path(),
+            Some("test-model".to_string()),
+        )
+        .await;
+
+        persistence.save_cancelled_with_summary(
+            codex_home.path(),
+            "background auto review was cancelled by request".to_string(),
+        );
+
+        let store = AutoReviewStore::new(codex_home.path());
+        let run = store
+            .load_run("custom-cancelled")
+            .expect("load persisted review run");
+        assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+        assert_eq!(
+            run.error_summary.as_deref(),
+            Some("background auto review was cancelled by request")
+        );
     }
 
     #[tokio::test]

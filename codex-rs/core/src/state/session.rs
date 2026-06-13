@@ -116,6 +116,12 @@ pub(crate) struct BackgroundAutoReviewCancellation {
     pub(crate) running_review: Option<BackgroundAutoReviewRunningHandle>,
 }
 
+#[derive(Debug)]
+pub(crate) enum BackgroundAutoReviewControlledRun {
+    Pending(BackgroundAutoReviewPendingHandle),
+    Running(BackgroundAutoReviewRunningHandle),
+}
+
 impl BackgroundAutoReviewSchedulerState {
     pub(crate) fn begin_regular_turn(&mut self, turn_id: String) {
         self.active_regular_turns
@@ -235,6 +241,36 @@ impl BackgroundAutoReviewSchedulerState {
 
     pub(crate) fn take_running_review(&mut self) -> Option<BackgroundAutoReviewRunningHandle> {
         self.running_review.take().map(running_review_handle)
+    }
+
+    pub(crate) fn take_review_by_run_id(
+        &mut self,
+        run_id: &str,
+    ) -> Option<BackgroundAutoReviewControlledRun> {
+        if self
+            .pending_review
+            .as_ref()
+            .is_some_and(|pending_review| pending_review.persistence.run_id() == run_id)
+        {
+            self.generation = self.generation.saturating_add(1);
+            return self.pending_review.take().map(|pending_review| {
+                BackgroundAutoReviewControlledRun::Pending(BackgroundAutoReviewPendingHandle {
+                    persistence: pending_review.persistence,
+                })
+            });
+        }
+
+        if self
+            .running_review
+            .as_ref()
+            .is_some_and(|running_review| running_review.persistence.run_id() == run_id)
+        {
+            return self
+                .take_running_review()
+                .map(BackgroundAutoReviewControlledRun::Running);
+        }
+
+        None
     }
 
     pub(crate) fn cancel_pending_and_take_reviews(&mut self) -> BackgroundAutoReviewCancellation {

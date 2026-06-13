@@ -588,6 +588,13 @@ pub enum Op {
         persistence: Option<ReviewPersistence>,
     },
 
+    /// Control a scheduler-owned background auto-review run.
+    BackgroundAutoReviewControl {
+        run_id: String,
+        action: BackgroundAutoReviewControlAction,
+        reason: BackgroundAutoReviewControlReason,
+    },
+
     /// Record that the user approved one retry of a concrete Guardian-denied action.
     ApproveGuardianDeniedAction { event: GuardianAssessmentEvent },
 
@@ -610,6 +617,24 @@ pub enum Op {
 pub enum ThreadMemoryMode {
     Enabled,
     Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BackgroundAutoReviewControlAction {
+    Cancel,
+    Supersede,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+#[ts(tag = "reason", rename_all = "snake_case")]
+pub enum BackgroundAutoReviewControlReason {
+    UserRequested,
+    SupersededByRun { run_id: String },
+    ForegroundWorkStarted,
+    ThreadClosing,
 }
 
 impl From<Vec<UserInput>> for Op {
@@ -735,6 +760,7 @@ impl Op {
             Self::SetThreadMemoryMode { .. } => "set_thread_memory_mode",
             Self::ThreadRollback { .. } => "thread_rollback",
             Self::Review { .. } => "review",
+            Self::BackgroundAutoReviewControl { .. } => "background_auto_review_control",
             Self::ApproveGuardianDeniedAction { .. } => "approve_guardian_denied_action",
             Self::Shutdown => "shutdown",
             Self::RunUserShellCommand { .. } => "run_user_shell_command",
@@ -3014,6 +3040,7 @@ pub enum ReviewPersistence {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub enum BackgroundAutoReviewStatus {
     Pending,
     Running,
