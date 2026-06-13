@@ -2,6 +2,17 @@ use super::*;
 use codex_core_skills::HostLoadedSkills;
 use codex_protocol::openai_models::ToolMode;
 use std::sync::atomic::AtomicBool;
+use tokio_util::sync::CancellationToken;
+
+use crate::tasks::SessionTask;
+use crate::tasks::SessionTaskContext;
+
+pub(super) struct PreparedReviewThread {
+    pub(super) turn_context: Arc<TurnContext>,
+    pub(super) input: Vec<TurnInput>,
+    pub(super) task: ReviewTask,
+    manual_review_request: Option<ReviewRequest>,
+}
 
 /// Spawn a review thread using the given prompt.
 pub(super) async fn spawn_review_thread(
@@ -12,6 +23,40 @@ pub(super) async fn spawn_review_thread(
     resolved: crate::review_prompts::ResolvedReviewRequest,
     persistence: Option<ReviewPersistence>,
 ) {
+    let prepared = prepare_review_thread(
+        Arc::clone(&sess),
+        config,
+        parent_turn_context,
+        sub_id,
+        resolved,
+        persistence,
+    )
+    .await;
+
+    let manual_review_request = prepared.manual_review_request.clone();
+    sess.spawn_task(
+        Arc::clone(&prepared.turn_context),
+        prepared.input,
+        prepared.task,
+    )
+    .await;
+    if let Some(review_request) = manual_review_request {
+        sess.send_event(
+            prepared.turn_context.as_ref(),
+            EventMsg::EnteredReviewMode(review_request),
+        )
+        .await;
+    }
+}
+
+pub(super) async fn prepare_review_thread(
+    sess: Arc<Session>,
+    config: Arc<Config>,
+    parent_turn_context: Arc<TurnContext>,
+    sub_id: String,
+    resolved: crate::review_prompts::ResolvedReviewRequest,
+    persistence: Option<ReviewPersistence>,
+) -> PreparedReviewThread {
     let model = config
         .review_model
         .clone()
@@ -175,16 +220,14 @@ pub(super) async fn spawn_review_thread(
     // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
     let should_emit_review_mode =
         persistence.is_none_or(|mode| matches!(mode, ReviewPersistence::ManualAutoReview));
-    if should_emit_review_mode {
-        // Announce entering review mode before spawning the task so lifecycle
-        // events cannot be inverted by a fast review failure or completion.
-        let review_request = ReviewRequest {
+    let manual_review_request = if should_emit_review_mode {
+        Some(ReviewRequest {
             target: resolved.target.clone(),
             user_facing_hint: Some(resolved.user_facing_hint.clone()),
-        };
-        sess.send_event(&tc, EventMsg::EnteredReviewMode(review_request))
-            .await;
-    }
+        })
+    } else {
+        None
+    };
     if let Some(persistence) = persistence {
         let target_cwd = tc
             .environments
@@ -199,9 +242,39 @@ pub(super) async fn spawn_review_thread(
             Some(model),
         )
         .await;
-        sess.spawn_task(tc.clone(), input, ReviewTask::with_persistence(persistence))
-            .await;
+        PreparedReviewThread {
+            turn_context: tc,
+            input,
+            task: ReviewTask::with_persistence(persistence),
+            manual_review_request,
+        }
     } else {
-        sess.spawn_task(tc.clone(), input, ReviewTask::new()).await;
+        PreparedReviewThread {
+            turn_context: tc,
+            input,
+            task: ReviewTask::new(),
+            manual_review_request,
+        }
     }
+}
+
+pub(super) fn spawn_detached_review_thread(
+    sess: Arc<Session>,
+    prepared: PreparedReviewThread,
+    cancellation_token: CancellationToken,
+    generation: u64,
+) {
+    let turn_extension_data = Arc::clone(&prepared.turn_context.extension_data);
+    let session_ctx = Arc::new(SessionTaskContext::new(
+        Arc::clone(&sess),
+        turn_extension_data,
+    ));
+    let task = Arc::new(prepared.task);
+    let turn_context = prepared.turn_context;
+    let input = prepared.input;
+    tokio::spawn(async move {
+        task.run(session_ctx, turn_context, input, cancellation_token)
+            .await;
+        sess.clear_background_auto_review(generation).await;
+    });
 }
