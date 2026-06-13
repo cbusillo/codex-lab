@@ -46,6 +46,18 @@ class RunAllReportTest(unittest.TestCase):
                     "total_tokens": 23,
                 },
             },
+            "token-usage-report": {
+                "scenario": "token-usage-report",
+                "passed": True,
+                "returncode": 0,
+                "token_usage": {
+                    "input_tokens": 280,
+                    "cached_input_tokens": 160,
+                    "output_tokens": 55,
+                    "reasoning_output_tokens": 13,
+                    "total_tokens": 335,
+                },
+            },
         }
 
         def fake_run(command, **_kwargs):
@@ -80,15 +92,15 @@ class RunAllReportTest(unittest.TestCase):
         self.assertEqual(0, returncode)
         self.assertTrue(report["passed"])
         self.assertFalse(report["partial"])
-        self.assertEqual(5, report["scenario_total"])
+        self.assertEqual(6, report["scenario_total"])
         self.assertEqual("abc123", report["git_revision"])
         self.assertEqual(
             {
-                "input_tokens": 30,
-                "cached_input_tokens": 16,
-                "output_tokens": 5,
-                "reasoning_output_tokens": 1,
-                "total_tokens": 35,
+                "input_tokens": 310,
+                "cached_input_tokens": 176,
+                "output_tokens": 60,
+                "reasoning_output_tokens": 14,
+                "total_tokens": 370,
             },
             report["token_usage"],
         )

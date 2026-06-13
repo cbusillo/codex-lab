@@ -5,6 +5,10 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import unittest.mock
+from argparse import Namespace
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 
@@ -269,6 +273,51 @@ class HarnessSafetyTest(unittest.TestCase):
             self.assertEqual(paths.run_dir.parent, Path(tmp))
             self.assertIn("bad-name", paths.run_dir.name)
 
+    def test_run_scenario_resolves_relative_output_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scenario_path = Path(tmp) / "scenario.json"
+            output_root = Path(tmp) / "runs"
+            scenario_path.write_text(
+                json.dumps(
+                    {
+                        "name": "relative-output-root",
+                        "prompt": "hi",
+                        "responses_api": {"responses": [{}]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            paths = HARNESS.make_paths(output_root, "relative-output-root")
+            with unittest.mock.patch.object(HARNESS, "make_paths", return_value=paths) as make:
+                with unittest.mock.patch.object(HARNESS, "materialize_workspace"):
+                    with unittest.mock.patch.object(HARNESS, "save_config"):
+                        with unittest.mock.patch.object(
+                            HARNESS,
+                            "run_turns",
+                            return_value={
+                                "returncode": 0,
+                                "events": [],
+                                "event_types": {},
+                                "turns": [],
+                                "thread_id": None,
+                                "token_usage": HARNESS.empty_token_usage(),
+                            },
+                        ):
+                            with unittest.mock.patch.object(
+                                HARNESS, "evaluate_expectations", return_value=[]
+                            ):
+                                with redirect_stdout(StringIO()):
+                                    HARNESS.run_scenario(
+                                        Namespace(
+                                            scenario=str(scenario_path),
+                                            codex_bin="/tmp/codex",
+                                            output_root="relative-runs",
+                                        )
+                                    )
+
+            self.assertTrue(make.call_args.args[0].is_absolute())
+
     def test_materialize_workspace_rejects_escaping_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = HARNESS.make_paths(Path(tmp), "escape")
@@ -364,6 +413,13 @@ class HarnessSafetyTest(unittest.TestCase):
         failures = HARNESS.evaluate_expectations(
             {
                 "expect": {
+                    "token_usage": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 75,
+                        "output_tokens": 10,
+                        "reasoning_output_tokens": 0,
+                        "total_tokens": 110,
+                    },
                     "turns": [
                         {
                             "token_usage": {
@@ -380,6 +436,13 @@ class HarnessSafetyTest(unittest.TestCase):
                 "returncode": 0,
                 "events": [],
                 "event_types": {},
+                "token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 75,
+                    "output_tokens": 10,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 110,
+                },
                 "turns": [
                     {
                         "token_usage": {
@@ -437,6 +500,68 @@ class HarnessSafetyTest(unittest.TestCase):
                 "turn 0.token_usage: expected cached_input_tokens >= 80, found 50",
                 "turn 0.token_usage: expected cache_ratio >= 0.5, found 0.250",
             ],
+            failures,
+        )
+
+    def test_token_usage_snapshot_expectations_are_evaluated(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "turns": [
+                        {
+                            "token_usage_snapshot": {
+                                "input_tokens": 12,
+                                "cached_input_tokens": 4,
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "returncode": 0,
+                "events": [],
+                "event_types": {},
+                "turns": [
+                    {
+                        "token_usage_snapshot": {
+                            "input_tokens": 7,
+                            "cached_input_tokens": 4,
+                            "output_tokens": 1,
+                            "reasoning_output_tokens": 0,
+                            "total_tokens": 8,
+                        }
+                    }
+                ],
+            },
+            [],
+        )
+
+        self.assertEqual(
+            ["turn 0.token_usage_snapshot: expected input_tokens 12, found 7"],
+            failures,
+        )
+
+    def test_aggregate_token_usage_expectations_are_evaluated(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            {"expect": {"token_usage": {"total_tokens": 99}}},
+            {
+                "returncode": 0,
+                "events": [],
+                "event_types": {},
+                "token_usage": {
+                    "input_tokens": 10,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 11,
+                },
+                "turns": [],
+            },
+            [],
+        )
+
+        self.assertEqual(
+            ["token_usage: expected total_tokens 99, found 11"],
             failures,
         )
 

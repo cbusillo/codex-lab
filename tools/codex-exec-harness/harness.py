@@ -911,6 +911,15 @@ def evaluate_expectations(
                 f"expected event type {event_type!r} {expected} times, found {actual}"
             )
 
+    token_usage_assertion = expect.get("token_usage")
+    if token_usage_assertion is not None:
+        add_token_usage_assertion_failures(
+            failures,
+            run.get("token_usage"),
+            token_usage_assertion,
+            "token_usage",
+        )
+
     turn_assertions = expect.get("turns", [])
     if not isinstance(turn_assertions, list):
         raise HarnessError("expect.turns must be a list")
@@ -939,6 +948,14 @@ def evaluate_expectations(
                 actual_turn.get("token_usage"),
                 token_usage_assertion,
                 f"turn {index}.token_usage",
+            )
+        token_usage_snapshot_assertion = assertion.get("token_usage_snapshot")
+        if token_usage_snapshot_assertion is not None:
+            add_token_usage_assertion_failures(
+                failures,
+                actual_turn.get("token_usage_snapshot"),
+                token_usage_snapshot_assertion,
+                f"turn {index}.token_usage_snapshot",
             )
         turn_event_types = assertion.get("event_types", {})
         if not isinstance(turn_event_types, dict):
@@ -991,7 +1008,7 @@ def run_scenario(args: argparse.Namespace) -> int:
     if not codex_bin:
         raise HarnessError("codex binary not found; pass --codex-bin")
 
-    paths = make_paths(Path(args.output_root), name)
+    paths = make_paths(Path(args.output_root).resolve(), name)
     paths.artifacts.mkdir(parents=True, exist_ok=True)
     materialize_workspace(scenario, paths)
 
