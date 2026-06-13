@@ -80,10 +80,10 @@ impl AutoReviewRun {
         active_target: &AutoReviewRunTarget,
         active_review_target: &ReviewTarget,
     ) -> Vec<&'a AutoReviewFindingRecord> {
-        if self.review_target != *active_review_target {
+        if !review_target_matches(&self.review_target, active_review_target) {
             return Vec::new();
         }
-        if self.freshness(active_target) != AutoReviewFreshness::Current {
+        if !self.is_current_for(active_target, active_review_target) {
             return Vec::new();
         }
         self.findings.iter().collect()
@@ -91,6 +91,17 @@ impl AutoReviewRun {
 
     pub fn freshness(&self, active_target: &AutoReviewRunTarget) -> AutoReviewFreshness {
         self.target.freshness(active_target)
+    }
+
+    fn is_current_for(
+        &self,
+        active_target: &AutoReviewRunTarget,
+        active_review_target: &ReviewTarget,
+    ) -> bool {
+        match active_review_target {
+            ReviewTarget::Commit { sha, .. } => active_target.head_sha.as_deref() == Some(sha),
+            _ => self.freshness(active_target) == AutoReviewFreshness::Current,
+        }
     }
 
     pub fn summary(
@@ -216,6 +227,20 @@ pub struct AutoReviewDetail {
     pub max_bytes: usize,
     pub truncated: bool,
     pub content: String,
+}
+
+fn review_target_matches(stored: &ReviewTarget, active: &ReviewTarget) -> bool {
+    match (stored, active) {
+        (
+            ReviewTarget::Commit {
+                sha: stored_sha, ..
+            },
+            ReviewTarget::Commit {
+                sha: active_sha, ..
+            },
+        ) => stored_sha == active_sha,
+        _ => stored == active,
+    }
 }
 
 fn render_summary(findings: Vec<&AutoReviewFindingRecord>) -> AutoReviewSummary {

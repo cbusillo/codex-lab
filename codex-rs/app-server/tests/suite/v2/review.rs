@@ -26,6 +26,9 @@ use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_auto_review::AutoReviewRunSource;
+use codex_auto_review::AutoReviewRunStatus;
+use codex_auto_review::AutoReviewStore;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -367,6 +370,30 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
         serde_json::from_value(notification.params.expect("params must be present"))?;
     assert_eq!(started.thread.id, review_thread_id);
     assert_eq!(started.thread.session_id, review_thread_id);
+
+    let _completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let runs_dir = codex_home.path().join("auto-review/runs");
+    let mut runs = std::fs::read_dir(&runs_dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+    assert_eq!(runs.len(), 1, "expected detached review to persist one run");
+    let run_id = runs
+        .pop()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .expect("run file stem");
+    let run = AutoReviewStore::new(codex_home.path()).load_run(&run_id)?;
+    assert_eq!(run.status, AutoReviewRunStatus::Completed);
+    assert_eq!(run.source, AutoReviewRunSource::Manual);
+    assert_eq!(run.run_id, turn.id);
+    assert_eq!(run.findings.len(), 0);
 
     Ok(())
 }

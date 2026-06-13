@@ -1,6 +1,7 @@
 use super::*;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
+use codex_protocol::protocol::ReviewPersistence;
 
 #[derive(Clone)]
 pub(crate) struct TurnRequestProcessor {
@@ -1013,7 +1014,10 @@ impl TurnRequestProcessor {
             .submit_core_op(
                 request_id,
                 parent_thread.as_ref(),
-                Op::Review { review_request },
+                Op::Review {
+                    review_request,
+                    persistence: None,
+                },
             )
             .await
             .map_err(|err| internal_error(format!("failed to start review: {err}")))?;
@@ -1119,7 +1123,10 @@ impl TurnRequestProcessor {
             .submit_core_op(
                 request_id,
                 review_thread.as_ref(),
-                Op::Review { review_request },
+                Op::Review {
+                    review_request,
+                    persistence: Some(ReviewPersistence::ManualAutoReview),
+                },
             )
             .await
             .map_err(|err| {

@@ -583,7 +583,10 @@ pub enum Op {
     ThreadRollback { num_turns: u32 },
 
     /// Request a code review from the agent.
-    Review { review_request: ReviewRequest },
+    Review {
+        review_request: ReviewRequest,
+        persistence: Option<ReviewPersistence>,
+    },
 
     /// Record that the user approved one retry of a concrete Guardian-denied action.
     ApproveGuardianDeniedAction { event: GuardianAssessmentEvent },
@@ -2997,6 +3000,12 @@ pub struct GitInfo {
 pub enum ReviewDelivery {
     Inline,
     Detached,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPersistence {
+    ManualAutoReview,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
