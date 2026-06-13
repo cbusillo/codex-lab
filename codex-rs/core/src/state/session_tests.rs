@@ -1,8 +1,11 @@
 use super::*;
+use crate::review_persistence::ReviewPersistenceContext;
 use crate::session::tests::make_session_configuration_for_tests;
 use crate::state::AutoCompactWindowSnapshot;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::ReviewPersistence;
+use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SpendControlLimitSnapshot;
 use pretty_assertions::assert_eq;
 
@@ -67,13 +70,76 @@ fn background_auto_review_running_review_can_be_cancelled_and_cleared() {
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
+    let (persistence, _cwd) = test_background_review_persistence("running-review");
     let token = state
-        .record_started(schedule.generation, &schedule.fingerprint)
+        .record_started(schedule.generation, &schedule.fingerprint, persistence)
         .expect("current schedule should start");
 
-    state.cancel_running_review();
-    assert!(token.is_cancelled());
-    state.clear_running_review(schedule.generation);
+    let running = state
+        .take_running_review()
+        .expect("running review should be tracked");
+    running.cancellation_token.cancel();
+    assert!(token.cancellation_token.is_cancelled());
+
+    assert!(state.take_running_review().is_none());
+}
+
+#[test]
+fn background_auto_review_cancel_invalidates_pending_schedule() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-pending".to_string());
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+    let schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed dirty fingerprint should schedule review");
+
+    assert!(state.is_current_schedule(schedule.generation, &schedule.fingerprint));
+    assert!(state.cancel_pending_and_take_running_review().is_none());
+
+    assert!(!state.is_current_schedule(schedule.generation, &schedule.fingerprint));
+    assert_eq!(
+        state.complete_regular_turn("turn-pending", Some("sha256:late".to_string())),
+        None
+    );
+}
+
+#[test]
+fn background_auto_review_clear_running_review_honors_generation() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string());
+    state.update_regular_turn_start_fingerprint("turn-1", None);
+    let first_schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed dirty fingerprint should schedule review");
+    let (persistence, _cwd) = test_background_review_persistence("clear-running-review");
+    let first_token = state
+        .record_started(
+            first_schedule.generation,
+            &first_schedule.fingerprint,
+            persistence,
+        )
+        .expect("current schedule should start");
+
+    state.clear_running_review(first_schedule.generation + 1);
+
+    state.begin_regular_turn("turn-2".to_string());
+    state.update_regular_turn_start_fingerprint("turn-2", Some("sha256:new".to_string()));
+    let second_schedule = state
+        .complete_regular_turn("turn-2", Some("sha256:newer".to_string()))
+        .expect("changed dirty fingerprint should schedule newer review");
+
+    let (persistence, _cwd) = test_background_review_persistence("clear-running-review-newer");
+    state
+        .record_started(
+            second_schedule.generation,
+            &second_schedule.fingerprint,
+            persistence,
+        )
+        .expect("newer schedule should start after mismatched clear");
+    assert!(first_token.cancellation_token.is_cancelled());
+    state.clear_running_review(second_schedule.generation);
+    assert!(state.take_running_review().is_none());
 }
 
 #[test]
@@ -90,14 +156,16 @@ fn background_auto_review_duplicate_check_starts_after_review_starts() {
     let second = state.complete_regular_turn("turn-2", Some("sha256:new".to_string()));
 
     let second = second.expect("abandoned schedule should not suppress same fingerprint");
+    let (first_persistence, _first_cwd) = test_background_review_persistence("first-started");
     assert!(
         state
-            .record_started(first.generation, &first.fingerprint)
+            .record_started(first.generation, &first.fingerprint, first_persistence)
             .is_none()
     );
+    let (second_persistence, _second_cwd) = test_background_review_persistence("second-started");
     assert!(
         state
-            .record_started(second.generation, &second.fingerprint)
+            .record_started(second.generation, &second.fingerprint, second_persistence)
             .is_some()
     );
 }
@@ -121,9 +189,10 @@ fn background_auto_review_skips_duplicate_fingerprint() {
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
+    let (persistence, _cwd) = test_background_review_persistence("duplicate-started");
     assert!(
         state
-            .record_started(schedule.generation, &schedule.fingerprint)
+            .record_started(schedule.generation, &schedule.fingerprint, persistence)
             .is_some()
     );
     state.begin_regular_turn("turn-2".to_string());
@@ -132,6 +201,24 @@ fn background_auto_review_skips_duplicate_fingerprint() {
     let schedule = state.complete_regular_turn("turn-2", Some("sha256:new".to_string()));
 
     assert_eq!(schedule, None);
+}
+
+fn test_background_review_persistence(
+    run_id: &str,
+) -> (ReviewPersistenceContext, tempfile::TempDir) {
+    let cwd = tempfile::TempDir::new().expect("create temp cwd");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+    let persistence = runtime.block_on(ReviewPersistenceContext::new(
+        run_id.to_string(),
+        ReviewPersistence::BackgroundAutoReview,
+        ReviewTarget::UncommittedChanges,
+        cwd.path(),
+        Some("test-model".to_string()),
+    ));
+    (persistence, cwd)
 }
 
 #[test]

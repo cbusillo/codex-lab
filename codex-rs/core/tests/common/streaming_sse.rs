@@ -44,6 +44,26 @@ impl StreamingSseServer {
         }
     }
 
+    pub async fn assert_request_count_stays(&self, count: usize, duration: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + duration;
+        loop {
+            let notified = self.request_notify.notified();
+            let request_count = self.requests.lock().await.len();
+            assert_eq!(
+                request_count, count,
+                "unexpected streaming SSE request count"
+            );
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return;
+            }
+        }
+    }
+
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(());
         let _ = self.task.await;

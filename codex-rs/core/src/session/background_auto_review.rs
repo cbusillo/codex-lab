@@ -193,7 +193,9 @@ impl Session {
     pub(crate) async fn cancel_background_auto_review(self: &Arc<Self>) {
         let running_review = {
             let mut state = self.state.lock().await;
-            state.background_auto_review.take_running_review()
+            state
+                .background_auto_review
+                .cancel_pending_and_take_running_review()
         };
         let Some(running_review) = running_review else {
             return;

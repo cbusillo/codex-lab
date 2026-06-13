@@ -5,6 +5,7 @@ use codex_core::CodexThread;
 use codex_core::REVIEW_PROMPT;
 use codex_core::config::Config;
 use codex_core::review_format::render_review_output_text;
+use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
@@ -38,6 +39,7 @@ use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -780,6 +782,247 @@ async fn automatic_background_review_shutdown_persists_cancelled_run() -> anyhow
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_shutdown_cancels_pending_debounce() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let call_id = "auto-bg-shutdown-before-debounce";
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_shutdown_pending.txt\n+pending shutdown\n*** End Patch";
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call(call_id, patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let background_review = vec![StreamingSseChunk {
+        gate: None,
+        body: streaming_sse_event(responses::ev_completed("resp-3")),
+    }];
+    let (server, _completions) = start_streaming_sse_server(vec![
+        foreground_tool,
+        foreground_complete,
+        background_review,
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file to review").await?;
+    server.wait_for_request_count(2).await;
+
+    test.codex.submit(Op::Shutdown {}).await?;
+    let _shutdown =
+        wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
+    server
+        .assert_request_count_stays(2, Duration::from_millis(2500))
+        .await;
+    assert_eq!(load_auto_review_runs(codex_home.path())?.len(), 0);
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_suppresses_unchanged_dirty_diff() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let review_json = serde_json::json!({
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "Initial background review completed.",
+        "overall_confidence_score": 0.9
+    })
+    .to_string();
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_once.txt\n+review once\n*** End Patch";
+    let (gate_second_completed_tx, gate_second_completed_rx) = oneshot::channel();
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call("auto-bg-once", patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let background_review = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(assistant_message_sse(&review_json)),
+    }];
+    let unchanged_foreground = vec![StreamingSseChunk {
+        gate: Some(gate_second_completed_rx),
+        body: responses::sse(vec![
+            ev_assistant_message("msg-2", "no further changes"),
+            ev_completed("resp-4"),
+        ]),
+    }];
+    let (server, _completions) = start_streaming_sse_server(vec![
+        foreground_tool,
+        foreground_complete,
+        background_review,
+        unchanged_foreground,
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file to review").await?;
+    let first_run = wait_for_background_auto_review_run_without_review_mode_events(
+        test.codex.as_ref(),
+        codex_home.path(),
+    )
+    .await;
+    assert_eq!(first_run.status, AutoReviewRunStatus::Completed);
+    assert_eq!(
+        first_run.target.worktree_diff_fingerprint,
+        Some(expected_worktree_diff_fingerprint(test.cwd_path()).await)
+    );
+
+    let second_turn = test.submit_turn("respond without changing files");
+    tokio::pin!(second_turn);
+    tokio::select! {
+        result = &mut second_turn => panic!("second turn completed before gate: {result:?}"),
+        _ = server.wait_for_request_count(4) => {}
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _ = gate_second_completed_tx.send(());
+    second_turn.await?;
+    server
+        .assert_request_count_stays(4, Duration::from_millis(2500))
+        .await;
+    assert_eq!(load_auto_review_runs(codex_home.path())?.len(), 1);
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_debounce_ignores_superseded_diff() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let review_json = serde_json::json!({
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "Superseded background review completed once.",
+        "overall_confidence_score": 0.9
+    })
+    .to_string();
+    let first_patch =
+        "*** Begin Patch\n*** Add File: auto_background_review_first.txt\n+first\n*** End Patch";
+    let second_patch =
+        "*** Begin Patch\n*** Add File: auto_background_review_second.txt\n+second\n*** End Patch";
+    let (gate_second_patch_tx, gate_second_patch_rx) = oneshot::channel();
+    let first_foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call("auto-bg-first", first_patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let first_foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "first patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let second_foreground_tool = vec![
+        StreamingSseChunk {
+            gate: None,
+            body: streaming_sse_event(ev_response_created("resp-3")),
+        },
+        StreamingSseChunk {
+            gate: Some(gate_second_patch_rx),
+            body: responses::sse(vec![
+                ev_apply_patch_custom_tool_call("auto-bg-second", second_patch),
+                ev_completed("resp-3"),
+            ]),
+        },
+    ];
+    let second_foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-2", "second patch applied"),
+            ev_completed("resp-4"),
+        ]),
+    }];
+    let background_review = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(assistant_message_sse(&review_json)),
+    }];
+    let (server, _completions) = start_streaming_sse_server(vec![
+        first_foreground_tool,
+        first_foreground_complete,
+        second_foreground_tool,
+        second_foreground_complete,
+        background_review,
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create the first file").await?;
+    let second_turn = test.submit_turn("create the second file");
+    tokio::pin!(second_turn);
+    tokio::select! {
+        result = &mut second_turn => panic!("second turn completed before gate: {result:?}"),
+        _ = server.wait_for_request_count(3) => {}
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let _ = gate_second_patch_tx.send(());
+    second_turn.await?;
+
+    let run = wait_for_background_auto_review_run_without_review_mode_events(
+        test.codex.as_ref(),
+        codex_home.path(),
+    )
+    .await;
+    assert_eq!(run.status, AutoReviewRunStatus::Completed);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert_eq!(run.review_target, ReviewTarget::UncommittedChanges);
+    assert_eq!(
+        run.target.worktree_diff_fingerprint,
+        Some(expected_worktree_diff_fingerprint(test.cwd_path()).await)
+    );
+    server.wait_for_request_count(5).await;
+    server
+        .assert_request_count_stays(5, Duration::from_millis(500))
+        .await;
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
 /// Ensure review flow suppresses assistant-specific streaming/completion events:
 /// - AgentMessageContentDelta
 /// - ItemCompleted for TurnItem::AgentMessage
@@ -1404,20 +1647,47 @@ fn streaming_sse_event(event: serde_json::Value) -> String {
 fn load_single_auto_review_run(
     codex_home: &std::path::Path,
 ) -> anyhow::Result<codex_auto_review::AutoReviewRun> {
+    let mut runs = load_auto_review_runs(codex_home)?;
+    if runs.len() != 1 {
+        anyhow::bail!("expected exactly one auto review run, found {}", runs.len());
+    }
+    Ok(runs.remove(0))
+}
+
+fn load_auto_review_runs(
+    codex_home: &std::path::Path,
+) -> anyhow::Result<Vec<codex_auto_review::AutoReviewRun>> {
     let runs_dir = codex_home.join("auto-review/runs");
+    if !runs_dir.exists() {
+        return Ok(Vec::new());
+    }
     let mut runs = std::fs::read_dir(&runs_dir)
         .map_err(|err| anyhow::anyhow!("auto review runs dir: {err}"))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(runs.len(), 1, "expected exactly one auto review run");
-    let run_id = runs
-        .pop()
-        .and_then(|path| {
-            path.file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
+        .filter_map(|entry| match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                (path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+                    .then_some(Ok(path))
+            }
+            Err(err) => Some(Err(err)),
         })
-        .ok_or_else(|| anyhow::anyhow!("run file stem"))?;
-    AutoReviewStore::new(codex_home).load_run(&run_id)
+        .map(|path| {
+            let path = path?;
+            let run_id = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .ok_or_else(|| anyhow::anyhow!("run file stem"))?;
+            AutoReviewStore::new(codex_home).load_run(&run_id)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    Ok(runs)
+}
+
+async fn expected_worktree_diff_fingerprint(cwd: &Path) -> String {
+    get_worktree_diff_fingerprint(cwd)
+        .await
+        .expect("expected dirty worktree fingerprint")
 }
 
 async fn wait_for_background_auto_review_run_without_review_mode_events(
