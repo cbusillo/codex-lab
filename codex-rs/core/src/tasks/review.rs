@@ -20,6 +20,7 @@ use crate::codex_delegate::run_codex_thread_one_shot;
 use crate::config::Constrained;
 use crate::review_format::format_review_findings_block;
 use crate::review_format::render_review_output_text;
+use crate::review_persistence::ReviewPersistenceContext;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -30,12 +31,20 @@ use codex_protocol::user_input::UserInput;
 use super::SessionTask;
 use super::SessionTaskContext;
 
-#[derive(Clone, Copy)]
-pub(crate) struct ReviewTask;
+#[derive(Clone)]
+pub(crate) struct ReviewTask {
+    persistence: Option<ReviewPersistenceContext>,
+}
 
 impl ReviewTask {
     pub(crate) fn new() -> Self {
-        Self
+        Self { persistence: None }
+    }
+
+    pub(crate) fn with_persistence(persistence: ReviewPersistenceContext) -> Self {
+        Self {
+            persistence: Some(persistence),
+        }
     }
 }
 
@@ -55,41 +64,73 @@ impl SessionTask for ReviewTask {
         input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> Option<String> {
-        session.session.services.session_telemetry.counter(
-            "codex.task.review",
-            /*inc*/ 1,
-            &[],
-        );
-
-        let mut user_input = Vec::new();
-        for item in input {
-            match item {
-                TurnInput::UserInput { mut content, .. } => user_input.append(&mut content),
-                TurnInput::ResponseItem(_) => {}
-            }
-        }
-
-        // Start sub-codex conversation and get the receiver for events.
-        let output = match start_review_conversation(
-            session.clone(),
-            ctx.clone(),
-            user_input,
-            cancellation_token.clone(),
+        run_review_task(
+            self.persistence.clone(),
+            session,
+            ctx,
+            input,
+            cancellation_token,
         )
         .await
-        {
-            Some(receiver) => process_review_events(session.clone(), ctx.clone(), receiver).await,
-            None => None,
-        };
-        if !cancellation_token.is_cancelled() {
-            exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
-        }
-        None
     }
 
     async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
+        if let Some(persistence) = self.persistence.clone() {
+            let codex_home = session.codex_home().await;
+            persistence.save_cancelled(codex_home);
+        }
         exit_review_mode(session.clone_session(), /*review_output*/ None, ctx).await;
     }
+}
+
+async fn run_review_task(
+    persistence: Option<ReviewPersistenceContext>,
+    session: Arc<SessionTaskContext>,
+    ctx: Arc<TurnContext>,
+    input: Vec<TurnInput>,
+    cancellation_token: CancellationToken,
+) -> Option<String> {
+    session
+        .session
+        .services
+        .session_telemetry
+        .counter("codex.task.review", /*inc*/ 1, &[]);
+
+    let mut user_input = Vec::new();
+    for item in input {
+        match item {
+            TurnInput::UserInput { mut content, .. } => user_input.append(&mut content),
+            TurnInput::ResponseItem(_) => {}
+        }
+    }
+
+    // Start sub-codex conversation and get the receiver for events.
+    let output = match start_review_conversation(
+        session.clone(),
+        ctx.clone(),
+        user_input,
+        cancellation_token.clone(),
+    )
+    .await
+    {
+        Some(receiver) => process_review_events(session.clone(), ctx.clone(), receiver).await,
+        None => None,
+    };
+    if !cancellation_token.is_cancelled() {
+        exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
+        if let Some(persistence) = persistence {
+            let codex_home = session.codex_home().await;
+            if let Some(output) = output.as_ref() {
+                persistence.save_completed(codex_home, output);
+            } else {
+                persistence.save_failed(
+                    codex_home,
+                    "review ended without producing review output".to_string(),
+                );
+            }
+        }
+    }
+    None
 }
 
 async fn start_review_conversation(

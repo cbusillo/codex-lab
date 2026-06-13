@@ -187,6 +187,10 @@ impl SessionTaskContext {
         Arc::clone(&self.turn_extension_data)
     }
 
+    pub(crate) async fn codex_home(&self) -> codex_utils_absolute_path::AbsolutePathBuf {
+        self.session.codex_home().await
+    }
+
     pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
         Arc::clone(&self.session.services.auth_manager)
     }

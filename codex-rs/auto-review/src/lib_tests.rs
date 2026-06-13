@@ -157,6 +157,88 @@ fn summary_hides_findings_for_mismatched_review_target() {
 }
 
 #[test]
+fn commit_review_targets_match_by_sha_even_when_titles_differ() {
+    let active = sample_target("main", "abc123", "/repo");
+    let run = AutoReviewRun {
+        review_target: ReviewTarget::Commit {
+            sha: "abc123".to_string(),
+            title: Some("Original title".to_string()),
+        },
+        ..sample_run("run_1", vec![sample_finding("f1", "Title")])
+    };
+    let active_review_target = ReviewTarget::Commit {
+        sha: "abc123".to_string(),
+        title: None,
+    };
+
+    assert_eq!(
+        run.visible_findings(&active, &active_review_target).len(),
+        1
+    );
+
+    let title_variant = ReviewTarget::Commit {
+        sha: "abc123".to_string(),
+        title: Some("Different title".to_string()),
+    };
+    assert_eq!(run.visible_findings(&active, &title_variant).len(), 1);
+
+    let different_commit = ReviewTarget::Commit {
+        sha: "def456".to_string(),
+        title: Some("Original title".to_string()),
+    };
+    assert!(run.visible_findings(&active, &different_commit).is_empty());
+}
+
+#[test]
+fn commit_review_targets_ignore_checkout_metadata_when_reopened() {
+    let run = AutoReviewRun {
+        target: AutoReviewRunTarget {
+            branch: Some("feature-old".to_string()),
+            head_sha: Some("abc123".to_string()),
+            base_sha: Some("base-old".to_string()),
+            worktree_path: Some(PathBuf::from("/repo-old")),
+        },
+        review_target: ReviewTarget::Commit {
+            sha: "abc123".to_string(),
+            title: Some("Original title".to_string()),
+        },
+        ..sample_run("run_1", vec![sample_finding("f1", "Title")])
+    };
+    let reopened_detached = AutoReviewRunTarget {
+        branch: None,
+        head_sha: Some("abc123".to_string()),
+        base_sha: None,
+        worktree_path: None,
+    };
+    let reopened_renamed_branch = AutoReviewRunTarget {
+        branch: Some("feature-renamed".to_string()),
+        head_sha: Some("abc123".to_string()),
+        base_sha: Some("base-new".to_string()),
+        worktree_path: Some(PathBuf::from("/repo-new")),
+    };
+
+    assert_eq!(
+        run.visible_findings(&reopened_detached, &run.review_target)
+            .len(),
+        1
+    );
+    assert_eq!(
+        run.visible_findings(&reopened_renamed_branch, &run.review_target)
+            .len(),
+        1
+    );
+    assert_eq!(
+        run.summary(&reopened_detached, &run.review_target).content,
+        "[P1] f1: Title (/tmp/example.rs:7-9)"
+    );
+    assert_eq!(
+        run.summary(&reopened_renamed_branch, &run.review_target)
+            .content,
+        "[P1] f1: Title (/tmp/example.rs:7-9)"
+    );
+}
+
+#[test]
 fn summary_marks_omitted_findings_when_count_cap_is_hit() {
     let active = sample_target("main", "head-2", "/repo");
     let findings = (0..25)

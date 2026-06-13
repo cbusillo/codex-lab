@@ -107,6 +107,7 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RawResponseItemEvent;
+use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
@@ -1046,7 +1047,6 @@ impl Session {
         }
     }
 
-    #[cfg(test)]
     pub(crate) async fn codex_home(&self) -> AbsolutePathBuf {
         let state = self.state.lock().await;
         state.session_configuration.codex_home().clone()

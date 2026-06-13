@@ -10,6 +10,7 @@ pub(super) async fn spawn_review_thread(
     parent_turn_context: Arc<TurnContext>,
     sub_id: String,
     resolved: crate::review_prompts::ResolvedReviewRequest,
+    persistence: Option<ReviewPersistence>,
 ) {
     let model = config
         .review_model
@@ -172,7 +173,25 @@ pub(super) async fn spawn_review_thread(
     // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
     // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
     // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
-    sess.spawn_task(tc.clone(), input, ReviewTask::new()).await;
+    if let Some(persistence) = persistence {
+        let target_cwd = tc
+            .environments
+            .single_local_environment_cwd()
+            .map(std::convert::AsRef::as_ref)
+            .unwrap_or_else(|| tc.config.cwd.as_ref());
+        let persistence = crate::review_persistence::ReviewPersistenceContext::new(
+            review_turn_id.clone(),
+            persistence,
+            resolved.target.clone(),
+            target_cwd,
+            Some(model),
+        )
+        .await;
+        sess.spawn_task(tc.clone(), input, ReviewTask::with_persistence(persistence))
+            .await;
+    } else {
+        sess.spawn_task(tc.clone(), input, ReviewTask::new()).await;
+    }
 
     // Announce entering review mode so UIs can switch modes.
     let review_request = ReviewRequest {
