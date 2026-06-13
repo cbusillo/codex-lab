@@ -24,11 +24,17 @@ use codex_protocol::user_input::UserInput;
 use core_test_support::PathBufExt;
 use core_test_support::responses;
 use core_test_support::responses::ResponseMock;
+use core_test_support::responses::ev_apply_patch_custom_tool_call;
+use core_test_support::responses::ev_assistant_message;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
+use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -611,6 +617,81 @@ async fn background_review_persistence_writes_cancelled_run_without_review_mode_
     server.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let review_json = serde_json::json!({
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "Automatic background review completed.",
+        "overall_confidence_score": 0.9
+    })
+    .to_string();
+    let harness = TestCodexHarness::new().await?;
+    init_git_repo(harness.cwd());
+    let codex_home = harness.test().codex_home_path().to_path_buf();
+    let call_id = "auto-bg-apply-patch";
+    let patch =
+        "*** Begin Patch\n*** Add File: auto_background_review.txt\n+review me\n*** End Patch";
+    let request_log = mount_sse_sequence(
+        harness.server(),
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_apply_patch_custom_tool_call(call_id, patch),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "patch applied"),
+                ev_completed("resp-2"),
+            ]),
+            responses::sse(assistant_message_sse(&review_json)),
+        ],
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn("create a file to review")
+        .await?;
+
+    let run = wait_for_background_auto_review_run_without_review_mode_events(
+        harness.test().codex.as_ref(),
+        &codex_home,
+    )
+    .await;
+    assert_eq!(run.status, AutoReviewRunStatus::Completed);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert_eq!(run.review_target, ReviewTarget::UncommittedChanges);
+    assert!(run.completed_at_unix_secs.is_some());
+    assert_eq!(run.error_summary, None);
+    assert!(
+        run.target.worktree_diff_fingerprint.is_some(),
+        "expected background uncommitted review to record diff fingerprint"
+    );
+
+    let file_contents = harness.read_file_text("auto_background_review.txt").await?;
+    assert_eq!(file_contents, "review me\n");
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected foreground tool, foreground completion, and background review requests"
+    );
+    let review_request = &requests[2];
+    assert_eq!(
+        review_request.header("x-openai-subagent").as_deref(),
+        Some("review")
+    );
+    assert!(
+        review_request.body_contains_text("Review the current code changes"),
+        "background review request should use the uncommitted-changes review prompt"
+    );
+    harness.server().verify().await;
+    Ok(())
+}
+
 /// Ensure review flow suppresses assistant-specific streaming/completion events:
 /// - AgentMessageContentDelta
 /// - ItemCompleted for TurnItem::AgentMessage
@@ -1144,22 +1225,6 @@ async fn review_uses_overridden_cwd_for_base_branch_merge_base() {
     let repo_dir = TempDir::new().unwrap();
     let repo_path = repo_dir.path();
 
-    fn run_git(repo_path: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(args)
-            .output()
-            .expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: stdout={:?} stderr={:?}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
     run_git(repo_path, &["init", "-b", "main"]);
     run_git(repo_path, &["config", "user.email", "test@example.com"]);
     run_git(repo_path, &["config", "user.name", "Test User"]);
@@ -1265,6 +1330,85 @@ fn load_single_auto_review_run(
         })
         .ok_or_else(|| anyhow::anyhow!("run file stem"))?;
     AutoReviewStore::new(codex_home).load_run(&run_id)
+}
+
+async fn wait_for_background_auto_review_run_without_review_mode_events(
+    codex: &CodexThread,
+    codex_home: &std::path::Path,
+) -> codex_auto_review::AutoReviewRun {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(run) = load_single_auto_review_run(codex_home)
+            && run.status == AutoReviewRunStatus::Completed
+        {
+            drain_pending_events_without_review_mode(codex).await;
+            return run;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timeout waiting for automatic background auto-review run"
+        );
+        match tokio::time::timeout(Duration::from_millis(50), codex.next_event()).await {
+            Ok(Ok(event)) => match event.msg {
+                EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {
+                    panic!(
+                        "automatic background review emitted review mode event: {:?}",
+                        event.msg
+                    )
+                }
+                _ => {}
+            },
+            Ok(Err(err)) => {
+                panic!("stream ended while waiting for automatic background auto-review: {err}")
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+async fn drain_pending_events_without_review_mode(codex: &CodexThread) {
+    loop {
+        match tokio::time::timeout(Duration::from_millis(50), codex.next_event()).await {
+            Ok(Ok(event)) => match event.msg {
+                EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {
+                    panic!(
+                        "automatic background review emitted review mode event: {:?}",
+                        event.msg
+                    )
+                }
+                _ => {}
+            },
+            Ok(Err(err)) => {
+                panic!("stream ended while draining automatic background auto-review events: {err}")
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn init_git_repo(repo_path: &std::path::Path) {
+    run_git(repo_path, &["init", "-b", "main"]);
+    run_git(repo_path, &["config", "user.email", "test@example.com"]);
+    run_git(repo_path, &["config", "user.name", "Test User"]);
+    std::fs::write(repo_path.join("README.md"), "initial\n").expect("write initial file");
+    run_git(repo_path, &["add", "."]);
+    run_git(repo_path, &["commit", "-m", "initial"]);
+}
+
+fn run_git(repo_path: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: stdout={:?} stderr={:?}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 async fn wait_for_terminal_without_review_mode_event<F>(
