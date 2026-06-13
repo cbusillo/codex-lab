@@ -34,6 +34,7 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::oneshot;
@@ -484,6 +485,127 @@ async fn review_op_with_persistence_writes_cancelled_run_when_interrupted() {
         Some("review was interrupted before producing structured output")
     );
     assert_eq!(run.findings.len(), 0);
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_review_persistence_writes_background_run_without_review_mode_events() {
+    skip_if_no_network!();
+
+    let review_json = serde_json::json!({
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "Background review completed.",
+        "overall_confidence_score": 0.8
+    })
+    .to_string();
+    let (server, _request_log) = start_responses_server_with_sse(
+        assistant_message_sse(&review_json),
+        /*expected_requests*/ 1,
+    )
+    .await;
+    let codex_home = Arc::new(TempDir::new().unwrap());
+    let codex = new_conversation_for_server(&server, codex_home.clone(), |_| {}).await;
+
+    let review_target = ReviewTarget::Custom {
+        instructions: "background review".to_string(),
+    };
+    codex
+        .submit(Op::Review {
+            review_request: ReviewRequest {
+                target: review_target.clone(),
+                user_facing_hint: None,
+            },
+            persistence: Some(ReviewPersistence::BackgroundAutoReview),
+        })
+        .await
+        .unwrap();
+
+    let complete = wait_for_terminal_without_review_mode_event(&codex, |ev| {
+        matches!(ev, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert!(matches!(complete, EventMsg::TurnComplete(_)));
+
+    let run = load_single_auto_review_run(codex_home.path())
+        .unwrap_or_else(|err| panic!("load single auto review run: {err}"));
+    assert_eq!(run.status, AutoReviewRunStatus::Completed);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert_eq!(run.review_target, review_target);
+    assert!(run.completed_at_unix_secs.is_some());
+    assert_eq!(run.error_summary, None);
+
+    let _codex_home_guard = codex_home;
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_review_persistence_writes_cancelled_run_without_review_mode_events() {
+    skip_if_no_network!();
+
+    let (gate_completed_tx, gate_completed_rx) = oneshot::channel();
+    let chunks = vec![
+        StreamingSseChunk {
+            gate: None,
+            body: streaming_sse_event(responses::ev_response_created("resp-1")),
+        },
+        StreamingSseChunk {
+            gate: Some(gate_completed_rx),
+            body: streaming_sse_event(responses::ev_completed("resp-1")),
+        },
+    ];
+    let (server, _completions) = start_streaming_sse_server(vec![chunks]).await;
+    let codex_home = Arc::new(TempDir::new().unwrap());
+    let codex = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await
+        .unwrap()
+        .codex;
+
+    let review_target = ReviewTarget::Custom {
+        instructions: "cancel background review".to_string(),
+    };
+    codex
+        .submit(Op::Review {
+            review_request: ReviewRequest {
+                target: review_target.clone(),
+                user_facing_hint: None,
+            },
+            persistence: Some(ReviewPersistence::BackgroundAutoReview),
+        })
+        .await
+        .unwrap();
+
+    server.wait_for_request_count(1).await;
+    let running = load_single_auto_review_run(codex_home.path())
+        .unwrap_or_else(|err| panic!("load running auto review run: {err}"));
+    assert_eq!(running.status, AutoReviewRunStatus::Running);
+    assert_eq!(running.source, AutoReviewRunSource::Background);
+    assert_eq!(running.completed_at_unix_secs, None);
+
+    codex.submit(Op::Interrupt).await.unwrap();
+
+    let aborted = wait_for_terminal_without_review_mode_event(&codex, |ev| {
+        matches!(ev, EventMsg::TurnAborted(_))
+    })
+    .await;
+    assert!(matches!(aborted, EventMsg::TurnAborted(_)));
+    let _ = gate_completed_tx.send(());
+
+    let run = load_single_auto_review_run(codex_home.path())
+        .unwrap_or_else(|err| panic!("load cancelled auto review run: {err}"));
+    assert_eq!(run.run_id, running.run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert_eq!(run.review_target, review_target);
+    assert!(run.completed_at_unix_secs.is_some());
+    assert_eq!(
+        run.error_summary.as_deref(),
+        Some("review was interrupted before producing structured output")
+    );
 
     let _codex_home_guard = codex_home;
     server.shutdown().await;
@@ -1124,6 +1246,55 @@ fn completed_sse() -> Vec<serde_json::Value> {
 
 fn streaming_sse_event(event: serde_json::Value) -> String {
     format!("data: {event}\n\n")
+}
+
+fn load_single_auto_review_run(
+    codex_home: &std::path::Path,
+) -> anyhow::Result<codex_auto_review::AutoReviewRun> {
+    let runs_dir = codex_home.join("auto-review/runs");
+    let mut runs = std::fs::read_dir(&runs_dir)
+        .map_err(|err| anyhow::anyhow!("auto review runs dir: {err}"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(runs.len(), 1, "expected exactly one auto review run");
+    let run_id = runs
+        .pop()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .ok_or_else(|| anyhow::anyhow!("run file stem"))?;
+    AutoReviewStore::new(codex_home).load_run(&run_id)
+}
+
+async fn wait_for_terminal_without_review_mode_event<F>(
+    codex: &CodexThread,
+    mut terminal_predicate: F,
+) -> EventMsg
+where
+    F: FnMut(&EventMsg) -> bool,
+{
+    loop {
+        let event = match tokio::time::timeout(Duration::from_secs(10), codex.next_event()).await {
+            Ok(Ok(event)) => event,
+            Ok(Err(err)) => {
+                panic!(
+                    "stream ended unexpectedly while waiting for background review terminal event: {err}"
+                )
+            }
+            Err(_) => panic!("timeout waiting for background review terminal event"),
+        };
+        match event.msg {
+            EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {
+                panic!(
+                    "background review emitted review mode event: {:?}",
+                    event.msg
+                )
+            }
+            msg if terminal_predicate(&msg) => return msg,
+            _ => {}
+        }
+    }
 }
 
 /// Start a mock Responses API server and mount the given SSE events.

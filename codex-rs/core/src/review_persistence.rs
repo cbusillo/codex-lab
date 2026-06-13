@@ -10,6 +10,7 @@ use codex_auto_review::AutoReviewStore;
 use codex_auto_review::SCHEMA_VERSION;
 use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
+use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_git_utils::merge_base_with_head;
 use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewPersistence;
@@ -40,12 +41,26 @@ impl ReviewPersistenceContext {
             run_id,
             source: match mode {
                 ReviewPersistence::ManualAutoReview => AutoReviewRunSource::Manual,
+                ReviewPersistence::BackgroundAutoReview => AutoReviewRunSource::Background,
             },
             target,
             review_target,
             started_at_unix_secs: now_unix_secs(),
             model,
         }
+    }
+
+    pub(crate) fn is_manual(&self) -> bool {
+        self.source == AutoReviewRunSource::Manual
+    }
+
+    pub(crate) fn save_running(&self, codex_home: impl AsRef<Path>) {
+        self.save_run(
+            codex_home,
+            AutoReviewRunStatus::Running,
+            /*output*/ None,
+            /*error_summary*/ None,
+        );
     }
 
     pub(crate) fn save_completed(&self, codex_home: impl AsRef<Path>, output: &ReviewOutputEvent) {
@@ -82,7 +97,19 @@ impl ReviewPersistenceContext {
         output: Option<&ReviewOutputEvent>,
         error_summary: Option<String>,
     ) {
+        let codex_home = codex_home.as_ref();
+        let completed_at_unix_secs = if is_terminal_status(&status) {
+            Some(now_unix_secs())
+        } else {
+            None
+        };
         let store = AutoReviewStore::new(codex_home);
+        if is_terminal_status(&status)
+            && let Ok(existing) = store.load_run(&self.run_id)
+            && is_terminal_status(&existing.status)
+        {
+            return;
+        }
         let run = AutoReviewRun {
             schema_version: SCHEMA_VERSION,
             run_id: self.run_id.clone(),
@@ -91,7 +118,7 @@ impl ReviewPersistenceContext {
             target: self.target.clone(),
             review_target: self.review_target.clone(),
             started_at_unix_secs: self.started_at_unix_secs,
-            completed_at_unix_secs: Some(now_unix_secs()),
+            completed_at_unix_secs,
             model: self.model.clone(),
             error_summary,
             findings: output
@@ -106,6 +133,10 @@ impl ReviewPersistenceContext {
             );
         }
     }
+}
+
+fn is_terminal_status(status: &AutoReviewRunStatus) -> bool {
+    !matches!(status, AutoReviewRunStatus::Running)
 }
 
 async fn collect_target(cwd: &Path, review_target: &ReviewTarget) -> AutoReviewRunTarget {
@@ -128,6 +159,11 @@ async fn collect_target(cwd: &Path, review_target: &ReviewTarget) -> AutoReviewR
         _ => None,
     };
 
+    let worktree_diff_fingerprint = match review_target {
+        ReviewTarget::UncommittedChanges => get_worktree_diff_fingerprint(cwd).await,
+        _ => None,
+    };
+
     AutoReviewRunTarget {
         branch: git_info.as_ref().and_then(|git| git.branch.clone()),
         head_sha: git_info
@@ -135,6 +171,7 @@ async fn collect_target(cwd: &Path, review_target: &ReviewTarget) -> AutoReviewR
             .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
         base_sha,
         worktree_path: repo_root.or_else(|| Some(PathBuf::from(cwd))),
+        worktree_diff_fingerprint,
     }
 }
 

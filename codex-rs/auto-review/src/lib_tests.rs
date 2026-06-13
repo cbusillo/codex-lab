@@ -39,6 +39,43 @@ fn save_and_load_run_round_trips_under_codex_home() -> anyhow::Result<()> {
 }
 
 #[test]
+fn load_run_defaults_missing_worktree_diff_fingerprint() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let store = AutoReviewStore::new(codex_home.path());
+    let runs_dir = codex_home.path().join("auto-review").join("runs");
+    let path = runs_dir.join("run_1.json");
+    std::fs::create_dir_all(&runs_dir)?;
+    std::fs::write(
+        &path,
+        r#"{
+  "schema_version": 1,
+  "run_id": "run_1",
+  "status": "completed",
+  "source": "manual",
+  "target": {
+    "branch": "main",
+    "head_sha": "head-2",
+    "base_sha": "base-1",
+    "worktree_path": "/repo"
+  },
+  "review_target": {
+    "type": "uncommittedChanges"
+  },
+  "started_at_unix_secs": 1,
+  "completed_at_unix_secs": 2,
+  "model": "gpt-test",
+  "error_summary": null,
+  "findings": []
+}"#,
+    )?;
+
+    let loaded = store.load_run("run_1")?;
+
+    assert_eq!(loaded.target.worktree_diff_fingerprint, None);
+    Ok(())
+}
+
+#[test]
 fn unsafe_run_ids_are_rejected() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let store = AutoReviewStore::new(codex_home.path());
@@ -157,6 +194,66 @@ fn summary_hides_findings_for_mismatched_review_target() {
 }
 
 #[test]
+fn summary_hides_findings_when_worktree_diff_fingerprint_changes() {
+    let active = AutoReviewRunTarget {
+        worktree_diff_fingerprint: Some("sha256:new".to_string()),
+        ..sample_target("main", "head-2", "/repo")
+    };
+    let run = AutoReviewRun {
+        target: AutoReviewRunTarget {
+            worktree_diff_fingerprint: Some("sha256:old".to_string()),
+            ..sample_target("main", "head-2", "/repo")
+        },
+        ..sample_run("run_1", vec![sample_finding("f1", "Title")])
+    };
+
+    assert_eq!(run.freshness(&active), AutoReviewFreshness::Stale);
+    assert!(
+        run.visible_findings(&active, &ReviewTarget::UncommittedChanges)
+            .is_empty()
+    );
+}
+
+#[test]
+fn visible_findings_require_completed_run_status() {
+    let active = sample_target("main", "head-2", "/repo");
+    let active_review_target = ReviewTarget::UncommittedChanges;
+
+    for status in [
+        AutoReviewRunStatus::Running,
+        AutoReviewRunStatus::Failed,
+        AutoReviewRunStatus::Cancelled,
+    ] {
+        let run = AutoReviewRun {
+            status,
+            ..sample_run("run_1", vec![sample_finding("f1", "Title")])
+        };
+
+        assert!(
+            run.visible_findings(&active, &active_review_target)
+                .is_empty()
+        );
+        assert_eq!(run.summary(&active, &active_review_target).content, "");
+    }
+}
+
+#[test]
+fn finding_detail_requires_completed_run_status() {
+    let run = AutoReviewRun {
+        status: AutoReviewRunStatus::Cancelled,
+        ..sample_run("run_1", vec![sample_finding("f1", "Title")])
+    };
+
+    let err = run
+        .finding_detail("f1", DETAIL_MAX_BYTES)
+        .expect_err("non-completed runs should not expose finding detail");
+    assert!(
+        err.to_string()
+            .contains("auto review run is not completed: run_1")
+    );
+}
+
+#[test]
 fn commit_review_targets_match_by_sha_even_when_titles_differ() {
     let active = sample_target("main", "abc123", "/repo");
     let run = AutoReviewRun {
@@ -197,6 +294,7 @@ fn commit_review_targets_ignore_checkout_metadata_when_reopened() {
             head_sha: Some("abc123".to_string()),
             base_sha: Some("base-old".to_string()),
             worktree_path: Some(PathBuf::from("/repo-old")),
+            worktree_diff_fingerprint: Some("sha256:old".to_string()),
         },
         review_target: ReviewTarget::Commit {
             sha: "abc123".to_string(),
@@ -209,12 +307,14 @@ fn commit_review_targets_ignore_checkout_metadata_when_reopened() {
         head_sha: Some("abc123".to_string()),
         base_sha: None,
         worktree_path: None,
+        worktree_diff_fingerprint: Some("sha256:new".to_string()),
     };
     let reopened_renamed_branch = AutoReviewRunTarget {
         branch: Some("feature-renamed".to_string()),
         head_sha: Some("abc123".to_string()),
         base_sha: Some("base-new".to_string()),
         worktree_path: Some(PathBuf::from("/repo-new")),
+        worktree_diff_fingerprint: Some("sha256:new".to_string()),
     };
 
     assert_eq!(
@@ -350,6 +450,7 @@ fn sample_target(branch: &str, head_sha: &str, worktree_path: &str) -> AutoRevie
         head_sha: Some(head_sha.to_string()),
         base_sha: Some("base-1".to_string()),
         worktree_path: Some(PathBuf::from(worktree_path)),
+        worktree_diff_fingerprint: None,
     }
 }
 

@@ -80,6 +80,9 @@ impl AutoReviewRun {
         active_target: &AutoReviewRunTarget,
         active_review_target: &ReviewTarget,
     ) -> Vec<&'a AutoReviewFindingRecord> {
+        if self.status != AutoReviewRunStatus::Completed {
+            return Vec::new();
+        }
         if !review_target_matches(&self.review_target, active_review_target) {
             return Vec::new();
         }
@@ -115,6 +118,9 @@ impl AutoReviewRun {
     pub fn finding_detail(&self, finding_id: &str, max_bytes: usize) -> Result<AutoReviewDetail> {
         if max_bytes == 0 {
             anyhow::bail!("auto review detail max_bytes must be positive");
+        }
+        if self.status != AutoReviewRunStatus::Completed {
+            anyhow::bail!("auto review run is not completed: {}", self.run_id);
         }
 
         let finding = self
@@ -162,6 +168,8 @@ pub struct AutoReviewRunTarget {
     pub head_sha: Option<String>,
     pub base_sha: Option<String>,
     pub worktree_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_diff_fingerprint: Option<String>,
 }
 
 impl AutoReviewRunTarget {
@@ -173,6 +181,9 @@ impl AutoReviewRunTarget {
             return AutoReviewFreshness::Stale;
         }
         if self.base_sha != active.base_sha {
+            return AutoReviewFreshness::Stale;
+        }
+        if self.worktree_diff_fingerprint != active.worktree_diff_fingerprint {
             return AutoReviewFreshness::Stale;
         }
         AutoReviewFreshness::Current
