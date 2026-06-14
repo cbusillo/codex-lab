@@ -1,0 +1,23 @@
+# Codex Lab owns this repo-local metadata namespace. Keep it limited to
+# reviewable, repo-owned files; user/private/runtime state belongs in
+# ~/.codex-lab.
+
+.DS_Store
+__pycache__/
+*.pyc
+
+# Runtime leaves must not live under repo .codex/.
+sessions/
+history*.jsonl
+log/
+logs/
+tmp/
+
+# Secret-shaped files belong in ~/.codex-lab, never repo .codex/.
+auth.json
+.credentials.json
+credentials*/
+secrets/
+*.key
+*.pem
+*.token
