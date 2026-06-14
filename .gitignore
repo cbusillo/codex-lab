@@ -34,6 +34,10 @@ CLAUDE.md
 .claude/
 AGENTS.override.md
 
+# Local operator/runtime scratch. Codex Lab repo-owned metadata belongs in
+# `.codex/`; private agent output and tool state must not be committed.
+.code/
+
 # caches
 .cache/
 .tmp/
