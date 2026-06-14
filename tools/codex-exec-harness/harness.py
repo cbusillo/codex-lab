@@ -852,6 +852,51 @@ def add_prefix_assertion_failures(
         )
 
 
+def add_input_prefix_assertion_failures(
+    failures: list[str],
+    assertion: dict[str, Any],
+    requests: list[dict[str, Any]],
+    request_index: int,
+    label: str,
+) -> None:
+    prefix_request = assertion.get("input_prefix_matches_request")
+    if prefix_request is None:
+        return
+
+    other_request_index = scenario_int(
+        prefix_request, f"{label}.input_prefix_matches_request"
+    )
+    assert_not_self_prefix_match(request_index, other_request_index, label)
+    if other_request_index < 0:
+        failures.append(f"{label}: missing input prefix request {other_request_index}")
+        return
+    if other_request_index >= len(requests):
+        failures.append(f"{label}: missing input prefix request {other_request_index}")
+        return
+
+    subject = scoped_request_body(requests[request_index], "input")
+    reference = scoped_request_body(requests[other_request_index], "input")
+    if not isinstance(subject, list):
+        failures.append(f"{label}: missing input prefix subject")
+        return
+    if not isinstance(reference, list):
+        failures.append(
+            f"{label}: missing input prefix reference responses[{other_request_index}].input"
+        )
+        return
+    if len(subject) < len(reference):
+        failures.append(
+            f"{label}: expected input to have at least {len(reference)} prefix item(s), "
+            f"found {len(subject)}"
+        )
+        return
+    actual_prefix = subject[: len(reference)]
+    if actual_prefix != reference:
+        failures.append(
+            f"{label}: expected input to start with responses[{other_request_index}].input"
+        )
+
+
 def evaluate_expectations(
     scenario: dict[str, Any], run: dict[str, Any], requests: list[dict[str, Any]]
 ) -> list[str]:
@@ -995,6 +1040,13 @@ def evaluate_expectations(
             requests,
             request_index,
             f"responses[{request_index}].{scope}",
+        )
+        add_input_prefix_assertion_failures(
+            failures,
+            assertion,
+            requests,
+            request_index,
+            f"responses[{request_index}]",
         )
 
     return failures

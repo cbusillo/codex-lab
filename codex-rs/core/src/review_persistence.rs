@@ -42,7 +42,7 @@ impl ReviewPersistenceContext {
         cwd: &Path,
         model: Option<String>,
     ) -> Self {
-        let target = collect_target(cwd, &review_target).await;
+        let target = collect_auto_review_target(cwd, &review_target).await;
         Self {
             run_id,
             source: match mode {
@@ -205,7 +205,10 @@ fn is_terminal_status(status: &AutoReviewRunStatus) -> bool {
     )
 }
 
-async fn collect_target(cwd: &Path, review_target: &ReviewTarget) -> AutoReviewRunTarget {
+pub(crate) async fn collect_auto_review_target(
+    cwd: &Path,
+    review_target: &ReviewTarget,
+) -> AutoReviewRunTarget {
     let git_info = collect_git_info(cwd).await;
     let repo_root = get_git_repo_root(cwd);
     let base_sha = match (repo_root.as_deref(), review_target) {

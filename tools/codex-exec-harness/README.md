@@ -163,3 +163,8 @@ the first characters of one captured request scope with another. This is useful
 for prompt-prefix stability checks across resumed turns. By default the
 reference request uses the same `scope`; set `prefix_scope` when the reference
 request should use a different scope.
+
+Use `expect.responses[].input_prefix_matches_request` when cache safety depends
+on preserving the whole previous request input as a structural prefix of a later
+request. This compares JSON input items rather than mocked token usage, so it
+can catch volatile context inserted before the cached input tail.

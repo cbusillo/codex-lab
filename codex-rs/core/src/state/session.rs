@@ -116,6 +116,12 @@ pub(crate) struct BackgroundAutoReviewCancellation {
     pub(crate) running_review: Option<BackgroundAutoReviewRunningHandle>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BackgroundAutoReviewActiveSnapshot {
+    pub(crate) pending_run_id: Option<String>,
+    pub(crate) running_run_id: Option<String>,
+}
+
 #[derive(Debug)]
 pub(crate) enum BackgroundAutoReviewControlledRun {
     Pending(BackgroundAutoReviewPendingHandle),
@@ -241,6 +247,19 @@ impl BackgroundAutoReviewSchedulerState {
 
     pub(crate) fn take_running_review(&mut self) -> Option<BackgroundAutoReviewRunningHandle> {
         self.running_review.take().map(running_review_handle)
+    }
+
+    pub(crate) fn active_snapshot(&self) -> BackgroundAutoReviewActiveSnapshot {
+        BackgroundAutoReviewActiveSnapshot {
+            pending_run_id: self
+                .pending_review
+                .as_ref()
+                .map(|pending_review| pending_review.persistence.run_id().to_string()),
+            running_run_id: self
+                .running_review
+                .as_ref()
+                .map(|running_review| running_review.persistence.run_id().to_string()),
+        }
     }
 
     pub(crate) fn take_review_by_run_id(

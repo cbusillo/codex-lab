@@ -168,6 +168,9 @@ pub(crate) async fn run_turn(
         return None;
     }
 
+    let auto_review_awareness_input_item =
+        build_auto_review_awareness_input_item(sess.as_ref(), turn_context.as_ref()).await;
+
     sess.merge_connector_selection(explicitly_enabled_connectors.clone())
         .await;
     sess.set_previous_turn_settings(Some(PreviousTurnSettings {
@@ -214,11 +217,14 @@ pub(crate) async fn run_turn(
         }
 
         // Construct the input that we will send to the model.
-        let sampling_request_input: Vec<ResponseItem> = {
+        let mut sampling_request_input: Vec<ResponseItem> = {
             sess.clone_history()
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        if let Some(auto_review_awareness_input_item) = &auto_review_awareness_input_item {
+            sampling_request_input.push(auto_review_awareness_input_item.clone());
+        }
 
         let window_id = sess.services.model_client.current_window_id();
         let turn_metadata_header = turn_context
@@ -232,6 +238,7 @@ pub(crate) async fn run_turn(
             &mut client_session,
             turn_metadata_header.as_deref(),
             sampling_request_input.clone(),
+            auto_review_awareness_input_item.clone(),
             cancellation_token.child_token(),
         )
         .await
@@ -636,6 +643,28 @@ async fn build_extension_turn_input_items(
     Some(items)
 }
 
+async fn build_auto_review_awareness_input_item(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> Option<ResponseItem> {
+    let cwd = turn_context
+        .environments
+        .single_local_environment_cwd()?
+        .clone();
+    let codex_home = sess.codex_home().await;
+    let active_snapshot = {
+        let state = sess.state.lock().await;
+        state.background_auto_review.active_snapshot()
+    };
+    crate::context::build_auto_review_awareness(
+        codex_home.as_path(),
+        cwd.as_path(),
+        active_snapshot,
+    )
+    .await
+    .map(ContextualUserFragment::into)
+}
+
 async fn track_turn_resolved_config_analytics(
     sess: &Session,
     turn_context: &TurnContext,
@@ -979,6 +1008,7 @@ async fn run_sampling_request(
     client_session: &mut ModelClientSession,
     turn_metadata_header: Option<&str>,
     input: Vec<ResponseItem>,
+    request_only_input_item: Option<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     let router = built_tools(sess.as_ref(), turn_context.as_ref(), &cancellation_token).await?;
@@ -1004,9 +1034,14 @@ async fn run_sampling_request(
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.clone_history()
+            let mut input = sess
+                .clone_history()
                 .await
-                .for_prompt(&turn_context.model_info.input_modalities)
+                .for_prompt(&turn_context.model_info.input_modalities);
+            if let Some(request_only_input_item) = &request_only_input_item {
+                input.push(request_only_input_item.clone());
+            }
+            input
         };
         let prompt = build_prompt(
             prompt_input,

@@ -756,6 +756,73 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_review_awareness_injected_for_current_findings() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::new().await?;
+    init_git_repo(harness.cwd());
+    let reviewed_path = harness.cwd().join("auto_review_awareness.txt");
+    std::fs::write(&reviewed_path, "needs review\n")?;
+    let codex_home = harness.test().codex_home_path().to_path_buf();
+    let fingerprint = expected_worktree_diff_fingerprint(harness.cwd()).await;
+    let run = codex_auto_review::AutoReviewRun {
+        schema_version: codex_auto_review::SCHEMA_VERSION,
+        run_id: "awareness_run".to_string(),
+        status: AutoReviewRunStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        target: codex_auto_review::AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: current_git_head(harness.cwd()),
+            base_sha: None,
+            worktree_path: Some(harness.cwd().to_path_buf()),
+            worktree_diff_fingerprint: Some(fingerprint),
+        },
+        review_target: ReviewTarget::UncommittedChanges,
+        started_at_unix_secs: 1,
+        completed_at_unix_secs: Some(2),
+        model: Some("gpt-test".to_string()),
+        error_summary: None,
+        findings: vec![codex_auto_review::AutoReviewFindingRecord {
+            finding_id: "f1".to_string(),
+            finding: ReviewFinding {
+                title: "Use a clearer fixture name".to_string(),
+                body: "full finding body must not be injected into normal turns".to_string(),
+                confidence_score: 0.9,
+                priority: 1,
+                code_location: ReviewCodeLocation {
+                    absolute_file_path: reviewed_path,
+                    line_range: ReviewLineRange { start: 1, end: 1 },
+                },
+            },
+        }],
+    };
+    AutoReviewStore::new(&codex_home).save_run(&run)?;
+    let request_log = mount_sse_sequence(
+        harness.server(),
+        vec![sse(vec![
+            ev_assistant_message("msg-1", "ack"),
+            ev_completed("resp-1"),
+        ])],
+    )
+    .await;
+
+    harness.test().submit_turn("continue").await?;
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert!(request.body_contains_text("<auto_review_awareness>"));
+    assert!(request.body_contains_text("current findings from run awareness_run"));
+    assert!(request.body_contains_text("[P1] f1: Use a clearer fixture name"));
+    assert!(request.body_contains_text("run_id/finding_id"));
+    assert!(
+        !request.body_contains_text("full finding body must not be injected into normal turns")
+    );
+
+    harness.server().verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_background_review_shutdown_persists_cancelled_run() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2230,6 +2297,22 @@ fn run_git(repo_path: &std::path::Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn current_git_head(repo_path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("spawn git rev-parse HEAD");
+    assert!(
+        output.status.success(),
+        "git rev-parse HEAD failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Start a mock Responses API server and mount the given SSE events.

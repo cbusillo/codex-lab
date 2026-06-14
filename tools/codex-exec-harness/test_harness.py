@@ -503,6 +503,56 @@ class HarnessSafetyTest(unittest.TestCase):
             failures,
         )
 
+    def test_input_prefix_expectation_compares_structural_input_items(self) -> None:
+        requests = [
+            {"body": {"input": [{"role": "user", "content": "stable"}]}},
+            {
+                "body": {
+                    "input": [
+                        {"role": "user", "content": "stable"},
+                        {"role": "user", "content": "volatile tail"},
+                    ]
+                }
+            },
+        ]
+
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "responses": [
+                        {"request": 1, "input_prefix_matches_request": 0}
+                    ]
+                }
+            },
+            {"returncode": 0, "events": [], "event_types": {}},
+            requests,
+        )
+
+        self.assertEqual([], failures)
+
+    def test_input_prefix_expectation_reports_early_churn(self) -> None:
+        requests = [
+            {"body": {"input": [{"role": "user", "content": "stable"}]}},
+            {"body": {"input": [{"role": "user", "content": "changed"}]}},
+        ]
+
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "responses": [
+                        {"request": 1, "input_prefix_matches_request": 0}
+                    ]
+                }
+            },
+            {"returncode": 0, "events": [], "event_types": {}},
+            requests,
+        )
+
+        self.assertEqual(
+            ["responses[1]: expected input to start with responses[0].input"],
+            failures,
+        )
+
     def test_token_usage_snapshot_expectations_are_evaluated(self) -> None:
         failures = HARNESS.evaluate_expectations(
             {
