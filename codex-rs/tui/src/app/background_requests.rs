@@ -93,6 +93,26 @@ impl App {
         });
     }
 
+    pub(super) fn fetch_auto_review_summary(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        run_id: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = fetch_auto_review_summary(request_handle, thread_id)
+                .await
+                .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::AutoReviewSummaryLoaded {
+                thread_id,
+                run_id,
+                result,
+            });
+        });
+    }
+
     /// Starts the initial skills refresh without delaying the first interactive frame.
     ///
     /// Startup only needs skill metadata to populate skill mentions and the skills UI; the prompt can be
@@ -666,6 +686,22 @@ pub(super) async fn send_add_credits_nudge_email(
         .wrap_err("account/sendAddCreditsNudgeEmail failed in TUI")?;
 
     Ok(response.status)
+}
+
+pub(super) async fn fetch_auto_review_summary(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+) -> Result<AutoReviewSummaryReadResponse> {
+    let request_id = RequestId::String(format!("auto-review-summary-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams {
+                thread_id: thread_id.to_string(),
+            },
+        })
+        .await
+        .wrap_err("review/summary/read failed in TUI")
 }
 
 pub(super) async fn fetch_skills_list(

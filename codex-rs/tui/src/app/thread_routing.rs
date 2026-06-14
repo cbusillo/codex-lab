@@ -1097,6 +1097,10 @@ impl App {
                     self.enqueue_thread_history_entry_response(thread_id, event)
                         .await?;
                 }
+                ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => {
+                    self.enqueue_thread_auto_review_summary(thread_id, run_id, result)
+                        .await?;
+                }
                 ThreadBufferedEvent::FeedbackSubmission(event) => {
                     self.enqueue_thread_feedback_event(thread_id, event).await;
                 }
@@ -1105,6 +1109,61 @@ impl App {
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ false);
         self.chat_widget.submit_initial_user_message_if_pending();
+        Ok(())
+    }
+
+    pub(super) async fn enqueue_thread_auto_review_summary(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: String,
+        result: Result<AutoReviewSummaryReadResponse, String>,
+    ) -> Result<()> {
+        let (sender, store) = {
+            let channel = self.ensure_thread_channel(thread_id);
+            (channel.sender.clone(), Arc::clone(&channel.store))
+        };
+
+        let should_send = {
+            let mut guard = store.lock().await;
+            guard.push_auto_review_summary(run_id.clone(), result.clone());
+            guard.active
+        };
+
+        if should_send {
+            let event = ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result };
+            match sender.try_send(event) {
+                Ok(()) => {}
+                Err(TrySendError::Full(event)) => {
+                    tokio::spawn(async move {
+                        if let Err(err) = sender.send(event).await {
+                            tracing::warn!("thread {thread_id} event channel closed: {err}");
+                        }
+                    });
+                }
+                Err(TrySendError::Closed(_)) => {
+                    tracing::warn!("thread {thread_id} event channel closed");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn enqueue_primary_thread_auto_review_summary(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: String,
+        result: Result<AutoReviewSummaryReadResponse, String>,
+    ) -> Result<()> {
+        if self.primary_thread_id == Some(thread_id) {
+            return self
+                .enqueue_thread_auto_review_summary(thread_id, run_id, result)
+                .await;
+        }
+        if self.primary_thread_id.is_none() {
+            self.pending_primary_events
+                .push_back(ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result });
+        }
         Ok(())
     }
 
@@ -1405,6 +1464,10 @@ impl App {
             ThreadBufferedEvent::HistoryEntryResponse(event) => {
                 self.chat_widget.handle_history_entry_response(event);
             }
+            ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => {
+                self.chat_widget
+                    .handle_auto_review_summary_loaded(run_id, result);
+            }
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }
@@ -1425,6 +1488,9 @@ impl App {
             ThreadBufferedEvent::HistoryEntryResponse(event) => {
                 self.chat_widget.handle_history_entry_response(event)
             }
+            ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => self
+                .chat_widget
+                .handle_auto_review_summary_loaded(run_id, result),
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }

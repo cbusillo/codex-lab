@@ -39,6 +39,10 @@ pub(super) use codex_app_server_protocol::AdditionalNetworkPermissions as AppSer
 pub(super) use codex_app_server_protocol::AdditionalPermissionProfile as AppServerAdditionalPermissionProfile;
 pub(super) use codex_app_server_protocol::AppSummary;
 pub(super) use codex_app_server_protocol::AutoReviewDecisionSource as AppServerGuardianApprovalReviewDecisionSource;
+pub(super) use codex_app_server_protocol::AutoReviewFreshness;
+pub(super) use codex_app_server_protocol::AutoReviewRunSource;
+pub(super) use codex_app_server_protocol::AutoReviewRunSummary;
+pub(super) use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 pub(super) use codex_app_server_protocol::BackgroundAutoReviewStatus;
 pub(super) use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 pub(super) use codex_app_server_protocol::CodexErrorInfo;

@@ -9,6 +9,12 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::session_state::ThreadSessionState;
 use crate::wrapping::word_wrap_lines;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AutoReviewFreshness;
+use codex_app_server_protocol::AutoReviewRunSource;
+use codex_app_server_protocol::AutoReviewRunSummary;
+use codex_app_server_protocol::AutoReviewStatusCount;
+use codex_app_server_protocol::AutoReviewSummaryReadResponse;
+use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::McpAuthStatus;
 use codex_config::types::McpServerConfig;
 use codex_otel::RuntimeMetricTotals;
@@ -216,6 +222,138 @@ fn raw_lines_from_source_preserves_trailing_blank_but_not_trailing_newline() {
         vec!["alpha".to_string(), String::new()]
     );
     assert_eq!(raw_lines_from_source(""), Vec::<Line<'static>>::new());
+}
+
+fn auto_review_summary(
+    run_id: &str,
+    freshness: AutoReviewFreshness,
+    rendered_findings: usize,
+    content: &str,
+) -> AutoReviewRunSummary {
+    AutoReviewRunSummary {
+        run_id: run_id.to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: Some("code-gpt-5.5".to_string()),
+        error_summary: None,
+        rendered_findings,
+        omitted_findings: 0,
+        truncated: false,
+        content: content.to_string(),
+    }
+}
+
+#[test]
+fn auto_review_summary_clean_snapshot() {
+    let summary = auto_review_summary(
+        "run-clean",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 0,
+        "",
+    );
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(summary.clone()),
+        current: Some(summary),
+        status_counts: Vec::new(),
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
+✔ Auto Review found no findings · run-clean
+  completed · current · code-gpt-5.5
+  No findings.
+");
+}
+
+#[test]
+fn auto_review_summary_findings_snapshot() {
+    let mut summary = auto_review_summary(
+        "run-findings",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 2,
+        "[P1] Fix request ordering\nThe resumed turn can miss sandbox propagation.",
+    );
+    summary.omitted_findings = 1;
+    summary.truncated = true;
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(summary.clone()),
+        current: Some(summary),
+        status_counts: Vec::new(),
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
+! Auto Review found 2 findings · run-findings
+  completed · current · code-gpt-5.5 · 1 omitted · truncated
+  [P1] Fix request ordering
+  The resumed turn can miss sandbox propagation.
+");
+}
+
+#[test]
+fn auto_review_summary_stale_latest_snapshot() {
+    let latest = auto_review_summary(
+        "run-stale",
+        AutoReviewFreshness::Stale,
+        /*rendered_findings*/ 1,
+        "",
+    );
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(latest),
+        current: None,
+        status_counts: vec![AutoReviewStatusCount {
+            status: BackgroundAutoReviewStatus::Completed,
+            source: AutoReviewRunSource::Background,
+            freshness: AutoReviewFreshness::Stale,
+            target_matches: false,
+            count: 1,
+        }],
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
+○ Auto Review has no current findings · latest stale · run-stale
+  completed · stale · code-gpt-5.5
+  Latest findings are hidden because they no longer match this worktree.
+  1 stale completed off-target
+");
+}
+
+#[test]
+fn auto_review_summary_error_snapshot() {
+    let cell = new_auto_review_summary_error_cell("review/summary/read failed".to_string());
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"✗ Auto Review summary unavailable · review/summary/read failed");
+}
+
+#[test]
+fn auto_review_summary_failed_current_snapshot() {
+    let mut summary = auto_review_summary(
+        "run-failed",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 0,
+        "",
+    );
+    summary.status = BackgroundAutoReviewStatus::Failed;
+    summary.error_summary = Some("review model unavailable".to_string());
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(summary.clone()),
+        current: Some(summary),
+        status_counts: Vec::new(),
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
+✗ Auto Review failed · run-failed
+  failed · current · code-gpt-5.5 · review model unavailable
+");
 }
 
 #[test]

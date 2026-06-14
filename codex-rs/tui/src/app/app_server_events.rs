@@ -11,8 +11,10 @@ use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_protocol::ThreadId;
 
 impl App {
     fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
@@ -118,6 +120,17 @@ impl App {
             _ => {}
         }
 
+        let auto_review_summary_target = match &notification {
+            ServerNotification::BackgroundAutoReviewStatusChanged(notification)
+                if notification.status == BackgroundAutoReviewStatus::Completed =>
+            {
+                ThreadId::from_string(&notification.thread_id)
+                    .ok()
+                    .map(|thread_id| (thread_id, notification.run_id.clone()))
+            }
+            _ => None,
+        };
+
         match server_notification_thread_target(&notification) {
             ServerNotificationThreadTarget::Thread(thread_id) => {
                 let result = if self.primary_thread_id == Some(thread_id)
@@ -131,6 +144,11 @@ impl App {
 
                 if let Err(err) = result {
                     tracing::warn!("failed to enqueue app-server notification: {err}");
+                }
+                if let Some((summary_thread_id, run_id)) = auto_review_summary_target
+                    && summary_thread_id == thread_id
+                {
+                    self.fetch_auto_review_summary(app_server_client, thread_id, run_id);
                 }
                 return;
             }
