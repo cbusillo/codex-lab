@@ -368,6 +368,61 @@ async fn live_app_server_background_auto_review_failure_renders_error_summary() 
 }
 
 #[tokio::test]
+async fn stale_auto_review_summary_result_is_ignored() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let summary = AutoReviewRunSummary {
+        run_id: "newer-run".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 0,
+        omitted_findings: 0,
+        truncated: false,
+        content: String::new(),
+    };
+
+    chat.handle_auto_review_summary_loaded(
+        "older-run".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(summary.clone()),
+            current: Some(summary),
+            status_counts: Vec::new(),
+        }),
+    );
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn stale_auto_review_summary_error_is_ignored() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.handle_server_notification(
+        ServerNotification::BackgroundAutoReviewStatusChanged(
+            BackgroundAutoReviewStatusChangedNotification {
+                thread_id: "thread-1".to_string(),
+                run_id: "newer-run".to_string(),
+                status: BackgroundAutoReviewStatus::Completed,
+                review_target: ReviewTarget::UncommittedChanges,
+                error_summary: None,
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+    let _ = drain_insert_history(&mut rx);
+
+    chat.handle_auto_review_summary_loaded(
+        "older-run".to_string(),
+        Err("review/summary/read failed".to_string()),
+    );
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
 async fn live_app_server_turn_completed_clears_working_status_after_answer_item() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

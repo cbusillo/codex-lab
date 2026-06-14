@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
+use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
@@ -157,6 +158,13 @@ pub(crate) enum AppEvent {
     ThreadHistoryEntryResponse {
         thread_id: ThreadId,
         event: HistoryLookupResponse,
+    },
+
+    /// Deliver a native Auto Review summary fetched from the app server to a thread transcript.
+    AutoReviewSummaryLoaded {
+        thread_id: ThreadId,
+        run_id: String,
+        result: Result<AutoReviewSummaryReadResponse, String>,
     },
 
     /// Persist a submitted prompt in the cross-session message history.

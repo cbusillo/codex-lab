@@ -361,6 +361,19 @@ impl App {
                 self.enqueue_thread_history_entry_response(thread_id, event)
                     .await?;
             }
+            AppEvent::AutoReviewSummaryLoaded {
+                thread_id,
+                run_id,
+                result,
+            } => {
+                if self.primary_thread_id.is_none() || self.primary_thread_id == Some(thread_id) {
+                    self.enqueue_primary_thread_auto_review_summary(thread_id, run_id, result)
+                        .await?;
+                } else {
+                    self.enqueue_thread_auto_review_summary(thread_id, run_id, result)
+                        .await?;
+                }
+            }
             AppEvent::DiffResult(text) => {
                 // Clear the in-progress state in the bottom pane
                 self.chat_widget.on_diff_complete();

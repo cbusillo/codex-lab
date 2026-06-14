@@ -67,6 +67,24 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn handle_auto_review_summary_loaded(
+        &mut self,
+        run_id: String,
+        result: Result<codex_app_server_protocol::AutoReviewSummaryReadResponse, String>,
+    ) {
+        match result {
+            Ok(response) if auto_review_summary_contains_run(&response, &run_id) => {
+                self.add_to_history(history_cell::new_auto_review_summary_cell(&response));
+            }
+            Ok(_) => return,
+            Err(err) if self.current_background_review_matches_run(&run_id) => {
+                self.add_to_history(history_cell::new_auto_review_summary_error_cell(err));
+            }
+            Err(_) => return,
+        }
+        self.request_redraw();
+    }
+
     pub(super) fn on_guardian_review_notification(
         &mut self,
         id: String,
@@ -159,4 +177,27 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_deprecation_notice(summary, details));
         self.request_redraw();
     }
+}
+
+impl ChatWidget {
+    fn current_background_review_matches_run(&self, run_id: &str) -> bool {
+        self.review
+            .current_background_review
+            .as_ref()
+            .is_some_and(|review| review.run_id == run_id)
+    }
+}
+
+fn auto_review_summary_contains_run(
+    response: &codex_app_server_protocol::AutoReviewSummaryReadResponse,
+    run_id: &str,
+) -> bool {
+    response
+        .current
+        .as_ref()
+        .is_some_and(|summary| summary.run_id == run_id)
+        || response
+            .latest
+            .as_ref()
+            .is_some_and(|summary| summary.run_id == run_id)
 }
