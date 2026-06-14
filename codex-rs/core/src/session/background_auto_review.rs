@@ -32,27 +32,22 @@ impl Session {
         self: &Arc<Self>,
         turn_context: &TurnContext,
     ) {
+        let fingerprint = if let Some(cwd) = turn_context
+            .environments
+            .single_local_environment_cwd()
+            .cloned()
+        {
+            background_review_fingerprint_for_cwd(&cwd).await
+        } else {
+            None
+        };
         let mut state = self.state.lock().await;
         state
             .background_auto_review
             .begin_regular_turn(turn_context.sub_id.clone());
-
-        let Some(cwd) = turn_context
-            .environments
-            .single_local_environment_cwd()
-            .cloned()
-        else {
-            return;
-        };
-        let sess = Arc::clone(self);
-        let turn_id = turn_context.sub_id.clone();
-        tokio::spawn(async move {
-            let fingerprint = background_review_fingerprint_for_cwd(&cwd).await;
-            let mut state = sess.state.lock().await;
-            state
-                .background_auto_review
-                .update_regular_turn_start_fingerprint(&turn_id, fingerprint);
-        });
+        state
+            .background_auto_review
+            .update_regular_turn_start_fingerprint(&turn_context.sub_id, fingerprint);
     }
 
     pub(crate) async fn maybe_schedule_background_auto_review(
@@ -390,6 +385,21 @@ impl Session {
     }
 
     pub(crate) async fn cancel_background_auto_review(self: &Arc<Self>) {
+        self.cancel_background_auto_review_with_summary(
+            AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+        )
+        .await;
+    }
+
+    pub(crate) async fn cancel_background_auto_review_for_foreground_work(self: &Arc<Self>) {
+        self.cancel_background_auto_review_with_summary(background_auto_review_control_summary(
+            &BackgroundAutoReviewControlAction::Cancel,
+            &BackgroundAutoReviewControlReason::ForegroundWorkStarted,
+        ))
+        .await;
+    }
+
+    async fn cancel_background_auto_review_with_summary(self: &Arc<Self>, error_summary: String) {
         let cancellation = {
             let mut state = self.state.lock().await;
             state
@@ -398,24 +408,23 @@ impl Session {
         };
         let codex_home = self.codex_home().await;
         if let Some(pending_review) = cancellation.pending_review
-            && pending_review.persistence.save_cancelled(&codex_home)
+            && pending_review
+                .persistence
+                .save_cancelled_with_summary(&codex_home, error_summary.clone())
         {
             record_background_review_status(
                 Arc::clone(self),
                 &pending_review.persistence,
                 BackgroundAutoReviewStatus::Cancelled,
-                Some(AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string()),
+                Some(error_summary.clone()),
             )
             .await;
         }
         let Some(running_review) = cancellation.running_review else {
             return;
         };
-        self.cancel_running_background_auto_review(
-            running_review,
-            AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
-        )
-        .await;
+        self.cancel_running_background_auto_review(running_review, error_summary)
+            .await;
     }
 
     pub(crate) async fn control_background_auto_review(
