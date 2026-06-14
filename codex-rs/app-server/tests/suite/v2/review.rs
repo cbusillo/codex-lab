@@ -5,6 +5,8 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_shell_command_sse_response;
 use app_test_support::to_response;
+use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
+use codex_app_server_protocol::AutoReviewFindingDetailReadResponse;
 use codex_app_server_protocol::BackgroundAutoReviewControlAction;
 use codex_app_server_protocol::BackgroundAutoReviewControlParams;
 use codex_app_server_protocol::BackgroundAutoReviewControlReason;
@@ -26,15 +28,25 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
+use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_auto_review::AutoReviewFindingRecord;
+use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
+use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::SCHEMA_VERSION;
+use codex_protocol::protocol::ReviewCodeLocation;
+use codex_protocol::protocol::ReviewFinding;
+use codex_protocol::protocol::ReviewLineRange;
+use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
@@ -538,6 +550,228 @@ async fn background_auto_review_control_unknown_run_is_acknowledged() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn auto_review_finding_detail_read_returns_bounded_detail() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    AutoReviewStore::new(codex_home.path()).save_run(&sample_auto_review_run(
+        "run_detail",
+        "finding_detail",
+        &thread_cwd,
+        &"Use the existing bounded detail store instead of embedding the whole finding. ".repeat(8),
+    ))?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: "run_detail".to_string(),
+            finding_id: "finding_detail".to_string(),
+            max_bytes: Some(180),
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
+    assert_eq!(detail.run_id, "run_detail");
+    assert_eq!(detail.finding_id, "finding_detail");
+    assert_eq!(detail.max_bytes, 180);
+    assert!(detail.truncated);
+    assert!(detail.bytes <= 180);
+    assert!(detail.original_bytes > detail.bytes);
+    assert!(detail.content.contains("finding_detail"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_finding_detail_read_uses_selected_environment_cwd() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    let environment_cwd = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            cwd: Some(codex_home.path().to_string_lossy().into_owned()),
+            environments: Some(vec![TurnEnvironmentParams {
+                environment_id: "local".to_string(),
+                cwd: environment_cwd.path().to_path_buf().try_into()?,
+            }]),
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/started"),
+    )
+    .await??;
+
+    AutoReviewStore::new(codex_home.path()).save_run(&sample_auto_review_run(
+        "run_environment_detail",
+        "environment_finding",
+        environment_cwd.path(),
+        "Stored environment body",
+    ))?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id: thread.id,
+            run_id: "run_environment_detail".to_string(),
+            finding_id: "environment_finding".to_string(),
+            max_bytes: Some(1024),
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
+    assert_eq!(detail.run_id, "run_environment_detail");
+    assert_eq!(detail.finding_id, "environment_finding");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_finding_detail_read_rejects_empty_finding_id() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: "run_detail".to_string(),
+            finding_id: " \t ".to_string(),
+            max_bytes: Some(180),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error.error.message.contains("findingId must not be empty"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_finding_detail_read_rejects_unknown_finding_id() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    AutoReviewStore::new(codex_home.path()).save_run(&sample_auto_review_run(
+        "run_detail",
+        "finding_detail",
+        &thread_cwd,
+        "Stored body",
+    ))?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: "run_detail".to_string(),
+            finding_id: "missing".to_string(),
+            max_bytes: Some(180),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("auto review finding not found"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_finding_detail_read_rejects_stale_run() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    AutoReviewStore::new(codex_home.path()).save_run(&sample_auto_review_run(
+        "run_detail",
+        "finding_detail",
+        &thread_cwd.join("other-worktree"),
+        "Stored body",
+    ))?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: "run_detail".to_string(),
+            finding_id: "finding_detail".to_string(),
+            max_bytes: Some(180),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("auto review finding not found"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
+
 async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
@@ -557,6 +791,45 @@ async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
     )
     .await??;
     Ok(thread.id)
+}
+
+fn sample_auto_review_run(
+    run_id: &str,
+    finding_id: &str,
+    worktree_path: &std::path::Path,
+    body: &str,
+) -> AutoReviewRun {
+    AutoReviewRun {
+        schema_version: SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        status: AutoReviewRunStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        target: AutoReviewRunTarget {
+            branch: None,
+            head_sha: None,
+            base_sha: None,
+            worktree_path: Some(worktree_path.to_path_buf()),
+            worktree_diff_fingerprint: None,
+        },
+        review_target: CoreReviewTarget::UncommittedChanges,
+        started_at_unix_secs: 1,
+        completed_at_unix_secs: Some(2),
+        model: Some("review-model".to_string()),
+        error_summary: None,
+        findings: vec![AutoReviewFindingRecord {
+            finding_id: finding_id.to_string(),
+            finding: ReviewFinding {
+                title: "Prefer bounded details".to_string(),
+                body: body.to_string(),
+                confidence_score: 0.92,
+                priority: 1,
+                code_location: ReviewCodeLocation {
+                    absolute_file_path: PathBuf::from("/repo/src/lib.rs"),
+                    line_range: ReviewLineRange { start: 12, end: 14 },
+                },
+            },
+        }],
+    }
 }
 
 async fn materialize_thread_rollout(mcp: &mut TestAppServer, thread_id: &str) -> Result<()> {

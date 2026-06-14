@@ -32,29 +32,25 @@ impl Session {
         self: &Arc<Self>,
         turn_context: &TurnContext,
     ) {
-        {
-            let mut state = self.state.lock().await;
-            state
-                .background_auto_review
-                .begin_regular_turn(turn_context.sub_id.clone());
-        }
-        let fingerprint = if let Some(cwd) = turn_context
-            .environments
-            .single_local_environment_cwd()
-            .cloned()
-        {
-            background_review_fingerprint_for_cwd(&cwd).await
-        } else {
-            None
-        };
         let mut state = self.state.lock().await;
         state
             .background_auto_review
-            .update_regular_turn_start_fingerprint(&turn_context.sub_id, fingerprint);
+            .begin_regular_turn(turn_context.sub_id.clone());
     }
 
     pub(crate) async fn maybe_schedule_background_auto_review(
         self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+    ) {
+        let sess = Arc::clone(self);
+        tokio::spawn(async move {
+            sess.schedule_background_auto_review_after_turn(turn_context)
+                .await;
+        });
+    }
+
+    async fn schedule_background_auto_review_after_turn(
+        self: Arc<Self>,
         turn_context: Arc<TurnContext>,
     ) {
         let Some(after_fingerprint) = background_review_fingerprint(turn_context.as_ref()).await
@@ -118,7 +114,7 @@ impl Session {
         let codex_home = self.codex_home().await;
         if persistence.save_pending(codex_home) {
             record_background_review_status(
-                Arc::clone(self),
+                Arc::clone(&self),
                 &persistence,
                 BackgroundAutoReviewStatus::Pending,
                 None,
@@ -126,7 +122,7 @@ impl Session {
             .await;
         }
 
-        let sess = Arc::clone(self);
+        let sess = Arc::clone(&self);
         tokio::spawn(async move {
             tokio::time::sleep(BACKGROUND_AUTO_REVIEW_DEBOUNCE).await;
             if !sess

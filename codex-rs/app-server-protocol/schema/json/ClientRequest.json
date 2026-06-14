@@ -150,6 +150,34 @@
         }
       ]
     },
+    "AutoReviewFindingDetailReadParams": {
+      "properties": {
+        "findingId": {
+          "type": "string"
+        },
+        "maxBytes": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findingId",
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "BackgroundAutoReviewControlAction": {
       "enum": [
         "cancel",
@@ -5713,6 +5741,30 @@
         "params"
       ],
       "title": "Review/background/controlRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "review/findingDetail/read"
+          ],
+          "title": "Review/findingDetail/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutoReviewFindingDetailReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Review/findingDetail/readRequest",
       "type": "object"
     },
     {

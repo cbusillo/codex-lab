@@ -819,6 +819,11 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::BackgroundAutoReviewControlResponse,
     },
+    AutoReviewFindingDetailRead => "review/findingDetail/read" {
+        params: v2::AutoReviewFindingDetailReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutoReviewFindingDetailReadResponse,
+    },
 
     ModelList => "model/list" {
         params: v2::ModelListParams,
