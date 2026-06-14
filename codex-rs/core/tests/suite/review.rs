@@ -1358,6 +1358,12 @@ async fn automatic_background_review_debounce_ignores_superseded_diff() -> anyho
     init_git_repo(test.cwd_path());
 
     test.submit_turn("create the first file").await?;
+    let first_pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
     let second_turn = test.submit_turn("create the second file");
     tokio::pin!(second_turn);
     tokio::select! {
@@ -1380,6 +1386,21 @@ async fn automatic_background_review_debounce_ignores_superseded_diff() -> anyho
         run.target.worktree_diff_fingerprint,
         Some(expected_worktree_diff_fingerprint(test.cwd_path()).await)
     );
+    let runs = load_auto_review_runs(codex_home.path())?;
+    assert_eq!(runs.len(), 2, "expected cancelled and completed runs");
+    let cancelled = runs
+        .iter()
+        .find(|run| run.run_id == first_pending_status.run_id)
+        .expect("expected first pending run to be persisted");
+    assert_eq!(cancelled.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(cancelled.source, AutoReviewRunSource::Background);
+    assert_eq!(cancelled.review_target, ReviewTarget::UncommittedChanges);
+    assert_eq!(
+        cancelled.error_summary.as_deref(),
+        Some("foreground work started before background auto review could continue")
+    );
+    assert!(cancelled.completed_at_unix_secs.is_some());
+    assert!(runs.iter().any(|candidate| candidate.run_id == run.run_id));
     server.wait_for_request_count(5).await;
     server
         .assert_request_count_stays(5, Duration::from_millis(500))

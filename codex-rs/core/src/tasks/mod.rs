@@ -337,7 +337,8 @@ impl Session {
         let task_kind = task.kind();
         let background_review_trigger_eligible = task.background_review_trigger_eligible();
         if task_kind == TaskKind::Regular {
-            self.cancel_background_auto_review().await;
+            self.cancel_background_auto_review_for_foreground_work()
+                .await;
         }
         let span_name = task.span_name();
         let started_at = Instant::now();
