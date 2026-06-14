@@ -2,6 +2,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use rand::prelude::IndexedRandom;
@@ -12,6 +13,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 /// This structure is used to add some limits on the multi-agent capabilities for Codex. In
 /// the current implementation, it limits:
@@ -22,7 +25,14 @@ use std::sync::atomic::Ordering;
 #[derive(Default)]
 pub(crate) struct AgentRegistry {
     active_agents: Mutex<ActiveAgents>,
+    external_agents: Mutex<HashMap<ThreadId, ExternalAgentRuntime>>,
     total_count: AtomicUsize,
+}
+
+struct ExternalAgentRuntime {
+    status_tx: watch::Sender<AgentStatus>,
+    _status_rx: watch::Receiver<AgentStatus>,
+    cancellation_token: CancellationToken,
 }
 
 #[derive(Default)]
@@ -97,6 +107,10 @@ impl AgentRegistry {
     }
 
     pub(crate) fn release_spawned_thread(&self, thread_id: ThreadId) {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&thread_id);
         let removed_counted_agent = {
             let mut active_agents = self
                 .active_agents
@@ -192,6 +206,69 @@ impl AgentRegistry {
         {
             metadata.last_task_message = None;
         }
+    }
+
+    pub(crate) fn register_external_agent(
+        &self,
+        thread_id: ThreadId,
+        initial_status: AgentStatus,
+    ) -> CancellationToken {
+        let (status_tx, status_rx) = watch::channel(initial_status);
+        let cancellation_token = CancellationToken::new();
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                thread_id,
+                ExternalAgentRuntime {
+                    status_tx,
+                    _status_rx: status_rx,
+                    cancellation_token: cancellation_token.clone(),
+                },
+            );
+        cancellation_token
+    }
+
+    pub(crate) fn external_agent_status(&self, thread_id: ThreadId) -> Option<AgentStatus> {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread_id)
+            .map(|runtime| runtime.status_tx.borrow().clone())
+    }
+
+    pub(crate) fn external_agent_status_rx(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<watch::Receiver<AgentStatus>> {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread_id)
+            .map(|runtime| runtime.status_tx.subscribe())
+    }
+
+    pub(crate) fn update_external_agent_status(
+        &self,
+        thread_id: ThreadId,
+        status: AgentStatus,
+    ) -> bool {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread_id)
+            .is_some_and(|runtime| runtime.status_tx.send(status).is_ok())
+    }
+
+    pub(crate) fn cancel_external_agent(&self, thread_id: ThreadId) -> bool {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread_id)
+            .is_some_and(|runtime| {
+                runtime.cancellation_token.cancel();
+                true
+            })
     }
 
     fn register_spawned_thread(&self, agent_metadata: AgentMetadata) {

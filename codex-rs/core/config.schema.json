@@ -6,9 +6,55 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentRoleBackendToml": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "args": {
+              "description": "Arguments passed to the command after the executable path.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "command": {
+              "description": "Command to execute for each spawned external agent.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Maximum process runtime in milliseconds.",
+              "format": "uint64",
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "external_command"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
+        "backend": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentRoleBackendToml"
+            }
+          ],
+          "description": "Optional non-Codex backend used to run agents spawned with this role."
+        },
         "config_file": {
           "allOf": [
             {

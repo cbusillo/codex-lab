@@ -8,11 +8,13 @@ use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
 use codex_config::ProfileV2Name;
 use codex_config::RequirementSource;
+use codex_config::config_toml::AgentRoleBackendToml;
 use codex_config::config_toml::AgentRoleToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ExperimentalRequestUserInput;
+use codex_config::config_toml::ExternalCommandAgentBackendToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeConfig;
 use codex_config::config_toml::RealtimeToml;
@@ -92,6 +94,7 @@ use codex_protocol::protocol::SandboxPolicy;
 use serde::Deserialize;
 use tempfile::tempdir;
 
+use super::AgentRoleBackendConfig;
 use super::*;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -6835,6 +6838,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
                     description: Some("Research role".to_string()),
                     config_file: Some(missing_path.abs()),
                     nickname_candidates: None,
+                    backend: None,
                 },
             )]),
         }),
@@ -7009,6 +7013,236 @@ nickname_candidates = ["Noether"]
             .as_ref()
             .map(|candidates| candidates.iter().map(String::as_str).collect::<Vec<_>>()),
         Some(vec!["Hypatia"])
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_role_external_command_backend_loads_from_config_toml() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        agents: Some(AgentsToml {
+            max_threads: None,
+            max_depth: None,
+            job_max_runtime_seconds: None,
+            interrupt_message: None,
+            roles: BTreeMap::from([(
+                "external".to_string(),
+                AgentRoleToml {
+                    description: Some("External role".to_string()),
+                    config_file: None,
+                    nickname_candidates: None,
+                    backend: Some(AgentRoleBackendToml::ExternalCommand(
+                        ExternalCommandAgentBackendToml {
+                            command: "/bin/echo".to_string(),
+                            args: Some(vec!["ok".to_string()]),
+                            timeout_ms: Some(1234),
+                        },
+                    )),
+                },
+            )]),
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    let role = config
+        .agent_roles
+        .get("external")
+        .expect("external role should load");
+    assert_eq!(role.description.as_deref(), Some("External role"));
+    assert_eq!(
+        role.backend,
+        Some(AgentRoleBackendConfig::ExternalCommand(
+            ExternalCommandAgentBackendConfig {
+                command: "/bin/echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_ms: 1234,
+            },
+        ))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_role_external_command_backend_defaults_optional_fields() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        agents: Some(AgentsToml {
+            max_threads: None,
+            max_depth: None,
+            job_max_runtime_seconds: None,
+            interrupt_message: None,
+            roles: BTreeMap::from([(
+                "external".to_string(),
+                AgentRoleToml {
+                    description: Some("External role".to_string()),
+                    config_file: None,
+                    nickname_candidates: None,
+                    backend: Some(AgentRoleBackendToml::ExternalCommand(
+                        ExternalCommandAgentBackendToml {
+                            command: "/bin/echo".to_string(),
+                            args: None,
+                            timeout_ms: None,
+                        },
+                    )),
+                },
+            )]),
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    let role = config
+        .agent_roles
+        .get("external")
+        .expect("external role should load");
+    assert_eq!(
+        role.backend,
+        Some(AgentRoleBackendConfig::ExternalCommand(
+            ExternalCommandAgentBackendConfig {
+                command: "/bin/echo".to_string(),
+                args: Vec::new(),
+                timeout_ms: 30_000,
+            },
+        ))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_role_external_command_backend_rejects_invalid_values() -> std::io::Result<()> {
+    for (command, timeout_ms, expected) in [
+        (
+            "",
+            Some(1),
+            "external_command backend command must not be empty",
+        ),
+        (
+            "  ",
+            Some(1),
+            "external_command backend command must not be empty",
+        ),
+        (
+            "/bin/echo",
+            Some(0),
+            "external_command backend timeout_ms must be greater than 0",
+        ),
+    ] {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml {
+            agents: Some(AgentsToml {
+                max_threads: None,
+                max_depth: None,
+                job_max_runtime_seconds: None,
+                interrupt_message: None,
+                roles: BTreeMap::from([(
+                    "external".to_string(),
+                    AgentRoleToml {
+                        description: Some("External role".to_string()),
+                        config_file: None,
+                        nickname_candidates: None,
+                        backend: Some(AgentRoleBackendToml::ExternalCommand(
+                            ExternalCommandAgentBackendToml {
+                                command: command.to_string(),
+                                args: None,
+                                timeout_ms,
+                            },
+                        )),
+                    },
+                )]),
+            }),
+            ..Default::default()
+        };
+
+        let err = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await
+        .expect_err("invalid external_command backend should be rejected");
+        assert!(
+            err.to_string().contains(expected),
+            "expected `{expected}` in `{err}`"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_role_external_command_backend_loads_from_role_file() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let role_config_path = codex_home.path().join("agents").join("external.toml");
+    tokio::fs::create_dir_all(
+        role_config_path
+            .parent()
+            .expect("role config should have a parent directory"),
+    )
+    .await?;
+    tokio::fs::write(
+        &role_config_path,
+        r#"
+description = "External role from file"
+nickname_candidates = ["Echo"]
+developer_instructions = "External command role"
+
+[backend]
+type = "external_command"
+command = "/bin/echo"
+args = ["ok"]
+timeout_ms = 4321
+"#,
+    )
+    .await?;
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[agents.external]
+description = "External role from config"
+config_file = "./agents/external.toml"
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+    let role = config
+        .agent_roles
+        .get("external")
+        .expect("external role should load");
+    assert_eq!(role.description.as_deref(), Some("External role from file"));
+    assert_eq!(
+        role.nickname_candidates
+            .as_ref()
+            .map(|candidates| candidates.iter().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["Echo"])
+    );
+    assert_eq!(
+        role.backend,
+        Some(AgentRoleBackendConfig::ExternalCommand(
+            ExternalCommandAgentBackendConfig {
+                command: "/bin/echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_ms: 4321,
+            },
+        ))
     );
 
     Ok(())
@@ -7786,6 +8020,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
                         "  Hypatia  ".to_string(),
                         "Noether".to_string(),
                     ]),
+                    backend: None,
                 },
             )]),
         }),
@@ -7826,6 +8061,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(Vec::new()),
+                    backend: None,
                 },
             )]),
         }),
@@ -7863,6 +8099,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Hypatia".to_string(), " Hypatia ".to_string()]),
+                    backend: None,
                 },
             )]),
         }),
@@ -7900,6 +8137,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Agent <One>".to_string()]),
+                    backend: None,
                 },
             )]),
         }),
