@@ -16,18 +16,12 @@ if [[ -n "${CODEX_EXEC_HARNESS_CARGO_TARGET_DIR:-}" ]]; then
 	target_dir="$CODEX_EXEC_HARNESS_CARGO_TARGET_DIR"
 elif [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
 	target_dir="$CARGO_TARGET_DIR"
-elif [[ -n "${CODE_HOME:-}" ]]; then
-	target_dir="${CODE_HOME%/}/working/_target-cache/$repo_name/exec-harness"
-elif [[ -n "${CODEX_HOME:-}" ]]; then
-	target_dir="${CODEX_HOME%/}/working/_target-cache/$repo_name/exec-harness"
+elif [[ -n "${CODEX_LAB_HOME:-}" ]]; then
+	target_dir="${CODEX_LAB_HOME%/}/working/_target-cache/$repo_name/exec-harness"
 elif [[ -n "$derived_cache_home" ]]; then
 	target_dir="$derived_cache_home/working/_target-cache/$repo_name/exec-harness"
-elif [[ -d "$HOME/.code" ]]; then
-	target_dir="$HOME/.code/working/_target-cache/$repo_name/exec-harness"
-elif [[ -d "$HOME/.codex" ]]; then
-	target_dir="$HOME/.codex/working/_target-cache/$repo_name/exec-harness"
 else
-	target_dir="$repo_root/.code/working/_target-cache/$repo_name/exec-harness"
+	target_dir="${HOME%/}/.codex-lab/working/_target-cache/$repo_name/exec-harness"
 fi
 
 case "$target_dir" in

@@ -3776,7 +3776,7 @@ dependencies = [
  "clap",
  "codex-git-utils",
  "codex-protocol",
- "dirs",
+ "codex-utils-home-dir",
  "log",
  "owo-colors",
  "pretty_assertions",

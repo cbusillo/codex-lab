@@ -625,7 +625,7 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner);
             let dir = tempdir().expect("create CODEX_HOME temp dir");
             unsafe {
-                std::env::set_var("CODEX_HOME", dir.path());
+                std::env::set_var("CODEX_LAB_HOME", dir.path());
             }
             Self {
                 _guard: guard,
@@ -637,7 +637,7 @@ mod tests {
     impl Drop for TempCodexHome {
         fn drop(&mut self) {
             unsafe {
-                std::env::remove_var("CODEX_HOME");
+                std::env::remove_var("CODEX_LAB_HOME");
             }
         }
     }

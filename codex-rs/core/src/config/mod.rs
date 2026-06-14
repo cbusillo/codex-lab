@@ -4000,13 +4000,13 @@ fn normalize_guardian_policy_config(value: Option<&str>) -> Option<String> {
     })
 }
 
-/// Returns the path to the Codex configuration directory, which can be
-/// specified by the `CODEX_HOME` environment variable. If not set, defaults to
-/// `~/.codex`.
+/// Returns the path to the Codex Lab configuration directory, which can be
+/// specified by the `CODEX_LAB_HOME` environment variable. If not set, defaults
+/// to `~/.codex-lab`.
 ///
-/// - If `CODEX_HOME` is set, the value must exist and be a directory. The
+/// - If `CODEX_LAB_HOME` is set, the value must exist and be a directory. The
 ///   value will be canonicalized and this function will Err otherwise.
-/// - If `CODEX_HOME` is not set, this function does not verify that the
+/// - If `CODEX_LAB_HOME` is not set, this function does not verify that the
 ///   directory exists.
 pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
     codex_utils_home_dir::find_codex_home()

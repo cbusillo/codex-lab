@@ -41,6 +41,8 @@ use crate::managed_install::ExecutableIdentity;
 use crate::managed_install::executable_identity;
 #[cfg(unix)]
 use crate::managed_install::resolved_managed_codex_bin;
+#[cfg(unix)]
+use codex_utils_home_dir::find_codex_home;
 
 #[cfg(unix)]
 const INITIAL_UPDATE_DELAY: Duration = Duration::from_secs(5 * 60);
@@ -155,6 +157,7 @@ pub(crate) fn reexec_managed_updater(managed_codex_bin: &std::path::Path) -> Res
 
 #[cfg(unix)]
 async fn install_latest_standalone() -> Result<()> {
+    let codex_lab_home = find_codex_home().context("failed to resolve CODEX_LAB_HOME")?;
     let script = reqwest::get("https://chatgpt.com/codex/install.sh")
         .await
         .context("failed to fetch standalone Codex updater")?
@@ -166,6 +169,11 @@ async fn install_latest_standalone() -> Result<()> {
 
     let mut child = Command::new("/bin/sh")
         .arg("-s")
+        // The upstream standalone installer only understands CODEX_HOME. Scope
+        // the translation to this child process so Codex Lab still uses
+        // CODEX_LAB_HOME as its public home selector everywhere else.
+        .env("CODEX_HOME", codex_lab_home.as_path())
+        .env_remove("CODE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
