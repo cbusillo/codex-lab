@@ -30,6 +30,7 @@ pub(crate) struct AgentRegistry {
 }
 
 struct ExternalAgentRuntime {
+    parent_thread_id: ThreadId,
     status_tx: watch::Sender<AgentStatus>,
     _status_rx: watch::Receiver<AgentStatus>,
     cancellation_token: CancellationToken,
@@ -211,6 +212,7 @@ impl AgentRegistry {
     pub(crate) fn register_external_agent(
         &self,
         thread_id: ThreadId,
+        parent_thread_id: ThreadId,
         initial_status: AgentStatus,
     ) -> CancellationToken {
         let (status_tx, status_rx) = watch::channel(initial_status);
@@ -221,6 +223,7 @@ impl AgentRegistry {
             .insert(
                 thread_id,
                 ExternalAgentRuntime {
+                    parent_thread_id,
                     status_tx,
                     _status_rx: status_rx,
                     cancellation_token: cancellation_token.clone(),
@@ -235,6 +238,19 @@ impl AgentRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&thread_id)
             .map(|runtime| runtime.status_tx.borrow().clone())
+    }
+
+    pub(crate) fn live_external_thread_spawn_edges(&self) -> Vec<(ThreadId, ThreadId)> {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|(thread_id, runtime)| {
+                let status = runtime.status_tx.borrow().clone();
+                (!crate::agent::status::is_final(&status))
+                    .then_some((runtime.parent_thread_id, *thread_id))
+            })
+            .collect()
     }
 
     pub(crate) fn external_agent_status_rx(
@@ -266,6 +282,9 @@ impl AgentRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&thread_id)
             .is_some_and(|runtime| {
+                if crate::agent::status::is_final(&runtime.status_tx.borrow()) {
+                    return false;
+                }
                 runtime.cancellation_token.cancel();
                 true
             })

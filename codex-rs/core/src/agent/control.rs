@@ -404,6 +404,20 @@ impl AgentControl {
         let _ = self.state.update_external_agent_status(agent_id, status);
     }
 
+    pub(crate) fn release_external_agent(&self, agent_id: ThreadId) {
+        self.state.release_spawned_thread(agent_id);
+    }
+
+    pub(crate) async fn close_external_agent(&self, agent_id: ThreadId) {
+        self.close_thread_spawn_edge(agent_id).await;
+        self.release_external_agent(agent_id);
+    }
+
+    pub(crate) async fn close_thread_spawn_edge(&self, agent_id: ThreadId) {
+        self.persist_thread_spawn_edge_status(agent_id, DirectionalThreadSpawnEdgeStatus::Closed)
+            .await;
+    }
+
     /// Starts a detached watcher for sub-agents spawned from another thread.
     ///
     /// This is only enabled for `SubAgentSource::ThreadSpawn`, where a parent thread exists and
@@ -601,6 +615,21 @@ impl AgentControl {
                 ));
         }
 
+        for (parent_thread_id, child_thread_id) in self.state.live_external_thread_spawn_edges() {
+            children_by_parent
+                .entry(parent_thread_id)
+                .or_default()
+                .push((
+                    child_thread_id,
+                    self.state
+                        .agent_metadata_for_thread(child_thread_id)
+                        .unwrap_or(AgentMetadata {
+                            agent_id: Some(child_thread_id),
+                            ..Default::default()
+                        }),
+                ));
+        }
+
         for children in children_by_parent.values_mut() {
             children.sort_by(|left, right| {
                 left.1
@@ -637,6 +666,48 @@ impl AgentControl {
             .await
         {
             warn!("failed to persist thread-spawn edge: {err}");
+        }
+    }
+
+    async fn persist_thread_spawn_edge(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+    ) {
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        let Some(state_db_ctx) = state.state_db() else {
+            return;
+        };
+        if let Err(err) = state_db_ctx
+            .upsert_thread_spawn_edge(
+                parent_thread_id,
+                child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+        {
+            warn!("failed to persist thread-spawn edge: {err}");
+        }
+    }
+
+    async fn persist_thread_spawn_edge_status(
+        &self,
+        child_thread_id: ThreadId,
+        status: DirectionalThreadSpawnEdgeStatus,
+    ) {
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        let Some(state_db_ctx) = state.state_db() else {
+            return;
+        };
+        if let Err(err) = state_db_ctx
+            .set_thread_spawn_edge_status(child_thread_id, status)
+            .await
+        {
+            warn!("failed to persist thread-spawn edge status for {child_thread_id}: {err}");
         }
     }
 

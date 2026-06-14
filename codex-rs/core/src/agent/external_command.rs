@@ -74,6 +74,8 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
     let result = run_external_agent_inner(&launch).await;
     if launch.cancellation_token.is_cancelled() {
         control.update_external_agent_status(thread_id, AgentStatus::Shutdown);
+        send_completion_to_parent(&launch, &control, "external agent cancelled".to_string()).await;
+        control.release_external_agent(thread_id);
         return;
     }
     match result {
@@ -96,6 +98,13 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
         Err(err) => {
             if launch.cancellation_token.is_cancelled() {
                 control.update_external_agent_status(thread_id, AgentStatus::Shutdown);
+                send_completion_to_parent(
+                    &launch,
+                    &control,
+                    "external agent cancelled".to_string(),
+                )
+                .await;
+                control.release_external_agent(thread_id);
                 return;
             }
             let message = err.to_string();
@@ -108,6 +117,10 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
 async fn run_external_agent_inner(
     launch: &ExternalAgentLaunch,
 ) -> anyhow::Result<ExternalAgentResponse> {
+    if launch.cancellation_token.is_cancelled() {
+        return Err(anyhow::anyhow!("external agent cancelled before launch"));
+    }
+
     let request = ExternalAgentRequest {
         protocol_version: 1,
         thread_id: launch.thread_id,
@@ -129,6 +142,11 @@ async fn run_external_agent_inner(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+
+    if launch.cancellation_token.is_cancelled() {
+        return Err(anyhow::anyhow!("external agent cancelled before launch"));
+    }
+
     let mut child = command.spawn()?;
     let mut stdin = child.stdin.take();
     let stdout = child
@@ -205,7 +223,7 @@ async fn send_completion_to_parent(
     control: &AgentControl,
     message: String,
 ) {
-    if launch.cancellation_token.is_cancelled() || !control.is_external_agent(launch.thread_id) {
+    if !control.is_external_agent(launch.thread_id) {
         return;
     }
     let communication = InterAgentCommunication::new(
@@ -244,5 +262,54 @@ fn render_external_agent_message(initial_operation: &Op) -> String {
             .filter(|content| !content.is_empty())
             .unwrap_or_else(|| communication.content.clone()),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::AgentPath;
+    use codex_protocol::protocol::Op;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn pre_cancelled_external_agent_does_not_launch_subprocess() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let marker_path = temp_dir.path().join("launched");
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+
+        let launch = ExternalAgentLaunch {
+            thread_id: ThreadId::new(),
+            parent_thread_id: ThreadId::new(),
+            author: AgentPath::root(),
+            recipient: AgentPath::try_from("/root/external").expect("agent path"),
+            role: Some("external".to_string()),
+            task_name: Some("external".to_string()),
+            initial_operation: Op::UserInput {
+                environments: None,
+                items: Vec::new(),
+                final_output_json_schema: None,
+                responsesapi_client_metadata: None,
+                additional_context: Default::default(),
+                thread_settings: Default::default(),
+            },
+            backend: ExternalCommandAgentBackendConfig {
+                command: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    format!("touch '{}'", marker_path.display()),
+                ],
+                timeout_ms: 5_000,
+            },
+            cwd: temp_dir.path().to_path_buf(),
+            cancellation_token,
+        };
+
+        let err = run_external_agent_inner(&launch)
+            .await
+            .expect_err("pre-cancelled external agent should fail before launch");
+        assert!(err.to_string().contains("cancelled before launch"));
+        assert!(!marker_path.exists(), "subprocess should not launch");
     }
 }
