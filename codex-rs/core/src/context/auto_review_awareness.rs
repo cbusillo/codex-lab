@@ -76,9 +76,16 @@ async fn build_auto_review_awareness_inner(
     cwd: &Path,
     active_snapshot: BackgroundAutoReviewActiveSnapshot,
 ) -> Result<Option<AutoReviewAwareness>> {
+    let runs = AutoReviewStore::new(codex_home).list_runs()?;
+    if runs.is_empty()
+        && active_snapshot.pending_run_id.is_none()
+        && active_snapshot.running_run_id.is_none()
+    {
+        return Ok(None);
+    }
+
     let active_review_target = ReviewTarget::UncommittedChanges;
     let active_target = collect_auto_review_target(cwd, &active_review_target).await;
-    let runs = AutoReviewStore::new(codex_home).list_runs()?;
     Ok(render_awareness(
         &runs,
         &active_target,

@@ -111,6 +111,31 @@ pub struct BackgroundAutoReviewControlParams {
 pub struct BackgroundAutoReviewControlResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewFindingDetailReadParams {
+    pub thread_id: String,
+    pub run_id: String,
+    pub finding_id: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub max_bytes: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewFindingDetailReadResponse {
+    pub run_id: String,
+    pub finding_id: String,
+    pub bytes: usize,
+    pub original_bytes: usize,
+    pub max_bytes: usize,
+    pub truncated: bool,
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
 #[ts(tag = "type", export_to = "v2/")]
 pub enum ReviewTarget {

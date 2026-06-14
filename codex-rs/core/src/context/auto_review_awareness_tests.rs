@@ -168,6 +168,22 @@ fn awareness_reports_live_pending_and_running_runs() {
 }
 
 #[tokio::test]
+async fn awareness_is_absent_when_store_and_snapshot_are_empty() -> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo = TempDir::new()?;
+
+    let awareness = build_auto_review_awareness(
+        codex_home.path(),
+        repo.path(),
+        BackgroundAutoReviewActiveSnapshot::default(),
+    )
+    .await;
+
+    assert_eq!(awareness, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn awareness_is_absent_when_store_is_unreadable() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let repo = TempDir::new()?;

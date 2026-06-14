@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "findingId": {
+      "type": "string"
+    },
+    "maxBytes": {
+      "default": null,
+      "format": "uint",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "runId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "findingId",
+    "runId",
+    "threadId"
+  ],
+  "title": "AutoReviewFindingDetailReadParams",
+  "type": "object"
+}

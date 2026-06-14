@@ -36,17 +36,11 @@ pub(crate) struct BackgroundAutoReviewSchedule {
 
 #[derive(Debug, Default)]
 pub(crate) struct BackgroundAutoReviewSchedulerState {
-    active_regular_turns: HashMap<String, BackgroundAutoReviewStartFingerprint>,
+    active_regular_turns: HashMap<String, u64>,
     generation: u64,
     last_started_fingerprint: Option<String>,
     pending_review: Option<BackgroundAutoReviewPending>,
     running_review: Option<BackgroundAutoReviewRunning>,
-}
-
-#[derive(Debug)]
-enum BackgroundAutoReviewStartFingerprint {
-    Pending,
-    Ready(Option<String>),
 }
 
 #[derive(Debug)]
@@ -130,18 +124,7 @@ pub(crate) enum BackgroundAutoReviewControlledRun {
 
 impl BackgroundAutoReviewSchedulerState {
     pub(crate) fn begin_regular_turn(&mut self, turn_id: String) {
-        self.active_regular_turns
-            .insert(turn_id, BackgroundAutoReviewStartFingerprint::Pending);
-    }
-
-    pub(crate) fn update_regular_turn_start_fingerprint(
-        &mut self,
-        turn_id: &str,
-        fingerprint: Option<String>,
-    ) {
-        if let Some(start_fingerprint) = self.active_regular_turns.get_mut(turn_id) {
-            *start_fingerprint = BackgroundAutoReviewStartFingerprint::Ready(fingerprint);
-        }
+        self.active_regular_turns.insert(turn_id, self.generation);
     }
 
     pub(crate) fn remove_regular_turn(&mut self, turn_id: &str) {
@@ -153,20 +136,17 @@ impl BackgroundAutoReviewSchedulerState {
         turn_id: &str,
         after_fingerprint: Option<String>,
     ) -> Option<BackgroundAutoReviewSchedule> {
-        let Some(start_fingerprint) = self.active_regular_turns.remove(turn_id) else {
+        let Some(start_generation) = self.active_regular_turns.remove(turn_id) else {
             return None;
         };
-        let BackgroundAutoReviewStartFingerprint::Ready(start_fingerprint) = start_fingerprint
-        else {
-            return None;
-        };
-
         let Some(after_fingerprint) = after_fingerprint else {
             return None;
         };
-        if after_fingerprint == UNKNOWN_WORKTREE_DIFF_FINGERPRINT
-            || start_fingerprint.as_deref() == Some(after_fingerprint.as_str())
-            || self.last_started_fingerprint.as_deref() == Some(after_fingerprint.as_str())
+        if after_fingerprint == UNKNOWN_WORKTREE_DIFF_FINGERPRINT {
+            return None;
+        }
+        if start_generation != self.generation
+            || self.has_pending_or_started_fingerprint(&after_fingerprint)
         {
             return None;
         }
@@ -176,6 +156,13 @@ impl BackgroundAutoReviewSchedulerState {
             generation: self.generation,
             fingerprint: after_fingerprint,
         })
+    }
+
+    fn has_pending_or_started_fingerprint(&self, fingerprint: &str) -> bool {
+        self.pending_review
+            .as_ref()
+            .is_some_and(|pending_review| pending_review.fingerprint == fingerprint)
+            || self.last_started_fingerprint.as_deref() == Some(fingerprint)
     }
 
     pub(crate) fn is_current_schedule(&self, generation: u64, fingerprint: &str) -> bool {
@@ -284,6 +271,7 @@ impl BackgroundAutoReviewSchedulerState {
             .as_ref()
             .is_some_and(|running_review| running_review.persistence.run_id() == run_id)
         {
+            self.generation = self.generation.saturating_add(1);
             return self
                 .take_running_review()
                 .map(BackgroundAutoReviewControlledRun::Running);

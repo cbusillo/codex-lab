@@ -1,4 +1,5 @@
 use super::*;
+use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
 use codex_protocol::protocol::ReviewPersistence;
@@ -217,6 +218,15 @@ impl TurnRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn auto_review_finding_detail_read(
+        &self,
+        params: AutoReviewFindingDetailReadParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.auto_review_finding_detail_read_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     fn track_error_response(
         &self,
         request_id: &ConnectionRequestId,
@@ -334,6 +344,38 @@ impl TurnRequestProcessor {
                 .map_err(|err| invalid_request(environment_selection_error_message(err)))?;
         }
         Ok(environment_selections)
+    }
+
+    async fn auto_review_target_for_thread(thread: &CodexThread) -> AutoReviewRunTarget {
+        let snapshot = thread.config_snapshot().await;
+        let environments = thread.environment_selections().await;
+        let cwd = match environments.as_slice() {
+            [environment] if environment.environment_id == LOCAL_ENVIRONMENT_ID => {
+                environment.cwd.clone()
+            }
+            _ => snapshot.cwd,
+        };
+        let git_info = collect_git_info(cwd.as_path()).await;
+        let repo_root = get_git_repo_root(cwd.as_path());
+        let worktree_diff_fingerprint = get_worktree_diff_fingerprint(cwd.as_path()).await;
+
+        AutoReviewRunTarget {
+            branch: git_info.as_ref().and_then(|git| git.branch.clone()),
+            head_sha: git_info
+                .as_ref()
+                .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+            base_sha: None,
+            worktree_path: repo_root.or_else(|| Some(cwd.as_path().to_path_buf())),
+            worktree_diff_fingerprint,
+        }
+    }
+
+    fn auto_review_detail_error_message(error: &str) -> &'static str {
+        if error.contains("not completed") {
+            "auto review run is not completed"
+        } else {
+            "auto review finding detail is unavailable"
+        }
     }
 
     async fn request_trace_context(
@@ -1221,6 +1263,61 @@ impl TurnRequestProcessor {
         })?;
 
         Ok(BackgroundAutoReviewControlResponse {})
+    }
+
+    async fn auto_review_finding_detail_read_inner(
+        &self,
+        params: AutoReviewFindingDetailReadParams,
+    ) -> Result<AutoReviewFindingDetailReadResponse, JSONRPCErrorError> {
+        let AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id,
+            finding_id,
+            max_bytes,
+        } = params;
+        let run_id = run_id.trim().to_string();
+        if run_id.is_empty() {
+            return Err(invalid_request("runId must not be empty"));
+        }
+        let finding_id = finding_id.trim().to_string();
+        if finding_id.is_empty() {
+            return Err(invalid_request("findingId must not be empty"));
+        }
+        let max_bytes = max_bytes.unwrap_or(AUTO_REVIEW_DETAIL_MAX_BYTES);
+        if max_bytes == 0 {
+            return Err(invalid_request("maxBytes must be positive"));
+        }
+
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        let store = AutoReviewStore::new(&self.config.codex_home);
+        let run = store
+            .load_run(&run_id)
+            .map_err(|_| invalid_request("auto review run not found"))?;
+        let active_review_target = CoreReviewTarget::UncommittedChanges;
+        let active_target = Self::auto_review_target_for_thread(thread.as_ref()).await;
+        if run
+            .visible_findings(&active_target, &active_review_target)
+            .into_iter()
+            .all(|finding| finding.finding_id != finding_id)
+        {
+            return Err(invalid_request("auto review finding not found"));
+        }
+        let detail = run.finding_detail(&finding_id, max_bytes).map_err(|err| {
+            invalid_request(format!(
+                "failed to read auto review finding detail: {}",
+                Self::auto_review_detail_error_message(&err.to_string())
+            ))
+        })?;
+
+        Ok(AutoReviewFindingDetailReadResponse {
+            run_id,
+            finding_id: detail.finding_id,
+            bytes: detail.bytes,
+            original_bytes: detail.original_bytes,
+            max_bytes: detail.max_bytes,
+            truncated: detail.truncated,
+            content: detail.content,
+        })
     }
 
     async fn turn_interrupt_inner(

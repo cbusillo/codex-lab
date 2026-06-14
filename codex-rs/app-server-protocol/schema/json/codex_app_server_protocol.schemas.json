@@ -1484,6 +1484,30 @@
             },
             "method": {
               "enum": [
+                "review/findingDetail/read"
+              ],
+              "title": "Review/findingDetail/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AutoReviewFindingDetailReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/findingDetail/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "model/list"
               ],
               "title": "Model/listRequestMethod",
@@ -6756,6 +6780,79 @@
           "agent"
         ],
         "type": "string"
+      },
+      "AutoReviewFindingDetailReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "findingId": {
+            "type": "string"
+          },
+          "maxBytes": {
+            "default": null,
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "runId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "findingId",
+          "runId",
+          "threadId"
+        ],
+        "title": "AutoReviewFindingDetailReadParams",
+        "type": "object"
+      },
+      "AutoReviewFindingDetailReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "bytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "content": {
+            "type": "string"
+          },
+          "findingId": {
+            "type": "string"
+          },
+          "maxBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "originalBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "bytes",
+          "content",
+          "findingId",
+          "maxBytes",
+          "originalBytes",
+          "runId",
+          "truncated"
+        ],
+        "title": "AutoReviewFindingDetailReadResponse",
+        "type": "object"
       },
       "BackgroundAutoReviewControlAction": {
         "enum": [
