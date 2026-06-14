@@ -46,7 +46,7 @@ Scenarios are JSON files. Supported fields:
 - `turns`: ordered turn objects; turn 1 runs `codex exec`, later turns resume
   the captured thread id with `codex exec resume`
 - `files`: workspace files created before the run
-- `config_toml`: isolated `CODEX_HOME/config.toml` contents
+- `config_toml`: isolated `CODEX_LAB_HOME/config.toml` contents
 - `config_overrides`: `-c key=value` arguments passed to `codex exec`
 - `responses_api`: start a local fake Responses API and point Codex at it
 - `expect`: assertions over return code, turn count, captured thread id, and

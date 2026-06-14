@@ -807,6 +807,29 @@ class HarnessSafetyTest(unittest.TestCase):
             self.assertIn("turn.started", (artifact_dir / "stdout.jsonl").read_text())
             self.assertIn("timed out", (artifact_dir / "stderr.log").read_text())
 
+    def test_run_codex_uses_codex_lab_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.make_paths(Path(tmp), "home-env")
+            paths.workspace.mkdir(parents=True)
+            artifact_dir = paths.artifacts
+            artifact_dir.mkdir(parents=True)
+
+            result = HARNESS.run_codex(
+                [
+                    "python3",
+                    "-c",
+                    "import json, os; print(json.dumps({'codex_lab_home': os.environ.get('CODEX_LAB_HOME'), 'codex_home': os.environ.get('CODEX_HOME')}))",
+                ],
+                {},
+                paths,
+                artifact_dir,
+            )
+
+            self.assertEqual(0, result["returncode"])
+            payload = json.loads((artifact_dir / "stdout.jsonl").read_text())
+            self.assertEqual(str(paths.codex_home), payload["codex_lab_home"])
+            self.assertIsNone(payload["codex_home"])
+
     def test_token_usage_snapshot_from_events_uses_last_turn_completed_usage(self) -> None:
         usage = HARNESS.token_usage_snapshot_from_events(
             [
