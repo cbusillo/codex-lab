@@ -5,9 +5,10 @@ impl AgentControl {
     /// persisted spawn-edge state.
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         if self.state.cancel_external_agent(agent_id) {
-            self.state
-                .update_external_agent_status(agent_id, AgentStatus::Shutdown);
-            self.state.release_spawned_thread(agent_id);
+            return Ok(String::new());
+        }
+        if self.state.external_agent_status(agent_id).is_some() {
+            self.release_external_agent(agent_id);
             return Ok(String::new());
         }
         let state = self.upgrade()?;
@@ -33,9 +34,11 @@ impl AgentControl {
     /// agent and any live descendants reached from the in-memory tree.
     pub(crate) async fn close_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         if self.state.cancel_external_agent(agent_id) {
-            self.state
-                .update_external_agent_status(agent_id, AgentStatus::Shutdown);
-            self.state.release_spawned_thread(agent_id);
+            self.close_thread_spawn_edge(agent_id).await;
+            return Ok(String::new());
+        }
+        if self.state.external_agent_status(agent_id).is_some() {
+            self.close_external_agent(agent_id).await;
             return Ok(String::new());
         }
         let state = self.upgrade()?;

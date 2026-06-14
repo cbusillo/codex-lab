@@ -65,6 +65,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+#[cfg(not(windows))]
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -3576,6 +3578,378 @@ printf '%s\n' '{"status":"completed","final_message":"external done"}'
                 .to_string(),
         )
     );
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn multi_agent_v2_external_command_persists_spawn_graph_edge() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow sqlite");
+    let state_db = init_state_db(&config)
+        .await
+        .expect("sqlite state db should initialize");
+    tokio::fs::create_dir_all(&config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let ready_path = config.codex_home.as_path().join("external-ready");
+    let helper_path = config
+        .codex_home
+        .as_path()
+        .join("external-agent-sleeper.sh");
+    tokio::fs::write(
+        &helper_path,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n: > '{}'\nsleep 30\n",
+            ready_path.display()
+        ),
+    )
+    .await
+    .expect("helper should be written");
+    let mut permissions = std::fs::metadata(&helper_path)
+        .expect("helper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&helper_path, permissions).expect("helper should be executable");
+    config.agent_roles.insert(
+        "external".to_string(),
+        AgentRoleConfig {
+            description: Some("External command role".to_string()),
+            config_file: None,
+            nickname_candidates: Some(vec!["Echo".to_string()]),
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: helper_path.display().to_string(),
+                    args: Vec::new(),
+                    timeout_ms: 60_000,
+                },
+            )),
+        },
+    );
+    set_turn_config(&mut turn, config);
+
+    let config = (*turn.config).clone();
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let session = Arc::clone(&root.thread.codex.session);
+    let turn = root.thread.codex.session.new_default_turn().await;
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "external_worker",
+                "agent_type": "external",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "external_worker")
+        .await
+        .expect("external path should resolve");
+    let open_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("open children should load");
+    assert_eq!(open_children, vec![agent_id]);
+
+    CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn,
+            "close_agent",
+            function_payload(json!({"target": "external_worker"})),
+        ))
+        .await
+        .expect("close_agent should cancel external worker");
+
+    let open_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("open children should load after close");
+    assert_eq!(open_children, Vec::<ThreadId>::new());
+    let closed_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await
+        .expect("closed children should load after close");
+    assert_eq!(closed_children, vec![agent_id]);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn multi_agent_v2_external_command_shutdown_keeps_spawn_edge_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow sqlite");
+    let state_db = init_state_db(&config)
+        .await
+        .expect("sqlite state db should initialize");
+    tokio::fs::create_dir_all(&config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let helper_path = config
+        .codex_home
+        .as_path()
+        .join("external-agent-shutdown-sleeper.sh");
+    tokio::fs::write(&helper_path, "#!/bin/sh\ncat >/dev/null\nsleep 30\n")
+        .await
+        .expect("helper should be written");
+    let mut permissions = std::fs::metadata(&helper_path)
+        .expect("helper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&helper_path, permissions).expect("helper should be executable");
+    config.agent_roles.insert(
+        "external".to_string(),
+        AgentRoleConfig {
+            description: Some("External command role".to_string()),
+            config_file: None,
+            nickname_candidates: Some(vec!["Echo".to_string()]),
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: helper_path.display().to_string(),
+                    args: Vec::new(),
+                    timeout_ms: 60_000,
+                },
+            )),
+        },
+    );
+    set_turn_config(&mut turn, config);
+
+    let config = (*turn.config).clone();
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let session = Arc::clone(&root.thread.codex.session);
+    let turn = root.thread.codex.session.new_default_turn().await;
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "external_worker",
+                "agent_type": "external",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "external_worker")
+        .await
+        .expect("external path should resolve");
+    session
+        .services
+        .agent_control
+        .shutdown_live_agent(agent_id)
+        .await
+        .expect("shutdown should cancel external worker");
+
+    let open_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("open children should load after shutdown");
+    assert_eq!(open_children, vec![agent_id]);
+    let closed_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await
+        .expect("closed children should load after shutdown");
+    assert_eq!(closed_children, Vec::<ThreadId>::new());
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn multi_agent_v2_external_command_close_wakes_parent_wait() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+    let (_, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    tokio::fs::create_dir_all(&config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let ready_path = config.codex_home.as_path().join("external-ready");
+    let helper_path = config.codex_home.as_path().join("external-agent-wait.sh");
+    tokio::fs::write(
+        &helper_path,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n: > '{}'\nsleep 30\n",
+            ready_path.display()
+        ),
+    )
+    .await
+    .expect("helper should be written");
+    let mut permissions = std::fs::metadata(&helper_path)
+        .expect("helper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&helper_path, permissions).expect("helper should be executable");
+    config.agent_roles.insert(
+        "external".to_string(),
+        AgentRoleConfig {
+            description: Some("External command role".to_string()),
+            config_file: None,
+            nickname_candidates: Some(vec!["Echo".to_string()]),
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: helper_path.display().to_string(),
+                    args: Vec::new(),
+                    timeout_ms: 60_000,
+                },
+            )),
+        },
+    );
+    set_turn_config(&mut turn, config);
+
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let session = Arc::clone(&root.thread.codex.session);
+    let turn = root.thread.codex.session.new_default_turn().await;
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "external_worker",
+                "agent_type": "external",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+
+    let readiness_task = tokio::spawn(async move {
+        loop {
+            if tokio::fs::try_exists(&ready_path).await.unwrap_or(false) {
+                let _ = ready_tx.send(());
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    timeout(Duration::from_secs(2), ready_rx)
+        .await
+        .expect("external helper should start")
+        .expect("readiness sender should report");
+    readiness_task.await.expect("readiness task should join");
+
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandlerV2::default()
+                .handle(invocation(
+                    session,
+                    turn,
+                    "wait_agent",
+                    function_payload(json!({"timeout_ms": 10_000})),
+                ))
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+
+    CloseAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "close_agent",
+            function_payload(json!({"target": "external_worker"})),
+        ))
+        .await
+        .expect("close_agent should cancel external worker");
+
+    let wait_output = timeout(Duration::from_secs(2), wait_task)
+        .await
+        .expect("external cancellation should wake wait_agent")
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(wait_output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+        }
+    );
+    assert_eq!(success, None);
 }
 
 #[tokio::test]

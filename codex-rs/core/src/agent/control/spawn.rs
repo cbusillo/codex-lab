@@ -270,11 +270,15 @@ impl AgentControl {
             let thread_id = ThreadId::new();
             agent_metadata.agent_id = Some(thread_id);
             agent_metadata.last_task_message = Some(last_task_message);
-            let cancellation_token = self
-                .state
-                .register_external_agent(thread_id, AgentStatus::PendingInit);
+            let cancellation_token = self.state.register_external_agent(
+                thread_id,
+                parent_thread_id,
+                AgentStatus::PendingInit,
+            );
             reservation.commit(agent_metadata.clone());
-            self.spawn_external_agent_task(ExternalAgentLaunch {
+            self.persist_thread_spawn_edge(parent_thread_id, thread_id)
+                .await;
+            let launch = ExternalAgentLaunch {
                 thread_id,
                 parent_thread_id,
                 author,
@@ -288,7 +292,8 @@ impl AgentControl {
                 backend,
                 cwd: config.cwd.to_path_buf(),
                 cancellation_token,
-            });
+            };
+            self.spawn_external_agent_task(launch);
             return Ok(LiveAgent {
                 thread_id,
                 metadata: agent_metadata,
