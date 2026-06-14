@@ -168,9 +168,6 @@ pub(crate) async fn run_turn(
         return None;
     }
 
-    let auto_review_awareness_input_item =
-        build_auto_review_awareness_input_item(sess.as_ref(), turn_context.as_ref()).await;
-
     sess.merge_connector_selection(explicitly_enabled_connectors.clone())
         .await;
     sess.set_previous_turn_settings(Some(PreviousTurnSettings {
@@ -217,11 +214,14 @@ pub(crate) async fn run_turn(
         }
 
         // Construct the input that we will send to the model.
-        let mut sampling_request_input: Vec<ResponseItem> = {
+        let prompt_history_input: Vec<ResponseItem> = {
             sess.clone_history()
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        let auto_review_awareness_input_item =
+            build_auto_review_awareness_input_item(sess.as_ref(), turn_context.as_ref()).await;
+        let mut sampling_request_input = prompt_history_input.clone();
         if let Some(auto_review_awareness_input_item) = &auto_review_awareness_input_item {
             sampling_request_input.push(auto_review_awareness_input_item.clone());
         }
@@ -333,7 +333,7 @@ pub(crate) async fn run_turn(
                     if run_legacy_after_agent_hook(
                         &sess,
                         &turn_context,
-                        &sampling_request_input,
+                        &prompt_history_input,
                         last_agent_message.clone(),
                     )
                     .await

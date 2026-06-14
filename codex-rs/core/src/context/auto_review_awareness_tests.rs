@@ -114,6 +114,42 @@ fn awareness_keeps_current_findings_even_with_many_unrelated_newer_runs() {
 }
 
 #[test]
+fn awareness_uses_newest_current_run_findings() {
+    let older_run = AutoReviewRun {
+        started_at_unix_secs: 10,
+        completed_at_unix_secs: Some(20),
+        ..sample_run(
+            "z_older_current",
+            AutoReviewRunStatus::Completed,
+            vec![sample_finding("f1", "Older current title", "hidden older")],
+        )
+    };
+    let newer_run = AutoReviewRun {
+        started_at_unix_secs: 30,
+        completed_at_unix_secs: Some(40),
+        ..sample_run(
+            "a_newer_current",
+            AutoReviewRunStatus::Completed,
+            vec![sample_finding("f1", "Newer current title", "hidden newer")],
+        )
+    };
+
+    let awareness = render_awareness(
+        &[older_run, newer_run],
+        &sample_target("main", "head-2", "/repo"),
+        &ReviewTarget::UncommittedChanges,
+        &BackgroundAutoReviewActiveSnapshot::default(),
+    )
+    .expect("newer current findings should render awareness");
+    let body = awareness.body();
+
+    assert!(body.contains("current findings from run a_newer_current"));
+    assert!(body.contains("Newer current title"));
+    assert!(!body.contains("Older current title"));
+    assert!(!body.contains("hidden newer"));
+}
+
+#[test]
 fn awareness_reports_live_pending_and_running_runs() {
     let awareness = render_awareness(
         &[],

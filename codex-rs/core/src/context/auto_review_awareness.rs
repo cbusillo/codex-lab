@@ -8,6 +8,7 @@ use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::AutoReviewSummary;
 use codex_auto_review::SUMMARY_MAX_BYTES;
 use codex_protocol::protocol::ReviewTarget;
 
@@ -95,7 +96,7 @@ fn render_awareness(
     let mut lines = Vec::new();
     let mut status_lines = Vec::new();
     let mut counts = BTreeMap::<String, usize>::new();
-    let mut current_finding_lines = Vec::new();
+    let mut current_summary: Option<(&AutoReviewRun, AutoReviewSummary)> = None;
 
     if let Some(run_id) = &active_snapshot.pending_run_id {
         status_lines.push(format!("- pending background run: {run_id}"));
@@ -109,23 +110,28 @@ fn render_awareness(
         let key = status_count_key(run, freshness, active_review_target);
         *counts.entry(key).or_default() += 1;
 
-        if current_finding_lines.is_empty() {
-            let summary = run.summary(active_target, active_review_target);
-            if !summary.content.is_empty() {
-                current_finding_lines.push(format!(
-                    "- current findings from run {}: {} rendered, {} omitted",
-                    run.run_id, summary.rendered_findings, summary.omitted_findings
-                ));
-                current_finding_lines
-                    .extend(summary.content.lines().map(|line| format!("  {line}")));
-                if summary.truncated {
-                    current_finding_lines.push("  ... finding summary truncated".to_string());
-                }
+        let summary = run.summary(active_target, active_review_target);
+        if !summary.content.is_empty() {
+            match &current_summary {
+                Some((selected_run, _)) if !run_is_newer(run, selected_run) => {}
+                _ => current_summary = Some((run, summary)),
             }
         }
     }
 
-    if status_lines.is_empty() && current_finding_lines.is_empty() && counts.is_empty() {
+    let current_finding_lines = current_summary.map(|(run, summary)| {
+        let mut lines = vec![format!(
+            "- current findings from run {}: {} rendered, {} omitted",
+            run.run_id, summary.rendered_findings, summary.omitted_findings
+        )];
+        lines.extend(summary.content.lines().map(|line| format!("  {line}")));
+        if summary.truncated {
+            lines.push("  ... finding summary truncated".to_string());
+        }
+        lines
+    });
+
+    if status_lines.is_empty() && current_finding_lines.is_none() && counts.is_empty() {
         return None;
     }
 
@@ -135,7 +141,7 @@ fn render_awareness(
         lines.push("- live status:".to_string());
         lines.extend(status_lines.into_iter().take(MAX_STATUS_LINES));
     }
-    if !current_finding_lines.is_empty() {
+    if let Some(current_finding_lines) = current_finding_lines {
         lines.push("- current finding summaries:".to_string());
         lines.extend(current_finding_lines);
         lines.push(format!(
@@ -150,6 +156,16 @@ fn render_awareness(
     }
 
     AutoReviewAwareness::new(lines.join("\n"))
+}
+
+fn run_is_newer(candidate: &AutoReviewRun, selected: &AutoReviewRun) -> bool {
+    let candidate_time = candidate
+        .completed_at_unix_secs
+        .unwrap_or(candidate.started_at_unix_secs);
+    let selected_time = selected
+        .completed_at_unix_secs
+        .unwrap_or(selected.started_at_unix_secs);
+    (candidate_time, &candidate.run_id) > (selected_time, &selected.run_id)
 }
 
 fn status_count_key(
