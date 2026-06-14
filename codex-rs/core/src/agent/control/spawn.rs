@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::AgentRoleBackendConfig;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
@@ -231,6 +232,69 @@ impl AgentControl {
             other => (other, AgentMetadata::default()),
         };
         let notification_source = session_source.clone();
+
+        if let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = agent_metadata
+            .agent_role
+            .as_deref()
+            .and_then(|role| resolve_role_config(&config, role))
+            .and_then(|role| role.backend.clone())
+        {
+            if options.fork_mode.is_some() {
+                return Err(CodexErr::UnsupportedOperation(
+                    "external_command agents do not support fork_turns in this dogfood backend"
+                        .to_string(),
+                ));
+            }
+            let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                agent_path,
+                agent_role,
+                ..
+            })) = notification_source.clone()
+            else {
+                return Err(CodexErr::UnsupportedOperation(
+                    "external_command agents require a thread-spawn source".to_string(),
+                ));
+            };
+            let Some(recipient) = agent_path.clone() else {
+                return Err(CodexErr::UnsupportedOperation(
+                    "external_command agents require an agent path".to_string(),
+                ));
+            };
+            let author = recipient
+                .as_str()
+                .rsplit_once('/')
+                .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
+                .unwrap_or_else(AgentPath::root);
+            let last_task_message = external_command_task_message(&initial_operation);
+            let thread_id = ThreadId::new();
+            agent_metadata.agent_id = Some(thread_id);
+            agent_metadata.last_task_message = Some(last_task_message);
+            let cancellation_token = self
+                .state
+                .register_external_agent(thread_id, AgentStatus::PendingInit);
+            reservation.commit(agent_metadata.clone());
+            self.spawn_external_agent_task(ExternalAgentLaunch {
+                thread_id,
+                parent_thread_id,
+                author,
+                recipient,
+                role: agent_role,
+                task_name: agent_metadata
+                    .agent_path
+                    .as_ref()
+                    .map(|path| path.name().to_string()),
+                initial_operation,
+                backend,
+                cwd: config.cwd.to_path_buf(),
+                cancellation_token,
+            });
+            return Ok(LiveAgent {
+                thread_id,
+                metadata: agent_metadata,
+                status: AgentStatus::PendingInit,
+            });
+        }
 
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread = match (session_source, options.fork_mode.as_ref(), inheritance) {
@@ -675,5 +739,16 @@ impl AgentControl {
         .await;
 
         Ok(resumed_thread.thread_id)
+    }
+}
+
+fn external_command_task_message(initial_operation: &Op) -> String {
+    match initial_operation {
+        Op::InterAgentCommunication { communication } => communication
+            .encrypted_content
+            .clone()
+            .filter(|content| !content.is_empty())
+            .unwrap_or_else(|| communication.content.clone()),
+        _ => render_input_preview(initial_operation),
     }
 }

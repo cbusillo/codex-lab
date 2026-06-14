@@ -1,8 +1,10 @@
 use super::*;
 use crate::LoadedAgentsMd;
 use crate::ThreadManager;
+use crate::config::AgentRoleBackendConfig;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
+use crate::config::ExternalCommandAgentBackendConfig;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::tests::make_session_and_context;
@@ -128,6 +130,7 @@ model_reasoning_effort = "minimal"
             description: Some("Role with model overrides".to_string()),
             config_file: Some(role_config_path),
             nickname_candidates: None,
+            backend: None,
         },
     );
     turn.config = Arc::new(config);
@@ -418,14 +421,7 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
 
 #[tokio::test]
 async fn multi_agent_v2_spawn_defaults_to_full_fork_and_rejects_child_model_overrides() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
+    let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config
         .features
@@ -672,6 +668,7 @@ service_tier = "priority"
                 description: Some("Role with a child service tier".to_string()),
                 config_file: Some(role_config_path),
                 nickname_candidates: None,
+                backend: None,
             },
         );
         turn.config = Arc::new(config);
@@ -745,6 +742,7 @@ service_tier = "turbo"
             description: Some("Role with an unsupported child tier".to_string()),
             config_file: Some(role_config_path),
             nickname_candidates: None,
+            backend: None,
         },
     );
     turn.config = Arc::new(config);
@@ -808,6 +806,7 @@ service_tier = "priority"
             description: Some("Role with a supported child tier".to_string()),
             config_file: Some(role_config_path),
             nickname_candidates: None,
+            backend: None,
         },
     );
     turn.config = Arc::new(config);
@@ -1035,14 +1034,7 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
 
 #[tokio::test]
 async fn multi_agent_v2_spawn_requires_task_name() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
+    let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config
         .features
@@ -1069,14 +1061,7 @@ async fn multi_agent_v2_spawn_requires_task_name() {
 
 #[tokio::test]
 async fn multi_agent_v2_spawn_rejects_legacy_items_field() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
+    let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config
         .features
@@ -1129,14 +1114,8 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         nickname: Option<String>,
     }
 
-    let (mut session, mut turn) = make_session_and_context().await;
+    let (session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
     let mut config = (*turn.config).clone();
     config
         .features
@@ -1224,14 +1203,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
 
 #[tokio::test]
 async fn multi_agent_v2_spawn_rejects_legacy_fork_context() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
+    let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config
         .features
@@ -1264,14 +1236,7 @@ async fn multi_agent_v2_spawn_rejects_legacy_fork_context() {
 
 #[tokio::test]
 async fn multi_agent_v2_spawn_rejects_invalid_fork_turns_string() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
+    let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config
         .features
@@ -2950,7 +2915,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
             timed_out: false,
         }
     );
-    assert_eq!(success, None);
+    assert_eq!(success, Some(true));
 }
 
 #[tokio::test]
@@ -3015,7 +2980,7 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min() 
             timed_out: true,
         }
     );
-    assert_eq!(success, None);
+    assert_eq!(success, Some(true));
 }
 
 #[tokio::test]
@@ -3435,6 +3400,182 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
         }
     );
     assert_eq!(success, None);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn multi_agent_v2_external_command_role_completes_through_parent_mailbox() {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+        nickname: Option<String>,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    tokio::fs::create_dir_all(&config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let helper_path = config.codex_home.as_path().join("external-agent-helper.sh");
+    tokio::fs::write(
+        &helper_path,
+        r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"status":"completed","final_message":"external done"}'
+"#,
+    )
+    .await
+    .expect("helper should be written");
+    let mut permissions = std::fs::metadata(&helper_path)
+        .expect("helper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&helper_path, permissions).expect("helper should be executable");
+    config.agent_roles.insert(
+        "external".to_string(),
+        AgentRoleConfig {
+            description: Some("External command role".to_string()),
+            config_file: None,
+            nickname_candidates: Some(vec!["Echo".to_string()]),
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: helper_path.display().to_string(),
+                    args: Vec::new(),
+                    timeout_ms: 5_000,
+                },
+            )),
+        },
+    );
+    set_turn_config(&mut turn, config);
+
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let session = Arc::clone(&root.thread.codex.session);
+    let turn = root.thread.codex.session.new_default_turn().await;
+
+    let spawn_output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "external_worker",
+                "agent_type": "external",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, success) = expect_text_output(spawn_output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(result.task_name, "/root/external_worker");
+    assert!(result.nickname.is_none() || result.nickname.as_deref() == Some("Echo"));
+    assert_eq!(success, Some(true));
+
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "external_worker")
+        .await
+        .expect("external path should resolve");
+    assert_eq!(
+        session.services.agent_control.get_status(agent_id).await,
+        AgentStatus::PendingInit,
+    );
+    assert!(
+        manager.get_thread(agent_id).await.is_err(),
+        "external agents should not create internal Codex threads"
+    );
+
+    let wait_output = timeout(
+        Duration::from_secs(2),
+        WaitAgentHandlerV2::default().handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("external completion should wake wait_agent")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(wait_output);
+    let wait_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        wait_result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+        }
+    );
+    assert_eq!(success, None);
+    assert_eq!(
+        session.services.agent_control.get_status(agent_id).await,
+        AgentStatus::Completed(Some("external done".to_string())),
+    );
+
+    let list_output = ListAgentsHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed");
+    let (content, _) = expect_text_output(list_output);
+    let list: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let external = list
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/external_worker")
+        .expect("external agent should be listed");
+    assert_eq!(external.agent_status, json!({"completed": "external done"}));
+    assert_eq!(
+        external.last_task_message.as_deref(),
+        Some("inspect this repo")
+    );
+
+    let result = FollowupTaskHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "followup_task",
+            function_payload(json!({
+                "target": "external_worker",
+                "message": "more work"
+            })),
+        ))
+        .await;
+    let Err(err) = result else {
+        panic!("external_command follow-ups should be rejected");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "external_command agents do not accept follow-up messages in this dogfood backend"
+                .to_string(),
+        )
+    );
 }
 
 #[tokio::test]

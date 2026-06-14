@@ -704,6 +704,29 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+
+    /// Optional non-Codex backend used to run agents spawned with this role.
+    pub backend: Option<AgentRoleBackendToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(deny_unknown_fields)]
+pub enum AgentRoleBackendToml {
+    ExternalCommand(ExternalCommandAgentBackendToml),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ExternalCommandAgentBackendToml {
+    /// Command to execute for each spawned external agent.
+    #[schemars(length(min = 1))]
+    pub command: String,
+    /// Arguments passed to the command after the executable path.
+    pub args: Option<Vec<String>>,
+    /// Maximum process runtime in milliseconds.
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

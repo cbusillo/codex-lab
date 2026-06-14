@@ -1,4 +1,5 @@
 use crate::agent::AgentStatus;
+use crate::agent::external_command::ExternalAgentLaunch;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -117,6 +118,11 @@ impl AgentControl {
         agent_id: ThreadId,
         initial_operation: Op,
     ) -> CodexResult<String> {
+        if self.state.external_agent_status(agent_id).is_some() {
+            return Err(CodexErr::UnsupportedOperation(
+                "external agents do not accept direct input after spawn".to_string(),
+            ));
+        }
         let last_task_message = match &initial_operation {
             Op::InterAgentCommunication { communication } => {
                 last_task_message_from_communication(communication)
@@ -147,6 +153,12 @@ impl AgentControl {
         agent_id: ThreadId,
         communication: InterAgentCommunication,
     ) -> CodexResult<String> {
+        if self.state.external_agent_status(agent_id).is_some() {
+            return Err(CodexErr::UnsupportedOperation(
+                "external agents do not accept follow-up messages in this dogfood backend"
+                    .to_string(),
+            ));
+        }
         let last_task_message = last_task_message_from_communication(&communication);
         let state = self.upgrade()?;
         let result = self
@@ -190,6 +202,9 @@ impl AgentControl {
 
     /// Fetch the last known status for `agent_id`, returning `NotFound` when unavailable.
     pub(crate) async fn get_status(&self, agent_id: ThreadId) -> AgentStatus {
+        if let Some(status) = self.state.external_agent_status(agent_id) {
+            return status;
+        }
         let Ok(state) = self.upgrade() else {
             // No agent available if upgrade fails.
             return AgentStatus::NotFound;
@@ -227,6 +242,9 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
     ) -> Option<ThreadConfigSnapshot> {
+        if self.state.external_agent_status(agent_id).is_some() {
+            return None;
+        }
         let Ok(state) = self.upgrade() else {
             return None;
         };
@@ -262,6 +280,9 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
     ) -> CodexResult<watch::Receiver<AgentStatus>> {
+        if let Some(status_rx) = self.state.external_agent_status_rx(agent_id) {
+            return Ok(status_rx);
+        }
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
         Ok(thread.subscribe_status())
@@ -345,23 +366,42 @@ impl AgentControl {
                 continue;
             }
 
-            let Ok(thread) = state.get_thread(thread_id).await else {
-                continue;
-            };
             let agent_name = metadata
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
             let last_task_message = metadata.last_task_message.clone();
+            let agent_status = if let Some(status) = self.state.external_agent_status(thread_id) {
+                status
+            } else if let Ok(thread) = state.get_thread(thread_id).await {
+                thread.agent_status().await
+            } else {
+                continue;
+            };
             agents.push(ListedAgent {
                 agent_name,
-                agent_status: thread.agent_status().await,
+                agent_status,
                 last_task_message,
             });
         }
 
         Ok(agents)
+    }
+
+    pub(crate) fn is_external_agent(&self, agent_id: ThreadId) -> bool {
+        self.state.external_agent_status(agent_id).is_some()
+    }
+
+    fn spawn_external_agent_task(&self, launch: ExternalAgentLaunch) {
+        let control = self.clone();
+        tokio::spawn(async move {
+            crate::agent::external_command::run_external_agent(launch, control).await;
+        });
+    }
+
+    pub(crate) fn update_external_agent_status(&self, agent_id: ThreadId, status: AgentStatus) {
+        let _ = self.state.update_external_agent_status(agent_id, status);
     }
 
     /// Starts a detached watcher for sub-agents spawned from another thread.

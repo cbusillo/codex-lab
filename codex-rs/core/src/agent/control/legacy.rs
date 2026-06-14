@@ -4,6 +4,12 @@ impl AgentControl {
     /// Submit a shutdown request for a live agent without marking it explicitly closed in
     /// persisted spawn-edge state.
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+        if self.state.cancel_external_agent(agent_id) {
+            self.state
+                .update_external_agent_status(agent_id, AgentStatus::Shutdown);
+            self.state.release_spawned_thread(agent_id);
+            return Ok(String::new());
+        }
         let state = self.upgrade()?;
         let result = if let Ok(thread) = state.get_thread(agent_id).await {
             thread.codex.session.ensure_rollout_materialized().await;
@@ -26,6 +32,12 @@ impl AgentControl {
     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the
     /// agent and any live descendants reached from the in-memory tree.
     pub(crate) async fn close_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+        if self.state.cancel_external_agent(agent_id) {
+            self.state
+                .update_external_agent_status(agent_id, AgentStatus::Shutdown);
+            self.state.release_spawned_thread(agent_id);
+            return Ok(String::new());
+        }
         let state = self.upgrade()?;
         let known_agent = self.state.agent_metadata_for_thread(agent_id).is_some();
         match state.get_thread(agent_id).await {

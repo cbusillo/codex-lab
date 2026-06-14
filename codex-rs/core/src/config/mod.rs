@@ -24,6 +24,7 @@ use codex_config::ResidencyRequirement;
 use codex_config::SandboxModeRequirement;
 use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
+use codex_config::config_toml::AgentRoleBackendToml;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
@@ -1995,6 +1996,34 @@ pub struct AgentRoleConfig {
     pub config_file: Option<PathBuf>,
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+    /// Optional backend used instead of spawning an internal Codex thread.
+    pub backend: Option<AgentRoleBackendConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRoleBackendConfig {
+    ExternalCommand(ExternalCommandAgentBackendConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalCommandAgentBackendConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub timeout_ms: u64,
+}
+
+impl AgentRoleBackendConfig {
+    pub(crate) fn from_toml(backend: AgentRoleBackendToml) -> Self {
+        match backend {
+            AgentRoleBackendToml::ExternalCommand(command) => {
+                Self::ExternalCommand(ExternalCommandAgentBackendConfig {
+                    command: command.command,
+                    args: command.args.unwrap_or_default(),
+                    timeout_ms: command.timeout_ms.unwrap_or(30_000),
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
