@@ -32,6 +32,12 @@ impl Session {
         self: &Arc<Self>,
         turn_context: &TurnContext,
     ) {
+        {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .begin_regular_turn(turn_context.sub_id.clone());
+        }
         let fingerprint = if let Some(cwd) = turn_context
             .environments
             .single_local_environment_cwd()
@@ -42,9 +48,6 @@ impl Session {
             None
         };
         let mut state = self.state.lock().await;
-        state
-            .background_auto_review
-            .begin_regular_turn(turn_context.sub_id.clone());
         state
             .background_auto_review
             .update_regular_turn_start_fingerprint(&turn_context.sub_id, fingerprint);
