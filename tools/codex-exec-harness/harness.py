@@ -547,7 +547,7 @@ def run_codex(
     env = os.environ.copy()
     env.update(
         {
-            "CODEX_HOME": str(paths.codex_home),
+            "CODEX_LAB_HOME": str(paths.codex_home),
             "CODEX_SQLITE_HOME": str(paths.codex_home),
             "HOME": str(paths.home),
             "ZDOTDIR": str(paths.home),
