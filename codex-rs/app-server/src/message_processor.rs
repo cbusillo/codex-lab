@@ -1262,6 +1262,9 @@ impl MessageProcessor {
                     .background_auto_review_control(&request_id, params)
                     .await
             }
+            ClientRequest::AutoReviewSummaryRead { params, .. } => {
+                self.turn_processor.auto_review_summary_read(params).await
+            }
             ClientRequest::AutoReviewFindingDetailRead { params, .. } => {
                 self.turn_processor
                     .auto_review_finding_detail_read(params)

@@ -39,6 +39,8 @@ pub(super) use codex_app_server_protocol::AdditionalNetworkPermissions as AppSer
 pub(super) use codex_app_server_protocol::AdditionalPermissionProfile as AppServerAdditionalPermissionProfile;
 pub(super) use codex_app_server_protocol::AppSummary;
 pub(super) use codex_app_server_protocol::AutoReviewDecisionSource as AppServerGuardianApprovalReviewDecisionSource;
+pub(super) use codex_app_server_protocol::BackgroundAutoReviewStatus;
+pub(super) use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 pub(super) use codex_app_server_protocol::CodexErrorInfo;
 pub(super) use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 pub(super) use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;

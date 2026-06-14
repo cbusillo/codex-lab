@@ -505,8 +505,17 @@ def build_command(
         raise HarnessError("prompt must be a string")
 
     resume = session_id is not None
+    sandbox = str(scenario.get("sandbox", "danger-full-access"))
     if resume:
-        command = [codex_bin, "exec", "resume", "--json", "--skip-git-repo-check"]
+        command = [
+            codex_bin,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--sandbox",
+            sandbox,
+            "resume",
+        ]
     else:
         command = [
             codex_bin,
@@ -516,7 +525,7 @@ def build_command(
             "-C",
             str(paths.workspace),
             "--sandbox",
-            str(scenario.get("sandbox", "danger-full-access")),
+            sandbox,
         ]
     model = scenario.get("model")
     if isinstance(model, str) and model:

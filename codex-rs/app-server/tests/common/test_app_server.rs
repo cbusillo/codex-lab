@@ -13,6 +13,7 @@ use tokio::process::ChildStdout;
 use anyhow::Context;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
+use codex_app_server_protocol::AutoReviewSummaryReadParams;
 use codex_app_server_protocol::BackgroundAutoReviewControlParams;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientInfo;
@@ -1093,6 +1094,15 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("review/background/control", params).await
+    }
+
+    /// Send a `review/summary/read` JSON-RPC request (v2).
+    pub async fn send_auto_review_summary_read_request(
+        &mut self,
+        params: AutoReviewSummaryReadParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("review/summary/read", params).await
     }
 
     /// Send a `review/findingDetail/read` JSON-RPC request (v2).

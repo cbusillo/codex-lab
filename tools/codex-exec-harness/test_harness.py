@@ -318,6 +318,29 @@ class HarnessSafetyTest(unittest.TestCase):
 
             self.assertTrue(make.call_args.args[0].is_absolute())
 
+    def test_build_command_carries_sandbox_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.RunPaths(
+                run_dir=Path(tmp) / "run",
+                workspace=Path(tmp) / "workspace",
+                codex_home=Path(tmp) / "codex-home",
+                home=Path(tmp) / "home",
+                artifacts=Path(tmp) / "artifacts",
+            )
+            command = HARNESS.build_command(
+                {"sandbox": "read-only"},
+                {"prompt": "next"},
+                "/tmp/codex",
+                paths,
+                "session-1",
+            )
+
+        resume_index = command.index("resume")
+        sandbox_index = command.index("--sandbox")
+        self.assertLess(sandbox_index, resume_index)
+        self.assertEqual(command[sandbox_index + 1], "read-only")
+        self.assertEqual(command[-2:], ["session-1", "next"])
+
     def test_materialize_workspace_rejects_escaping_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = HARNESS.make_paths(Path(tmp), "escape")

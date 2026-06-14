@@ -34,13 +34,18 @@ pub(crate) struct BackgroundAutoReviewSchedule {
     pub(crate) fingerprint: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct BackgroundAutoReviewSchedulerState {
-    active_regular_turns: HashMap<String, u64>,
+    active_regular_turns: HashMap<String, BackgroundAutoReviewRegularTurnStart>,
     generation: u64,
     last_started_fingerprint: Option<String>,
     pending_review: Option<BackgroundAutoReviewPending>,
     running_review: Option<BackgroundAutoReviewRunning>,
+}
+
+pub(crate) struct BackgroundAutoReviewRegularTurnStart {
+    pub(crate) generation: u64,
+    pub(crate) fingerprint: Option<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -123,29 +128,76 @@ pub(crate) enum BackgroundAutoReviewControlledRun {
 }
 
 impl BackgroundAutoReviewSchedulerState {
-    pub(crate) fn begin_regular_turn(&mut self, turn_id: String) {
-        self.active_regular_turns.insert(turn_id, self.generation);
+    #[cfg(test)]
+    pub(crate) fn begin_regular_turn(&mut self, turn_id: String, fingerprint: Option<String>) {
+        self.active_regular_turns.insert(
+            turn_id,
+            BackgroundAutoReviewRegularTurnStart {
+                generation: self.generation,
+                fingerprint: Some(fingerprint),
+            },
+        );
+    }
+
+    pub(crate) fn begin_regular_turn_pending_fingerprint(&mut self, turn_id: String) {
+        self.active_regular_turns.insert(
+            turn_id,
+            BackgroundAutoReviewRegularTurnStart {
+                generation: self.generation,
+                fingerprint: None,
+            },
+        );
+    }
+
+    pub(crate) fn record_regular_turn_start_fingerprint(
+        &mut self,
+        turn_id: &str,
+        fingerprint: Option<String>,
+    ) {
+        if let Some(start) = self.active_regular_turns.get_mut(turn_id) {
+            start.fingerprint = Some(fingerprint);
+        }
+    }
+
+    pub(crate) fn take_regular_turn_start(
+        &mut self,
+        turn_id: &str,
+    ) -> Option<BackgroundAutoReviewRegularTurnStart> {
+        self.active_regular_turns.remove(turn_id)
     }
 
     pub(crate) fn remove_regular_turn(&mut self, turn_id: &str) {
         self.active_regular_turns.remove(turn_id);
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_regular_turn(
         &mut self,
         turn_id: &str,
         after_fingerprint: Option<String>,
     ) -> Option<BackgroundAutoReviewSchedule> {
-        let Some(start_generation) = self.active_regular_turns.remove(turn_id) else {
+        let Some(start) = self.take_regular_turn_start(turn_id) else {
             return None;
         };
+        self.complete_regular_turn_from_start(start, after_fingerprint)
+    }
+
+    pub(crate) fn complete_regular_turn_from_start(
+        &mut self,
+        start: BackgroundAutoReviewRegularTurnStart,
+        after_fingerprint: Option<String>,
+    ) -> Option<BackgroundAutoReviewSchedule> {
         let Some(after_fingerprint) = after_fingerprint else {
             return None;
         };
         if after_fingerprint == UNKNOWN_WORKTREE_DIFF_FINGERPRINT {
             return None;
         }
-        if start_generation != self.generation
+        let Some(start_fingerprint) = start.fingerprint else {
+            return None;
+        };
+        if start_fingerprint.as_deref() == Some(after_fingerprint.as_str())
+            || start.generation != self.generation
             || self.has_pending_or_started_fingerprint(&after_fingerprint)
         {
             return None;

@@ -1,0 +1,160 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AutoReviewFreshness": {
+      "enum": [
+        "current",
+        "stale",
+        "detached"
+      ],
+      "type": "string"
+    },
+    "AutoReviewRunSource": {
+      "enum": [
+        "manual",
+        "background"
+      ],
+      "type": "string"
+    },
+    "AutoReviewRunSummary": {
+      "properties": {
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "errorSummary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "freshness": {
+          "$ref": "#/definitions/AutoReviewFreshness"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "omittedFindings": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "renderedFindings": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/AutoReviewRunSource"
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatus"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content",
+        "freshness",
+        "omittedFindings",
+        "renderedFindings",
+        "runId",
+        "source",
+        "startedAt",
+        "status",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "AutoReviewStatusCount": {
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "freshness": {
+          "$ref": "#/definitions/AutoReviewFreshness"
+        },
+        "source": {
+          "$ref": "#/definitions/AutoReviewRunSource"
+        },
+        "status": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatus"
+        },
+        "targetMatches": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "count",
+        "freshness",
+        "source",
+        "status",
+        "targetMatches"
+      ],
+      "type": "object"
+    },
+    "BackgroundAutoReviewStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "current": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AutoReviewRunSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "latest": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AutoReviewRunSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "statusCounts": {
+      "items": {
+        "$ref": "#/definitions/AutoReviewStatusCount"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "statusCounts"
+  ],
+  "title": "AutoReviewSummaryReadResponse",
+  "type": "object"
+}

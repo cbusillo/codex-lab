@@ -2,10 +2,21 @@
 
 use crate::auto_review_denials::RecentAutoReviewDenials;
 use crate::token_usage::TokenUsageInfo;
+use codex_app_server_protocol::BackgroundAutoReviewStatus;
+use codex_app_server_protocol::ReviewTarget;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct BackgroundAutoReviewSnapshot {
+    pub(super) run_id: String,
+    pub(super) status: BackgroundAutoReviewStatus,
+    pub(super) review_target: ReviewTarget,
+    pub(super) error_summary: Option<String>,
+}
 
 #[derive(Debug, Default)]
 pub(super) struct ReviewState {
     pub(super) recent_auto_review_denials: RecentAutoReviewDenials,
+    pub(super) current_background_review: Option<BackgroundAutoReviewSnapshot>,
     /// Simple review mode flag; used to adjust layout and banners.
     pub(super) is_review_mode: bool,
     /// Snapshot of token usage to restore after review mode exits.

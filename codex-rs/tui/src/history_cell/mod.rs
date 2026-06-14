@@ -109,6 +109,7 @@ const RAW_DIFF_SUMMARY_WIDTH: usize = 10_000;
 const RAW_TOOL_OUTPUT_WIDTH: usize = 10_000;
 
 mod approvals;
+mod auto_review_status;
 mod base;
 mod exec;
 mod hook_cell;
@@ -123,6 +124,7 @@ mod separators;
 mod session;
 
 pub(crate) use approvals::*;
+pub(crate) use auto_review_status::*;
 pub(crate) use base::*;
 pub(crate) use exec::*;
 pub(crate) use hook_cell::HookCell;

@@ -395,6 +395,7 @@ use self::realtime::RealtimeConversationUiState;
 mod reasoning_shortcuts;
 mod review;
 mod review_popups;
+use self::review::BackgroundAutoReviewSnapshot;
 use self::review::ReviewState;
 #[cfg(test)]
 pub(crate) use self::review_popups::show_review_commit_picker_with_entries;

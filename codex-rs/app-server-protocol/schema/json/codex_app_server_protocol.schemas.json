@@ -1484,6 +1484,30 @@
             },
             "method": {
               "enum": [
+                "review/summary/read"
+              ],
+              "title": "Review/summary/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AutoReviewSummaryReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/summary/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "review/findingDetail/read"
               ],
               "title": "Review/findingDetail/readRequestMethod",
@@ -6852,6 +6876,166 @@
           "truncated"
         ],
         "title": "AutoReviewFindingDetailReadResponse",
+        "type": "object"
+      },
+      "AutoReviewFreshness": {
+        "enum": [
+          "current",
+          "stale",
+          "detached"
+        ],
+        "type": "string"
+      },
+      "AutoReviewRunSource": {
+        "enum": [
+          "manual",
+          "background"
+        ],
+        "type": "string"
+      },
+      "AutoReviewRunSummary": {
+        "properties": {
+          "completedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "errorSummary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "freshness": {
+            "$ref": "#/definitions/v2/AutoReviewFreshness"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "omittedFindings": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "renderedFindings": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/definitions/v2/AutoReviewRunSource"
+          },
+          "startedAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/BackgroundAutoReviewStatus"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "content",
+          "freshness",
+          "omittedFindings",
+          "renderedFindings",
+          "runId",
+          "source",
+          "startedAt",
+          "status",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "AutoReviewStatusCount": {
+        "properties": {
+          "count": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "freshness": {
+            "$ref": "#/definitions/v2/AutoReviewFreshness"
+          },
+          "source": {
+            "$ref": "#/definitions/v2/AutoReviewRunSource"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/BackgroundAutoReviewStatus"
+          },
+          "targetMatches": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "count",
+          "freshness",
+          "source",
+          "status",
+          "targetMatches"
+        ],
+        "type": "object"
+      },
+      "AutoReviewSummaryReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "AutoReviewSummaryReadParams",
+        "type": "object"
+      },
+      "AutoReviewSummaryReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewRunSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewRunSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "statusCounts": {
+            "items": {
+              "$ref": "#/definitions/v2/AutoReviewStatusCount"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "statusCounts"
+        ],
+        "title": "AutoReviewSummaryReadResponse",
         "type": "object"
       },
       "BackgroundAutoReviewControlAction": {

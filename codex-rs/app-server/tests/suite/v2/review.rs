@@ -7,10 +7,15 @@ use app_test_support::create_shell_command_sse_response;
 use app_test_support::to_response;
 use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
 use codex_app_server_protocol::AutoReviewFindingDetailReadResponse;
+use codex_app_server_protocol::AutoReviewFreshness as ApiAutoReviewFreshness;
+use codex_app_server_protocol::AutoReviewRunSource as ApiAutoReviewRunSource;
+use codex_app_server_protocol::AutoReviewSummaryReadParams;
+use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 use codex_app_server_protocol::BackgroundAutoReviewControlAction;
 use codex_app_server_protocol::BackgroundAutoReviewControlParams;
 use codex_app_server_protocol::BackgroundAutoReviewControlReason;
 use codex_app_server_protocol::BackgroundAutoReviewControlResponse;
+use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
@@ -546,6 +551,137 @@ async fn background_auto_review_control_unknown_run_is_acknowledged() -> Result<
     .await??;
     let _response: BackgroundAutoReviewControlResponse =
         to_response::<BackgroundAutoReviewControlResponse>(response)?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_summary_read_returns_empty_state() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+
+    let request_id = mcp
+        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
+    assert_eq!(summary.latest, None);
+    assert_eq!(summary.current, None);
+    assert_eq!(summary.status_counts, Vec::new());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_summary_read_returns_current_summary_and_counts() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    AutoReviewStore::new(codex_home.path()).save_run(&sample_auto_review_run(
+        "run_summary",
+        "finding_summary",
+        &thread_cwd,
+        "Stored body",
+    ))?;
+
+    let request_id = mcp
+        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
+    let current = summary.current.expect("current run summary");
+    assert_eq!(current.run_id, "run_summary");
+    assert_eq!(current.status, BackgroundAutoReviewStatus::Completed);
+    assert_eq!(current.source, ApiAutoReviewRunSource::Background);
+    assert_eq!(current.freshness, ApiAutoReviewFreshness::Current);
+    assert_eq!(current.rendered_findings, 1);
+    assert_eq!(current.omitted_findings, 0);
+    assert!(current.content.contains("finding_summary"));
+    assert_eq!(
+        summary.latest.as_ref().map(|run| run.run_id.as_str()),
+        Some("run_summary")
+    );
+    assert_eq!(summary.status_counts.len(), 1);
+    assert_eq!(summary.status_counts[0].count, 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_summary_read_suppresses_stale_findings_by_default() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    let mut current_run = sample_auto_review_run(
+        "run_current",
+        "finding_current",
+        &thread_cwd,
+        "Current body",
+    );
+    current_run.completed_at_unix_secs = Some(2);
+    let mut stale_run = sample_auto_review_run(
+        "run_stale",
+        "finding_stale",
+        &thread_cwd.join("other-worktree"),
+        "Stale body",
+    );
+    stale_run.started_at_unix_secs = 10;
+    stale_run.completed_at_unix_secs = Some(11);
+    AutoReviewStore::new(codex_home.path()).save_run(&current_run)?;
+    AutoReviewStore::new(codex_home.path()).save_run(&stale_run)?;
+
+    let request_id = mcp
+        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
+    let current = summary.current.expect("current run summary");
+    assert_eq!(current.run_id, "run_current");
+    assert!(current.content.contains("finding_current"));
+
+    let latest = summary.latest.expect("latest run summary");
+    assert_eq!(latest.run_id, "run_stale");
+    assert_eq!(latest.freshness, ApiAutoReviewFreshness::Detached);
+    assert_eq!(latest.rendered_findings, 0);
+    assert!(!latest.content.contains("finding_stale"));
+    assert_eq!(
+        summary
+            .status_counts
+            .iter()
+            .map(|count| count.count)
+            .sum::<usize>(),
+        2
+    );
 
     Ok(())
 }

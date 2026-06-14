@@ -38,6 +38,12 @@ export type { AttestationGenerateResponse } from "./AttestationGenerateResponse"
 export type { AutoReviewDecisionSource } from "./AutoReviewDecisionSource";
 export type { AutoReviewFindingDetailReadParams } from "./AutoReviewFindingDetailReadParams";
 export type { AutoReviewFindingDetailReadResponse } from "./AutoReviewFindingDetailReadResponse";
+export type { AutoReviewFreshness } from "./AutoReviewFreshness";
+export type { AutoReviewRunSource } from "./AutoReviewRunSource";
+export type { AutoReviewRunSummary } from "./AutoReviewRunSummary";
+export type { AutoReviewStatusCount } from "./AutoReviewStatusCount";
+export type { AutoReviewSummaryReadParams } from "./AutoReviewSummaryReadParams";
+export type { AutoReviewSummaryReadResponse } from "./AutoReviewSummaryReadResponse";
 export type { BackgroundAutoReviewControlAction } from "./BackgroundAutoReviewControlAction";
 export type { BackgroundAutoReviewControlParams } from "./BackgroundAutoReviewControlParams";
 export type { BackgroundAutoReviewControlReason } from "./BackgroundAutoReviewControlReason";

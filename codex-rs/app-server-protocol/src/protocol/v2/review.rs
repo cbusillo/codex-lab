@@ -110,6 +110,70 @@ pub struct BackgroundAutoReviewControlParams {
 #[ts(export_to = "v2/")]
 pub struct BackgroundAutoReviewControlResponse {}
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewSummaryReadParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewSummaryReadResponse {
+    pub latest: Option<AutoReviewRunSummary>,
+    pub current: Option<AutoReviewRunSummary>,
+    pub status_counts: Vec<AutoReviewStatusCount>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewRunSummary {
+    pub run_id: String,
+    pub status: BackgroundAutoReviewStatus,
+    pub source: AutoReviewRunSource,
+    pub freshness: AutoReviewFreshness,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number | null")]
+    pub completed_at: Option<i64>,
+    pub model: Option<String>,
+    pub error_summary: Option<String>,
+    pub rendered_findings: usize,
+    pub omitted_findings: usize,
+    pub truncated: bool,
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewStatusCount {
+    pub status: BackgroundAutoReviewStatus,
+    pub source: AutoReviewRunSource,
+    pub freshness: AutoReviewFreshness,
+    pub target_matches: bool,
+    pub count: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AutoReviewRunSource {
+    Manual,
+    Background,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AutoReviewFreshness {
+    Current,
+    Stale,
+    Detached,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
