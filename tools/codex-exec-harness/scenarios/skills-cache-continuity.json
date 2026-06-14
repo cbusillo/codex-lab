@@ -111,6 +111,7 @@
         "request": 1,
         "scope": "input",
         "contains": "SECOND_CACHE_CONTINUITY_TURN_MARKER",
+        "input_prefix_matches_request": 0,
         "prefix_matches_request": 0,
         "prefix_length": 1000,
         "count": {

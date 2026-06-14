@@ -52,6 +52,40 @@ impl AutoReviewStore {
         Ok(run)
     }
 
+    pub fn list_runs(&self) -> Result<Vec<AutoReviewRun>> {
+        let runs_dir = self.root.join(RUNS_DIR);
+        if !runs_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut run_ids = Vec::new();
+        for entry in std::fs::read_dir(&runs_dir).with_context(|| {
+            format!("failed to read auto review runs dir {}", runs_dir.display())
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to read auto review runs dir entry {}",
+                    runs_dir.display()
+                )
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            validate_safe_id(run_id).context("auto review run_id")?;
+            run_ids.push(run_id.to_string());
+        }
+
+        run_ids.sort();
+        run_ids
+            .into_iter()
+            .map(|run_id| self.load_run(&run_id))
+            .collect()
+    }
+
     fn run_path(&self, run_id: &str) -> Result<PathBuf> {
         validate_safe_id(run_id).context("auto review run_id")?;
         Ok(self.root.join(RUNS_DIR).join(format!("{run_id}.json")))

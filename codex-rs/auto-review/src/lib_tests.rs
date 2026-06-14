@@ -39,6 +39,35 @@ fn save_and_load_run_round_trips_under_codex_home() -> anyhow::Result<()> {
 }
 
 #[test]
+fn list_runs_returns_valid_json_runs_in_id_order() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let store = AutoReviewStore::new(codex_home.path());
+    let run_b = sample_run("run_b", Vec::new());
+    let run_a = sample_run("run_a", Vec::new());
+    store.save_run(&run_b)?;
+    store.save_run(&run_a)?;
+    let runs_dir = codex_home.path().join("auto-review").join("runs");
+    std::fs::write(runs_dir.join("ignored.txt"), "ignored")?;
+
+    let runs = store.list_runs()?;
+
+    assert_eq!(
+        runs.into_iter().map(|run| run.run_id).collect::<Vec<_>>(),
+        vec!["run_a".to_string(), "run_b".to_string()]
+    );
+    Ok(())
+}
+
+#[test]
+fn list_runs_returns_empty_when_store_is_missing() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let runs = AutoReviewStore::new(codex_home.path()).list_runs()?;
+
+    assert!(runs.is_empty());
+    Ok(())
+}
+
+#[test]
 fn load_run_defaults_missing_worktree_diff_fingerprint() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let store = AutoReviewStore::new(codex_home.path());
