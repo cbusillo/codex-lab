@@ -53,6 +53,20 @@ impl ChatWidget {
 
     pub(super) fn on_patch_apply_output_delta(&mut self, _item_id: String, _delta: String) {}
 
+    pub(super) fn on_background_auto_review_status_changed(
+        &mut self,
+        notification: codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
+    ) {
+        self.review.current_background_review = Some(BackgroundAutoReviewSnapshot {
+            run_id: notification.run_id.clone(),
+            status: notification.status,
+            review_target: notification.review_target.clone(),
+            error_summary: notification.error_summary.clone(),
+        });
+        self.add_to_history(history_cell::new_auto_review_status_cell(&notification));
+        self.request_redraw();
+    }
+
     pub(super) fn on_guardian_review_notification(
         &mut self,
         id: String,

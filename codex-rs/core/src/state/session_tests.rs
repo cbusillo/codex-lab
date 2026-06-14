@@ -12,7 +12,7 @@ use pretty_assertions::assert_eq;
 #[test]
 fn background_auto_review_schedules_only_changed_dirty_fingerprint() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
 
     let schedule = state.complete_regular_turn("turn-1", Some("sha256:new".to_string()));
 
@@ -23,10 +23,20 @@ fn background_auto_review_schedules_only_changed_dirty_fingerprint() {
 }
 
 #[test]
+fn background_auto_review_skips_unchanged_dirty_fingerprint() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:dirty".to_string()));
+
+    let schedule = state.complete_regular_turn("turn-1", Some("sha256:dirty".to_string()));
+
+    assert_eq!(schedule, None);
+}
+
+#[test]
 fn background_auto_review_skips_stale_overlapping_turn_completion() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
-    state.begin_regular_turn("turn-2".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
+    state.begin_regular_turn("turn-2".to_string(), Some("sha256:old".to_string()));
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:first".to_string()))
         .expect("first completed turn should schedule review");
@@ -41,7 +51,7 @@ fn background_auto_review_skips_stale_overlapping_turn_completion() {
 #[test]
 fn background_auto_review_remove_regular_turn_clears_pending_snapshot() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     state.remove_regular_turn("turn-1");
 
     assert_eq!(
@@ -53,7 +63,7 @@ fn background_auto_review_remove_regular_turn_clears_pending_snapshot() {
 #[test]
 fn background_auto_review_running_review_can_be_cancelled_and_cleared() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
@@ -74,8 +84,8 @@ fn background_auto_review_running_review_can_be_cancelled_and_cleared() {
 #[test]
 fn background_auto_review_cancel_invalidates_pending_schedule() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-pending".to_string());
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-pending".to_string(), Some("sha256:old".to_string()));
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
@@ -95,8 +105,8 @@ fn background_auto_review_cancel_invalidates_pending_schedule() {
 #[test]
 fn background_auto_review_control_takes_pending_by_run_id() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-pending".to_string());
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-pending".to_string(), Some("sha256:old".to_string()));
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
@@ -120,7 +130,7 @@ fn background_auto_review_control_takes_pending_by_run_id() {
 #[test]
 fn background_auto_review_control_ignores_unknown_run_id() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
@@ -143,8 +153,8 @@ fn background_auto_review_control_ignores_unknown_run_id() {
 #[test]
 fn background_auto_review_control_takes_running_by_run_id() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("stale-turn".to_string());
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("stale-turn".to_string(), Some("sha256:old".to_string()));
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
@@ -171,7 +181,7 @@ fn background_auto_review_control_takes_running_by_run_id() {
 #[test]
 fn background_auto_review_clear_running_review_honors_generation() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let first_schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
@@ -186,7 +196,7 @@ fn background_auto_review_clear_running_review_honors_generation() {
 
     state.clear_running_review(first_schedule.generation + 1);
 
-    state.begin_regular_turn("turn-2".to_string());
+    state.begin_regular_turn("turn-2".to_string(), Some("sha256:old".to_string()));
     let second_schedule = state
         .complete_regular_turn("turn-2", Some("sha256:newer".to_string()))
         .expect("changed dirty fingerprint should schedule newer review");
@@ -207,12 +217,12 @@ fn background_auto_review_clear_running_review_honors_generation() {
 #[test]
 fn background_auto_review_duplicate_check_starts_after_review_starts() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let first = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
 
-    state.begin_regular_turn("turn-2".to_string());
+    state.begin_regular_turn("turn-2".to_string(), Some("sha256:old".to_string()));
     let second = state.complete_regular_turn("turn-2", Some("sha256:new".to_string()));
 
     let second = second.expect("abandoned schedule should not suppress same fingerprint");
@@ -233,13 +243,13 @@ fn background_auto_review_duplicate_check_starts_after_review_starts() {
 #[test]
 fn background_auto_review_skips_pending_duplicate_fingerprint() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
     let (persistence, _cwd) = test_background_review_persistence("pending-duplicate");
     assert!(state.record_pending(schedule.generation, &schedule.fingerprint, persistence));
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
 
     let schedule = state.complete_regular_turn("turn-1", Some("sha256:new".to_string()));
 
@@ -249,7 +259,7 @@ fn background_auto_review_skips_pending_duplicate_fingerprint() {
 #[test]
 fn background_auto_review_skips_duplicate_fingerprint() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let schedule = state
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
@@ -259,7 +269,7 @@ fn background_auto_review_skips_duplicate_fingerprint() {
             .record_started(schedule.generation, &schedule.fingerprint, persistence)
             .is_some()
     );
-    state.begin_regular_turn("turn-2".to_string());
+    state.begin_regular_turn("turn-2".to_string(), Some("sha256:old".to_string()));
 
     let schedule = state.complete_regular_turn("turn-2", Some("sha256:new".to_string()));
 
@@ -287,7 +297,7 @@ fn test_background_review_persistence(
 #[test]
 fn background_auto_review_mismatched_completion_preserves_other_turn_snapshot() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-2".to_string());
+    state.begin_regular_turn("turn-2".to_string(), Some("sha256:old".to_string()));
 
     assert_eq!(
         state.complete_regular_turn("turn-1", Some("sha256:new".to_string())),
@@ -303,7 +313,7 @@ fn background_auto_review_mismatched_completion_preserves_other_turn_snapshot() 
 #[test]
 fn background_auto_review_skips_unknown_fingerprint() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
-    state.begin_regular_turn("turn-1".to_string());
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
 
     let schedule = state.complete_regular_turn("turn-1", Some("unknown".to_string()));
 

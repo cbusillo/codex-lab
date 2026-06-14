@@ -297,6 +297,77 @@ async fn live_app_server_user_message_item_completed_does_not_duplicate_rendered
 }
 
 #[tokio::test]
+async fn live_app_server_background_auto_review_status_renders_history() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::BackgroundAutoReviewStatusChanged(
+            BackgroundAutoReviewStatusChangedNotification {
+                thread_id: "thread-1".to_string(),
+                run_id: "run-background-1".to_string(),
+                status: BackgroundAutoReviewStatus::Running,
+                review_target: ReviewTarget::UncommittedChanges,
+                error_summary: None,
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::BackgroundAutoReviewStatusChanged(
+            BackgroundAutoReviewStatusChangedNotification {
+                thread_id: "thread-1".to_string(),
+                run_id: "run-background-1".to_string(),
+                status: BackgroundAutoReviewStatus::Completed,
+                review_target: ReviewTarget::UncommittedChanges,
+                error_summary: None,
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("");
+    assert_chatwidget_snapshot!("background_auto_review_status_history", rendered);
+    let snapshot = chat
+        .review
+        .current_background_review
+        .as_ref()
+        .expect("background review snapshot");
+    assert_eq!(snapshot.run_id, "run-background-1");
+    assert_eq!(snapshot.status, BackgroundAutoReviewStatus::Completed);
+}
+
+#[tokio::test]
+async fn live_app_server_background_auto_review_failure_renders_error_summary() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::BackgroundAutoReviewStatusChanged(
+            BackgroundAutoReviewStatusChangedNotification {
+                thread_id: "thread-1".to_string(),
+                run_id: "run-background-failed".to_string(),
+                status: BackgroundAutoReviewStatus::Failed,
+                review_target: ReviewTarget::BaseBranch {
+                    branch: "main".to_string(),
+                },
+                error_summary: Some("review model unavailable".to_string()),
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("");
+    assert_chatwidget_snapshot!("background_auto_review_failure_history", rendered);
+}
+
+#[tokio::test]
 async fn live_app_server_turn_completed_clears_working_status_after_answer_item() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

@@ -218,6 +218,15 @@ impl TurnRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn auto_review_summary_read(
+        &self,
+        params: AutoReviewSummaryReadParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.auto_review_summary_read_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn auto_review_finding_detail_read(
         &self,
         params: AutoReviewFindingDetailReadParams,
@@ -375,6 +384,79 @@ impl TurnRequestProcessor {
             "auto review run is not completed"
         } else {
             "auto review finding detail is unavailable"
+        }
+    }
+
+    fn auto_review_run_sort_key(run: &AutoReviewRun) -> (i64, &str) {
+        (
+            run.completed_at_unix_secs
+                .unwrap_or(run.started_at_unix_secs),
+            run.run_id.as_str(),
+        )
+    }
+
+    fn auto_review_review_target_matches(
+        stored: &CoreReviewTarget,
+        active: &CoreReviewTarget,
+    ) -> bool {
+        match (stored, active) {
+            (
+                CoreReviewTarget::Commit {
+                    sha: stored_sha, ..
+                },
+                CoreReviewTarget::Commit {
+                    sha: active_sha, ..
+                },
+            ) => stored_sha == active_sha,
+            _ => stored == active,
+        }
+    }
+
+    fn api_auto_review_status(status: AutoReviewRunStatus) -> ApiBackgroundAutoReviewStatus {
+        match status {
+            AutoReviewRunStatus::Pending => ApiBackgroundAutoReviewStatus::Pending,
+            AutoReviewRunStatus::Running => ApiBackgroundAutoReviewStatus::Running,
+            AutoReviewRunStatus::Completed => ApiBackgroundAutoReviewStatus::Completed,
+            AutoReviewRunStatus::Failed => ApiBackgroundAutoReviewStatus::Failed,
+            AutoReviewRunStatus::Cancelled => ApiBackgroundAutoReviewStatus::Cancelled,
+            AutoReviewRunStatus::Skipped => ApiBackgroundAutoReviewStatus::Skipped,
+        }
+    }
+
+    fn api_auto_review_source(source: AutoReviewRunSource) -> ApiAutoReviewRunSource {
+        match source {
+            AutoReviewRunSource::Manual => ApiAutoReviewRunSource::Manual,
+            AutoReviewRunSource::Background => ApiAutoReviewRunSource::Background,
+        }
+    }
+
+    fn api_auto_review_freshness(freshness: AutoReviewFreshness) -> ApiAutoReviewFreshness {
+        match freshness {
+            AutoReviewFreshness::Current => ApiAutoReviewFreshness::Current,
+            AutoReviewFreshness::Stale => ApiAutoReviewFreshness::Stale,
+            AutoReviewFreshness::Detached => ApiAutoReviewFreshness::Detached,
+        }
+    }
+
+    fn auto_review_run_summary(
+        run: &AutoReviewRun,
+        active_target: &AutoReviewRunTarget,
+        active_review_target: &CoreReviewTarget,
+    ) -> AutoReviewRunSummary {
+        let summary = run.summary(active_target, active_review_target);
+        AutoReviewRunSummary {
+            run_id: run.run_id.clone(),
+            status: Self::api_auto_review_status(run.status.clone()),
+            source: Self::api_auto_review_source(run.source.clone()),
+            freshness: Self::api_auto_review_freshness(run.freshness(active_target)),
+            started_at: run.started_at_unix_secs,
+            completed_at: run.completed_at_unix_secs,
+            model: run.model.clone(),
+            error_summary: run.error_summary.clone(),
+            rendered_findings: summary.rendered_findings,
+            omitted_findings: summary.omitted_findings,
+            truncated: summary.truncated,
+            content: summary.content,
         }
     }
 
@@ -1263,6 +1345,67 @@ impl TurnRequestProcessor {
         })?;
 
         Ok(BackgroundAutoReviewControlResponse {})
+    }
+
+    async fn auto_review_summary_read_inner(
+        &self,
+        params: AutoReviewSummaryReadParams,
+    ) -> Result<AutoReviewSummaryReadResponse, JSONRPCErrorError> {
+        let AutoReviewSummaryReadParams { thread_id } = params;
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        let active_review_target = CoreReviewTarget::UncommittedChanges;
+        let active_target = Self::auto_review_target_for_thread(thread.as_ref()).await;
+        let runs = AutoReviewStore::new(&self.config.codex_home)
+            .list_runs()
+            .map_err(|err| internal_error(format!("failed to list auto review runs: {err}")))?;
+
+        let latest = runs
+            .iter()
+            .max_by_key(|run| Self::auto_review_run_sort_key(run))
+            .map(|run| Self::auto_review_run_summary(run, &active_target, &active_review_target));
+        let current = runs
+            .iter()
+            .filter(|run| {
+                run.freshness(&active_target) == AutoReviewFreshness::Current
+                    && Self::auto_review_review_target_matches(
+                        &run.review_target,
+                        &active_review_target,
+                    )
+            })
+            .max_by_key(|run| Self::auto_review_run_sort_key(run))
+            .map(|run| Self::auto_review_run_summary(run, &active_target, &active_review_target));
+
+        let mut status_counts = Vec::<AutoReviewStatusCount>::new();
+        for run in &runs {
+            let freshness = run.freshness(&active_target);
+            let target_matches =
+                Self::auto_review_review_target_matches(&run.review_target, &active_review_target);
+            let status = Self::api_auto_review_status(run.status.clone());
+            let source = Self::api_auto_review_source(run.source.clone());
+            let freshness = Self::api_auto_review_freshness(freshness);
+            if let Some(count) = status_counts.iter_mut().find(|count| {
+                count.status == status
+                    && count.source == source
+                    && count.freshness == freshness
+                    && count.target_matches == target_matches
+            }) {
+                count.count += 1;
+            } else {
+                status_counts.push(AutoReviewStatusCount {
+                    status,
+                    source,
+                    freshness,
+                    target_matches,
+                    count: 1,
+                });
+            }
+        }
+
+        Ok(AutoReviewSummaryReadResponse {
+            latest,
+            current,
+            status_counts,
+        })
     }
 
     async fn auto_review_finding_detail_read_inner(

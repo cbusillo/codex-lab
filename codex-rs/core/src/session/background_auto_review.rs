@@ -32,10 +32,17 @@ impl Session {
         self: &Arc<Self>,
         turn_context: &TurnContext,
     ) {
+        {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .begin_regular_turn_pending_fingerprint(turn_context.sub_id.clone());
+        }
+        let fingerprint = background_review_fingerprint(turn_context).await;
         let mut state = self.state.lock().await;
         state
             .background_auto_review
-            .begin_regular_turn(turn_context.sub_id.clone());
+            .record_regular_turn_start_fingerprint(&turn_context.sub_id, fingerprint);
     }
 
     pub(crate) async fn maybe_schedule_background_auto_review(
@@ -53,12 +60,21 @@ impl Session {
         self: Arc<Self>,
         turn_context: Arc<TurnContext>,
     ) {
+        let start = {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .take_regular_turn_start(&turn_context.sub_id)
+        };
+        let Some(start) = start else {
+            return;
+        };
         let Some(after_fingerprint) = background_review_fingerprint(turn_context.as_ref()).await
         else {
             let mut state = self.state.lock().await;
             let _ = state
                 .background_auto_review
-                .complete_regular_turn(&turn_context.sub_id, None);
+                .complete_regular_turn_from_start(start, None);
             debug!(turn_id = %turn_context.sub_id, "background auto review skipped: clean or unsupported worktree");
             return;
         };
@@ -66,7 +82,7 @@ impl Session {
             let mut state = self.state.lock().await;
             state
                 .background_auto_review
-                .complete_regular_turn(&turn_context.sub_id, Some(after_fingerprint))
+                .complete_regular_turn_from_start(start, Some(after_fingerprint))
         };
         let Some(schedule) = schedule else {
             debug!(turn_id = %turn_context.sub_id, "background auto review skipped: unchanged or duplicate fingerprint");

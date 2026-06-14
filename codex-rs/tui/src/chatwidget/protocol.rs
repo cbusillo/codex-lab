@@ -180,6 +180,9 @@ impl ChatWidget {
                     notification.action,
                 );
             }
+            ServerNotification::BackgroundAutoReviewStatusChanged(notification) => {
+                self.on_background_auto_review_status_changed(notification);
+            }
             ServerNotification::ThreadClosed(_) => {
                 if !from_replay {
                     self.on_shutdown_complete();
@@ -218,7 +221,6 @@ impl ChatWidget {
             ServerNotification::ServerRequestResolved(_)
             | ServerNotification::AccountUpdated(_)
             | ServerNotification::AccountRateLimitsUpdated(_)
-            | ServerNotification::BackgroundAutoReviewStatusChanged(_)
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)
