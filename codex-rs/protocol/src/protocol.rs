@@ -2665,7 +2665,9 @@ impl SessionSource {
 
     pub fn restriction_product(&self) -> Option<Product> {
         match self {
-            SessionSource::Custom(source) => Product::from_session_source_name(source),
+            SessionSource::Custom(source) => {
+                Some(Product::from_session_source_name(source).unwrap_or(Product::Codex))
+            }
             SessionSource::Cli
             | SessionSource::VSCode
             | SessionSource::Exec
@@ -4186,7 +4188,19 @@ mod tests {
         );
         assert_eq!(
             SessionSource::Custom("atlas-dev".to_string()).restriction_product(),
-            None
+            Some(Product::Codex)
+        );
+        assert_eq!(
+            SessionSource::Custom("launchplane".to_string()).restriction_product(),
+            Some(Product::Codex)
+        );
+        assert_eq!(
+            SessionSource::Custom("agent_session".to_string()).restriction_product(),
+            Some(Product::Codex)
+        );
+        assert_eq!(
+            SessionSource::Custom("every_code".to_string()).restriction_product(),
+            Some(Product::Codex)
         );
     }
 
@@ -4203,6 +4217,14 @@ mod tests {
         assert!(SessionSource::VSCode.matches_product_restriction(&[Product::Codex]));
         assert!(
             !SessionSource::Custom("atlas-dev".to_string())
+                .matches_product_restriction(&[Product::Atlas])
+        );
+        assert!(
+            SessionSource::Custom("launchplane".to_string())
+                .matches_product_restriction(&[Product::Codex])
+        );
+        assert!(
+            !SessionSource::Custom("launchplane".to_string())
                 .matches_product_restriction(&[Product::Atlas])
         );
         assert!(SessionSource::Custom("atlas-dev".to_string()).matches_product_restriction(&[]));
