@@ -307,6 +307,7 @@ impl ExternalAgentConfigRequestProcessor {
                 config,
                 initial_history: InitialHistory::Forked(rollout_items),
                 session_source: None,
+                session_provenance: None,
                 thread_source: None,
                 dynamic_tools: Vec::new(),
                 metrics_service_name: None,

@@ -14,6 +14,7 @@ use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::SessionProvenance;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -192,6 +193,65 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     let started: ThreadStartedNotification =
         serde_json::from_value(notif.params.expect("params must be present"))?;
     assert_eq!(started.thread, thread);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_preserves_session_provenance() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let provenance = SessionProvenance {
+        request_id: Some("agent-session-123".to_string()),
+        repository: Some("cbusillo/codex-lab".to_string()),
+        issue_number: Some(48),
+        issue_url: Some("https://github.com/cbusillo/codex-lab/issues/48".to_string()),
+        source: Some("agent-session".to_string()),
+        origin: Some("launchplane".to_string()),
+    };
+    let req_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            session_provenance: Some(provenance.clone()),
+            ..Default::default()
+        })
+        .await?;
+
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let resp_result = resp.result.clone();
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(resp)?;
+    assert_eq!(thread.session_provenance, Some(provenance.clone()));
+    assert_eq!(
+        resp_result
+            .get("thread")
+            .and_then(|thread| thread.get("sessionProvenance"))
+            .and_then(|provenance| provenance.get("requestId"))
+            .and_then(Value::as_str),
+        Some("agent-session-123")
+    );
+
+    let deadline = tokio::time::Instant::now() + DEFAULT_READ_TIMEOUT;
+    let started = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let message = timeout(remaining, mcp.read_next_message()).await??;
+        let JSONRPCMessage::Notification(notif) = message else {
+            continue;
+        };
+        if notif.method == "thread/started" {
+            break serde_json::from_value::<ThreadStartedNotification>(
+                notif.params.expect("params must be present"),
+            )?;
+        }
+    };
+    assert_eq!(started.thread.session_provenance, Some(provenance));
 
     Ok(())
 }

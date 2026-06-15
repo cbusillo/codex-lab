@@ -246,6 +246,7 @@ impl MemoryStartupContext {
                 session_source: Some(SessionSource::Internal(
                     InternalSessionSource::MemoryConsolidation,
                 )),
+                session_provenance: None,
                 thread_source: Some(ThreadSource::MemoryConsolidation),
                 dynamic_tools: Vec::new(),
                 metrics_service_name: None,

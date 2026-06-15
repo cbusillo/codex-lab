@@ -319,6 +319,7 @@ impl AgentControl {
                     config.clone(),
                     self.clone(),
                     session_source,
+                    /*session_provenance*/ None,
                     options.parent_thread_id,
                     /*forked_from_thread_id*/ None,
                     /*thread_source*/ Some(ThreadSource::Subagent),

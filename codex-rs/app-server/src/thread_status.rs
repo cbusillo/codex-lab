@@ -905,6 +905,7 @@ mod tests {
             agent_role: None,
             source,
             thread_source: None,
+            session_provenance: None,
             git_info: None,
             name: None,
             turns: Vec::new(),

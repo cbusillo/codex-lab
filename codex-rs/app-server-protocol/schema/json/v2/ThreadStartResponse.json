@@ -821,6 +821,50 @@
         }
       ]
     },
+    "SessionProvenance": {
+      "description": "Structured provenance for a thread started by an external orchestrator.\n\nThese fields are descriptive metadata only. Runtime authorization and product filtering must continue to use server-side policy and `source`.",
+      "properties": {
+        "issueNumber": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "issueUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "SessionSource": {
       "oneOf": [
         {
@@ -1050,6 +1094,17 @@
         "sessionId": {
           "description": "Session id shared by threads that belong to the same session tree.",
           "type": "string"
+        },
+        "sessionProvenance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional structured launch provenance supplied by an external agent orchestrator."
         },
         "source": {
           "allOf": [
