@@ -11,6 +11,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadMemoryMode as MemoryMode;
 use codex_protocol::protocol::ThreadSource;
@@ -67,6 +68,8 @@ pub struct CreateThreadParams {
     pub parent_thread_id: Option<ThreadId>,
     /// Runtime source for the thread.
     pub source: SessionSource,
+    /// Optional external launch provenance supplied by an orchestrator.
+    pub session_provenance: Option<SessionProvenance>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Base instructions persisted in session metadata.
@@ -377,6 +380,8 @@ pub struct StoredThread {
     pub cli_version: String,
     /// Runtime source for the thread.
     pub source: SessionSource,
+    /// Optional external launch provenance supplied by an orchestrator.
+    pub session_provenance: Option<SessionProvenance>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Optional random nickname for thread-spawn sub-agents.

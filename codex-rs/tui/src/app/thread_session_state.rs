@@ -423,6 +423,7 @@ mod tests {
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
             thread_source: None,
+            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,

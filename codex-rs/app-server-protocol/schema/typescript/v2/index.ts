@@ -352,6 +352,7 @@ export type { SendAddCreditsNudgeEmailParams } from "./SendAddCreditsNudgeEmailP
 export type { SendAddCreditsNudgeEmailResponse } from "./SendAddCreditsNudgeEmailResponse";
 export type { ServerRequestResolvedNotification } from "./ServerRequestResolvedNotification";
 export type { SessionMigration } from "./SessionMigration";
+export type { SessionProvenance } from "./SessionProvenance";
 export type { SessionSource } from "./SessionSource";
 export type { SkillDependencies } from "./SkillDependencies";
 export type { SkillErrorInfo } from "./SkillErrorInfo";

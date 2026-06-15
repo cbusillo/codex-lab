@@ -1414,6 +1414,8 @@ fn thread_start_params_from_config(
         ephemeral: Some(config.ephemeral),
         session_start_source,
         thread_source: Some(ThreadSource::User),
+        session_provenance: crate::agent_session_env::session_provenance_from_agent_env()
+            .map(Into::into),
         developer_instructions: with_terminal_visualization_instructions(
             config, /*control_instructions*/ None,
         ),
@@ -2344,6 +2346,7 @@ mod tests {
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Cli,
                 thread_source: None,
+                session_provenance: None,
                 agent_nickname: None,
                 agent_role: None,
                 git_info: None,

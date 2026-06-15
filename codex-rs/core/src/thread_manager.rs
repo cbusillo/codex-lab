@@ -44,6 +44,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
@@ -177,6 +178,7 @@ pub struct StartThreadOptions {
     pub config: Config,
     pub initial_history: InitialHistory,
     pub session_source: Option<SessionSource>,
+    pub session_provenance: Option<SessionProvenance>,
     pub thread_source: Option<ThreadSource>,
     pub dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
     pub metrics_service_name: Option<String>,
@@ -571,6 +573,7 @@ impl ThreadManager {
             config,
             initial_history: InitialHistory::New,
             session_source: None,
+            session_provenance: None,
             thread_source: None,
             dynamic_tools,
             metrics_service_name: None,
@@ -598,6 +601,7 @@ impl ThreadManager {
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         let session_source = options.session_source.unwrap_or(resumed_session_source);
+        let session_provenance = options.session_provenance;
         let thread_source = options.thread_source.or(resumed_thread_source);
         Box::pin(self.state.spawn_thread_with_source(
             options.config,
@@ -605,6 +609,7 @@ impl ThreadManager {
             Arc::clone(&self.state.auth_manager),
             self.agent_control(),
             session_source,
+            session_provenance,
             /*parent_thread_id*/ None,
             forked_from_thread_id,
             thread_source,
@@ -693,6 +698,7 @@ impl ThreadManager {
             auth_manager,
             self.agent_control(),
             session_source,
+            /*session_provenance*/ None,
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
             thread_source,
@@ -754,6 +760,7 @@ impl ThreadManager {
             auth_manager,
             self.agent_control(),
             session_source,
+            /*session_provenance*/ None,
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
             thread_source,
@@ -1093,6 +1100,7 @@ impl ThreadManagerState {
             config,
             agent_control,
             self.session_source.clone(),
+            /*session_provenance*/ None,
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
             /*thread_source*/ None,
@@ -1110,6 +1118,7 @@ impl ThreadManagerState {
         config: Config,
         agent_control: AgentControl,
         session_source: SessionSource,
+        session_provenance: Option<SessionProvenance>,
         parent_thread_id: Option<ThreadId>,
         forked_from_thread_id: Option<ThreadId>,
         thread_source: Option<ThreadSource>,
@@ -1127,6 +1136,7 @@ impl ThreadManagerState {
             Arc::clone(&self.auth_manager),
             agent_control,
             session_source,
+            session_provenance,
             parent_thread_id,
             forked_from_thread_id,
             thread_source,
@@ -1163,6 +1173,7 @@ impl ThreadManagerState {
             Arc::clone(&self.auth_manager),
             agent_control,
             session_source,
+            /*session_provenance*/ None,
             parent_thread_id,
             /*forked_from_thread_id*/ None,
             thread_source,
@@ -1200,6 +1211,7 @@ impl ThreadManagerState {
             Arc::clone(&self.auth_manager),
             agent_control,
             session_source,
+            /*session_provenance*/ None,
             parent_thread_id,
             forked_from_thread_id,
             thread_source,
@@ -1237,6 +1249,7 @@ impl ThreadManagerState {
             auth_manager,
             agent_control,
             self.session_source.clone(),
+            /*session_provenance*/ None,
             parent_thread_id,
             forked_from_thread_id,
             thread_source,
@@ -1259,6 +1272,7 @@ impl ThreadManagerState {
         auth_manager: Arc<AuthManager>,
         agent_control: AgentControl,
         session_source: SessionSource,
+        session_provenance: Option<SessionProvenance>,
         parent_thread_id: Option<ThreadId>,
         forked_from_thread_id: Option<ThreadId>,
         thread_source: Option<ThreadSource>,
@@ -1320,6 +1334,7 @@ impl ThreadManagerState {
             extensions: Arc::clone(&self.extensions),
             conversation_history: initial_history,
             session_source,
+            session_provenance,
             forked_from_thread_id,
             parent_thread_id,
             thread_source,

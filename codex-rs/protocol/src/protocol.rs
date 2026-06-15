@@ -2536,6 +2536,40 @@ pub enum ThreadSource {
     MemoryConsolidation,
 }
 
+/// Structured provenance for sessions launched by an external orchestrator.
+///
+/// These fields are untrusted descriptive metadata. Authorization, product
+/// filtering, and runtime behavior must continue to use `SessionSource` and
+/// other server-side policy inputs.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SessionProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+impl SessionProvenance {
+    pub fn is_empty(&self) -> bool {
+        self.request_id.is_none()
+            && self.repository.is_none()
+            && self.issue_number.is_none()
+            && self.issue_url.is_none()
+            && self.source.is_none()
+            && self.origin.is_none()
+    }
+}
+
 impl ThreadSource {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -2802,6 +2836,11 @@ pub struct SessionMeta {
     /// Optional analytics source classification for this thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_source: Option<ThreadSource>,
+    /// Optional structured launch provenance supplied by an external agent
+    /// orchestrator. This is intentionally separate from `source`, which is a
+    /// coarse runtime/product classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_provenance: Option<SessionProvenance>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_nickname: Option<String>,
@@ -2836,6 +2875,7 @@ impl Default for SessionMeta {
             cli_version: String::new(),
             source: SessionSource::default(),
             thread_source: None,
+            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             agent_path: None,

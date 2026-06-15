@@ -2,6 +2,7 @@ use super::CodexErrorInfo;
 use super::ThreadItem;
 use super::ThreadStatus;
 use super::TurnStatus;
+use codex_protocol::protocol::SessionProvenance as CoreSessionProvenance;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::ThreadSource as CoreThreadSource;
@@ -70,6 +71,60 @@ pub enum ThreadSource {
     MemoryConsolidation,
 }
 
+/// Structured provenance for a thread started by an external orchestrator.
+///
+/// These fields are descriptive metadata only. Runtime authorization and
+/// product filtering must continue to use server-side policy and `source`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SessionProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub issue_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub origin: Option<String>,
+}
+
+impl From<CoreSessionProvenance> for SessionProvenance {
+    fn from(value: CoreSessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<SessionProvenance> for CoreSessionProvenance {
+    fn from(value: SessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
 impl From<CoreThreadSource> for ThreadSource {
     fn from(value: CoreThreadSource) -> Self {
         match value {
@@ -134,6 +189,11 @@ pub struct Thread {
     pub source: SessionSource,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
+    /// Optional structured launch provenance supplied by an external agent
+    /// orchestrator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub session_provenance: Option<SessionProvenance>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     pub agent_nickname: Option<String>,
     /// Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.

@@ -408,6 +408,7 @@ mod thread_processor_behavior_tests {
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Cli,
             thread_source: Some(codex_protocol::protocol::ThreadSource::User),
+            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             agent_path: None,
@@ -704,6 +705,7 @@ mod thread_processor_behavior_tests {
             forked_from_thread_id: None,
             parent_thread_id: None,
             thread_source: None,
+            session_provenance: None,
         };
 
         assert_eq!(

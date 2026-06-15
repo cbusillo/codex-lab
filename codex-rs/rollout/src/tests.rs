@@ -36,6 +36,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
@@ -606,6 +607,7 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -624,6 +626,7 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -642,6 +645,7 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -753,6 +757,7 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -771,6 +776,7 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -825,6 +831,7 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -843,6 +850,7 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -889,6 +897,7 @@ async fn test_pagination_cursor() {
             git_sha: None,
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
+            session_provenance: None,
             parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
@@ -930,6 +939,62 @@ async fn test_list_threads_scans_past_head_for_user_event() {
 
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].thread_id, Some(thread_id_from_uuid(uuid)));
+}
+
+#[tokio::test]
+async fn test_list_threads_preserves_session_provenance() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+
+    let uuid = Uuid::from_u128(101);
+    let ts = "2025-05-03T10-30-00";
+    let payload = serde_json::json!({
+        "id": uuid,
+        "timestamp": ts,
+        "cwd": ".",
+        "originator": "test_originator",
+        "cli_version": "test_version",
+        "source": "vscode",
+        "model_provider": TEST_PROVIDER,
+        "session_provenance": {
+            "requestId": "agent-session-123",
+            "repository": "cbusillo/codex-lab",
+            "issueNumber": 48,
+            "issueUrl": "https://github.com/cbusillo/codex-lab/issues/48",
+            "source": "agent-session",
+            "origin": "launchplane"
+        },
+        "base_instructions": null,
+    });
+    write_session_file_with_meta_payload(home, ts, uuid, payload).unwrap();
+
+    let provider_filter = provider_vec(&[TEST_PROVIDER]);
+    let page = get_threads(
+        home,
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        Some(provider_filter.as_slice()),
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].thread_id, Some(thread_id_from_uuid(uuid)));
+    assert_eq!(
+        page.items[0].session_provenance,
+        Some(SessionProvenance {
+            request_id: Some("agent-session-123".to_string()),
+            repository: Some("cbusillo/codex-lab".to_string()),
+            issue_number: Some(48),
+            issue_url: Some("https://github.com/cbusillo/codex-lab/issues/48".to_string()),
+            source: Some("agent-session".to_string()),
+            origin: Some("launchplane".to_string()),
+        })
+    );
 }
 
 #[tokio::test]
@@ -1060,6 +1125,7 @@ async fn test_get_thread_contents() {
             git_sha: None,
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
+            session_provenance: None,
             parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
@@ -1267,6 +1333,7 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
                 cli_version: "test_version".into(),
                 source: SessionSource::VSCode,
                 thread_source: None,
+                session_provenance: None,
                 agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -1414,6 +1481,7 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -1432,6 +1500,7 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                session_provenance: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
