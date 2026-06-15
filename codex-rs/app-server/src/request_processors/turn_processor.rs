@@ -1378,8 +1378,11 @@ impl TurnRequestProcessor {
         let mut status_counts = Vec::<AutoReviewStatusCount>::new();
         for run in &runs {
             let freshness = run.freshness(&active_target);
-            let target_matches =
-                Self::auto_review_review_target_matches(&run.review_target, &active_review_target);
+            let target_matches = freshness == AutoReviewFreshness::Current
+                && Self::auto_review_review_target_matches(
+                    &run.review_target,
+                    &active_review_target,
+                );
             let status = Self::api_auto_review_status(run.status.clone());
             let source = Self::api_auto_review_source(run.source.clone());
             let freshness = Self::api_auto_review_freshness(freshness);

@@ -78,7 +78,7 @@ fn awareness_reports_stale_status_without_stale_findings() {
     .expect("stale status count should render awareness");
     let body = awareness.body();
 
-    assert!(body.contains("background/completed/stale/target_match: 1"));
+    assert!(body.contains("background/completed/stale/off_target: 1"));
     assert!(!body.contains("Stale title"));
     assert!(!body.contains("stale body"));
 }
