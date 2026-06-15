@@ -2079,6 +2079,8 @@ mod tests {
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_config::config_toml::ProjectConfig;
+    use codex_protocol::protocol::Product;
+    use codex_protocol::protocol::SessionSource;
     use pretty_assertions::assert_eq;
     use serial_test::serial;
     use std::sync::atomic::AtomicBool;
@@ -2093,6 +2095,12 @@ mod tests {
         "EVERY_CODE_ORIGIN",
         "LAUNCHPLANE_EVERY_CODE_ORIGIN",
         "EVERY_CODE_REQUEST_ID",
+        "AGENT_SESSION_REPOSITORY",
+        "AGENT_SESSION_ISSUE_NUMBER",
+        "AGENT_SESSION_ISSUE_URL",
+        "EVERY_CODE_REPOSITORY",
+        "EVERY_CODE_ISSUE_NUMBER",
+        "EVERY_CODE_ISSUE_URL",
     ];
 
     struct AgentSessionEnvGuard {
@@ -2942,6 +2950,114 @@ mod tests {
             Err(_) => {}
         }
         Ok(())
+    }
+
+    async fn assert_embedded_app_server_startup_session_source(
+        setup_env: impl FnOnce(),
+        assert_session_source: impl FnOnce(&SessionSource) + Send + 'static,
+    ) -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let saw_start_args = Arc::new(AtomicBool::new(false));
+        let saw_start_args_for_closure = Arc::clone(&saw_start_args);
+        let guard = AgentSessionEnvGuard::clear();
+        setup_env();
+        let result = start_embedded_app_server_with(
+            Arg0DispatchPaths::default(),
+            config,
+            Vec::new(),
+            LoaderOverrides::default(),
+            /*strict_config*/ false,
+            CloudConfigBundleLoader::default(),
+            codex_feedback::CodexFeedback::new(),
+            /*log_db*/ None,
+            /*state_db*/ None,
+            Arc::new(EnvironmentManager::default_for_tests()),
+            move |args| {
+                let _guard = guard;
+                saw_start_args_for_closure.store(true, Ordering::SeqCst);
+                assert_session_source(&args.session_source);
+                async { Err(std::io::Error::other("stop after inspecting startup args")) }
+            },
+        )
+        .await;
+
+        assert!(
+            saw_start_args.load(Ordering::SeqCst),
+            "embedded app-server start args should be constructed"
+        );
+        match result {
+            Ok(_) => panic!("startup should stop after inspecting args"),
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn embedded_app_server_startup_accepts_launchplane_agent_session_contract()
+    -> color_eyre::Result<()> {
+        assert_embedded_app_server_startup_session_source(
+            || unsafe {
+                std::env::set_var("AGENT_SESSION_ORIGIN", "every_code");
+                std::env::set_var(
+                    "AGENT_SESSION_REQUEST_ID",
+                    "every-code-cbusillo-code-123-test",
+                );
+                std::env::set_var("AGENT_SESSION_REPOSITORY", "cbusillo/code");
+                std::env::set_var("AGENT_SESSION_ISSUE_NUMBER", "123");
+                std::env::set_var(
+                    "AGENT_SESSION_ISSUE_URL",
+                    "https://github.com/cbusillo/code/issues/123",
+                );
+                std::env::set_var("EVERY_CODE_SESSION_ORIGIN", "every_code");
+                std::env::set_var("EVERY_CODE_REQUEST_ID", "every-code-cbusillo-code-123-test");
+                std::env::set_var("EVERY_CODE_REPOSITORY", "cbusillo/code");
+                std::env::set_var("EVERY_CODE_ISSUE_NUMBER", "123");
+                std::env::set_var(
+                    "EVERY_CODE_ISSUE_URL",
+                    "https://github.com/cbusillo/code/issues/123",
+                );
+            },
+            |session_source| {
+                assert_eq!(
+                    *session_source,
+                    SessionSource::Custom("every_code".to_string())
+                );
+                assert_eq!(session_source.restriction_product(), Some(Product::Codex));
+                assert!(session_source.matches_product_restriction(&[Product::Codex]));
+                assert!(!session_source.matches_product_restriction(&[Product::Atlas]));
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn embedded_app_server_startup_keeps_legacy_every_code_contract() -> color_eyre::Result<()>
+    {
+        assert_embedded_app_server_startup_session_source(
+            || unsafe {
+                std::env::set_var("EVERY_CODE_SESSION_ORIGIN", "every_code");
+                std::env::set_var("EVERY_CODE_REQUEST_ID", "every-code-cbusillo-code-123-test");
+                std::env::set_var("EVERY_CODE_REPOSITORY", "cbusillo/code");
+                std::env::set_var("EVERY_CODE_ISSUE_NUMBER", "123");
+                std::env::set_var(
+                    "EVERY_CODE_ISSUE_URL",
+                    "https://github.com/cbusillo/code/issues/123",
+                );
+            },
+            |session_source| {
+                assert_eq!(
+                    *session_source,
+                    SessionSource::Custom("every_code".to_string())
+                );
+                assert_eq!(session_source.restriction_product(), Some(Product::Codex));
+                assert!(session_source.matches_product_restriction(&[Product::Codex]));
+                assert!(!session_source.matches_product_restriction(&[Product::Atlas]));
+            },
+        )
+        .await
     }
 
     #[tokio::test]
