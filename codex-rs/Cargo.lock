@@ -2450,6 +2450,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-code-bridge-service"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "codex-code-bridge-protocol",
+ "codex-utils-home-dir",
+ "constant_time_eq 0.3.1",
+ "http 1.4.0",
+ "rand 0.9.3",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "codex-code-mode"
 version = "0.0.0"
 dependencies = [
