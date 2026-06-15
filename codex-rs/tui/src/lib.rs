@@ -2081,7 +2081,47 @@ mod tests {
     use codex_config::config_toml::ProjectConfig;
     use pretty_assertions::assert_eq;
     use serial_test::serial;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
+
+    const AGENT_SESSION_ENV_KEYS: &[&str] = &[
+        "AGENT_SESSION_ORIGIN",
+        "AGENT_SESSION_SOURCE",
+        "AGENT_SESSION_REQUEST_ID",
+        "EVERY_CODE_SESSION_ORIGIN",
+        "EVERY_CODE_ORIGIN",
+        "LAUNCHPLANE_EVERY_CODE_ORIGIN",
+        "EVERY_CODE_REQUEST_ID",
+    ];
+
+    struct AgentSessionEnvGuard {
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl AgentSessionEnvGuard {
+        fn clear() -> Self {
+            let values = AGENT_SESSION_ENV_KEYS
+                .iter()
+                .map(|key| (*key, std::env::var(key).ok()))
+                .collect();
+            for key in AGENT_SESSION_ENV_KEYS {
+                unsafe { std::env::remove_var(key) };
+            }
+            Self { values }
+        }
+    }
+
+    impl Drop for AgentSessionEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.values.drain(..) {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
 
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
         ConfigBuilder::default()
@@ -2858,6 +2898,49 @@ mod tests {
         assert!(!response.thread.id.is_empty());
 
         app_server.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn embedded_app_server_startup_uses_agent_session_origin() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let saw_start_args = Arc::new(AtomicBool::new(false));
+        let saw_start_args_for_closure = Arc::clone(&saw_start_args);
+        let guard = AgentSessionEnvGuard::clear();
+        unsafe { std::env::set_var("AGENT_SESSION_ORIGIN", "launchplane") };
+        let result = start_embedded_app_server_with(
+            Arg0DispatchPaths::default(),
+            config,
+            Vec::new(),
+            LoaderOverrides::default(),
+            /*strict_config*/ false,
+            CloudConfigBundleLoader::default(),
+            codex_feedback::CodexFeedback::new(),
+            /*log_db*/ None,
+            /*state_db*/ None,
+            Arc::new(EnvironmentManager::default_for_tests()),
+            move |args| {
+                let _guard = guard;
+                saw_start_args_for_closure.store(true, Ordering::SeqCst);
+                assert_eq!(
+                    args.session_source,
+                    codex_protocol::protocol::SessionSource::Custom("launchplane".to_string())
+                );
+                async { Err(std::io::Error::other("stop after inspecting startup args")) }
+            },
+        )
+        .await;
+
+        assert!(
+            saw_start_args.load(Ordering::SeqCst),
+            "embedded app-server start args should be constructed"
+        );
+        match result {
+            Ok(_) => panic!("startup should stop after inspecting args"),
+            Err(_) => {}
+        }
         Ok(())
     }
 
