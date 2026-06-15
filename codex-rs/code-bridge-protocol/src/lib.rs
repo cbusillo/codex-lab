@@ -72,6 +72,8 @@ pub struct HelloResponseMessage {
     pub accepted: bool,
     pub protocol_version: String,
     pub granted_capabilities: CapabilitySet,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_session_token: Option<String>,
     pub limits: BridgeLimits,
     pub error: Option<ErrorMessage>,
 }
@@ -210,6 +212,7 @@ pub enum ErrorCode {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotRequestMessage {
     pub request_id: String,
+    pub requester_client_id: String,
     pub target_client_id: String,
     pub timeout_ms: u64,
 }
@@ -218,6 +221,7 @@ pub struct ScreenshotRequestMessage {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotResponseMessage {
     pub request_id: String,
+    pub responding_client_id: String,
     pub status: ControlStatus,
     pub screenshot: Option<ScreenshotPayload>,
     pub error: Option<ErrorMessage>,
@@ -236,6 +240,7 @@ pub struct ScreenshotPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ControlRequestMessage {
     pub request_id: String,
+    pub requester_client_id: String,
     pub target_client_id: String,
     pub command: ControlCommand,
     pub timeout_ms: u64,
@@ -252,6 +257,7 @@ pub enum ControlCommand {
 #[serde(rename_all = "camelCase")]
 pub struct ControlResponseMessage {
     pub request_id: String,
+    pub responding_client_id: String,
     pub status: ControlStatus,
     pub summary: String,
     pub error: Option<ErrorMessage>,
@@ -281,7 +287,7 @@ pub enum AuthProof {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct CapabilitySet {
     pub publish_events: bool,
     pub subscribe_events: bool,
@@ -289,20 +295,50 @@ pub struct CapabilitySet {
     pub provide_screenshot: bool,
     pub request_control: bool,
     pub provide_control: bool,
+    pub provide_javascript_execution: bool,
     pub service_control: bool,
 }
 
 impl CapabilitySet {
-    pub fn allows_role(&self, role: ClientRole) -> bool {
+    pub fn for_role(&self, role: ClientRole) -> Self {
         match role {
-            ClientRole::Producer => {
-                self.publish_events || self.provide_screenshot || self.provide_control
-            }
-            ClientRole::Subscriber => {
-                self.subscribe_events || self.request_screenshot || self.request_control
-            }
-            ClientRole::ServiceControl => self.service_control,
+            ClientRole::Producer => Self {
+                publish_events: self.publish_events,
+                provide_screenshot: self.provide_screenshot,
+                provide_control: self.provide_control,
+                provide_javascript_execution: self.provide_javascript_execution,
+                ..Self::default()
+            },
+            ClientRole::Subscriber => Self {
+                subscribe_events: self.subscribe_events,
+                request_screenshot: self.request_screenshot,
+                request_control: self.request_control,
+                ..Self::default()
+            },
+            ClientRole::ServiceControl => Self {
+                service_control: self.service_control,
+                ..Self::default()
+            },
         }
+    }
+
+    pub fn allows_role(&self, role: ClientRole) -> bool {
+        self.for_role(role).has_any_capability()
+    }
+
+    pub fn has_cross_role_capability(&self, role: ClientRole) -> bool {
+        self != &self.for_role(role)
+    }
+
+    fn has_any_capability(&self) -> bool {
+        self.publish_events
+            || self.subscribe_events
+            || self.request_screenshot
+            || self.provide_screenshot
+            || self.request_control
+            || self.provide_control
+            || self.provide_javascript_execution
+            || self.service_control
     }
 
     pub fn allows_event(&self, event: &BridgeEvent) -> bool {
@@ -448,6 +484,12 @@ pub fn validate_payload(payload: &BridgePayload) -> Result<(), ValidationError> 
         BridgePayload::Hello(message) => {
             validate_auth(&message.auth)?;
             if !message.requested_capabilities.allows_role(message.role) {
+                return Err(ValidationError::CapabilityDenied);
+            }
+            if message
+                .requested_capabilities
+                .has_cross_role_capability(message.role)
+            {
                 return Err(ValidationError::CapabilityDenied);
             }
             Ok(())
@@ -653,6 +695,7 @@ mod tests {
     fn wire_names_are_camel_case_and_bounded_to_mvp_families() {
         let payload = BridgePayload::ControlRequest(ControlRequestMessage {
             request_id: "request-1".to_string(),
+            requester_client_id: "requester-1".to_string(),
             target_client_id: "client-1".to_string(),
             command: ControlCommand::CaptureScreenshot,
             timeout_ms: 100,
@@ -673,6 +716,7 @@ mod tests {
                 subscribe_events: true,
                 ..CapabilitySet::default()
             },
+            client_session_token: Some("session-1".to_string()),
             limits: BridgeLimits::default(),
             error: None,
         });
@@ -775,6 +819,7 @@ mod tests {
     fn screenshot_response_uses_screenshot_specific_message_cap() {
         let payload = BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
             request_id: "request-1".to_string(),
+            responding_client_id: "client-1".to_string(),
             status: ControlStatus::Ok,
             screenshot: Some(ScreenshotPayload {
                 width: 100,
@@ -810,6 +855,28 @@ mod tests {
                 secret: "secret".to_string(),
             },
             requested_capabilities: CapabilitySet {
+                subscribe_events: true,
+                ..CapabilitySet::default()
+            },
+            metadata: ClientMetadata::default(),
+        });
+
+        assert_eq!(
+            validate_payload(&hello),
+            Err(ValidationError::CapabilityDenied)
+        );
+    }
+
+    #[test]
+    fn hello_rejects_cross_role_capabilities() {
+        let hello = BridgePayload::Hello(HelloMessage {
+            client_id: "client-1".to_string(),
+            role: ClientRole::Producer,
+            auth: AuthProof::LocalSecret {
+                secret: "secret".to_string(),
+            },
+            requested_capabilities: CapabilitySet {
+                publish_events: true,
                 subscribe_events: true,
                 ..CapabilitySet::default()
             },
@@ -913,6 +980,7 @@ mod tests {
         let oversized_summary = "x".repeat(MAX_MODEL_VISIBLE_SUMMARY_BYTES + 1);
         let payload = BridgePayload::ControlResponse(ControlResponseMessage {
             request_id: "request-1".to_string(),
+            responding_client_id: "client-1".to_string(),
             status: ControlStatus::Ok,
             summary: oversized_summary,
             error: None,
@@ -931,6 +999,7 @@ mod tests {
     fn screenshot_and_timeout_bounds_are_enforced() {
         let payload = BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
             request_id: "request-1".to_string(),
+            responding_client_id: "client-1".to_string(),
             status: ControlStatus::Ok,
             screenshot: Some(ScreenshotPayload {
                 width: MAX_SCREENSHOT_WIDTH + 1,
@@ -948,6 +1017,7 @@ mod tests {
 
         let payload = BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
             request_id: "request-1".to_string(),
+            requester_client_id: "requester-1".to_string(),
             target_client_id: "client-1".to_string(),
             timeout_ms: MAX_CONTROL_TIMEOUT_MS + 1,
         });

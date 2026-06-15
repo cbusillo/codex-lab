@@ -2,6 +2,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::ConnectInfo;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::Path as AxumPath;
 use axum::extract::Request;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -11,6 +12,9 @@ use axum::middleware;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use axum::response::sse::Event as SseEvent;
+use axum::response::sse::KeepAlive;
+use axum::response::sse::Sse;
 use axum::routing::get;
 use axum::routing::post;
 use codex_code_bridge_protocol::AckMessage;
@@ -18,22 +22,34 @@ use codex_code_bridge_protocol::AuthProof;
 use codex_code_bridge_protocol::BridgeDescriptor;
 use codex_code_bridge_protocol::BridgeEndpoint;
 use codex_code_bridge_protocol::BridgeEnvelope;
+use codex_code_bridge_protocol::BridgeEvent;
 use codex_code_bridge_protocol::BridgeLimits;
 use codex_code_bridge_protocol::BridgePayload;
+use codex_code_bridge_protocol::CapabilitySet;
 use codex_code_bridge_protocol::ClientRole;
+use codex_code_bridge_protocol::ControlCommand;
 use codex_code_bridge_protocol::ErrorCode;
 use codex_code_bridge_protocol::ErrorMessage;
+use codex_code_bridge_protocol::EventKind;
 use codex_code_bridge_protocol::HelloResponseMessage;
+use codex_code_bridge_protocol::MAX_RETAINED_EVENTS;
 use codex_code_bridge_protocol::MAX_SCREENSHOT_MESSAGE_BYTES;
 use codex_code_bridge_protocol::PROTOCOL_VERSION;
+use codex_code_bridge_protocol::SubscribeMessage;
+use codex_code_bridge_protocol::SubscriptionFilter;
 use codex_code_bridge_protocol::ValidationError;
+use codex_code_bridge_protocol::event_kind;
+use codex_code_bridge_protocol::message_family;
 use codex_code_bridge_protocol::validate_descriptor;
 use codex_code_bridge_protocol::validate_envelope;
+use codex_code_bridge_protocol::validate_event_capabilities;
 use constant_time_eq::constant_time_eq;
 use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
@@ -49,13 +65,18 @@ use std::time::UNIX_EPOCH;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 const DEFAULT_STALE_CLIENT_TIMEOUT: Duration = Duration::from_secs(45);
 const DEFAULT_STALE_CLIENT_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+const EVENT_STREAM_TOUCH_INTERVAL: Duration = Duration::from_secs(10);
+const CLIENT_SESSION_HEADER: &str = "x-code-bridge-client-session";
+const MAX_PENDING_REQUESTS: usize = 256;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const EVENT_WAKE_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct BridgeServiceConfig {
@@ -181,6 +202,7 @@ pub async fn start(config: BridgeServiceConfig) -> Result<BridgeServiceHandle, B
     let router = Router::new()
         .route("/readyz", get(readyz_handler))
         .route("/status", get(status_handler))
+        .route("/events/{client_id}", get(events_handler))
         .route("/message", post(message_handler))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -234,17 +256,23 @@ struct AppState {
 #[derive(Clone)]
 struct SharedState {
     inner: Arc<Mutex<ServiceState>>,
+    delivery_tx: broadcast::Sender<Arc<BridgeDelivery>>,
 }
 
 impl SharedState {
     fn new(stale_client_timeout: Duration) -> Self {
+        let (delivery_tx, _) = broadcast::channel(EVENT_WAKE_CHANNEL_CAPACITY);
         Self {
             inner: Arc::new(Mutex::new(ServiceState {
                 started_at: Instant::now(),
                 clients: HashMap::new(),
+                retained_deliveries: VecDeque::new(),
+                next_delivery_sequence: 1,
+                pending_requests: HashMap::new(),
                 stale_client_timeout,
                 last_event_time_unix_ms: None,
             })),
+            delivery_tx,
         }
     }
 
@@ -252,17 +280,32 @@ impl SharedState {
         let mut state = self.inner.lock().await;
         match &envelope.payload {
             BridgePayload::Hello(message) => {
+                if state.clients.contains_key(&message.client_id) {
+                    return error_payload(
+                        ErrorCode::InvalidPayload,
+                        format!(
+                            "Code Bridge client {} is already registered",
+                            message.client_id
+                        ),
+                    );
+                }
+                let client_session_token = generate_auth_secret();
+                let granted_capabilities = message.requested_capabilities.for_role(message.role);
                 state.clients.insert(
                     message.client_id.clone(),
                     ClientState {
                         role: message.role,
+                        capabilities: granted_capabilities.clone(),
+                        filter: SubscriptionFilter::default(),
+                        session_token: client_session_token.clone(),
                         last_seen: Instant::now(),
                     },
                 );
                 BridgePayload::HelloResponse(HelloResponseMessage {
                     accepted: true,
                     protocol_version: PROTOCOL_VERSION.to_string(),
-                    granted_capabilities: message.requested_capabilities.clone(),
+                    granted_capabilities,
+                    client_session_token: Some(client_session_token),
                     limits: BridgeLimits::default(),
                     error: None,
                 })
@@ -272,37 +315,132 @@ impl SharedState {
                 ack_for(envelope)
             }
             BridgePayload::Event(message) => {
-                state.touch_client(&message.client_id);
-                state.last_event_time_unix_ms = Some(now_unix_ms());
-                ack_for(envelope)
+                let mut outgoing = Vec::new();
+                let payload = state.handle_event(envelope, message, &mut outgoing);
+                drop(state);
+                self.publish_deliveries(outgoing);
+                payload
             }
-            BridgePayload::Subscribe(message) => {
-                state.clients.insert(
-                    message.subscriber_id.clone(),
-                    ClientState {
-                        role: ClientRole::Subscriber,
-                        last_seen: Instant::now(),
-                    },
-                );
-                ack_for(envelope)
+            BridgePayload::Subscribe(message) => state.handle_subscribe(envelope, message),
+            BridgePayload::ScreenshotRequest(message) => {
+                let mut outgoing = Vec::new();
+                let payload = state.handle_screenshot_request(envelope, message, &mut outgoing);
+                drop(state);
+                self.publish_deliveries(outgoing);
+                payload
             }
             BridgePayload::ScreenshotResponse(message) => {
-                state.last_event_time_unix_ms = Some(now_unix_ms());
-                BridgePayload::Ack(AckMessage {
-                    message_id: message.request_id.clone(),
-                })
+                let mut outgoing = Vec::new();
+                let payload = state.handle_screenshot_response(envelope, message, &mut outgoing);
+                drop(state);
+                self.publish_deliveries(outgoing);
+                payload
+            }
+            BridgePayload::ControlRequest(message) => {
+                let mut outgoing = Vec::new();
+                let payload = state.handle_control_request(envelope, message, &mut outgoing);
+                drop(state);
+                self.publish_deliveries(outgoing);
+                payload
             }
             BridgePayload::ControlResponse(message) => {
-                state.last_event_time_unix_ms = Some(now_unix_ms());
-                BridgePayload::Ack(AckMessage {
-                    message_id: message.request_id.clone(),
-                })
+                let mut outgoing = Vec::new();
+                let payload = state.handle_control_response(envelope, message, &mut outgoing);
+                drop(state);
+                self.publish_deliveries(outgoing);
+                payload
             }
-            BridgePayload::HelloResponse(_)
-            | BridgePayload::Ack(_)
-            | BridgePayload::Error(_)
-            | BridgePayload::ScreenshotRequest(_)
-            | BridgePayload::ControlRequest(_) => ack_for(envelope),
+            BridgePayload::HelloResponse(_) | BridgePayload::Ack(_) | BridgePayload::Error(_) => {
+                ack_for(envelope)
+            }
+        }
+    }
+
+    async fn open_event_stream(
+        &self,
+        client_id: &str,
+        client_session_token: &str,
+        last_seen_sequence: u64,
+    ) -> Result<EventStreamState, BridgeHttpError> {
+        let delivery_rx = self.delivery_tx.subscribe();
+        let mut state = self.inner.lock().await;
+        let Some(client) = state.clients.get_mut(client_id) else {
+            return Err(BridgeHttpError::InvalidPayload(format!(
+                "unknown Code Bridge client {client_id}"
+            )));
+        };
+        if !constant_time_eq(
+            client.session_token.as_bytes(),
+            client_session_token.as_bytes(),
+        ) {
+            return Err(BridgeHttpError::Unauthorized(
+                "invalid Code Bridge client session token".to_string(),
+            ));
+        }
+        client.last_seen = Instant::now();
+        let client = client.clone();
+        let replay_cursor = state
+            .retained_deliveries
+            .back()
+            .map(|delivery| delivery.sequence)
+            .unwrap_or(0)
+            .max(last_seen_sequence);
+        let replay = state
+            .retained_deliveries
+            .iter()
+            .filter(|delivery| delivery.sequence > last_seen_sequence)
+            .filter(|delivery| delivery.matches_client(client_id, &client))
+            .cloned()
+            .collect();
+
+        Ok(EventStreamState {
+            client_id: client_id.to_string(),
+            cursor: replay_cursor,
+            replay,
+            delivery_rx,
+        })
+    }
+
+    async fn client_matches_delivery(&self, client_id: &str, delivery: &BridgeDelivery) -> bool {
+        let mut state = self.inner.lock().await;
+        let Some(client) = state.clients.get_mut(client_id) else {
+            return false;
+        };
+        client.last_seen = Instant::now();
+        delivery.matches_client(client_id, client)
+    }
+
+    async fn touch_client(&self, client_id: &str) {
+        let mut state = self.inner.lock().await;
+        state.touch_client(client_id);
+    }
+
+    async fn validate_client_session(
+        &self,
+        client_id: &str,
+        client_session_token: &str,
+    ) -> Result<(), BridgeHttpError> {
+        let state = self.inner.lock().await;
+        let Some(client) = state.clients.get(client_id) else {
+            return Err(BridgeHttpError::InvalidPayload(format!(
+                "unknown Code Bridge client {client_id}"
+            )));
+        };
+        if constant_time_eq(
+            client.session_token.as_bytes(),
+            client_session_token.as_bytes(),
+        ) {
+            Ok(())
+        } else {
+            Err(BridgeHttpError::Unauthorized(
+                "invalid Code Bridge client session token".to_string(),
+            ))
+        }
+    }
+
+    fn publish_deliveries(&self, deliveries: Vec<Arc<BridgeDelivery>>) {
+        for delivery in deliveries {
+            let _ = self.delivery_tx.send(delivery);
         }
     }
 
@@ -313,18 +451,339 @@ impl SharedState {
 
     async fn expire_stale_clients(&self) {
         let mut state = self.inner.lock().await;
+        let mut outgoing = Vec::new();
         state.expire_stale_clients();
+        state.expire_pending_requests(&mut outgoing);
+        drop(state);
+        self.publish_deliveries(outgoing);
     }
 }
 
 struct ServiceState {
     started_at: Instant,
     clients: HashMap<String, ClientState>,
+    retained_deliveries: VecDeque<Arc<BridgeDelivery>>,
+    next_delivery_sequence: u64,
+    pending_requests: HashMap<String, PendingRequest>,
     stale_client_timeout: Duration,
     last_event_time_unix_ms: Option<u64>,
 }
 
 impl ServiceState {
+    fn handle_event(
+        &mut self,
+        envelope: &BridgeEnvelope,
+        message: &codex_code_bridge_protocol::EventPublishMessage,
+        outgoing: &mut Vec<Arc<BridgeDelivery>>,
+    ) -> BridgePayload {
+        let Some(client) = self.clients.get_mut(&message.client_id) else {
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!("unknown Code Bridge client {}", message.client_id),
+            );
+        };
+        client.last_seen = Instant::now();
+        if let Err(error) = validate_event_capabilities(&client.capabilities, &message.event) {
+            return validation_error_payload(error);
+        }
+        self.last_event_time_unix_ms = Some(now_unix_ms());
+        self.enqueue_delivery(
+            envelope.clone(),
+            DeliveryRoute::Subscribers {
+                source_client_id: message.client_id.clone(),
+                event_kind: event_kind(&message.event),
+                event: message.event.clone(),
+            },
+            true,
+            outgoing,
+        );
+        ack_for(envelope)
+    }
+
+    fn handle_subscribe(
+        &mut self,
+        envelope: &BridgeEnvelope,
+        message: &SubscribeMessage,
+    ) -> BridgePayload {
+        let Some(client) = self.clients.get_mut(&message.subscriber_id) else {
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!("unknown Code Bridge subscriber {}", message.subscriber_id),
+            );
+        };
+        client.last_seen = Instant::now();
+        if !client.capabilities.subscribe_events {
+            return validation_error_payload(ValidationError::CapabilityDenied);
+        }
+        client.filter = message.filter.clone();
+        ack_for(envelope)
+    }
+
+    fn handle_screenshot_request(
+        &mut self,
+        envelope: &BridgeEnvelope,
+        message: &codex_code_bridge_protocol::ScreenshotRequestMessage,
+        outgoing: &mut Vec<Arc<BridgeDelivery>>,
+    ) -> BridgePayload {
+        if let Some(error) = self.validate_request_participants(
+            &message.requester_client_id,
+            &message.target_client_id,
+            |capabilities| capabilities.request_screenshot,
+            |capabilities| capabilities.provide_screenshot,
+        ) {
+            return error;
+        }
+        if self.pending_requests.len() >= MAX_PENDING_REQUESTS {
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!("Code Bridge has {MAX_PENDING_REQUESTS} pending requests"),
+            );
+        }
+        if self.pending_requests.contains_key(&message.request_id) {
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!(
+                    "Code Bridge request {} is already pending",
+                    message.request_id
+                ),
+            );
+        }
+        self.pending_requests.insert(
+            message.request_id.clone(),
+            PendingRequest {
+                requester_client_id: message.requester_client_id.clone(),
+                target_client_id: message.target_client_id.clone(),
+                kind: PendingRequestKind::Screenshot,
+                deadline: Instant::now() + Duration::from_millis(message.timeout_ms),
+            },
+        );
+        self.enqueue_delivery(
+            envelope.clone(),
+            DeliveryRoute::Target(message.target_client_id.clone()),
+            false,
+            outgoing,
+        );
+        ack_for(envelope)
+    }
+
+    fn handle_screenshot_response(
+        &mut self,
+        envelope: &BridgeEnvelope,
+        message: &codex_code_bridge_protocol::ScreenshotResponseMessage,
+        outgoing: &mut Vec<Arc<BridgeDelivery>>,
+    ) -> BridgePayload {
+        let request_id = &message.request_id;
+        let Some(pending) = self.pending_requests.remove(request_id) else {
+            return unknown_request_error(request_id);
+        };
+        if pending.kind != PendingRequestKind::Screenshot {
+            self.pending_requests.insert(request_id.clone(), pending);
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!("Code Bridge request {request_id} is not a screenshot request"),
+            );
+        }
+        if pending.target_client_id != message.responding_client_id {
+            self.pending_requests.insert(request_id.clone(), pending);
+            return validation_error_payload(ValidationError::CapabilityDenied);
+        }
+        self.touch_client(&pending.target_client_id);
+        self.last_event_time_unix_ms = Some(now_unix_ms());
+        self.enqueue_delivery(
+            envelope.clone(),
+            DeliveryRoute::Target(pending.requester_client_id),
+            false,
+            outgoing,
+        );
+        BridgePayload::Ack(AckMessage {
+            message_id: request_id.to_string(),
+        })
+    }
+
+    fn handle_control_request(
+        &mut self,
+        envelope: &BridgeEnvelope,
+        message: &codex_code_bridge_protocol::ControlRequestMessage,
+        outgoing: &mut Vec<Arc<BridgeDelivery>>,
+    ) -> BridgePayload {
+        let Some(requester) = self.clients.get_mut(&message.requester_client_id) else {
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!(
+                    "unknown Code Bridge requester {}",
+                    message.requester_client_id
+                ),
+            );
+        };
+        requester.last_seen = Instant::now();
+        if let Err(error) = codex_code_bridge_protocol::validate_control_capabilities(
+            &requester.capabilities,
+            &message.command,
+        ) {
+            return validation_error_payload(error);
+        }
+
+        let Some(target) = self.clients.get_mut(&message.target_client_id) else {
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!("unknown Code Bridge target {}", message.target_client_id),
+            );
+        };
+        target.last_seen = Instant::now();
+        if !target_can_run_command(&target.capabilities, &message.command) {
+            return validation_error_payload(ValidationError::CapabilityDenied);
+        }
+
+        if self.pending_requests.len() >= MAX_PENDING_REQUESTS {
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!("Code Bridge has {MAX_PENDING_REQUESTS} pending requests"),
+            );
+        }
+        if self.pending_requests.contains_key(&message.request_id) {
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!(
+                    "Code Bridge request {} is already pending",
+                    message.request_id
+                ),
+            );
+        }
+
+        self.pending_requests.insert(
+            message.request_id.clone(),
+            PendingRequest {
+                requester_client_id: message.requester_client_id.clone(),
+                target_client_id: message.target_client_id.clone(),
+                kind: PendingRequestKind::Control,
+                deadline: Instant::now() + Duration::from_millis(message.timeout_ms),
+            },
+        );
+        self.enqueue_delivery(
+            envelope.clone(),
+            DeliveryRoute::Target(message.target_client_id.clone()),
+            false,
+            outgoing,
+        );
+        ack_for(envelope)
+    }
+
+    fn handle_control_response(
+        &mut self,
+        envelope: &BridgeEnvelope,
+        message: &codex_code_bridge_protocol::ControlResponseMessage,
+        outgoing: &mut Vec<Arc<BridgeDelivery>>,
+    ) -> BridgePayload {
+        let request_id = &message.request_id;
+        let Some(pending) = self.pending_requests.remove(request_id) else {
+            return unknown_request_error(request_id);
+        };
+        if pending.kind != PendingRequestKind::Control {
+            self.pending_requests.insert(request_id.clone(), pending);
+            return error_payload(
+                ErrorCode::InvalidPayload,
+                format!("Code Bridge request {request_id} is not a control request"),
+            );
+        }
+        if pending.target_client_id != message.responding_client_id {
+            self.pending_requests.insert(request_id.clone(), pending);
+            return validation_error_payload(ValidationError::CapabilityDenied);
+        }
+        self.touch_client(&pending.target_client_id);
+        self.last_event_time_unix_ms = Some(now_unix_ms());
+        self.enqueue_delivery(
+            envelope.clone(),
+            DeliveryRoute::Target(pending.requester_client_id),
+            false,
+            outgoing,
+        );
+        BridgePayload::Ack(AckMessage {
+            message_id: request_id.to_string(),
+        })
+    }
+
+    fn validate_request_participants(
+        &mut self,
+        requester_client_id: &str,
+        target_client_id: &str,
+        requester_allows: impl FnOnce(&CapabilitySet) -> bool,
+        target_allows: impl FnOnce(&CapabilitySet) -> bool,
+    ) -> Option<BridgePayload> {
+        let Some(requester) = self.clients.get_mut(requester_client_id) else {
+            return Some(error_payload(
+                ErrorCode::InvalidPayload,
+                format!("unknown Code Bridge requester {requester_client_id}"),
+            ));
+        };
+        requester.last_seen = Instant::now();
+        if !requester_allows(&requester.capabilities) {
+            return Some(validation_error_payload(ValidationError::CapabilityDenied));
+        }
+
+        let Some(target) = self.clients.get_mut(target_client_id) else {
+            return Some(error_payload(
+                ErrorCode::InvalidPayload,
+                format!("unknown Code Bridge target {target_client_id}"),
+            ));
+        };
+        target.last_seen = Instant::now();
+        if !target_allows(&target.capabilities) {
+            return Some(validation_error_payload(ValidationError::CapabilityDenied));
+        }
+        None
+    }
+
+    fn enqueue_delivery(
+        &mut self,
+        envelope: BridgeEnvelope,
+        route: DeliveryRoute,
+        retain: bool,
+        outgoing: &mut Vec<Arc<BridgeDelivery>>,
+    ) {
+        let delivery = Arc::new(BridgeDelivery {
+            sequence: self.next_delivery_sequence,
+            envelope,
+            route,
+        });
+        self.next_delivery_sequence = self.next_delivery_sequence.saturating_add(1);
+        if retain {
+            self.retained_deliveries.push_back(Arc::clone(&delivery));
+            while self.retained_deliveries.len() > MAX_RETAINED_EVENTS {
+                self.retained_deliveries.pop_front();
+            }
+        }
+        outgoing.push(delivery);
+    }
+
+    fn expire_pending_requests(&mut self, outgoing: &mut Vec<Arc<BridgeDelivery>>) {
+        let now = Instant::now();
+        let expired: Vec<_> = self
+            .pending_requests
+            .iter()
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|(request_id, pending)| (request_id.clone(), pending.clone()))
+            .collect();
+        for (request_id, pending) in expired {
+            self.pending_requests.remove(&request_id);
+            let error = Some(ErrorMessage {
+                code: ErrorCode::Timeout,
+                message: format!("Code Bridge request {request_id} timed out"),
+            });
+            let envelope = BridgeEnvelope {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                message_id: format!("timeout-{request_id}"),
+                timestamp_unix_ms: now_unix_ms(),
+                payload: pending.timeout_payload(&request_id, error),
+            };
+            self.enqueue_delivery(
+                envelope,
+                DeliveryRoute::Target(pending.requester_client_id),
+                false,
+                outgoing,
+            );
+        }
+    }
+
     fn status(&self) -> BridgeServiceStatus {
         BridgeServiceStatus {
             protocol_version: PROTOCOL_VERSION.to_string(),
@@ -361,9 +820,186 @@ impl ServiceState {
     }
 }
 
+#[derive(Clone)]
 struct ClientState {
     role: ClientRole,
+    capabilities: CapabilitySet,
+    filter: SubscriptionFilter,
+    session_token: String,
     last_seen: Instant,
+}
+
+#[derive(Clone)]
+struct BridgeDelivery {
+    sequence: u64,
+    envelope: BridgeEnvelope,
+    route: DeliveryRoute,
+}
+
+impl BridgeDelivery {
+    fn matches_client(&self, client_id: &str, client: &ClientState) -> bool {
+        match &self.route {
+            DeliveryRoute::Target(target_client_id) => target_client_id == client_id,
+            DeliveryRoute::Subscribers {
+                source_client_id,
+                event_kind,
+                event,
+            } => {
+                client.capabilities.subscribe_events
+                    && filter_matches(&client.filter, source_client_id, event_kind.clone(), event)
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum DeliveryRoute {
+    Target(String),
+    Subscribers {
+        source_client_id: String,
+        event_kind: EventKind,
+        event: BridgeEvent,
+    },
+}
+
+struct EventStreamState {
+    client_id: String,
+    cursor: u64,
+    replay: Vec<Arc<BridgeDelivery>>,
+    delivery_rx: broadcast::Receiver<Arc<BridgeDelivery>>,
+}
+
+#[derive(Clone)]
+struct PendingRequest {
+    requester_client_id: String,
+    target_client_id: String,
+    kind: PendingRequestKind,
+    deadline: Instant,
+}
+
+impl PendingRequest {
+    fn timeout_payload(&self, request_id: &str, error: Option<ErrorMessage>) -> BridgePayload {
+        match self.kind {
+            PendingRequestKind::Screenshot => BridgePayload::ScreenshotResponse(
+                codex_code_bridge_protocol::ScreenshotResponseMessage {
+                    request_id: request_id.to_string(),
+                    responding_client_id: self.target_client_id.clone(),
+                    status: codex_code_bridge_protocol::ControlStatus::TimedOut,
+                    screenshot: None,
+                    error,
+                },
+            ),
+            PendingRequestKind::Control => {
+                BridgePayload::ControlResponse(codex_code_bridge_protocol::ControlResponseMessage {
+                    request_id: request_id.to_string(),
+                    responding_client_id: self.target_client_id.clone(),
+                    status: codex_code_bridge_protocol::ControlStatus::TimedOut,
+                    summary: String::new(),
+                    error,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingRequestKind {
+    Screenshot,
+    Control,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeSseMessage {
+    pub sequence: u64,
+    pub envelope: BridgeEnvelope,
+}
+
+fn filter_matches(
+    filter: &SubscriptionFilter,
+    source_client_id: &str,
+    event_kind: EventKind,
+    event: &BridgeEvent,
+) -> bool {
+    if !filter.client_ids.is_empty()
+        && !filter
+            .client_ids
+            .iter()
+            .any(|client_id| client_id == source_client_id)
+    {
+        return false;
+    }
+    if !filter.event_kinds.is_empty()
+        && !filter
+            .event_kinds
+            .iter()
+            .any(|allowed_kind| allowed_kind == &event_kind)
+    {
+        return false;
+    }
+    if !filter.levels.is_empty()
+        && let BridgeEvent::Console(console) = event
+    {
+        return filter
+            .levels
+            .iter()
+            .any(|allowed_level| allowed_level == &console.level);
+    }
+    true
+}
+
+fn target_can_run_command(capabilities: &CapabilitySet, command: &ControlCommand) -> bool {
+    match command {
+        ControlCommand::CaptureScreenshot => capabilities.provide_screenshot,
+        ControlCommand::ExecuteJavascript { .. } => {
+            capabilities.provide_control && capabilities.provide_javascript_execution
+        }
+    }
+}
+
+fn delivery_to_sse_event(delivery: &BridgeDelivery) -> Result<SseEvent, Infallible> {
+    envelope_to_sse_event(delivery.sequence, delivery.envelope.clone())
+}
+
+fn envelope_to_sse_event(sequence: u64, envelope: BridgeEnvelope) -> Result<SseEvent, Infallible> {
+    let event_name = message_family(&envelope.payload);
+    let message = BridgeSseMessage { sequence, envelope };
+    let data = serde_json::to_string(&message).unwrap_or_else(|err| {
+        let fallback = BridgeSseMessage {
+            sequence,
+            envelope: BridgeEnvelope {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                message_id: format!("event-serialization-error-{sequence}"),
+                timestamp_unix_ms: now_unix_ms(),
+                payload: error_payload(
+                    ErrorCode::InvalidPayload,
+                    format!("failed to serialize Code Bridge event: {err}"),
+                ),
+            },
+        };
+        serde_json::to_string(&fallback)
+            .expect("Code Bridge serialization fallback should serialize")
+    });
+    Ok(SseEvent::default()
+        .id(sequence.to_string())
+        .event(event_name)
+        .data(data))
+}
+
+fn validation_error_payload(error: ValidationError) -> BridgePayload {
+    let (_, message) = validation_http_error(error);
+    BridgePayload::Error(message)
+}
+
+fn unknown_request_error(request_id: &str) -> BridgePayload {
+    error_payload(
+        ErrorCode::InvalidPayload,
+        format!("unknown Code Bridge request {request_id}"),
+    )
+}
+
+fn error_payload(code: ErrorCode, message: String) -> BridgePayload {
+    BridgePayload::Error(ErrorMessage { code, message })
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -380,8 +1016,74 @@ async fn status_handler(State(state): State<AppState>) -> axum::Json<BridgeServi
     axum::Json(state.state.status().await)
 }
 
+async fn events_handler(
+    State(state): State<AppState>,
+    AxumPath(client_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, BridgeHttpError> {
+    let client_session_token = client_session_token_from_headers(&headers)?;
+    let last_seen_sequence = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let stream_state = state
+        .state
+        .open_event_stream(&client_id, client_session_token, last_seen_sequence)
+        .await?;
+    let shared_state = state.state.clone();
+    let stream = async_stream::stream! {
+        for delivery in stream_state.replay {
+            yield delivery_to_sse_event(&delivery);
+        }
+
+        let mut cursor = stream_state.cursor;
+        let client_id = stream_state.client_id;
+        let mut delivery_rx = stream_state.delivery_rx;
+        let mut touch_interval = tokio::time::interval(EVENT_STREAM_TOUCH_INTERVAL);
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = touch_interval.tick() => {
+                    shared_state.touch_client(&client_id).await;
+                }
+                delivery = delivery_rx.recv() => {
+                    match delivery {
+                        Ok(delivery) => {
+                            if delivery.sequence <= cursor {
+                                continue;
+                            }
+                            cursor = delivery.sequence;
+                            if shared_state.client_matches_delivery(&client_id, &delivery).await {
+                                yield delivery_to_sse_event(&delivery);
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            let envelope = BridgeEnvelope {
+                                protocol_version: PROTOCOL_VERSION.to_string(),
+                                message_id: format!("event-stream-lagged-{client_id}"),
+                                timestamp_unix_ms: now_unix_ms(),
+                                payload: error_payload(
+                                    ErrorCode::InvalidPayload,
+                                    format!("Code Bridge event stream lagged by {skipped} messages"),
+                                ),
+                            };
+                            yield envelope_to_sse_event(0, envelope);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 async fn message_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<axum::Json<BridgeMessageResponse>, BridgeHttpError> {
     if body.len() > MAX_SCREENSHOT_MESSAGE_BYTES {
@@ -398,6 +1100,17 @@ async fn message_handler(
 
     if let BridgePayload::Hello(message) = &envelope.payload {
         validate_payload_auth(&message.auth, state.auth_secret.as_str())?;
+    } else {
+        let client_id = payload_client_id(&envelope.payload).ok_or_else(|| {
+            BridgeHttpError::InvalidPayload(
+                "Code Bridge payload does not identify a client".to_string(),
+            )
+        })?;
+        let client_session_token = client_session_token_from_headers(&headers)?;
+        state
+            .state
+            .validate_client_session(client_id, client_session_token)
+            .await?;
     }
 
     let payload = state.state.handle_envelope(&envelope).await;
@@ -461,6 +1174,34 @@ fn bearer_token_from_headers(headers: &HeaderMap) -> Result<&str, BridgeHttpErro
         ));
     }
     Ok(token)
+}
+
+fn client_session_token_from_headers(headers: &HeaderMap) -> Result<&str, BridgeHttpError> {
+    headers
+        .get(CLIENT_SESSION_HEADER)
+        .ok_or_else(|| {
+            BridgeHttpError::Unauthorized("missing Code Bridge client session token".to_string())
+        })?
+        .to_str()
+        .map_err(|_| {
+            BridgeHttpError::Unauthorized("invalid Code Bridge client session token".to_string())
+        })
+}
+
+fn payload_client_id(payload: &BridgePayload) -> Option<&str> {
+    match payload {
+        BridgePayload::Heartbeat(message) => Some(&message.client_id),
+        BridgePayload::Event(message) => Some(&message.client_id),
+        BridgePayload::Subscribe(message) => Some(&message.subscriber_id),
+        BridgePayload::ScreenshotRequest(message) => Some(&message.requester_client_id),
+        BridgePayload::ScreenshotResponse(message) => Some(&message.responding_client_id),
+        BridgePayload::ControlRequest(message) => Some(&message.requester_client_id),
+        BridgePayload::ControlResponse(message) => Some(&message.responding_client_id),
+        BridgePayload::Hello(_)
+        | BridgePayload::HelloResponse(_)
+        | BridgePayload::Ack(_)
+        | BridgePayload::Error(_) => None,
+    }
 }
 
 fn validate_payload_auth(auth: &AuthProof, expected_secret: &str) -> Result<(), BridgeHttpError> {
@@ -723,14 +1464,23 @@ mod tests {
     use codex_code_bridge_protocol::ClientMetadata;
     use codex_code_bridge_protocol::ConsoleEvent;
     use codex_code_bridge_protocol::ConsoleLevel;
+    use codex_code_bridge_protocol::ControlCommand;
+    use codex_code_bridge_protocol::ControlRequestMessage;
+    use codex_code_bridge_protocol::ControlResponseMessage;
     use codex_code_bridge_protocol::ControlStatus;
+    use codex_code_bridge_protocol::EventKind;
     use codex_code_bridge_protocol::EventPublishMessage;
     use codex_code_bridge_protocol::HeartbeatMessage;
     use codex_code_bridge_protocol::HelloMessage;
     use codex_code_bridge_protocol::ScreenshotMediaType;
     use codex_code_bridge_protocol::ScreenshotPayload;
+    use codex_code_bridge_protocol::ScreenshotRequestMessage;
     use codex_code_bridge_protocol::ScreenshotResponseMessage;
     use codex_code_bridge_protocol::SourceKind;
+    use codex_code_bridge_protocol::SubscribeMessage;
+    use codex_code_bridge_protocol::SubscriptionFilter;
+    use eventsource_stream::Eventsource;
+    use futures::StreamExt;
     use http::header::CONTENT_LENGTH;
     use reqwest::Client;
     use tempfile::TempDir;
@@ -810,37 +1560,536 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_tracks_clients_heartbeats_events_and_stale_timeout() {
-        let service =
-            start_test_service(Duration::from_millis(80), Duration::from_millis(20)).await;
+    async fn events_endpoint_requires_auth_and_registered_client() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
         let client = Client::new();
+        let url = format!("{}/events/subscriber-1", service.handle.endpoint_url());
+
+        let missing = client.get(&url).send().await.expect("missing auth");
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid = client
+            .get(&url)
+            .bearer_auth("wrong")
+            .send()
+            .await
+            .expect("invalid auth");
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+
+        let unknown = client
+            .get(&url)
+            .bearer_auth(service.handle.auth_secret())
+            .header(CLIENT_SESSION_HEADER, "bogus-session")
+            .send()
+            .await
+            .expect("unknown client");
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn events_endpoint_replays_matching_subscribed_events() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let subscriber = register_subscriber(
+            &client,
+            &service.handle,
+            "subscriber-1",
+            subscriber_capabilities(),
+        )
+        .await;
+        subscribe(
+            &client,
+            &service.handle,
+            &subscriber,
+            "subscriber-1",
+            SubscriptionFilter {
+                levels: vec![ConsoleLevel::Error],
+                event_kinds: vec![EventKind::Console],
+                client_ids: vec!["producer-1".to_string()],
+            },
+        )
+        .await;
+
+        publish_console(
+            &client,
+            &service.handle,
+            &producer,
+            "producer-1",
+            "info-1",
+            ConsoleLevel::Info,
+        )
+        .await;
+        publish_console(
+            &client,
+            &service.handle,
+            &producer,
+            "producer-1",
+            "error-1",
+            ConsoleLevel::Error,
+        )
+        .await;
+
+        let response = open_events(&client, &service.handle, &subscriber, "subscriber-1")
+            .await
+            .expect("events response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/event-stream"))
+        );
+        let mut events = response.bytes_stream().eventsource();
+        let message = next_sse_message(&mut events).await;
+        assert_eq!(message.sequence, 2);
+        let BridgePayload::Event(event) = message.envelope.payload else {
+            panic!("expected event payload");
+        };
+        assert_eq!(event.client_id, "producer-1");
+        assert_eq!(event.event_id, "error-1");
+        assert!(matches!(
+            event.event,
+            BridgeEvent::Console(ConsoleEvent {
+                level: ConsoleLevel::Error,
+                ..
+            })
+        ));
+
+        assert_no_sse_message(&mut events).await;
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn level_filter_does_not_hide_matching_non_console_events() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let subscriber = register_subscriber(
+            &client,
+            &service.handle,
+            "subscriber-1",
+            subscriber_capabilities(),
+        )
+        .await;
+        subscribe(
+            &client,
+            &service.handle,
+            &subscriber,
+            "subscriber-1",
+            SubscriptionFilter {
+                levels: vec![ConsoleLevel::Error],
+                event_kinds: vec![EventKind::Console, EventKind::Error],
+                client_ids: vec!["producer-1".to_string()],
+            },
+        )
+        .await;
 
         post_envelope(
             &client,
             &service.handle,
-            hello_envelope(
-                "producer-1",
-                service.handle.auth_secret(),
-                ClientRole::Producer,
-                CapabilitySet {
-                    publish_events: true,
-                    ..CapabilitySet::default()
-                },
+            &producer,
+            envelope(
+                "error-event-1",
+                BridgePayload::Event(EventPublishMessage {
+                    client_id: "producer-1".to_string(),
+                    event_id: "error-event-1".to_string(),
+                    event: BridgeEvent::Error(codex_code_bridge_protocol::ErrorEvent {
+                        message: "boom".to_string(),
+                        stack: None,
+                    }),
+                }),
             ),
+        )
+        .await;
+
+        let response = open_events(&client, &service.handle, &subscriber, "subscriber-1")
+            .await
+            .expect("events response");
+        let mut events = response.bytes_stream().eventsource();
+        let message = next_sse_message(&mut events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::Event(EventPublishMessage {
+                event_id,
+                event: BridgeEvent::Error(_),
+                ..
+            }) if event_id == "error-event-1"
+        ));
+
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_session_token_is_bound_to_stream_and_message_identity() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let subscriber = register_subscriber(
+            &client,
+            &service.handle,
+            "subscriber-1",
+            subscriber_capabilities(),
+        )
+        .await;
+
+        let response = open_events(&client, &service.handle, &producer, "subscriber-1")
+            .await
+            .expect("cross-client stream response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = client
+            .post(format!("{}/message", service.handle.endpoint_url()))
+            .bearer_auth(service.handle.auth_secret())
+            .header(CLIENT_SESSION_HEADER, producer.session_token.as_str())
+            .json(&envelope(
+                "forged-subscribe",
+                BridgePayload::Subscribe(SubscribeMessage {
+                    subscriber_id: "subscriber-1".to_string(),
+                    filter: SubscriptionFilter::default(),
+                }),
+            ))
+            .send()
+            .await
+            .expect("cross-client message response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = open_events(&client, &service.handle, &subscriber, "subscriber-1")
+            .await
+            .expect("own stream response");
+        assert_eq!(response.status(), StatusCode::OK);
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn screenshot_request_and_response_route_only_to_target_and_requester() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let requester = register_subscriber(
+            &client,
+            &service.handle,
+            "requester-1",
+            subscriber_capabilities(),
+        )
+        .await;
+
+        let producer_events = open_events(&client, &service.handle, &producer, "producer-1")
+            .await
+            .expect("producer events");
+        let mut producer_events = producer_events.bytes_stream().eventsource();
+        let requester_events = open_events(&client, &service.handle, &requester, "requester-1")
+            .await
+            .expect("requester events");
+        let mut requester_events = requester_events.bytes_stream().eventsource();
+
+        post_envelope_with_payload(
+            &client,
+            &service.handle,
+            &requester,
+            envelope(
+                "screenshot-request-1",
+                BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                    request_id: "shot-1".to_string(),
+                    requester_client_id: "requester-1".to_string(),
+                    target_client_id: "producer-1".to_string(),
+                    timeout_ms: 1_000,
+                }),
+            ),
+        )
+        .await;
+        let message = next_sse_message(&mut producer_events).await;
+        let BridgePayload::ScreenshotRequest(request) = message.envelope.payload else {
+            panic!("expected screenshot request");
+        };
+        assert_eq!(request.request_id, "shot-1");
+        assert_eq!(request.requester_client_id, "requester-1");
+        assert_eq!(request.target_client_id, "producer-1");
+
+        post_envelope_with_payload(
+            &client,
+            &service.handle,
+            &producer,
+            envelope(
+                "screenshot-response-1",
+                BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                    request_id: "shot-1".to_string(),
+                    responding_client_id: "producer-1".to_string(),
+                    status: ControlStatus::Ok,
+                    screenshot: Some(ScreenshotPayload {
+                        width: 1,
+                        height: 1,
+                        media_type: ScreenshotMediaType::Png,
+                        data_base64: "iVBORw0KGgo=".to_string(),
+                    }),
+                    error: None,
+                }),
+            ),
+        )
+        .await;
+        let message = next_sse_message(&mut requester_events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                request_id,
+                status: ControlStatus::Ok,
+                ..
+            }) if request_id == "shot-1"
+        ));
+        assert_no_sse_message(&mut producer_events).await;
+
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn response_sender_must_match_pending_request_target() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let other_producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-2",
+            producer_capabilities(),
+        )
+        .await;
+        let requester = register_subscriber(
+            &client,
+            &service.handle,
+            "requester-1",
+            subscriber_capabilities(),
         )
         .await;
         post_envelope(
             &client,
             &service.handle,
-            hello_envelope(
-                "subscriber-1",
-                service.handle.auth_secret(),
-                ClientRole::Subscriber,
-                CapabilitySet {
-                    subscribe_events: true,
-                    ..CapabilitySet::default()
-                },
+            &requester,
+            envelope(
+                "screenshot-request-1",
+                BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                    request_id: "shot-1".to_string(),
+                    requester_client_id: "requester-1".to_string(),
+                    target_client_id: "producer-1".to_string(),
+                    timeout_ms: 1_000,
+                }),
             ),
+        )
+        .await;
+
+        let forged = post_envelope_with_payload(
+            &client,
+            &service.handle,
+            &other_producer,
+            envelope(
+                "forged-screenshot-response",
+                BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                    request_id: "shot-1".to_string(),
+                    responding_client_id: "producer-2".to_string(),
+                    status: ControlStatus::Ok,
+                    screenshot: None,
+                    error: None,
+                }),
+            ),
+        )
+        .await;
+        assert!(matches!(
+            forged,
+            BridgePayload::Error(ErrorMessage {
+                code: ErrorCode::CapabilityDenied,
+                ..
+            })
+        ));
+
+        let accepted = post_envelope_with_payload(
+            &client,
+            &service.handle,
+            &producer,
+            envelope(
+                "screenshot-response-1",
+                BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                    request_id: "shot-1".to_string(),
+                    responding_client_id: "producer-1".to_string(),
+                    status: ControlStatus::Ok,
+                    screenshot: None,
+                    error: None,
+                }),
+            ),
+        )
+        .await;
+        assert!(matches!(accepted, BridgePayload::Ack(_)));
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn javascript_execution_requires_explicit_provider_grant() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let requester = register_subscriber(
+            &client,
+            &service.handle,
+            "requester-1",
+            subscriber_capabilities(),
+        )
+        .await;
+        let producer_denied = register_producer(
+            &client,
+            &service.handle,
+            "producer-denied",
+            CapabilitySet {
+                provide_control: true,
+                ..producer_capabilities()
+            },
+        )
+        .await;
+
+        let denied = post_envelope_with_payload(
+            &client,
+            &service.handle,
+            &requester,
+            control_request_envelope("js-denied", "requester-1", "producer-denied"),
+        )
+        .await;
+        assert!(matches!(
+            denied,
+            BridgePayload::Error(ErrorMessage {
+                code: ErrorCode::CapabilityDenied,
+                ..
+            })
+        ));
+
+        let producer_granted = register_producer(
+            &client,
+            &service.handle,
+            "producer-granted",
+            CapabilitySet {
+                provide_control: true,
+                provide_javascript_execution: true,
+                ..producer_capabilities()
+            },
+        )
+        .await;
+        assert_ne!(
+            producer_denied.session_token,
+            producer_granted.session_token
+        );
+        let producer_events = open_events(
+            &client,
+            &service.handle,
+            &producer_granted,
+            "producer-granted",
+        )
+        .await
+        .expect("producer events");
+        let mut producer_events = producer_events.bytes_stream().eventsource();
+        let requester_events = open_events(&client, &service.handle, &requester, "requester-1")
+            .await
+            .expect("requester events");
+        let mut requester_events = requester_events.bytes_stream().eventsource();
+
+        let accepted = post_envelope_with_payload(
+            &client,
+            &service.handle,
+            &requester,
+            control_request_envelope("js-1", "requester-1", "producer-granted"),
+        )
+        .await;
+        assert!(matches!(accepted, BridgePayload::Ack(_)));
+        let message = next_sse_message(&mut producer_events).await;
+        let BridgePayload::ControlRequest(request) = message.envelope.payload else {
+            panic!("expected control request");
+        };
+        assert_eq!(request.request_id, "js-1");
+        assert!(matches!(
+            request.command,
+            ControlCommand::ExecuteJavascript { ref code } if code == "window.location.href"
+        ));
+
+        post_envelope_with_payload(
+            &client,
+            &service.handle,
+            &producer_granted,
+            envelope(
+                "control-response-1",
+                BridgePayload::ControlResponse(ControlResponseMessage {
+                    request_id: "js-1".to_string(),
+                    responding_client_id: "producer-granted".to_string(),
+                    status: ControlStatus::Ok,
+                    summary: "https://example.test/page".to_string(),
+                    error: None,
+                }),
+            ),
+        )
+        .await;
+        let message = next_sse_message(&mut requester_events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ControlResponse(ControlResponseMessage {
+                request_id,
+                status: ControlStatus::Ok,
+                ..
+            }) if request_id == "js-1"
+        ));
+
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn status_tracks_clients_heartbeats_events_and_stale_timeout() {
+        let service =
+            start_test_service(Duration::from_millis(80), Duration::from_millis(20)).await;
+        let client = Client::new();
+
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            CapabilitySet {
+                publish_events: true,
+                ..CapabilitySet::default()
+            },
+        )
+        .await;
+        let subscriber = register_subscriber(
+            &client,
+            &service.handle,
+            "subscriber-1",
+            CapabilitySet {
+                subscribe_events: true,
+                ..CapabilitySet::default()
+            },
         )
         .await;
 
@@ -854,6 +2103,7 @@ mod tests {
         post_envelope(
             &client,
             &service.handle,
+            &producer,
             envelope(
                 "event-1",
                 BridgePayload::Event(EventPublishMessage {
@@ -880,6 +2130,7 @@ mod tests {
         post_envelope(
             &client,
             &service.handle,
+            &subscriber,
             envelope(
                 "heartbeat-1",
                 BridgePayload::Heartbeat(HeartbeatMessage {
@@ -926,10 +2177,40 @@ mod tests {
     async fn accepts_protocol_valid_large_screenshot_response() {
         let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
         let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let requester = register_subscriber(
+            &client,
+            &service.handle,
+            "requester-1",
+            subscriber_capabilities(),
+        )
+        .await;
+        post_envelope(
+            &client,
+            &service.handle,
+            &requester,
+            envelope(
+                "screenshot-request-1",
+                BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                    request_id: "screenshot-request-1".to_string(),
+                    requester_client_id: "requester-1".to_string(),
+                    target_client_id: "producer-1".to_string(),
+                    timeout_ms: 1_000,
+                }),
+            ),
+        )
+        .await;
         let envelope = envelope(
             "screenshot-response-1",
             BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
                 request_id: "screenshot-request-1".to_string(),
+                responding_client_id: "producer-1".to_string(),
                 status: ControlStatus::Ok,
                 screenshot: Some(ScreenshotPayload {
                     width: 1,
@@ -941,7 +2222,7 @@ mod tests {
             }),
         );
 
-        post_envelope(&client, &service.handle, envelope).await;
+        post_envelope(&client, &service.handle, &producer, envelope).await;
         service.handle.shutdown().await;
     }
 
@@ -989,16 +2270,233 @@ mod tests {
     async fn post_envelope(
         client: &Client,
         handle: &BridgeServiceHandle,
+        session: &TestClientSession,
         envelope: BridgeEnvelope,
-    ) {
-        let response = client
+    ) -> TestClientSession {
+        let payload = post_envelope_with_payload(client, handle, session, envelope).await;
+        assert!(matches!(
+            payload,
+            BridgePayload::Ack(_) | BridgePayload::HelloResponse(_)
+        ));
+        if let BridgePayload::HelloResponse(response) = payload {
+            TestClientSession {
+                client_id: session.client_id.clone(),
+                session_token: response
+                    .client_session_token
+                    .expect("hello response client session token"),
+            }
+        } else {
+            session.clone()
+        }
+    }
+
+    async fn post_envelope_with_payload(
+        client: &Client,
+        handle: &BridgeServiceHandle,
+        session: &TestClientSession,
+        envelope: BridgeEnvelope,
+    ) -> BridgePayload {
+        let mut request = client
             .post(format!("{}/message", handle.endpoint_url()))
-            .bearer_auth(handle.auth_secret())
+            .bearer_auth(handle.auth_secret());
+        if !session.session_token.is_empty() {
+            request = request.header(CLIENT_SESSION_HEADER, session.session_token.as_str());
+        }
+        let response = request
             .json(&envelope)
             .send()
             .await
             .expect("message response");
         assert_eq!(response.status(), StatusCode::OK);
+        response
+            .json::<BridgeMessageResponse>()
+            .await
+            .expect("message response json")
+            .payload
+    }
+
+    async fn register_producer(
+        client: &Client,
+        handle: &BridgeServiceHandle,
+        client_id: &str,
+        capabilities: CapabilitySet,
+    ) -> TestClientSession {
+        post_envelope(
+            client,
+            handle,
+            &TestClientSession::new(client_id),
+            hello_envelope(
+                client_id,
+                handle.auth_secret(),
+                ClientRole::Producer,
+                capabilities,
+            ),
+        )
+        .await
+    }
+
+    async fn register_subscriber(
+        client: &Client,
+        handle: &BridgeServiceHandle,
+        client_id: &str,
+        capabilities: CapabilitySet,
+    ) -> TestClientSession {
+        post_envelope(
+            client,
+            handle,
+            &TestClientSession::new(client_id),
+            hello_envelope(
+                client_id,
+                handle.auth_secret(),
+                ClientRole::Subscriber,
+                capabilities,
+            ),
+        )
+        .await
+    }
+
+    async fn subscribe(
+        client: &Client,
+        handle: &BridgeServiceHandle,
+        session: &TestClientSession,
+        subscriber_id: &str,
+        filter: SubscriptionFilter,
+    ) {
+        post_envelope(
+            client,
+            handle,
+            session,
+            envelope(
+                &format!("subscribe-{subscriber_id}"),
+                BridgePayload::Subscribe(SubscribeMessage {
+                    subscriber_id: subscriber_id.to_string(),
+                    filter,
+                }),
+            ),
+        )
+        .await;
+    }
+
+    async fn publish_console(
+        client: &Client,
+        handle: &BridgeServiceHandle,
+        session: &TestClientSession,
+        client_id: &str,
+        event_id: &str,
+        level: ConsoleLevel,
+    ) {
+        post_envelope(
+            client,
+            handle,
+            session,
+            envelope(
+                event_id,
+                BridgePayload::Event(EventPublishMessage {
+                    client_id: client_id.to_string(),
+                    event_id: event_id.to_string(),
+                    event: BridgeEvent::Console(ConsoleEvent {
+                        level,
+                        text: format!("{event_id} text"),
+                    }),
+                }),
+            ),
+        )
+        .await;
+    }
+
+    async fn open_events(
+        client: &Client,
+        handle: &BridgeServiceHandle,
+        session: &TestClientSession,
+        client_id: &str,
+    ) -> reqwest::Result<reqwest::Response> {
+        client
+            .get(format!("{}/events/{client_id}", handle.endpoint_url()))
+            .bearer_auth(handle.auth_secret())
+            .header(CLIENT_SESSION_HEADER, session.session_token.as_str())
+            .send()
+            .await
+    }
+
+    #[derive(Clone)]
+    struct TestClientSession {
+        client_id: String,
+        session_token: String,
+    }
+
+    impl TestClientSession {
+        fn new(client_id: &str) -> Self {
+            Self {
+                client_id: client_id.to_string(),
+                session_token: String::new(),
+            }
+        }
+    }
+
+    async fn next_sse_message<S>(stream: &mut S) -> BridgeSseMessage
+    where
+        S: futures::Stream<
+                Item = Result<
+                    eventsource_stream::Event,
+                    eventsource_stream::EventStreamError<reqwest::Error>,
+                >,
+            > + Unpin,
+    {
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("timed out waiting for SSE message")
+            .expect("SSE stream ended")
+            .expect("SSE event");
+        serde_json::from_str(&event.data).expect("SSE bridge message")
+    }
+
+    async fn assert_no_sse_message<S>(stream: &mut S)
+    where
+        S: futures::Stream<
+                Item = Result<
+                    eventsource_stream::Event,
+                    eventsource_stream::EventStreamError<reqwest::Error>,
+                >,
+            > + Unpin,
+    {
+        let event = tokio::time::timeout(Duration::from_millis(150), stream.next()).await;
+        assert!(event.is_err(), "unexpected SSE event: {event:?}");
+    }
+
+    fn producer_capabilities() -> CapabilitySet {
+        CapabilitySet {
+            publish_events: true,
+            provide_screenshot: true,
+            ..CapabilitySet::default()
+        }
+    }
+
+    fn subscriber_capabilities() -> CapabilitySet {
+        CapabilitySet {
+            subscribe_events: true,
+            request_screenshot: true,
+            request_control: true,
+            ..CapabilitySet::default()
+        }
+    }
+
+    fn control_request_envelope(
+        request_id: &str,
+        requester_client_id: &str,
+        target_client_id: &str,
+    ) -> BridgeEnvelope {
+        envelope(
+            request_id,
+            BridgePayload::ControlRequest(ControlRequestMessage {
+                request_id: request_id.to_string(),
+                requester_client_id: requester_client_id.to_string(),
+                target_client_id: target_client_id.to_string(),
+                command: ControlCommand::ExecuteJavascript {
+                    code: "window.location.href".to_string(),
+                },
+                timeout_ms: 1_000,
+            }),
+        )
     }
 
     fn hello_envelope(
