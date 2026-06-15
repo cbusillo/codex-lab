@@ -2453,10 +2453,13 @@ dependencies = [
 name = "codex-code-bridge-service"
 version = "0.0.0"
 dependencies = [
+ "async-stream",
  "axum",
  "codex-code-bridge-protocol",
  "codex-utils-home-dir",
  "constant_time_eq 0.3.1",
+ "eventsource-stream",
+ "futures",
  "http 1.4.0",
  "rand 0.9.3",
  "reqwest 0.12.28",

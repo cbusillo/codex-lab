@@ -12,6 +12,7 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+async-stream = { workspace = true }
 axum = { workspace = true, default-features = false, features = [
     "http1",
     "json",
@@ -36,5 +37,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 
 [dev-dependencies]
-reqwest = { workspace = true, features = ["json"] }
+eventsource-stream = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream"] }
 tempfile = { workspace = true }
