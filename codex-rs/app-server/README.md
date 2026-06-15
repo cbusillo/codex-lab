@@ -26,7 +26,7 @@ Supported transports:
 
 - stdio (`--stdio` or `--listen stdio://`, default): newline-delimited JSON (JSONL)
 - websocket (`--listen ws://IP:PORT`): one JSON-RPC message per websocket text frame (**experimental / unsupported**)
-- unix socket (`--listen unix://` or `--listen unix://PATH`): websocket connections over `$CODEX_HOME/app-server-control/app-server-control.sock` or a custom socket path, using the standard HTTP Upgrade handshake
+- unix socket (`--listen unix://` or `--listen unix://PATH`): websocket connections over `$CODEX_LAB_HOME/app-server-control/app-server-control.sock` or a custom socket path, using the standard HTTP Upgrade handshake
 - off (`--listen off`): do not expose a local transport
 
 When running with `--listen ws://IP:PORT`, the same listener also serves basic HTTP health probes:
@@ -38,7 +38,7 @@ When running with `--listen ws://IP:PORT`, the same listener also serves basic H
 Websocket transport is currently experimental and unsupported. Do not rely on it for production workloads.
 
 The unix socket transport is intended for local app-server control-plane clients. `codex app-server proxy`
-opens exactly one raw stream connection to `$CODEX_HOME/app-server-control/app-server-control.sock`
+opens exactly one raw stream connection to `$CODEX_LAB_HOME/app-server-control/app-server-control.sock`
 by default, or to `--sock PATH` when provided, and proxies bytes between that socket and stdin/stdout.
 The proxied stream carries the websocket HTTP Upgrade handshake followed by websocket frames.
 
@@ -195,7 +195,7 @@ Example with notification opt-out:
 - `thread/metadata/update` — patch stored thread metadata in sqlite; currently supports updating persisted `gitInfo` fields and returns the refreshed `thread`.
 - `thread/settings/update` — experimental; queue a partial update to a loaded thread’s next-turn settings without starting a turn or adding transcript items. Omitted fields leave settings unchanged; `serviceTier: null` clears the tier; `sandboxPolicy` and `permissions` cannot be combined. Returns `{}` when the update is accepted and emits `thread/settings/updated` with the full effective settings only if they actually change. `turn/start` settings overrides emit the same notification when they change the stored settings.
 - `thread/memoryMode/set` — experimental; set a thread’s persisted memory eligibility to `"enabled"` or `"disabled"` for either a loaded thread or a stored rollout; returns `{}` on success.
-- `memory/reset` — experimental; clear the current `CODEX_HOME/memories` directory and reset persisted memory stage data in sqlite while preserving existing thread memory modes; returns `{}` on success.
+- `memory/reset` — experimental; clear the current `CODEX_LAB_HOME/memories` directory and reset persisted memory stage data in sqlite while preserving existing thread memory modes; returns `{}` on success.
 - `thread/goal/set` — create or update the single persisted goal for a materialized thread; returns the current goal and emits `thread/goal/updated`.
 - `thread/goal/get` — fetch the current persisted goal for a materialized thread; returns `goal: null` when no goal exists.
 - `thread/goal/clear` — clear the current persisted goal for a materialized thread; returns whether a goal was removed and emits `thread/goal/cleared` when state changes.
@@ -1682,7 +1682,7 @@ For unmanaged hooks, `currentHash` and `trustStatus` describe whether the curren
     "data": [{
       "cwd": "/Users/me/project",
       "hooks": [{
-        "key": "/Users/me/.codex/config.toml:pre_tool_use:0:0",
+        "key": "/Users/me/.codex-lab/config.toml:pre_tool_use:0:0",
         "eventName": "pre_tool_use",
         "handlerType": "command",
         "isManaged": false,
@@ -1690,7 +1690,7 @@ For unmanaged hooks, `currentHash` and `trustStatus` describe whether the curren
         "command": "python3 /Users/me/hook.py",
         "timeoutSec": 5,
         "statusMessage": "running hook",
-        "sourcePath": "/Users/me/.codex/config.toml",
+        "sourcePath": "/Users/me/.codex-lab/config.toml",
         "source": "user",
         "pluginId": null,
         "displayOrder": 0,
@@ -1715,7 +1715,7 @@ To disable a non-managed hook, upsert a state entry at `hooks.state` with `confi
     "edits": [{
       "keyPath": "hooks.state",
       "value": {
-        "/Users/me/.codex/config.toml:pre_tool_use:0:0": {
+        "/Users/me/.codex-lab/config.toml:pre_tool_use:0:0": {
           "enabled": false
         }
       },
