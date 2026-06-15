@@ -674,6 +674,12 @@ async fn auto_review_summary_read_suppresses_stale_findings_by_default() -> Resu
     assert_eq!(latest.freshness, ApiAutoReviewFreshness::Detached);
     assert_eq!(latest.rendered_findings, 0);
     assert!(!latest.content.contains("finding_stale"));
+    assert!(summary.status_counts.iter().any(|count| {
+        count.freshness == ApiAutoReviewFreshness::Current && count.target_matches
+    }));
+    assert!(summary.status_counts.iter().any(|count| {
+        count.freshness == ApiAutoReviewFreshness::Detached && !count.target_matches
+    }));
     assert_eq!(
         summary
             .status_counts

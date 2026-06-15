@@ -76,6 +76,7 @@ async fn write_rollout_with_user_event(dir: &Path, thread_id: ThreadId) -> io::R
             dynamic_tools: None,
             memory_mode: None,
             multi_agent_version: None,
+            session_provenance: None,
         },
         git: None,
     };
@@ -126,6 +127,7 @@ async fn write_rollout_with_meta_only(dir: &Path, thread_id: ThreadId) -> io::Re
             dynamic_tools: None,
             memory_mode: None,
             multi_agent_version: None,
+            session_provenance: None,
         },
         git: None,
     };

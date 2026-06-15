@@ -180,6 +180,13 @@ fn status_count_key(
     freshness: AutoReviewFreshness,
     active_review_target: &ReviewTarget,
 ) -> String {
+    let target = if freshness == AutoReviewFreshness::Current
+        && review_target_matches(&run.review_target, active_review_target)
+    {
+        "target_current"
+    } else {
+        "off_target"
+    };
     let freshness = match freshness {
         AutoReviewFreshness::Current => "current",
         AutoReviewFreshness::Stale => "stale",
@@ -196,11 +203,6 @@ fn status_count_key(
     let source = match &run.source {
         AutoReviewRunSource::Manual => "manual",
         AutoReviewRunSource::Background => "background",
-    };
-    let target = if review_target_matches(&run.review_target, active_review_target) {
-        "target_match"
-    } else {
-        "target_mismatch"
     };
     format!("{source}/{status}/{freshness}/{target}")
 }

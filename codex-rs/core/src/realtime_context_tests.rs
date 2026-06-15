@@ -50,6 +50,7 @@ fn stored_thread(cwd: &str, title: &str, first_user_message: &str) -> StoredThre
         cwd: PathBuf::from(cwd),
         cli_version: "test".to_string(),
         source: SessionSource::Cli,
+        session_provenance: None,
         thread_source: None,
         agent_nickname: None,
         agent_role: None,
