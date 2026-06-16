@@ -75,6 +75,7 @@ const DEFAULT_STALE_CLIENT_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 const EVENT_STREAM_TOUCH_INTERVAL: Duration = Duration::from_secs(10);
 const CLIENT_SESSION_HEADER: &str = "x-code-bridge-client-session";
 const MAX_PENDING_REQUESTS: usize = 256;
+const MAX_RETAINED_DELIVERY_BYTES: usize = 8 * 1024 * 1024;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const EVENT_WAKE_CHANNEL_CAPACITY: usize = 64;
 
@@ -259,6 +260,12 @@ struct SharedState {
     delivery_tx: broadcast::Sender<Arc<BridgeDelivery>>,
 }
 
+#[derive(Clone, Copy)]
+struct ValidatedClientSession<'a> {
+    client_id: &'a str,
+    client_session_token: &'a str,
+}
+
 impl SharedState {
     fn new(stale_client_timeout: Duration) -> Self {
         let (delivery_tx, _) = broadcast::channel(EVENT_WAKE_CHANNEL_CAPACITY);
@@ -267,6 +274,7 @@ impl SharedState {
                 started_at: Instant::now(),
                 clients: HashMap::new(),
                 retained_deliveries: VecDeque::new(),
+                retained_delivery_bytes: 0,
                 next_delivery_sequence: 1,
                 pending_requests: HashMap::new(),
                 stale_client_timeout,
@@ -276,82 +284,99 @@ impl SharedState {
         }
     }
 
-    async fn handle_envelope(&self, envelope: &BridgeEnvelope) -> BridgePayload {
+    async fn handle_envelope(
+        &self,
+        envelope: &BridgeEnvelope,
+        client_session: Option<ValidatedClientSession<'_>>,
+    ) -> Result<BridgePayload, BridgeHttpError> {
         let mut state = self.inner.lock().await;
+        if let Some(client_session) = client_session {
+            state.validate_client_session(
+                client_session.client_id,
+                client_session.client_session_token,
+            )?;
+        }
         match &envelope.payload {
             BridgePayload::Hello(message) => {
-                if state.clients.contains_key(&message.client_id) {
-                    return error_payload(
-                        ErrorCode::InvalidPayload,
-                        format!(
-                            "Code Bridge client {} is already registered",
-                            message.client_id
-                        ),
-                    );
-                }
                 let client_session_token = generate_auth_secret();
                 let granted_capabilities = message.requested_capabilities.for_role(message.role);
+                if let Some(client) = state.clients.get(&message.client_id)
+                    && client.role != message.role
+                {
+                    return Ok(error_payload(
+                        ErrorCode::InvalidPayload,
+                        format!(
+                            "Code Bridge client {} is already registered with a different role",
+                            message.client_id
+                        ),
+                    ));
+                }
+                let filter = state
+                    .clients
+                    .get(&message.client_id)
+                    .map(|client| client.filter.clone())
+                    .unwrap_or_default();
                 state.clients.insert(
                     message.client_id.clone(),
                     ClientState {
                         role: message.role,
                         capabilities: granted_capabilities.clone(),
-                        filter: SubscriptionFilter::default(),
+                        filter,
                         session_token: client_session_token.clone(),
                         last_seen: Instant::now(),
                     },
                 );
-                BridgePayload::HelloResponse(HelloResponseMessage {
+                Ok(BridgePayload::HelloResponse(HelloResponseMessage {
                     accepted: true,
                     protocol_version: PROTOCOL_VERSION.to_string(),
                     granted_capabilities,
                     client_session_token: Some(client_session_token),
                     limits: BridgeLimits::default(),
                     error: None,
-                })
+                }))
             }
             BridgePayload::Heartbeat(message) => {
                 state.touch_client(&message.client_id);
-                ack_for(envelope)
+                Ok(ack_for(envelope))
             }
             BridgePayload::Event(message) => {
                 let mut outgoing = Vec::new();
                 let payload = state.handle_event(envelope, message, &mut outgoing);
                 drop(state);
                 self.publish_deliveries(outgoing);
-                payload
+                Ok(payload)
             }
-            BridgePayload::Subscribe(message) => state.handle_subscribe(envelope, message),
+            BridgePayload::Subscribe(message) => Ok(state.handle_subscribe(envelope, message)),
             BridgePayload::ScreenshotRequest(message) => {
                 let mut outgoing = Vec::new();
                 let payload = state.handle_screenshot_request(envelope, message, &mut outgoing);
                 drop(state);
                 self.publish_deliveries(outgoing);
-                payload
+                Ok(payload)
             }
             BridgePayload::ScreenshotResponse(message) => {
                 let mut outgoing = Vec::new();
                 let payload = state.handle_screenshot_response(envelope, message, &mut outgoing);
                 drop(state);
                 self.publish_deliveries(outgoing);
-                payload
+                Ok(payload)
             }
             BridgePayload::ControlRequest(message) => {
                 let mut outgoing = Vec::new();
                 let payload = state.handle_control_request(envelope, message, &mut outgoing);
                 drop(state);
                 self.publish_deliveries(outgoing);
-                payload
+                Ok(payload)
             }
             BridgePayload::ControlResponse(message) => {
                 let mut outgoing = Vec::new();
                 let payload = state.handle_control_response(envelope, message, &mut outgoing);
                 drop(state);
                 self.publish_deliveries(outgoing);
-                payload
+                Ok(payload)
             }
             BridgePayload::HelloResponse(_) | BridgePayload::Ack(_) | BridgePayload::Error(_) => {
-                ack_for(envelope)
+                Ok(ack_for(envelope))
             }
         }
     }
@@ -395,47 +420,36 @@ impl SharedState {
 
         Ok(EventStreamState {
             client_id: client_id.to_string(),
+            client_session_token: client_session_token.to_string(),
             cursor: replay_cursor,
             replay,
             delivery_rx,
         })
     }
 
-    async fn client_matches_delivery(&self, client_id: &str, delivery: &BridgeDelivery) -> bool {
+    async fn client_session_matches_delivery(
+        &self,
+        client_id: &str,
+        client_session_token: &str,
+        delivery: &BridgeDelivery,
+    ) -> bool {
         let mut state = self.inner.lock().await;
         let Some(client) = state.clients.get_mut(client_id) else {
             return false;
         };
+        if !constant_time_eq(
+            client.session_token.as_bytes(),
+            client_session_token.as_bytes(),
+        ) {
+            return false;
+        }
         client.last_seen = Instant::now();
         delivery.matches_client(client_id, client)
     }
 
-    async fn touch_client(&self, client_id: &str) {
+    async fn touch_client_session(&self, client_id: &str, client_session_token: &str) {
         let mut state = self.inner.lock().await;
-        state.touch_client(client_id);
-    }
-
-    async fn validate_client_session(
-        &self,
-        client_id: &str,
-        client_session_token: &str,
-    ) -> Result<(), BridgeHttpError> {
-        let state = self.inner.lock().await;
-        let Some(client) = state.clients.get(client_id) else {
-            return Err(BridgeHttpError::InvalidPayload(format!(
-                "unknown Code Bridge client {client_id}"
-            )));
-        };
-        if constant_time_eq(
-            client.session_token.as_bytes(),
-            client_session_token.as_bytes(),
-        ) {
-            Ok(())
-        } else {
-            Err(BridgeHttpError::Unauthorized(
-                "invalid Code Bridge client session token".to_string(),
-            ))
-        }
+        state.touch_client_session(client_id, client_session_token);
     }
 
     fn publish_deliveries(&self, deliveries: Vec<Arc<BridgeDelivery>>) {
@@ -463,6 +477,7 @@ struct ServiceState {
     started_at: Instant,
     clients: HashMap<String, ClientState>,
     retained_deliveries: VecDeque<Arc<BridgeDelivery>>,
+    retained_delivery_bytes: usize,
     next_delivery_sequence: u64,
     pending_requests: HashMap<String, PendingRequest>,
     stale_client_timeout: Duration,
@@ -560,7 +575,7 @@ impl ServiceState {
         self.enqueue_delivery(
             envelope.clone(),
             DeliveryRoute::Target(message.target_client_id.clone()),
-            false,
+            true,
             outgoing,
         );
         ack_for(envelope)
@@ -592,7 +607,7 @@ impl ServiceState {
         self.enqueue_delivery(
             envelope.clone(),
             DeliveryRoute::Target(pending.requester_client_id),
-            false,
+            true,
             outgoing,
         );
         BridgePayload::Ack(AckMessage {
@@ -662,7 +677,7 @@ impl ServiceState {
         self.enqueue_delivery(
             envelope.clone(),
             DeliveryRoute::Target(message.target_client_id.clone()),
-            false,
+            true,
             outgoing,
         );
         ack_for(envelope)
@@ -694,7 +709,7 @@ impl ServiceState {
         self.enqueue_delivery(
             envelope.clone(),
             DeliveryRoute::Target(pending.requester_client_id),
-            false,
+            true,
             outgoing,
         );
         BridgePayload::Ack(AckMessage {
@@ -740,16 +755,29 @@ impl ServiceState {
         retain: bool,
         outgoing: &mut Vec<Arc<BridgeDelivery>>,
     ) {
+        let byte_size = envelope_approx_bytes(&envelope);
         let delivery = Arc::new(BridgeDelivery {
             sequence: self.next_delivery_sequence,
             envelope,
             route,
+            byte_size,
         });
         self.next_delivery_sequence = self.next_delivery_sequence.saturating_add(1);
         if retain {
+            self.retained_delivery_bytes = self
+                .retained_delivery_bytes
+                .saturating_add(delivery.byte_size);
             self.retained_deliveries.push_back(Arc::clone(&delivery));
-            while self.retained_deliveries.len() > MAX_RETAINED_EVENTS {
-                self.retained_deliveries.pop_front();
+            while self.retained_deliveries.len() > MAX_RETAINED_EVENTS
+                || self.retained_delivery_bytes > MAX_RETAINED_DELIVERY_BYTES
+            {
+                let Some(removed) = self.retained_deliveries.pop_front() else {
+                    self.retained_delivery_bytes = 0;
+                    break;
+                };
+                self.retained_delivery_bytes = self
+                    .retained_delivery_bytes
+                    .saturating_sub(removed.byte_size);
             }
         }
         outgoing.push(delivery);
@@ -778,7 +806,7 @@ impl ServiceState {
             self.enqueue_delivery(
                 envelope,
                 DeliveryRoute::Target(pending.requester_client_id),
-                false,
+                true,
                 outgoing,
             );
         }
@@ -813,6 +841,39 @@ impl ServiceState {
         }
     }
 
+    fn validate_client_session(
+        &self,
+        client_id: &str,
+        client_session_token: &str,
+    ) -> Result<(), BridgeHttpError> {
+        let Some(client) = self.clients.get(client_id) else {
+            return Err(BridgeHttpError::InvalidPayload(format!(
+                "unknown Code Bridge client {client_id}"
+            )));
+        };
+        if constant_time_eq(
+            client.session_token.as_bytes(),
+            client_session_token.as_bytes(),
+        ) {
+            Ok(())
+        } else {
+            Err(BridgeHttpError::Unauthorized(
+                "invalid Code Bridge client session token".to_string(),
+            ))
+        }
+    }
+
+    fn touch_client_session(&mut self, client_id: &str, client_session_token: &str) {
+        if let Some(client) = self.clients.get_mut(client_id)
+            && constant_time_eq(
+                client.session_token.as_bytes(),
+                client_session_token.as_bytes(),
+            )
+        {
+            client.last_seen = Instant::now();
+        }
+    }
+
     fn expire_stale_clients(&mut self) {
         let now = Instant::now();
         self.clients
@@ -834,6 +895,7 @@ struct BridgeDelivery {
     sequence: u64,
     envelope: BridgeEnvelope,
     route: DeliveryRoute,
+    byte_size: usize,
 }
 
 impl BridgeDelivery {
@@ -852,6 +914,12 @@ impl BridgeDelivery {
     }
 }
 
+fn envelope_approx_bytes(envelope: &BridgeEnvelope) -> usize {
+    serde_json::to_vec(envelope)
+        .map(|bytes| bytes.len())
+        .unwrap_or(MAX_SCREENSHOT_MESSAGE_BYTES)
+}
+
 #[derive(Clone)]
 enum DeliveryRoute {
     Target(String),
@@ -864,6 +932,7 @@ enum DeliveryRoute {
 
 struct EventStreamState {
     client_id: String,
+    client_session_token: String,
     cursor: u64,
     replay: Vec<Arc<BridgeDelivery>>,
     delivery_rx: broadcast::Receiver<Arc<BridgeDelivery>>,
@@ -1033,12 +1102,20 @@ async fn events_handler(
         .await?;
     let shared_state = state.state.clone();
     let stream = async_stream::stream! {
+        let client_id = stream_state.client_id;
+        let client_session_token = stream_state.client_session_token;
         for delivery in stream_state.replay {
-            yield delivery_to_sse_event(&delivery);
+            if shared_state
+                .client_session_matches_delivery(&client_id, &client_session_token, &delivery)
+                .await
+            {
+                yield delivery_to_sse_event(&delivery);
+            } else {
+                return;
+            }
         }
 
         let mut cursor = stream_state.cursor;
-        let client_id = stream_state.client_id;
         let mut delivery_rx = stream_state.delivery_rx;
         let mut touch_interval = tokio::time::interval(EVENT_STREAM_TOUCH_INTERVAL);
         loop {
@@ -1046,7 +1123,7 @@ async fn events_handler(
                 biased;
 
                 _ = touch_interval.tick() => {
-                    shared_state.touch_client(&client_id).await;
+                    shared_state.touch_client_session(&client_id, &client_session_token).await;
                 }
                 delivery = delivery_rx.recv() => {
                     match delivery {
@@ -1055,7 +1132,14 @@ async fn events_handler(
                                 continue;
                             }
                             cursor = delivery.sequence;
-                            if shared_state.client_matches_delivery(&client_id, &delivery).await {
+                            if shared_state
+                                .client_session_matches_delivery(
+                                    &client_id,
+                                    &client_session_token,
+                                    &delivery,
+                                )
+                                .await
+                            {
                                 yield delivery_to_sse_event(&delivery);
                             }
                         }
@@ -1098,8 +1182,9 @@ async fn message_handler(
     })?;
     validate_envelope(&envelope, body.len()).map_err(BridgeHttpError::Validation)?;
 
-    if let BridgePayload::Hello(message) = &envelope.payload {
+    let client_session = if let BridgePayload::Hello(message) = &envelope.payload {
         validate_payload_auth(&message.auth, state.auth_secret.as_str())?;
+        None
     } else {
         let client_id = payload_client_id(&envelope.payload).ok_or_else(|| {
             BridgeHttpError::InvalidPayload(
@@ -1107,13 +1192,16 @@ async fn message_handler(
             )
         })?;
         let client_session_token = client_session_token_from_headers(&headers)?;
-        state
-            .state
-            .validate_client_session(client_id, client_session_token)
-            .await?;
-    }
+        Some(ValidatedClientSession {
+            client_id,
+            client_session_token,
+        })
+    };
 
-    let payload = state.state.handle_envelope(&envelope).await;
+    let payload = state
+        .state
+        .handle_envelope(&envelope, client_session)
+        .await?;
     Ok(axum::Json(BridgeMessageResponse { payload }))
 }
 
@@ -1783,6 +1871,328 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_hello_refreshes_existing_client_session() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let first = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let second = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+
+        assert_ne!(first.session_token, second.session_token);
+
+        let stale_response = client
+            .post(format!("{}/message", service.handle.endpoint_url()))
+            .bearer_auth(service.handle.auth_secret())
+            .header(CLIENT_SESSION_HEADER, first.session_token.as_str())
+            .json(&envelope(
+                "stale-heartbeat",
+                BridgePayload::Heartbeat(HeartbeatMessage {
+                    client_id: "producer-1".to_string(),
+                    sequence: 1,
+                }),
+            ))
+            .send()
+            .await
+            .expect("stale heartbeat response");
+        assert_eq!(stale_response.status(), StatusCode::UNAUTHORIZED);
+
+        post_envelope(
+            &client,
+            &service.handle,
+            &second,
+            envelope(
+                "fresh-heartbeat",
+                BridgePayload::Heartbeat(HeartbeatMessage {
+                    client_id: "producer-1".to_string(),
+                    sequence: 2,
+                }),
+            ),
+        )
+        .await;
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_hello_rejects_role_change_for_existing_client_id() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "client-1",
+            producer_capabilities(),
+        )
+        .await;
+
+        let payload = post_envelope_with_payload(
+            &client,
+            &service.handle,
+            &producer,
+            hello_envelope(
+                "client-1",
+                service.handle.auth_secret(),
+                ClientRole::Subscriber,
+                subscriber_capabilities(),
+            ),
+        )
+        .await;
+        assert!(matches!(
+            payload,
+            BridgePayload::Error(ErrorMessage {
+                code: ErrorCode::InvalidPayload,
+                ..
+            })
+        ));
+
+        post_envelope(
+            &client,
+            &service.handle,
+            &producer,
+            envelope(
+                "still-producer-heartbeat",
+                BridgePayload::Heartbeat(HeartbeatMessage {
+                    client_id: "client-1".to_string(),
+                    sequence: 1,
+                }),
+            ),
+        )
+        .await;
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stale_session_is_rejected_inside_envelope_handling() {
+        let shared = SharedState::new(Duration::from_secs(30));
+        let first = shared
+            .handle_envelope(
+                &hello_envelope(
+                    "producer-1",
+                    "unused-secret",
+                    ClientRole::Producer,
+                    producer_capabilities(),
+                ),
+                None,
+            )
+            .await
+            .expect("first hello");
+        let BridgePayload::HelloResponse(first) = first else {
+            panic!("expected first hello response");
+        };
+        let first_token = first
+            .client_session_token
+            .expect("first client session token");
+
+        shared
+            .handle_envelope(
+                &hello_envelope(
+                    "producer-1",
+                    "unused-secret",
+                    ClientRole::Producer,
+                    producer_capabilities(),
+                ),
+                None,
+            )
+            .await
+            .expect("duplicate hello");
+
+        let stale = shared
+            .handle_envelope(
+                &envelope(
+                    "stale-heartbeat",
+                    BridgePayload::Heartbeat(HeartbeatMessage {
+                        client_id: "producer-1".to_string(),
+                        sequence: 1,
+                    }),
+                ),
+                Some(ValidatedClientSession {
+                    client_id: "producer-1",
+                    client_session_token: &first_token,
+                }),
+            )
+            .await;
+        assert!(matches!(stale, Err(BridgeHttpError::Unauthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn staged_replay_is_rejected_after_duplicate_hello() {
+        let shared = SharedState::new(Duration::from_secs(30));
+        let first = shared
+            .handle_envelope(
+                &hello_envelope(
+                    "producer-1",
+                    "unused-secret",
+                    ClientRole::Producer,
+                    producer_capabilities(),
+                ),
+                None,
+            )
+            .await
+            .expect("first hello");
+        let BridgePayload::HelloResponse(first) = first else {
+            panic!("expected first hello response");
+        };
+        let first_token = first
+            .client_session_token
+            .expect("first client session token");
+
+        let subscriber = shared
+            .handle_envelope(
+                &hello_envelope(
+                    "requester-1",
+                    "unused-secret",
+                    ClientRole::Subscriber,
+                    subscriber_capabilities(),
+                ),
+                None,
+            )
+            .await
+            .expect("subscriber hello");
+        let BridgePayload::HelloResponse(subscriber) = subscriber else {
+            panic!("expected subscriber hello response");
+        };
+        let subscriber_token = subscriber
+            .client_session_token
+            .expect("subscriber client session token");
+
+        shared
+            .handle_envelope(
+                &envelope(
+                    "screenshot-request-before-refresh",
+                    BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                        request_id: "shot-before-refresh".to_string(),
+                        requester_client_id: "requester-1".to_string(),
+                        target_client_id: "producer-1".to_string(),
+                        timeout_ms: 1_000,
+                    }),
+                ),
+                Some(ValidatedClientSession {
+                    client_id: "requester-1",
+                    client_session_token: &subscriber_token,
+                }),
+            )
+            .await
+            .expect("screenshot request");
+
+        let stream_state = shared
+            .open_event_stream("producer-1", &first_token, 0)
+            .await
+            .expect("staged replay stream");
+        assert_eq!(stream_state.replay.len(), 1);
+
+        shared
+            .handle_envelope(
+                &hello_envelope(
+                    "producer-1",
+                    "unused-secret",
+                    ClientRole::Producer,
+                    producer_capabilities(),
+                ),
+                None,
+            )
+            .await
+            .expect("duplicate hello");
+
+        assert!(
+            !shared
+                .client_session_matches_delivery(
+                    &stream_state.client_id,
+                    &stream_state.client_session_token,
+                    &stream_state.replay[0],
+                )
+                .await
+        );
+
+        let fresh_token = current_session_token(&shared, "producer-1").await;
+        let fresh = shared
+            .open_event_stream("producer-1", &fresh_token, 0)
+            .await
+            .expect("fresh replay stream");
+        assert_eq!(fresh.replay.len(), 1);
+        assert!(matches!(
+            fresh.replay[0].envelope.payload,
+            BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                ref request_id,
+                ..
+            }) if request_id == "shot-before-refresh"
+        ));
+    }
+
+    #[tokio::test]
+    async fn old_sse_stream_loses_authority_after_duplicate_hello() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let first = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let requester = register_subscriber(
+            &client,
+            &service.handle,
+            "requester-1",
+            subscriber_capabilities(),
+        )
+        .await;
+        let first_events = open_events(&client, &service.handle, &first, "producer-1")
+            .await
+            .expect("first producer stream");
+        let mut first_events = first_events.bytes_stream().eventsource();
+
+        let second = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+
+        post_envelope(
+            &client,
+            &service.handle,
+            &requester,
+            envelope(
+                "screenshot-request-after-refresh",
+                BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                    request_id: "shot-after-refresh".to_string(),
+                    requester_client_id: "requester-1".to_string(),
+                    target_client_id: "producer-1".to_string(),
+                    timeout_ms: 1_000,
+                }),
+            ),
+        )
+        .await;
+        assert_no_sse_message(&mut first_events).await;
+
+        let second_events = open_events(&client, &service.handle, &second, "producer-1")
+            .await
+            .expect("second producer stream");
+        let mut second_events = second_events.bytes_stream().eventsource();
+        let message = next_sse_message(&mut second_events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                request_id,
+                ..
+            }) if request_id == "shot-after-refresh"
+        ));
+
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn screenshot_request_and_response_route_only_to_target_and_requester() {
         let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
         let client = Client::new();
@@ -1864,6 +2274,104 @@ mod tests {
             }) if request_id == "shot-1"
         ));
         assert_no_sse_message(&mut producer_events).await;
+
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn targeted_request_and_response_replay_after_sse_reconnect() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let requester = register_subscriber(
+            &client,
+            &service.handle,
+            "requester-1",
+            subscriber_capabilities(),
+        )
+        .await;
+
+        post_envelope(
+            &client,
+            &service.handle,
+            &requester,
+            envelope(
+                "screenshot-request-1",
+                BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                    request_id: "shot-1".to_string(),
+                    requester_client_id: "requester-1".to_string(),
+                    target_client_id: "producer-1".to_string(),
+                    timeout_ms: 1_000,
+                }),
+            ),
+        )
+        .await;
+
+        let producer_events =
+            open_events_after(&client, &service.handle, &producer, "producer-1", 0)
+                .await
+                .expect("producer reconnect events");
+        let mut producer_events = producer_events.bytes_stream().eventsource();
+        let message = next_sse_message(&mut producer_events).await;
+        let request_sequence = message.sequence;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                request_id,
+                ..
+            }) if request_id == "shot-1"
+        ));
+        drop(producer_events);
+
+        post_envelope(
+            &client,
+            &service.handle,
+            &producer,
+            envelope(
+                "screenshot-response-1",
+                BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                    request_id: "shot-1".to_string(),
+                    responding_client_id: "producer-1".to_string(),
+                    status: ControlStatus::Ok,
+                    screenshot: None,
+                    error: None,
+                }),
+            ),
+        )
+        .await;
+
+        let producer_events = open_events_after(
+            &client,
+            &service.handle,
+            &producer,
+            "producer-1",
+            request_sequence,
+        )
+        .await
+        .expect("producer reconnect after request");
+        let mut producer_events = producer_events.bytes_stream().eventsource();
+        assert_no_sse_message(&mut producer_events).await;
+
+        let requester_events =
+            open_events_after(&client, &service.handle, &requester, "requester-1", 0)
+                .await
+                .expect("requester reconnect events");
+        let mut requester_events = requester_events.bytes_stream().eventsource();
+        let message = next_sse_message(&mut requester_events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                request_id,
+                status: ControlStatus::Ok,
+                ..
+            }) if request_id == "shot-1"
+        ));
 
         service.handle.shutdown().await;
     }
@@ -2226,6 +2734,48 @@ mod tests {
         service.handle.shutdown().await;
     }
 
+    #[test]
+    fn retained_delivery_store_is_bounded_by_bytes() {
+        let mut state = ServiceState {
+            started_at: Instant::now(),
+            clients: HashMap::new(),
+            retained_deliveries: VecDeque::new(),
+            retained_delivery_bytes: 0,
+            next_delivery_sequence: 1,
+            pending_requests: HashMap::new(),
+            stale_client_timeout: Duration::from_secs(30),
+            last_event_time_unix_ms: None,
+        };
+        let mut outgoing = Vec::new();
+
+        for index in 0..6 {
+            state.enqueue_delivery(
+                envelope(
+                    &format!("large-screenshot-response-{index}"),
+                    BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                        request_id: format!("shot-{index}"),
+                        responding_client_id: "producer-1".to_string(),
+                        status: ControlStatus::Ok,
+                        screenshot: Some(ScreenshotPayload {
+                            width: 1,
+                            height: 1,
+                            media_type: ScreenshotMediaType::Png,
+                            data_base64: "x".repeat(2 * 1024 * 1024),
+                        }),
+                        error: None,
+                    }),
+                ),
+                DeliveryRoute::Target("requester-1".to_string()),
+                true,
+                &mut outgoing,
+            );
+        }
+
+        assert!(state.retained_delivery_bytes <= MAX_RETAINED_DELIVERY_BYTES);
+        assert!(state.retained_deliveries.len() < 6);
+        assert_eq!(outgoing.len(), 6);
+    }
+
     #[tokio::test]
     async fn refuses_non_loopback_bind_address() {
         let temp = TempDir::new().expect("temp home");
@@ -2260,6 +2810,16 @@ mod tests {
             _temp: temp,
             handle,
         }
+    }
+
+    async fn current_session_token(shared: &SharedState, client_id: &str) -> String {
+        let state = shared.inner.lock().await;
+        state
+            .clients
+            .get(client_id)
+            .expect("registered client")
+            .session_token
+            .clone()
     }
 
     fn read_descriptor(path: &Path) -> BridgeDescriptor {
@@ -2410,10 +2970,21 @@ mod tests {
         session: &TestClientSession,
         client_id: &str,
     ) -> reqwest::Result<reqwest::Response> {
+        open_events_after(client, handle, session, client_id, 0).await
+    }
+
+    async fn open_events_after(
+        client: &Client,
+        handle: &BridgeServiceHandle,
+        session: &TestClientSession,
+        client_id: &str,
+        last_event_id: u64,
+    ) -> reqwest::Result<reqwest::Response> {
         client
             .get(format!("{}/events/{client_id}", handle.endpoint_url()))
             .bearer_auth(handle.auth_secret())
             .header(CLIENT_SESSION_HEADER, session.session_token.as_str())
+            .header("last-event-id", last_event_id.to_string())
             .send()
             .await
     }

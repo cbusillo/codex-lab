@@ -48,7 +48,7 @@ local development clients only.
 ## Payload Caps
 
 - Message payload: 64 KiB.
-- Retained events: 500.
+- Retained SSE deliveries: 500, additionally bounded by service memory budget.
 - Event text field: 4 KiB.
 - Screenshot payload: 2 MiB after encoding.
 - Screenshot dimensions: 4096 x 4096 maximum.
