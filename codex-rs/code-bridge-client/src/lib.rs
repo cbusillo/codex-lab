@@ -12,10 +12,22 @@ use codex_code_bridge_protocol::ClientMetadata;
 use codex_code_bridge_protocol::ClientRole;
 use codex_code_bridge_protocol::ConsoleEvent;
 use codex_code_bridge_protocol::ConsoleLevel;
+use codex_code_bridge_protocol::ControlCommand;
+use codex_code_bridge_protocol::ControlRequestMessage;
+use codex_code_bridge_protocol::ControlResponseMessage;
+use codex_code_bridge_protocol::ControlResultEvent;
+use codex_code_bridge_protocol::ControlStatus;
+use codex_code_bridge_protocol::ErrorEvent;
+use codex_code_bridge_protocol::ErrorMessage;
 use codex_code_bridge_protocol::EventPublishMessage;
 use codex_code_bridge_protocol::HelloMessage;
 use codex_code_bridge_protocol::HelloResponseMessage;
 use codex_code_bridge_protocol::PROTOCOL_VERSION;
+use codex_code_bridge_protocol::PageviewEvent;
+use codex_code_bridge_protocol::ScreenshotEvent;
+use codex_code_bridge_protocol::ScreenshotPayload;
+use codex_code_bridge_protocol::ScreenshotRequestMessage;
+use codex_code_bridge_protocol::ScreenshotResponseMessage;
 use codex_code_bridge_protocol::SubscribeMessage;
 use codex_code_bridge_protocol::SubscriptionFilter;
 use codex_code_bridge_protocol::validate_descriptor;
@@ -80,6 +92,37 @@ pub struct CodeBridgeClient {
     http: reqwest::Client,
     endpoint_url: Url,
     auth_secret: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenshotRequest {
+    pub request_id: String,
+    pub target_client_id: String,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenshotResponse {
+    pub request_id: String,
+    pub status: ControlStatus,
+    pub screenshot: Option<ScreenshotPayload>,
+    pub error: Option<ErrorMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlRequest {
+    pub request_id: String,
+    pub target_client_id: String,
+    pub command: ControlCommand,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlResponse {
+    pub request_id: String,
+    pub status: ControlStatus,
+    pub summary: String,
+    pub error: Option<ErrorMessage>,
 }
 
 impl CodeBridgeClient {
@@ -181,18 +224,138 @@ impl CodeBridgeClient {
         level: ConsoleLevel,
         text: impl Into<String>,
     ) -> Result<BridgePayload, CodeBridgeClientError> {
-        let event_id = event_id.into();
+        self.publish_event(
+            session,
+            event_id,
+            BridgeEvent::Console(ConsoleEvent {
+                level,
+                text: text.into(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn publish_error(
+        &self,
+        session: &CodeBridgeSession,
+        event_id: impl Into<String>,
+        event: ErrorEvent,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        self.publish_event(session, event_id, BridgeEvent::Error(event))
+            .await
+    }
+
+    pub async fn publish_pageview(
+        &self,
+        session: &CodeBridgeSession,
+        event_id: impl Into<String>,
+        event: PageviewEvent,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        self.publish_event(session, event_id, BridgeEvent::Pageview(event))
+            .await
+    }
+
+    pub async fn publish_screenshot_event(
+        &self,
+        session: &CodeBridgeSession,
+        event_id: impl Into<String>,
+        event: ScreenshotEvent,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        self.publish_event(session, event_id, BridgeEvent::Screenshot(event))
+            .await
+    }
+
+    pub async fn publish_control_result(
+        &self,
+        session: &CodeBridgeSession,
+        event_id: impl Into<String>,
+        event: ControlResultEvent,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        self.publish_event(session, event_id, BridgeEvent::ControlResult(event))
+            .await
+    }
+
+    pub async fn request_screenshot(
+        &self,
+        session: &CodeBridgeSession,
+        request: ScreenshotRequest,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        let message_id = format!("screenshot-request-{}", request.request_id);
         self.post(
             session,
             envelope(
-                event_id.clone(),
-                BridgePayload::Event(EventPublishMessage {
-                    client_id: session.client_id.clone(),
-                    event_id,
-                    event: BridgeEvent::Console(ConsoleEvent {
-                        level,
-                        text: text.into(),
-                    }),
+                message_id,
+                BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                    request_id: request.request_id,
+                    requester_client_id: session.client_id.clone(),
+                    target_client_id: request.target_client_id,
+                    timeout_ms: request.timeout_ms,
+                }),
+            ),
+        )
+        .await
+    }
+
+    pub async fn respond_screenshot(
+        &self,
+        session: &CodeBridgeSession,
+        response: ScreenshotResponse,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        let message_id = format!("screenshot-response-{}", response.request_id);
+        self.post(
+            session,
+            envelope(
+                message_id,
+                BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                    request_id: response.request_id,
+                    responding_client_id: session.client_id.clone(),
+                    status: response.status,
+                    screenshot: response.screenshot,
+                    error: response.error,
+                }),
+            ),
+        )
+        .await
+    }
+
+    pub async fn request_control(
+        &self,
+        session: &CodeBridgeSession,
+        request: ControlRequest,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        let message_id = format!("control-request-{}", request.request_id);
+        self.post(
+            session,
+            envelope(
+                message_id,
+                BridgePayload::ControlRequest(ControlRequestMessage {
+                    request_id: request.request_id,
+                    requester_client_id: session.client_id.clone(),
+                    target_client_id: request.target_client_id,
+                    command: request.command,
+                    timeout_ms: request.timeout_ms,
+                }),
+            ),
+        )
+        .await
+    }
+
+    pub async fn respond_control(
+        &self,
+        session: &CodeBridgeSession,
+        response: ControlResponse,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        let message_id = format!("control-response-{}", response.request_id);
+        self.post(
+            session,
+            envelope(
+                message_id,
+                BridgePayload::ControlResponse(ControlResponseMessage {
+                    request_id: response.request_id,
+                    responding_client_id: session.client_id.clone(),
+                    status: response.status,
+                    summary: response.summary,
+                    error: response.error,
                 }),
             ),
         )
@@ -238,6 +401,27 @@ impl CodeBridgeClient {
             return Err(CodeBridgeClientError::HttpStatus(response.status()));
         }
         Ok(response.json::<BridgeMessageResponse>().await?.payload)
+    }
+
+    async fn publish_event(
+        &self,
+        session: &CodeBridgeSession,
+        event_id: impl Into<String>,
+        event: BridgeEvent,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        let event_id = event_id.into();
+        self.post(
+            session,
+            envelope(
+                event_id.clone(),
+                BridgePayload::Event(EventPublishMessage {
+                    client_id: session.client_id.clone(),
+                    event_id,
+                    event,
+                }),
+            ),
+        )
+        .await
     }
 
     fn endpoint_path(&self, segments: &[&str]) -> Url {
@@ -330,15 +514,9 @@ fn session_from_hello_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_code_bridge_protocol::ControlCommand;
-    use codex_code_bridge_protocol::ControlRequestMessage;
-    use codex_code_bridge_protocol::ControlResponseMessage;
-    use codex_code_bridge_protocol::ControlStatus;
+    use codex_code_bridge_protocol::ErrorCode;
     use codex_code_bridge_protocol::EventKind;
     use codex_code_bridge_protocol::ScreenshotMediaType;
-    use codex_code_bridge_protocol::ScreenshotPayload;
-    use codex_code_bridge_protocol::ScreenshotRequestMessage;
-    use codex_code_bridge_protocol::ScreenshotResponseMessage;
     use codex_code_bridge_protocol::SourceKind;
     use codex_code_bridge_service::BridgeServiceConfig;
     use std::time::Duration;
@@ -411,17 +589,13 @@ mod tests {
         drop(subscriber_events);
 
         client
-            .post(
+            .request_screenshot(
                 &subscriber,
-                envelope(
-                    "screenshot-request-1",
-                    BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
-                        request_id: "shot-1".to_string(),
-                        requester_client_id: subscriber.client_id.clone(),
-                        target_client_id: producer.client_id.clone(),
-                        timeout_ms: 1_000,
-                    }),
-                ),
+                ScreenshotRequest {
+                    request_id: "shot-1".to_string(),
+                    target_client_id: producer.client_id.clone(),
+                    timeout_ms: 1_000,
+                },
             )
             .await
             .expect("screenshot request");
@@ -433,23 +607,19 @@ mod tests {
                 if request_id == "shot-1"
         ));
         client
-            .post(
+            .respond_screenshot(
                 &producer,
-                envelope(
-                    "screenshot-response-1",
-                    BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
-                        request_id: "shot-1".to_string(),
-                        responding_client_id: producer.client_id.clone(),
-                        status: ControlStatus::Ok,
-                        screenshot: Some(ScreenshotPayload {
-                            width: 1,
-                            height: 1,
-                            media_type: ScreenshotMediaType::Png,
-                            data_base64: "iVBORw0KGgo=".to_string(),
-                        }),
-                        error: None,
+                ScreenshotResponse {
+                    request_id: "shot-1".to_string(),
+                    status: ControlStatus::Ok,
+                    screenshot: Some(ScreenshotPayload {
+                        width: 1,
+                        height: 1,
+                        media_type: ScreenshotMediaType::Png,
+                        data_base64: "iVBORw0KGgo=".to_string(),
                     }),
-                ),
+                    error: None,
+                },
             )
             .await
             .expect("screenshot response");
@@ -466,20 +636,16 @@ mod tests {
         ));
 
         client
-            .post(
+            .request_control(
                 &subscriber,
-                envelope(
-                    "control-request-1",
-                    BridgePayload::ControlRequest(ControlRequestMessage {
-                        request_id: "js-1".to_string(),
-                        requester_client_id: subscriber.client_id.clone(),
-                        target_client_id: producer.client_id.clone(),
-                        command: ControlCommand::ExecuteJavascript {
-                            code: "window.location.href".to_string(),
-                        },
-                        timeout_ms: 1_000,
-                    }),
-                ),
+                ControlRequest {
+                    request_id: "js-1".to_string(),
+                    target_client_id: producer.client_id.clone(),
+                    command: ControlCommand::ExecuteJavascript {
+                        code: "window.location.href".to_string(),
+                    },
+                    timeout_ms: 1_000,
+                },
             )
             .await
             .expect("control request");
@@ -490,18 +656,14 @@ mod tests {
                 if request_id == "js-1"
         ));
         client
-            .post(
+            .respond_control(
                 &producer,
-                envelope(
-                    "control-response-1",
-                    BridgePayload::ControlResponse(ControlResponseMessage {
-                        request_id: "js-1".to_string(),
-                        responding_client_id: producer.client_id.clone(),
-                        status: ControlStatus::Ok,
-                        summary: "https://example.test/page".to_string(),
-                        error: None,
-                    }),
-                ),
+                ControlResponse {
+                    request_id: "js-1".to_string(),
+                    status: ControlStatus::Ok,
+                    summary: "https://example.test/page".to_string(),
+                    error: None,
+                },
             )
             .await
             .expect("control response");
@@ -510,6 +672,214 @@ mod tests {
             message.envelope.payload,
             BridgePayload::ControlResponse(ControlResponseMessage { request_id, .. })
                 if request_id == "js-1"
+        ));
+
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn descriptor_client_publishes_typed_events() {
+        let temp = TempDir::new().expect("temp home");
+        let mut config = BridgeServiceConfig::new(temp.path().to_path_buf());
+        config.stale_client_timeout = Duration::from_secs(30);
+        config.stale_client_sweep_interval = Duration::from_secs(30);
+        let service = codex_code_bridge_service::start(config)
+            .await
+            .expect("start service");
+
+        let client = CodeBridgeClient::from_descriptor_path(service.descriptor_path())
+            .expect("descriptor client");
+        let producer = client
+            .hello(
+                "producer-1",
+                ClientRole::Producer,
+                CapabilitySet {
+                    publish_events: true,
+                    provide_screenshot: true,
+                    ..CapabilitySet::default()
+                },
+                metadata("producer"),
+            )
+            .await
+            .expect("producer hello");
+        let subscriber = client
+            .hello(
+                "subscriber-1",
+                ClientRole::Subscriber,
+                CapabilitySet {
+                    subscribe_events: true,
+                    ..CapabilitySet::default()
+                },
+                metadata("subscriber"),
+            )
+            .await
+            .expect("subscriber hello");
+
+        client
+            .subscribe(
+                &subscriber,
+                SubscriptionFilter {
+                    levels: Vec::new(),
+                    event_kinds: vec![
+                        EventKind::Error,
+                        EventKind::Pageview,
+                        EventKind::Screenshot,
+                        EventKind::ControlResult,
+                    ],
+                    client_ids: vec![producer.client_id.clone()],
+                },
+            )
+            .await
+            .expect("subscribe");
+        let mut subscriber_events = client.events(&subscriber, 0).await.expect("events");
+
+        client
+            .publish_error(
+                &producer,
+                "error-1",
+                ErrorEvent {
+                    message: "boom".to_string(),
+                    stack: Some("stack".to_string()),
+                },
+            )
+            .await
+            .expect("publish error");
+        client
+            .publish_pageview(
+                &producer,
+                "page-1",
+                PageviewEvent {
+                    url: "https://example.test/page".to_string(),
+                    title: Some("Example".to_string()),
+                },
+            )
+            .await
+            .expect("publish pageview");
+        client
+            .publish_screenshot_event(
+                &producer,
+                "shot-event-1",
+                ScreenshotEvent {
+                    screenshot_id: "shot-1".to_string(),
+                    width: 1,
+                    height: 1,
+                    media_type: ScreenshotMediaType::Png,
+                    bytes: 8,
+                },
+            )
+            .await
+            .expect("publish screenshot event");
+        client
+            .publish_control_result(
+                &producer,
+                "control-result-1",
+                ControlResultEvent {
+                    request_id: "js-1".to_string(),
+                    status: ControlStatus::Failed,
+                    summary: "failed".to_string(),
+                },
+            )
+            .await
+            .expect("publish control result");
+
+        assert!(matches!(
+            next_test_message(&mut subscriber_events, "error event")
+                .await
+                .envelope
+                .payload,
+            BridgePayload::Event(EventPublishMessage {
+                event: BridgeEvent::Error(ErrorEvent { message, stack }),
+                ..
+            }) if message == "boom" && stack.as_deref() == Some("stack")
+        ));
+        assert!(matches!(
+            next_test_message(&mut subscriber_events, "pageview event")
+                .await
+                .envelope
+                .payload,
+            BridgePayload::Event(EventPublishMessage {
+                event: BridgeEvent::Pageview(PageviewEvent { url, title }),
+                ..
+            }) if url == "https://example.test/page" && title.as_deref() == Some("Example")
+        ));
+        assert!(matches!(
+            next_test_message(&mut subscriber_events, "screenshot event")
+                .await
+                .envelope
+                .payload,
+            BridgePayload::Event(EventPublishMessage {
+                event: BridgeEvent::Screenshot(ScreenshotEvent { screenshot_id, bytes, .. }),
+                ..
+            }) if screenshot_id == "shot-1" && bytes == 8
+        ));
+        assert!(matches!(
+            next_test_message(&mut subscriber_events, "control result event")
+                .await
+                .envelope
+                .payload,
+            BridgePayload::Event(EventPublishMessage {
+                event: BridgeEvent::ControlResult(ControlResultEvent { request_id, status, summary }),
+                ..
+            }) if request_id == "js-1" && status == ControlStatus::Failed && summary == "failed"
+        ));
+
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn typed_helpers_surface_capability_denials() {
+        let temp = TempDir::new().expect("temp home");
+        let mut config = BridgeServiceConfig::new(temp.path().to_path_buf());
+        config.stale_client_timeout = Duration::from_secs(30);
+        config.stale_client_sweep_interval = Duration::from_secs(30);
+        let service = codex_code_bridge_service::start(config)
+            .await
+            .expect("start service");
+
+        let client = CodeBridgeClient::from_descriptor_path(service.descriptor_path())
+            .expect("descriptor client");
+        let producer = client
+            .hello(
+                "producer-1",
+                ClientRole::Producer,
+                CapabilitySet {
+                    provide_screenshot: true,
+                    ..CapabilitySet::default()
+                },
+                metadata("producer"),
+            )
+            .await
+            .expect("producer hello");
+        let subscriber = client
+            .hello(
+                "subscriber-1",
+                ClientRole::Subscriber,
+                CapabilitySet {
+                    subscribe_events: true,
+                    ..CapabilitySet::default()
+                },
+                metadata("subscriber"),
+            )
+            .await
+            .expect("subscriber hello");
+
+        let payload = client
+            .request_screenshot(
+                &subscriber,
+                ScreenshotRequest {
+                    request_id: "shot-1".to_string(),
+                    target_client_id: producer.client_id.clone(),
+                    timeout_ms: 1_000,
+                },
+            )
+            .await
+            .expect("capability response");
+        assert!(matches!(
+            payload,
+            BridgePayload::Error(ErrorMessage {
+                code: ErrorCode::CapabilityDenied,
+                ..
+            })
         ));
 
         service.shutdown().await;
