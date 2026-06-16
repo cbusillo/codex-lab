@@ -9,7 +9,7 @@ Example:
 
 ```shell
 scripts/build_codex_lab_app.py \
-  --codex-bin codex-rs/target/release/codex \
+  --codex-bin codex-rs/target/release/codex-lab \
   --app-dir /tmp/Codex\ Lab.app \
   --shim-dir /tmp/codex-lab-bin \
   --force

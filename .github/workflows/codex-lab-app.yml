@@ -39,7 +39,7 @@ jobs:
       - name: Build Codex Lab CLI
         working-directory: codex-rs
         shell: bash
-        run: cargo build --release -p codex-cli --bin codex
+        run: cargo build --release -p codex-cli --bin codex-lab
 
       - name: Build Codex Lab app bundle
         id: package
@@ -52,7 +52,7 @@ jobs:
           lab_version="$(PYTHONPATH=scripts python3 -c 'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
           mkdir -p "$output_root"
           python3 scripts/build_codex_lab_app.py \
-            --codex-bin codex-rs/target/release/codex \
+            --codex-bin codex-rs/target/release/codex-lab \
             --app-dir "$app_dir" \
             --shim-dir "$shim_dir" \
             --short-version "$lab_version" \

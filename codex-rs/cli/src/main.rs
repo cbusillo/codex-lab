@@ -1,5 +1,7 @@
 use clap::Args;
+use clap::Command;
 use clap::CommandFactory;
+use clap::FromArgMatches;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
@@ -92,12 +94,7 @@ use codex_terminal_detection::TerminalName;
     author,
     version,
     // If a sub‑command is given, ignore requirements of the default args.
-    subcommand_negates_reqs = true,
-    // The executable is sometimes invoked via a platform‑specific name like
-    // `codex-x86_64-unknown-linux-musl`, but the help output should always use
-    // the generic `codex` command name that users run.
-    bin_name = "codex",
-    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
+    subcommand_negates_reqs = true
 )]
 struct MultitoolCli {
     #[clap(flatten)]
@@ -894,19 +891,20 @@ fn stage_str(stage: Stage) -> &'static str {
 
 fn main() -> anyhow::Result<()> {
     arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
-        cli_main(arg0_paths).await?;
+        cli_main(arg0_paths, cli_command_name()).await?;
         Ok(())
     })
 }
 
-async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+async fn cli_main(arg0_paths: Arg0DispatchPaths, command_name: &'static str) -> anyhow::Result<()> {
+    let cli = named_multitool_command(command_name);
     let MultitoolCli {
         config_overrides: mut root_config_overrides,
         feature_toggles,
         remote,
         mut interactive,
         subcommand,
-    } = MultitoolCli::parse();
+    } = MultitoolCli::from_arg_matches(&cli.get_matches())?;
 
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
@@ -959,7 +957,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 root_remote_auth_token_env.as_deref(),
                 "review",
             )?;
-            let mut exec_cli = ExecCli::try_parse_from(["codex", "exec"])?;
+            let mut exec_cli = ExecCli::try_parse_from([command_name, "exec"])?;
             exec_cli
                 .shared
                 .inherit_exec_root_options(&interactive.shared);
@@ -1306,7 +1304,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 root_remote_auth_token_env.as_deref(),
                 "completion",
             )?;
-            print_completion(completion_cli);
+            print_completion(completion_cli, command_name);
         }
         Some(Subcommand::Update) => {
             reject_remote_mode_for_subcommand(
@@ -2356,10 +2354,33 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         .extend(config_overrides.raw_overrides);
 }
 
-fn print_completion(cmd: CompletionCommand) {
-    let mut app = MultitoolCli::command();
-    let name = "codex";
+fn print_completion(cmd: CompletionCommand, command_name: &'static str) {
+    let mut app = named_multitool_command(command_name);
+    let name = command_name;
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
+}
+
+fn named_multitool_command(command_name: &'static str) -> Command {
+    MultitoolCli::command()
+        .bin_name(command_name)
+        .override_usage(format!(
+            "{command_name} [OPTIONS] [PROMPT]\n       {command_name} [OPTIONS] <COMMAND> [ARGS]"
+        ))
+}
+
+fn cli_command_name() -> &'static str {
+    let Some(arg0) = std::env::args_os().next() else {
+        return "codex";
+    };
+    if std::path::Path::new(&arg0)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("codex-lab")
+    {
+        "codex-lab"
+    } else {
+        "codex"
+    }
 }
 
 #[cfg(test)]
@@ -2683,6 +2704,33 @@ mod tests {
     }
 
     #[test]
+    fn codex_lab_command_name_updates_help_usage() {
+        let help = named_multitool_command("codex-lab")
+            .render_help()
+            .to_string();
+
+        assert!(help.contains("codex-lab [OPTIONS] [PROMPT]"));
+        assert!(help.contains("codex-lab [OPTIONS] <COMMAND> [ARGS]"));
+    }
+
+    #[test]
+    fn codex_command_name_keeps_upstream_usage() {
+        let help = named_multitool_command("codex").render_help().to_string();
+
+        assert!(help.contains("codex [OPTIONS] [PROMPT]"));
+        assert!(help.contains("codex [OPTIONS] <COMMAND> [ARGS]"));
+    }
+
+    #[test]
+    fn codex_lab_exec_help_uses_lab_command_and_home() {
+        let help = help_from_args(&["codex-lab", "exec", "--help"]);
+
+        assert!(help.contains("Usage: codex-lab exec"));
+        assert!(help.contains("CODEX_LAB_HOME"));
+        assert!(!help.contains("CODEX_HOME"));
+    }
+
+    #[test]
     fn responses_subcommand_is_not_registered() {
         let command = MultitoolCli::command();
         assert!(
@@ -2693,7 +2741,14 @@ mod tests {
     }
 
     fn help_from_args(args: &[&str]) -> String {
-        let err = MultitoolCli::try_parse_from(args).expect_err("help should short-circuit");
+        let command_name = if args.first().copied() == Some("codex-lab") {
+            "codex-lab"
+        } else {
+            "codex"
+        };
+        let err = named_multitool_command(command_name)
+            .try_get_matches_from(args)
+            .expect_err("help should short-circuit");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         err.to_string()
     }
