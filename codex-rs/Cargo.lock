@@ -2441,6 +2441,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-code-bridge-client"
+version = "0.0.0"
+dependencies = [
+ "codex-code-bridge-protocol",
+ "codex-code-bridge-service",
+ "eventsource-stream",
+ "futures",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "codex-code-bridge-protocol"
 version = "0.0.0"
 dependencies = [

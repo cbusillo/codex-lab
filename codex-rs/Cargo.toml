@@ -21,6 +21,7 @@ members = [
     "features",
     "install-context",
     "codex-backend-openapi-models",
+    "code-bridge-client",
     "code-bridge-protocol",
     "code-bridge-service",
     "code-mode",
@@ -153,6 +154,7 @@ codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }
 codex-chatgpt = { path = "chatgpt" }
 codex-cli = { path = "cli" }
+codex-code-bridge-client = { path = "code-bridge-client" }
 codex-code-bridge-protocol = { path = "code-bridge-protocol" }
 codex-code-bridge-service = { path = "code-bridge-service" }
 codex-client = { path = "codex-client" }
