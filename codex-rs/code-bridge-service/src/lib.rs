@@ -1758,6 +1758,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broadcast_event_replay_after_subscriber_reconnect() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let producer = register_producer(
+            &client,
+            &service.handle,
+            "producer-1",
+            producer_capabilities(),
+        )
+        .await;
+        let subscriber_a = register_subscriber(
+            &client,
+            &service.handle,
+            "subscriber-a",
+            subscriber_capabilities(),
+        )
+        .await;
+        let subscriber_b = register_subscriber(
+            &client,
+            &service.handle,
+            "subscriber-b",
+            subscriber_capabilities(),
+        )
+        .await;
+        subscribe_to_producer(
+            &client,
+            &service.handle,
+            &subscriber_a,
+            "subscriber-a",
+            "producer-1",
+        )
+        .await;
+        subscribe_to_producer(
+            &client,
+            &service.handle,
+            &subscriber_b,
+            "subscriber-b",
+            "producer-1",
+        )
+        .await;
+
+        for index in 1..=3 {
+            publish_console(
+                &client,
+                &service.handle,
+                &producer,
+                "producer-1",
+                &format!("event-{index}"),
+                ConsoleLevel::Info,
+            )
+            .await;
+        }
+
+        let subscriber_a_events =
+            open_events_after(&client, &service.handle, &subscriber_a, "subscriber-a", 0)
+                .await
+                .expect("subscriber-a initial stream");
+        let mut subscriber_a_events = subscriber_a_events.bytes_stream().eventsource();
+        let initial_messages = next_event_messages(&mut subscriber_a_events, 3).await;
+        assert_event_ids(&initial_messages, &["event-1", "event-2", "event-3"]);
+        let last_seen_sequence = initial_messages
+            .last()
+            .expect("initial event messages")
+            .sequence;
+        drop(subscriber_a_events);
+
+        for index in 4..=5 {
+            publish_console(
+                &client,
+                &service.handle,
+                &producer,
+                "producer-1",
+                &format!("event-{index}"),
+                ConsoleLevel::Info,
+            )
+            .await;
+        }
+
+        let subscriber_a_events = open_events_after(
+            &client,
+            &service.handle,
+            &subscriber_a,
+            "subscriber-a",
+            last_seen_sequence,
+        )
+        .await
+        .expect("subscriber-a reconnect stream");
+        let mut subscriber_a_events = subscriber_a_events.bytes_stream().eventsource();
+        let replay_messages = next_event_messages(&mut subscriber_a_events, 2).await;
+        assert_event_ids(&replay_messages, &["event-4", "event-5"]);
+        assert_no_sse_message(&mut subscriber_a_events).await;
+
+        let subscriber_b_events =
+            open_events_after(&client, &service.handle, &subscriber_b, "subscriber-b", 0)
+                .await
+                .expect("subscriber-b first stream");
+        let mut subscriber_b_events = subscriber_b_events.bytes_stream().eventsource();
+        let late_messages = next_event_messages(&mut subscriber_b_events, 5).await;
+        assert_event_ids(
+            &late_messages,
+            &["event-1", "event-2", "event-3", "event-4", "event-5"],
+        );
+        assert!(
+            late_messages
+                .windows(2)
+                .all(|window| window[0].sequence < window[1].sequence)
+        );
+        assert_no_sse_message(&mut subscriber_b_events).await;
+
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn level_filter_does_not_hide_matching_non_console_events() {
         let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
         let client = Client::new();
@@ -2937,6 +3050,27 @@ mod tests {
         .await;
     }
 
+    async fn subscribe_to_producer(
+        client: &Client,
+        handle: &BridgeServiceHandle,
+        session: &TestClientSession,
+        subscriber_id: &str,
+        producer_id: &str,
+    ) {
+        subscribe(
+            client,
+            handle,
+            session,
+            subscriber_id,
+            SubscriptionFilter {
+                levels: Vec::new(),
+                event_kinds: vec![EventKind::Console],
+                client_ids: vec![producer_id.to_string()],
+            },
+        )
+        .await;
+    }
+
     async fn publish_console(
         client: &Client,
         handle: &BridgeServiceHandle,
@@ -2962,6 +3096,35 @@ mod tests {
             ),
         )
         .await;
+    }
+
+    async fn next_event_messages<S>(stream: &mut S, count: usize) -> Vec<BridgeSseMessage>
+    where
+        S: futures::Stream<
+                Item = Result<
+                    eventsource_stream::Event,
+                    eventsource_stream::EventStreamError<reqwest::Error>,
+                >,
+            > + Unpin,
+    {
+        let mut messages = Vec::with_capacity(count);
+        for _ in 0..count {
+            let message = next_sse_message(stream).await;
+            assert!(matches!(message.envelope.payload, BridgePayload::Event(_)));
+            messages.push(message);
+        }
+        messages
+    }
+
+    fn assert_event_ids(messages: &[BridgeSseMessage], expected: &[&str]) {
+        let actual: Vec<&str> = messages
+            .iter()
+            .map(|message| match &message.envelope.payload {
+                BridgePayload::Event(event) => event.event_id.as_str(),
+                _ => panic!("expected event payload"),
+            })
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     async fn open_events(
