@@ -18,6 +18,12 @@ alias c := codex
 codex *args:
     cargo run --bin codex -- {args}
 
+# Install a local `codex-lab` launcher for dogfooding this checkout.
+[no-cd]
+[unix]
+install-codex-lab-dev *args:
+    {{ justfile_directory() }}/scripts/local/install-codex-lab-dev.sh {args}
+
 # `codex exec`
 exec *args:
     cargo run --bin codex -- exec {args}
@@ -99,6 +105,10 @@ test *args:
 [no-cd]
 test-github-scripts:
     {{ python }} -m unittest discover -s {{ justfile_directory() }}/.github/scripts -p 'test_*.py'
+
+[no-cd]
+test-local-scripts:
+    {{ python }} -m unittest discover -s {{ justfile_directory() }}/scripts/local -p 'test_*.py'
 
 # Run explicit workspace benchmark targets.
 bench *args:

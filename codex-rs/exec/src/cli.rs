@@ -7,10 +7,7 @@ use codex_utils_cli::SharedCliOptions;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(
-    version,
-    override_usage = "codex exec [OPTIONS] [PROMPT]\n       codex exec [OPTIONS] <COMMAND> [ARGS]"
-)]
+#[command(version)]
 pub struct Cli {
     /// Action to perform. If omitted, runs a new non-interactive session.
     #[command(subcommand)]
@@ -31,7 +28,7 @@ pub struct Cli {
     #[arg(long = "ephemeral", global = true, default_value_t = false)]
     pub ephemeral: bool,
 
-    /// Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`.
+    /// Do not load `$CODEX_LAB_HOME/config.toml`; auth still uses `CODEX_LAB_HOME`.
     #[arg(long = "ignore-user-config", global = true, default_value_t = false)]
     pub ignore_user_config: bool,
 

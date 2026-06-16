@@ -15,9 +15,9 @@ The GitHub Release also contains a [DotSlash](https://dotslash-cli.com/) file fo
 ### Build from source
 
 ```bash
-# Clone the repository and navigate to the root of the Cargo workspace.
-git clone https://github.com/openai/codex.git
-cd codex/codex-rs
+# Clone the repository and navigate to the root of the Codex Lab checkout.
+git clone https://github.com/cbusillo/codex-lab.git
+cd codex-lab
 
 # Install the Rust toolchain, if necessary.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -29,11 +29,20 @@ cargo install --locked just
 # Install nextest for the `just test` helper.
 cargo install --locked cargo-nextest
 
-# Build Codex.
+# Build Codex Lab from the Rust workspace.
+cd codex-rs
 cargo build
 
-# Launch the TUI with a sample prompt.
-cargo run --bin codex -- "explain this codebase to me"
+# Launch the TUI with a sample prompt from the workspace.
+cargo run --bin codex-lab -- "explain this codebase to me"
+cd ..
+
+# Install the dogfood launcher into ~/.local/bin/codex-lab. The launcher keeps
+# rebuilding this checkout incrementally, defaults CODEX_LAB_HOME to
+# ~/.codex-lab when unset, and leaves upstream `codex` plus Every Code `code`
+# untouched.
+just install-codex-lab-dev
+codex-lab "explain this codebase to me"
 
 # After making changes, use the root justfile helpers (they default to codex-rs):
 just fmt
