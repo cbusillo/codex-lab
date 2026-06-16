@@ -56,6 +56,16 @@ pub struct BridgeSseMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeServiceStatus {
+    pub protocol_version: String,
+    pub connected_producer_count: usize,
+    pub connected_subscriber_count: usize,
+    pub uptime_ms: u64,
+    pub last_event_time_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "body", rename_all = "camelCase")]
 pub enum BridgeEndpoint {
     LoopbackHttp { url: String },

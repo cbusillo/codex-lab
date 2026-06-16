@@ -33,6 +33,7 @@ use codex_code_bridge_protocol::BridgeEnvelope;
 use codex_code_bridge_protocol::BridgeEvent;
 use codex_code_bridge_protocol::BridgeLimits;
 use codex_code_bridge_protocol::BridgePayload;
+use codex_code_bridge_protocol::BridgeServiceStatus;
 use codex_code_bridge_protocol::CLIENT_SESSION_HEADER;
 use codex_code_bridge_protocol::CapabilitySet;
 use codex_code_bridge_protocol::ClientRole;
@@ -54,8 +55,6 @@ use codex_code_bridge_protocol::validate_envelope;
 use codex_code_bridge_protocol::validate_event_capabilities;
 use constant_time_eq::constant_time_eq;
 use rand::RngCore;
-use serde::Deserialize;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -166,16 +165,6 @@ impl BridgeServiceHandle {
         let _ = self.stale_task.await;
         remove_descriptor_if_current(&self.descriptor_path, &self.auth_secret);
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BridgeServiceStatus {
-    pub protocol_version: String,
-    pub connected_producer_count: usize,
-    pub connected_subscriber_count: usize,
-    pub uptime_ms: u64,
-    pub last_event_time_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Error)]

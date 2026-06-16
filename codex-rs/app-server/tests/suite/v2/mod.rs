@@ -3,6 +3,7 @@ mod analytics;
 mod app_list;
 mod attestation;
 mod client_metadata;
+mod code_bridge;
 mod collaboration_mode_list;
 #[cfg(unix)]
 mod command_exec;

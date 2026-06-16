@@ -650,6 +650,12 @@ impl TestAppServer {
             .await
     }
 
+    /// Send a `codeBridge/status/read` JSON-RPC request.
+    pub async fn send_code_bridge_status_read_request(&mut self) -> anyhow::Result<i64> {
+        self.send_request("codeBridge/status/read", /*params*/ None)
+            .await
+    }
+
     /// Send a `remoteControl/pairing/start` JSON-RPC request.
     pub async fn send_remote_control_pairing_start_request(
         &mut self,
