@@ -221,7 +221,7 @@ def run_code_bridge_live_test(codex_lab: Path) -> None:
         "test",
         "-p",
         "codex-code-bridge-service",
-        "broadcast_event_replay_after_subscriber_reconnect",
+        "live_client_witness_round_trips_descriptor_replay_screenshot_and_control",
     ]
     subprocess.run(bridge_cmd, cwd=codex_lab / "codex-rs", check=True)
 

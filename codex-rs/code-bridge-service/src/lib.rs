@@ -1871,6 +1871,224 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_client_witness_round_trips_descriptor_replay_screenshot_and_control() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let descriptor = read_descriptor(service.handle.descriptor_path());
+        assert_eq!(validate_descriptor(&descriptor), Ok(()));
+        assert_eq!(descriptor.auth_secret, service.handle.auth_secret());
+        let endpoint_url = descriptor_endpoint_url(&descriptor);
+        assert_eq!(endpoint_url, service.handle.endpoint_url());
+
+        let client = Client::new();
+        let producer = register_producer_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            "producer-1",
+            CapabilitySet {
+                provide_control: true,
+                provide_javascript_execution: true,
+                ..producer_capabilities()
+            },
+        )
+        .await;
+        let subscriber = register_subscriber_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            "subscriber-1",
+            subscriber_capabilities(),
+        )
+        .await;
+        subscribe_to_producer_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &subscriber,
+            "subscriber-1",
+            "producer-1",
+        )
+        .await;
+
+        publish_console_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &producer,
+            "producer-1",
+            "event-1",
+            ConsoleLevel::Info,
+        )
+        .await;
+        let subscriber_events = open_events_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &subscriber,
+            "subscriber-1",
+        )
+        .await
+        .expect("subscriber events");
+        let mut subscriber_events = subscriber_events.bytes_stream().eventsource();
+        let message = next_sse_message(&mut subscriber_events).await;
+        let first_sequence = message.sequence;
+        assert_event_ids(&[message], &["event-1"]);
+        drop(subscriber_events);
+
+        publish_console_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &producer,
+            "producer-1",
+            "event-2",
+            ConsoleLevel::Warn,
+        )
+        .await;
+        let subscriber_events = open_events_after_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &subscriber,
+            "subscriber-1",
+            first_sequence,
+        )
+        .await
+        .expect("subscriber reconnect events");
+        let mut subscriber_events = subscriber_events.bytes_stream().eventsource();
+        let replayed = next_event_messages(&mut subscriber_events, 1).await;
+        let second_sequence = replayed[0].sequence;
+        assert_event_ids(&replayed, &["event-2"]);
+        drop(subscriber_events);
+
+        let producer_events = open_events_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &producer,
+            "producer-1",
+        )
+        .await
+        .expect("producer events");
+        let mut producer_events = producer_events.bytes_stream().eventsource();
+        let subscriber_events = open_events_after_with_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &subscriber,
+            "subscriber-1",
+            second_sequence,
+        )
+        .await
+        .expect("subscriber targeted events");
+        let mut subscriber_events = subscriber_events.bytes_stream().eventsource();
+
+        post_envelope_with_payload_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &subscriber,
+            envelope(
+                "screenshot-request-1",
+                BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                    request_id: "shot-1".to_string(),
+                    requester_client_id: "subscriber-1".to_string(),
+                    target_client_id: "producer-1".to_string(),
+                    timeout_ms: 1_000,
+                }),
+            ),
+        )
+        .await;
+        let message = next_sse_message(&mut producer_events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ScreenshotRequest(ScreenshotRequestMessage {
+                request_id,
+                ..
+            }) if request_id == "shot-1"
+        ));
+
+        post_envelope_with_payload_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &producer,
+            envelope(
+                "screenshot-response-1",
+                BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                    request_id: "shot-1".to_string(),
+                    responding_client_id: "producer-1".to_string(),
+                    status: ControlStatus::Ok,
+                    screenshot: Some(ScreenshotPayload {
+                        width: 1,
+                        height: 1,
+                        media_type: ScreenshotMediaType::Png,
+                        data_base64: "iVBORw0KGgo=".to_string(),
+                    }),
+                    error: None,
+                }),
+            ),
+        )
+        .await;
+        let message = next_sse_message(&mut subscriber_events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+                request_id,
+                status: ControlStatus::Ok,
+                ..
+            }) if request_id == "shot-1"
+        ));
+
+        post_envelope_with_payload_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &subscriber,
+            control_request_envelope("js-1", "subscriber-1", "producer-1"),
+        )
+        .await;
+        let message = next_sse_message(&mut producer_events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ControlRequest(ControlRequestMessage {
+                request_id,
+                ..
+            }) if request_id == "js-1"
+        ));
+
+        post_envelope_with_payload_endpoint(
+            &client,
+            &endpoint_url,
+            &descriptor.auth_secret,
+            &producer,
+            envelope(
+                "control-response-1",
+                BridgePayload::ControlResponse(ControlResponseMessage {
+                    request_id: "js-1".to_string(),
+                    responding_client_id: "producer-1".to_string(),
+                    status: ControlStatus::Ok,
+                    summary: "https://example.test/page".to_string(),
+                    error: None,
+                }),
+            ),
+        )
+        .await;
+        let message = next_sse_message(&mut subscriber_events).await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::ControlResponse(ControlResponseMessage {
+                request_id,
+                status: ControlStatus::Ok,
+                ..
+            }) if request_id == "js-1"
+        ));
+        assert_no_sse_message(&mut producer_events).await;
+
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn level_filter_does_not_hide_matching_non_console_events() {
         let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
         let client = Client::new();
@@ -2940,13 +3158,52 @@ mod tests {
         serde_json::from_slice(&raw).expect("parse descriptor")
     }
 
+    fn descriptor_endpoint_url(descriptor: &BridgeDescriptor) -> String {
+        match &descriptor.endpoint {
+            BridgeEndpoint::LoopbackHttp { url } => url.clone(),
+            endpoint => panic!("expected loopback HTTP endpoint, got {endpoint:?}"),
+        }
+    }
+
     async fn post_envelope(
         client: &Client,
         handle: &BridgeServiceHandle,
         session: &TestClientSession,
         envelope: BridgeEnvelope,
     ) -> TestClientSession {
-        let payload = post_envelope_with_payload(client, handle, session, envelope).await;
+        let payload = post_envelope_with_payload_endpoint(
+            client,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            session,
+            envelope,
+        )
+        .await;
+        payload_to_session(session, payload)
+    }
+
+    async fn post_envelope_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        session: &TestClientSession,
+        envelope: BridgeEnvelope,
+    ) -> TestClientSession {
+        let payload = post_envelope_with_payload_endpoint(
+            client,
+            endpoint_url,
+            auth_secret,
+            session,
+            envelope,
+        )
+        .await;
+        payload_to_session(session, payload)
+    }
+
+    fn payload_to_session(
+        session: &TestClientSession,
+        payload: BridgePayload,
+    ) -> TestClientSession {
         assert!(matches!(
             payload,
             BridgePayload::Ack(_) | BridgePayload::HelloResponse(_)
@@ -2969,9 +3226,26 @@ mod tests {
         session: &TestClientSession,
         envelope: BridgeEnvelope,
     ) -> BridgePayload {
+        post_envelope_with_payload_endpoint(
+            client,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            session,
+            envelope,
+        )
+        .await
+    }
+
+    async fn post_envelope_with_payload_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        session: &TestClientSession,
+        envelope: BridgeEnvelope,
+    ) -> BridgePayload {
         let mut request = client
-            .post(format!("{}/message", handle.endpoint_url()))
-            .bearer_auth(handle.auth_secret());
+            .post(format!("{endpoint_url}/message"))
+            .bearer_auth(auth_secret);
         if !session.session_token.is_empty() {
             request = request.header(CLIENT_SESSION_HEADER, session.session_token.as_str());
         }
@@ -2994,16 +3268,29 @@ mod tests {
         client_id: &str,
         capabilities: CapabilitySet,
     ) -> TestClientSession {
-        post_envelope(
+        register_producer_with_endpoint(
             client,
-            handle,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            client_id,
+            capabilities,
+        )
+        .await
+    }
+
+    async fn register_producer_with_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        client_id: &str,
+        capabilities: CapabilitySet,
+    ) -> TestClientSession {
+        post_envelope_endpoint(
+            client,
+            endpoint_url,
+            auth_secret,
             &TestClientSession::new(client_id),
-            hello_envelope(
-                client_id,
-                handle.auth_secret(),
-                ClientRole::Producer,
-                capabilities,
-            ),
+            hello_envelope(client_id, auth_secret, ClientRole::Producer, capabilities),
         )
         .await
     }
@@ -3014,16 +3301,29 @@ mod tests {
         client_id: &str,
         capabilities: CapabilitySet,
     ) -> TestClientSession {
-        post_envelope(
+        register_subscriber_with_endpoint(
             client,
-            handle,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            client_id,
+            capabilities,
+        )
+        .await
+    }
+
+    async fn register_subscriber_with_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        client_id: &str,
+        capabilities: CapabilitySet,
+    ) -> TestClientSession {
+        post_envelope_endpoint(
+            client,
+            endpoint_url,
+            auth_secret,
             &TestClientSession::new(client_id),
-            hello_envelope(
-                client_id,
-                handle.auth_secret(),
-                ClientRole::Subscriber,
-                capabilities,
-            ),
+            hello_envelope(client_id, auth_secret, ClientRole::Subscriber, capabilities),
         )
         .await
     }
@@ -3035,9 +3335,29 @@ mod tests {
         subscriber_id: &str,
         filter: SubscriptionFilter,
     ) {
-        post_envelope(
+        subscribe_with_endpoint(
             client,
-            handle,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            session,
+            subscriber_id,
+            filter,
+        )
+        .await;
+    }
+
+    async fn subscribe_with_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        session: &TestClientSession,
+        subscriber_id: &str,
+        filter: SubscriptionFilter,
+    ) {
+        post_envelope_endpoint(
+            client,
+            endpoint_url,
+            auth_secret,
             session,
             envelope(
                 &format!("subscribe-{subscriber_id}"),
@@ -3057,9 +3377,29 @@ mod tests {
         subscriber_id: &str,
         producer_id: &str,
     ) {
-        subscribe(
+        subscribe_to_producer_with_endpoint(
             client,
-            handle,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            session,
+            subscriber_id,
+            producer_id,
+        )
+        .await;
+    }
+
+    async fn subscribe_to_producer_with_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        session: &TestClientSession,
+        subscriber_id: &str,
+        producer_id: &str,
+    ) {
+        subscribe_with_endpoint(
+            client,
+            endpoint_url,
+            auth_secret,
             session,
             subscriber_id,
             SubscriptionFilter {
@@ -3079,9 +3419,31 @@ mod tests {
         event_id: &str,
         level: ConsoleLevel,
     ) {
-        post_envelope(
+        publish_console_with_endpoint(
             client,
-            handle,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            session,
+            client_id,
+            event_id,
+            level,
+        )
+        .await;
+    }
+
+    async fn publish_console_with_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        session: &TestClientSession,
+        client_id: &str,
+        event_id: &str,
+        level: ConsoleLevel,
+    ) {
+        post_envelope_endpoint(
+            client,
+            endpoint_url,
+            auth_secret,
             session,
             envelope(
                 event_id,
@@ -3133,7 +3495,25 @@ mod tests {
         session: &TestClientSession,
         client_id: &str,
     ) -> reqwest::Result<reqwest::Response> {
-        open_events_after(client, handle, session, client_id, 0).await
+        open_events_with_endpoint(
+            client,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            session,
+            client_id,
+        )
+        .await
+    }
+
+    async fn open_events_with_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        session: &TestClientSession,
+        client_id: &str,
+    ) -> reqwest::Result<reqwest::Response> {
+        open_events_after_with_endpoint(client, endpoint_url, auth_secret, session, client_id, 0)
+            .await
     }
 
     async fn open_events_after(
@@ -3143,9 +3523,28 @@ mod tests {
         client_id: &str,
         last_event_id: u64,
     ) -> reqwest::Result<reqwest::Response> {
+        open_events_after_with_endpoint(
+            client,
+            &handle.endpoint_url(),
+            handle.auth_secret(),
+            session,
+            client_id,
+            last_event_id,
+        )
+        .await
+    }
+
+    async fn open_events_after_with_endpoint(
+        client: &Client,
+        endpoint_url: &str,
+        auth_secret: &str,
+        session: &TestClientSession,
+        client_id: &str,
+        last_event_id: u64,
+    ) -> reqwest::Result<reqwest::Response> {
         client
-            .get(format!("{}/events/{client_id}", handle.endpoint_url()))
-            .bearer_auth(handle.auth_secret())
+            .get(format!("{endpoint_url}/events/{client_id}"))
+            .bearer_auth(auth_secret)
             .header(CLIENT_SESSION_HEADER, session.session_token.as_str())
             .header("last-event-id", last_event_id.to_string())
             .send()
