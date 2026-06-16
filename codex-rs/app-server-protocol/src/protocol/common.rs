@@ -873,6 +873,12 @@ client_request_definitions! {
         serialization: global_shared_read("remote-control"),
         response: v2::RemoteControlStatusReadResponse,
     },
+    #[experimental("codeBridge/status/read")]
+    CodeBridgeStatusRead => "codeBridge/status/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: global_shared_read("code-bridge-status"),
+        response: v2::CodeBridgeStatusReadResponse,
+    },
     #[experimental("remoteControl/pairing/start")]
     RemoteControlPairingStart => "remoteControl/pairing/start" {
         params: v2::RemoteControlPairingStartParams,
@@ -2064,6 +2070,16 @@ mod tests {
                 "remote-control-pairing"
             ))
         );
+        let code_bridge_status_read = ClientRequest::CodeBridgeStatusRead {
+            request_id: request_id(),
+            params: None,
+        };
+        assert_eq!(
+            code_bridge_status_read.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead(
+                "code-bridge-status"
+            ))
+        );
         let remote_control_clients_list = ClientRequest::RemoteControlClientsList {
             request_id: request_id(),
             params: v2::RemoteControlClientsListParams::default(),
@@ -2468,6 +2484,7 @@ mod tests {
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
                     thread_source: None,
+                    session_provenance: None,
                     agent_nickname: None,
                     agent_role: None,
                     git_info: None,
@@ -3137,6 +3154,16 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("mock/experimentalMethod"));
+    }
+
+    #[test]
+    fn code_bridge_status_read_is_marked_experimental() {
+        let request = ClientRequest::CodeBridgeStatusRead {
+            request_id: RequestId::Integer(1),
+            params: None,
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("codeBridge/status/read"));
     }
 
     #[test]

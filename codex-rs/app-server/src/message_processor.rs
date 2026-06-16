@@ -19,6 +19,7 @@ use crate::outgoing_message::RequestContext;
 use crate::request_processors::AccountRequestProcessor;
 use crate::request_processors::AppsRequestProcessor;
 use crate::request_processors::CatalogRequestProcessor;
+use crate::request_processors::CodeBridgeRequestProcessor;
 use crate::request_processors::CommandExecRequestProcessor;
 use crate::request_processors::ConfigRequestProcessor;
 use crate::request_processors::EnvironmentRequestProcessor;
@@ -166,6 +167,7 @@ pub(crate) struct MessageProcessor {
     account_processor: AccountRequestProcessor,
     apps_processor: AppsRequestProcessor,
     catalog_processor: CatalogRequestProcessor,
+    code_bridge_processor: CodeBridgeRequestProcessor,
     command_exec_processor: CommandExecRequestProcessor,
     process_exec_processor: ProcessExecRequestProcessor,
     config_processor: ConfigRequestProcessor,
@@ -414,6 +416,8 @@ impl MessageProcessor {
             workspace_settings_cache,
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
+        let code_bridge_processor =
+            CodeBridgeRequestProcessor::new(config.codex_home.to_path_buf());
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -497,6 +501,7 @@ impl MessageProcessor {
             account_processor,
             apps_processor,
             catalog_processor,
+            code_bridge_processor,
             command_exec_processor,
             process_exec_processor,
             config_processor,
@@ -922,6 +927,10 @@ impl MessageProcessor {
                 .remote_control_processor
                 .status_read()
                 .map(|response| Some(response.into())),
+            ClientRequest::CodeBridgeStatusRead { .. } => {
+                let response = self.code_bridge_processor.status_read().await;
+                Ok(Some(response.into()))
+            }
             ClientRequest::RemoteControlPairingStart { params, .. } => self
                 .remote_control_processor
                 .pairing_start(params, app_server_client_name.as_deref())

@@ -5,6 +5,7 @@ use codex_code_bridge_protocol::BridgeEnvelope;
 use codex_code_bridge_protocol::BridgeEvent;
 use codex_code_bridge_protocol::BridgeMessageResponse;
 use codex_code_bridge_protocol::BridgePayload;
+use codex_code_bridge_protocol::BridgeServiceStatus;
 use codex_code_bridge_protocol::BridgeSseMessage;
 pub use codex_code_bridge_protocol::CLIENT_SESSION_HEADER;
 use codex_code_bridge_protocol::CapabilitySet;
@@ -154,6 +155,19 @@ impl CodeBridgeClient {
 
     pub fn endpoint_url(&self) -> &str {
         self.endpoint_url.as_str()
+    }
+
+    pub async fn status(&self) -> Result<BridgeServiceStatus, CodeBridgeClientError> {
+        let response = self
+            .http
+            .get(self.endpoint_path(&["status"]))
+            .bearer_auth(&self.auth_secret)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(CodeBridgeClientError::HttpStatus(response.status()));
+        }
+        Ok(response.json::<BridgeServiceStatus>().await?)
     }
 
     pub async fn hello(
@@ -678,6 +692,28 @@ mod tests {
             BridgePayload::ControlResponse(ControlResponseMessage { request_id, .. })
                 if request_id == "js-1"
         ));
+
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn descriptor_client_reads_service_status() {
+        let temp = TempDir::new().expect("temp home");
+        let mut config = BridgeServiceConfig::new(temp.path().to_path_buf());
+        config.stale_client_timeout = Duration::from_secs(30);
+        config.stale_client_sweep_interval = Duration::from_secs(30);
+        let service = codex_code_bridge_service::start(config)
+            .await
+            .expect("start service");
+
+        let client = CodeBridgeClient::from_descriptor_path(service.descriptor_path())
+            .expect("descriptor client");
+        let status = client.status().await.expect("status");
+
+        assert_eq!(status.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(status.connected_producer_count, 0);
+        assert_eq!(status.connected_subscriber_count, 0);
+        assert_eq!(status.last_event_time_unix_ms, None);
 
         service.shutdown().await;
     }

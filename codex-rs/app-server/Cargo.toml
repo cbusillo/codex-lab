@@ -34,6 +34,8 @@ codex-analytics = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-auto-review = { workspace = true }
 codex-cloud-config = { workspace = true }
+codex-code-bridge-client = { workspace = true }
+codex-code-bridge-protocol = { workspace = true }
 codex-config = { workspace = true }
 codex-core = { workspace = true }
 codex-core-plugins = { workspace = true }
@@ -109,6 +111,7 @@ axum = { workspace = true, default-features = false, features = [
 ] }
 base64 = { workspace = true }
 codex-model-provider-info = { workspace = true }
+codex-code-bridge-service = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 core_test_support = { workspace = true }
 flate2 = { workspace = true }
