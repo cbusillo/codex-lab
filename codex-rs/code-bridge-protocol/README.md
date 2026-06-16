@@ -54,6 +54,10 @@ local development clients only.
 - Screenshot dimensions: 4096 x 4096 maximum.
 - Control timeout: 10 seconds maximum.
 - Model-visible summary: 8 KiB maximum.
+- Client label: 128 bytes.
+- Provenance URLs: 512 bytes each.
+- Provenance request and trace ids: 128 bytes each.
+- Provenance environment label: 128 bytes.
 
 Raw screenshots and high-volume logs are never injected directly into model
 context. Consumers must summarize or explicitly request bounded artifacts.
@@ -63,6 +67,14 @@ context. Consumers must summarize or explicitly request bounded artifacts.
 Core protocol metadata is generic: client ids, labels, source kind, repository
 URL, issue/PR URL, request id, trace id, and environment label. Product-specific
 Launchplane, discord-blue, or app-server fields do not belong in this crate.
+
+Provenance is optional and must be safe to copy between local tools. Repository
+and issue/PR provenance only accepts HTTPS identity links without
+username/password, ports, query strings, fragments, localhost, or private IP
+hosts so clients do not smuggle tokens, prompts, local file paths, topology
+details, or raw work records into the bridge. Request id, trace id, and
+environment label values are short ASCII tokens; environment labels should be
+coarse labels such as `local-dev`, not hostnames, tenant names, or live topology.
 
 Launchplane remains the authority for work requests and planning state. Code
 Bridge only carries optional bounded provenance metadata that can correlate live

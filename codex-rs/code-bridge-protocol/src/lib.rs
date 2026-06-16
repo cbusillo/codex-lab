@@ -1,5 +1,10 @@
 use serde::Deserialize;
 use serde::Serialize;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+
+use url::Host;
 use url::Url;
 
 pub const PROTOCOL_VERSION: &str = "code_bridge.v1";
@@ -14,6 +19,10 @@ pub const MAX_SCREENSHOT_WIDTH: u32 = 4096;
 pub const MAX_SCREENSHOT_HEIGHT: u32 = 4096;
 pub const MAX_CONTROL_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_MODEL_VISIBLE_SUMMARY_BYTES: usize = 8 * 1024;
+pub const MAX_CLIENT_LABEL_BYTES: usize = 128;
+pub const MAX_PROVENANCE_URL_BYTES: usize = 512;
+pub const MAX_PROVENANCE_ID_BYTES: usize = 128;
+pub const MAX_PROVENANCE_ENVIRONMENT_LABEL_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -497,6 +506,7 @@ pub fn validate_payload(payload: &BridgePayload) -> Result<(), ValidationError> 
     match payload {
         BridgePayload::Hello(message) => {
             validate_auth(&message.auth)?;
+            validate_client_metadata(&message.metadata)?;
             if !message.requested_capabilities.allows_role(message.role) {
                 return Err(ValidationError::CapabilityDenied);
             }
@@ -610,6 +620,106 @@ fn validate_event(event: &BridgeEvent) -> Result<(), ValidationError> {
     }
 }
 
+fn validate_client_metadata(metadata: &ClientMetadata) -> Result<(), ValidationError> {
+    if let Some(label) = &metadata.label {
+        validate_text(label, MAX_CLIENT_LABEL_BYTES)?;
+    }
+    if let Some(provenance) = &metadata.provenance {
+        validate_provenance_metadata(provenance)?;
+    }
+    Ok(())
+}
+
+fn validate_provenance_metadata(provenance: &ProvenanceMetadata) -> Result<(), ValidationError> {
+    if let Some(repository_url) = &provenance.repository_url {
+        validate_provenance_url(repository_url)?;
+    }
+    if let Some(issue_or_pr_url) = &provenance.issue_or_pr_url {
+        validate_provenance_url(issue_or_pr_url)?;
+    }
+    if let Some(request_id) = &provenance.request_id {
+        validate_provenance_token(request_id, MAX_PROVENANCE_ID_BYTES)?;
+    }
+    if let Some(trace_id) = &provenance.trace_id {
+        validate_provenance_token(trace_id, MAX_PROVENANCE_ID_BYTES)?;
+    }
+    if let Some(environment_label) = &provenance.environment_label {
+        validate_provenance_token(environment_label, MAX_PROVENANCE_ENVIRONMENT_LABEL_BYTES)?;
+    }
+    Ok(())
+}
+
+fn validate_provenance_url(url: &str) -> Result<(), ValidationError> {
+    validate_text(url, MAX_PROVENANCE_URL_BYTES)?;
+    let parsed = Url::parse(url).map_err(|_| ValidationError::InvalidProvenance)?;
+    if parsed.scheme() != "https" {
+        return Err(ValidationError::InvalidProvenance);
+    }
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(ValidationError::InvalidProvenance);
+    }
+    if parsed.port().is_some() || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ValidationError::InvalidProvenance);
+    }
+    let Some(host) = parsed.host() else {
+        return Err(ValidationError::InvalidProvenance);
+    };
+    match host {
+        Host::Domain(domain) if domain.eq_ignore_ascii_case("localhost") => {
+            return Err(ValidationError::InvalidProvenance);
+        }
+        Host::Ipv4(address) if is_private_provenance_ip(IpAddr::V4(address)) => {
+            return Err(ValidationError::InvalidProvenance);
+        }
+        Host::Ipv6(address) if is_private_provenance_ip(IpAddr::V6(address)) => {
+            return Err(ValidationError::InvalidProvenance);
+        }
+        Host::Domain(_) | Host::Ipv4(_) | Host::Ipv6(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_provenance_token(token: &str, limit: usize) -> Result<(), ValidationError> {
+    validate_text(token, limit)?;
+    if token.is_empty()
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+    {
+        return Err(ValidationError::InvalidProvenance);
+    }
+    Ok(())
+}
+
+fn is_private_provenance_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_private_provenance_ipv4(address),
+        IpAddr::V6(address) => is_private_provenance_ipv6(address),
+    }
+}
+
+fn is_private_provenance_ipv4(address: Ipv4Addr) -> bool {
+    address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_broadcast()
+        || address.is_documentation()
+        || address.is_unspecified()
+}
+
+fn is_private_provenance_ipv6(address: Ipv6Addr) -> bool {
+    let first_segment = address.segments()[0];
+    let is_unique_local = (first_segment & 0xfe00) == 0xfc00;
+    let is_unicast_link_local = (first_segment & 0xffc0) == 0xfe80;
+    address.is_loopback()
+        || address.is_unspecified()
+        || is_unique_local
+        || is_unicast_link_local
+        || address
+            .to_ipv4_mapped()
+            .is_some_and(is_private_provenance_ipv4)
+}
+
 fn validate_auth(auth: &AuthProof) -> Result<(), ValidationError> {
     match auth {
         AuthProof::LocalSecret { secret } if secret.is_empty() => {
@@ -680,6 +790,7 @@ pub enum ValidationError {
     CapabilityDenied,
     InvalidEndpoint,
     InvalidDimensions,
+    InvalidProvenance,
     PayloadTooLarge { limit: usize, actual: usize },
     TimeoutTooLarge { limit_ms: u64, actual_ms: u64 },
 }
@@ -919,6 +1030,188 @@ mod tests {
         });
 
         assert_eq!(validate_payload(&hello), Err(ValidationError::AuthRequired));
+    }
+
+    #[test]
+    fn hello_accepts_bounded_generic_provenance() {
+        let hello = BridgePayload::Hello(HelloMessage {
+            client_id: "client-1".to_string(),
+            role: ClientRole::Producer,
+            auth: AuthProof::LocalSecret {
+                secret: "secret".to_string(),
+            },
+            requested_capabilities: CapabilitySet {
+                publish_events: true,
+                ..CapabilitySet::default()
+            },
+            metadata: ClientMetadata {
+                source_kind: SourceKind::Cli,
+                label: Some("launchplane worker".to_string()),
+                provenance: Some(ProvenanceMetadata {
+                    repository_url: Some("https://github.com/cbusillo/codex-lab".to_string()),
+                    issue_or_pr_url: Some(
+                        "https://github.com/cbusillo/codex-lab/issues/49".to_string(),
+                    ),
+                    request_id: Some("lp-request-1".to_string()),
+                    trace_id: Some("trace-1".to_string()),
+                    environment_label: Some("local-dev".to_string()),
+                }),
+            },
+        });
+
+        assert_eq!(validate_payload(&hello), Ok(()));
+    }
+
+    #[test]
+    fn hello_rejects_unbounded_or_sensitive_provenance_shapes() {
+        let mut hello = HelloMessage {
+            client_id: "client-1".to_string(),
+            role: ClientRole::Producer,
+            auth: AuthProof::LocalSecret {
+                secret: "secret".to_string(),
+            },
+            requested_capabilities: CapabilitySet {
+                publish_events: true,
+                ..CapabilitySet::default()
+            },
+            metadata: ClientMetadata {
+                source_kind: SourceKind::Cli,
+                label: Some("x".repeat(MAX_CLIENT_LABEL_BYTES + 1)),
+                provenance: None,
+            },
+        };
+
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::PayloadTooLarge {
+                limit: MAX_CLIENT_LABEL_BYTES,
+                actual: MAX_CLIENT_LABEL_BYTES + 1,
+            })
+        );
+
+        hello.metadata.label = None;
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: Some("http://github.com/cbusillo/codex-lab".to_string()),
+            issue_or_pr_url: None,
+            request_id: None,
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: Some("https://token@example.com/cbusillo/codex-lab".to_string()),
+            issue_or_pr_url: None,
+            request_id: None,
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: Some("https://github.com/cbusillo/codex-lab?token=secret".to_string()),
+            issue_or_pr_url: None,
+            request_id: None,
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: Some("https://127.0.0.1/cbusillo/codex-lab".to_string()),
+            issue_or_pr_url: None,
+            request_id: None,
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: Some("https://[fc00::1]/cbusillo/codex-lab".to_string()),
+            issue_or_pr_url: None,
+            request_id: None,
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: Some("https://[fe80::1]/cbusillo/codex-lab".to_string()),
+            issue_or_pr_url: None,
+            request_id: None,
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: Some("https://[::ffff:192.168.1.1]/cbusillo/codex-lab".to_string()),
+            issue_or_pr_url: None,
+            request_id: None,
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: None,
+            issue_or_pr_url: Some("file:///Users/cbusillo/private".to_string()),
+            request_id: None,
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: None,
+            issue_or_pr_url: None,
+            request_id: Some("not a token".to_string()),
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello.clone())),
+            Err(ValidationError::InvalidProvenance)
+        );
+
+        hello.metadata.provenance = Some(ProvenanceMetadata {
+            repository_url: None,
+            issue_or_pr_url: None,
+            request_id: Some("x".repeat(MAX_PROVENANCE_ID_BYTES + 1)),
+            trace_id: None,
+            environment_label: None,
+        });
+        assert_eq!(
+            validate_payload(&BridgePayload::Hello(hello)),
+            Err(ValidationError::PayloadTooLarge {
+                limit: MAX_PROVENANCE_ID_BYTES,
+                actual: MAX_PROVENANCE_ID_BYTES + 1,
+            })
+        );
     }
 
     #[test]
