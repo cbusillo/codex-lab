@@ -140,21 +140,25 @@ async fn live_browser_witness_round_trips_events_screenshot_and_control() {
         panic!("expected screenshot response");
     };
     assert_eq!(request_id, "live-browser-shot-1");
-    assert_nonblank_png(&screenshot);
+    let screenshot_bytes = assert_nonblank_png(&screenshot);
 
     let screenshot_event = next_message(&mut events, "screenshot event").await;
     let control_cursor = screenshot_event.sequence;
-    assert!(matches!(
-        screenshot_event.envelope.payload,
-        BridgePayload::Event(EventPublishMessage {
-            event: BridgeEvent::Screenshot(ScreenshotEvent {
+    let BridgePayload::Event(EventPublishMessage {
+        event:
+            BridgeEvent::Screenshot(ScreenshotEvent {
                 screenshot_id,
                 media_type: ScreenshotMediaType::Png,
+                bytes,
                 ..
             }),
-            ..
-        }) if screenshot_id == "live-browser-shot-1"
-    ));
+        ..
+    }) = screenshot_event.envelope.payload
+    else {
+        panic!("expected screenshot event");
+    };
+    assert_eq!(screenshot_id, "live-browser-shot-1");
+    assert_eq!(bytes, screenshot_bytes);
     drop(events);
 
     client
@@ -195,7 +199,7 @@ async fn next_message(
         .unwrap_or_else(|error| panic!("failed waiting for {label}: {error}"))
 }
 
-fn assert_nonblank_png(screenshot: &ScreenshotPayload) {
+fn assert_nonblank_png(screenshot: &ScreenshotPayload) -> usize {
     assert_eq!(screenshot.media_type, ScreenshotMediaType::Png);
     let bytes = BASE64_STANDARD
         .decode(screenshot.data_base64.as_bytes())
@@ -210,6 +214,7 @@ fn assert_nonblank_png(screenshot: &ScreenshotPayload) {
         .next()
         .expect("screenshot has at least one pixel");
     assert!(image.pixels().any(|pixel| pixel != first));
+    bytes.len()
 }
 
 fn descriptor_from_path(path: &std::path::Path) -> BridgeDescriptor {
