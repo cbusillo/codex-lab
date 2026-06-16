@@ -1484,7 +1484,9 @@ fn validation_http_error(error: ValidationError) -> (StatusCode, ErrorMessage) {
                 ),
             },
         ),
-        ValidationError::InvalidEndpoint | ValidationError::InvalidDimensions => (
+        ValidationError::InvalidEndpoint
+        | ValidationError::InvalidDimensions
+        | ValidationError::InvalidProvenance => (
             StatusCode::BAD_REQUEST,
             ErrorMessage {
                 code: ErrorCode::InvalidPayload,
@@ -1647,6 +1649,7 @@ mod tests {
     use codex_code_bridge_protocol::EventPublishMessage;
     use codex_code_bridge_protocol::HeartbeatMessage;
     use codex_code_bridge_protocol::HelloMessage;
+    use codex_code_bridge_protocol::ProvenanceMetadata;
     use codex_code_bridge_protocol::ScreenshotMediaType;
     use codex_code_bridge_protocol::ScreenshotPayload;
     use codex_code_bridge_protocol::ScreenshotRequestMessage;
@@ -2463,6 +2466,48 @@ mod tests {
             .await
             .expect("own stream response");
         assert_eq!(response.status(), StatusCode::OK);
+        service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_provenance_hello_is_rejected_before_registration() {
+        let service = start_test_service(Duration::from_secs(30), Duration::from_secs(30)).await;
+        let client = Client::new();
+        let envelope = envelope(
+            "hello-producer-1",
+            BridgePayload::Hello(HelloMessage {
+                client_id: "producer-1".to_string(),
+                role: ClientRole::Producer,
+                auth: AuthProof::LocalSecret {
+                    secret: service.handle.auth_secret().to_string(),
+                },
+                requested_capabilities: producer_capabilities(),
+                metadata: ClientMetadata {
+                    source_kind: SourceKind::Cli,
+                    label: Some("launchplane worker".to_string()),
+                    provenance: Some(ProvenanceMetadata {
+                        repository_url: Some("https://127.0.0.1/cbusillo/codex-lab".to_string()),
+                        issue_or_pr_url: None,
+                        request_id: None,
+                        trace_id: None,
+                        environment_label: None,
+                    }),
+                },
+            }),
+        );
+
+        let response = client
+            .post(format!("{}/message", service.handle.endpoint_url()))
+            .bearer_auth(service.handle.auth_secret())
+            .json(&envelope)
+            .send()
+            .await
+            .expect("invalid provenance hello response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let status = service.handle.status().await;
+        assert_eq!(status.connected_producer_count, 0);
+        assert_eq!(status.connected_subscriber_count, 0);
         service.handle.shutdown().await;
     }
 
