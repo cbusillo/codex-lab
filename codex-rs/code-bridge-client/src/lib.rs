@@ -200,12 +200,10 @@ impl CodeBridgeClient {
         session: &CodeBridgeSession,
         last_event_id: u64,
     ) -> Result<CodeBridgeEventStream, CodeBridgeClientError> {
+        let encoded_client_id = urlencoding::encode(&session.client_id);
         let response = self
             .http
-            .get(format!(
-                "{}/events/{}",
-                self.endpoint_url, session.client_id
-            ))
+            .get(format!("{}/events/{encoded_client_id}", self.endpoint_url))
             .bearer_auth(&self.auth_secret)
             .header(CLIENT_SESSION_HEADER, session.session_token.as_str())
             .header("last-event-id", last_event_id.to_string())
@@ -483,6 +481,69 @@ mod tests {
             message.envelope.payload,
             BridgePayload::ControlResponse(ControlResponseMessage { request_id, .. })
                 if request_id == "js-1"
+        ));
+
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn events_encodes_path_like_client_id() {
+        let temp = TempDir::new().expect("temp home");
+        let mut config = BridgeServiceConfig::new(temp.path().to_path_buf());
+        config.stale_client_timeout = Duration::from_secs(30);
+        config.stale_client_sweep_interval = Duration::from_secs(30);
+        let service = codex_code_bridge_service::start(config)
+            .await
+            .expect("start service");
+
+        let client = CodeBridgeClient::from_descriptor_path(service.descriptor_path())
+            .expect("descriptor client");
+        let producer = client
+            .hello(
+                "producer/path like?100%",
+                ClientRole::Producer,
+                CapabilitySet {
+                    publish_events: true,
+                    ..CapabilitySet::default()
+                },
+                metadata("producer"),
+            )
+            .await
+            .expect("producer hello");
+        let subscriber = client
+            .hello(
+                "subscriber/path like?100%",
+                ClientRole::Subscriber,
+                CapabilitySet {
+                    subscribe_events: true,
+                    ..CapabilitySet::default()
+                },
+                metadata("subscriber"),
+            )
+            .await
+            .expect("subscriber hello");
+
+        client
+            .subscribe(
+                &subscriber,
+                SubscriptionFilter {
+                    levels: Vec::new(),
+                    event_kinds: vec![EventKind::Console],
+                    client_ids: vec![producer.client_id.clone()],
+                },
+            )
+            .await
+            .expect("subscribe");
+        client
+            .publish_console(&producer, "event-1", ConsoleLevel::Info, "hello bridge")
+            .await
+            .expect("publish event");
+
+        let mut subscriber_events = client.events(&subscriber, 0).await.expect("events");
+        let message = next_test_message(&mut subscriber_events, "event message").await;
+        assert!(matches!(
+            message.envelope.payload,
+            BridgePayload::Event(EventPublishMessage { event_id, .. }) if event_id == "event-1"
         ));
 
         service.shutdown().await;
