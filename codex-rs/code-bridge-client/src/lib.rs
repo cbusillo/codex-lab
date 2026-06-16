@@ -26,6 +26,7 @@ use std::path::Path;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
+use url::Url;
 
 #[derive(Debug, Error)]
 pub enum CodeBridgeClientError {
@@ -48,6 +49,9 @@ pub enum CodeBridgeClientError {
 
     #[error("unsupported Code Bridge endpoint")]
     UnsupportedEndpoint,
+
+    #[error("invalid Code Bridge endpoint URL: {0}")]
+    InvalidEndpointUrl(#[from] url::ParseError),
 
     #[error("Code Bridge HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
@@ -74,7 +78,7 @@ pub enum CodeBridgeClientError {
 #[derive(Clone)]
 pub struct CodeBridgeClient {
     http: reqwest::Client,
-    endpoint_url: String,
+    endpoint_url: Url,
     auth_secret: String,
 }
 
@@ -86,7 +90,7 @@ impl CodeBridgeClient {
         };
         Ok(Self {
             http: reqwest::Client::new(),
-            endpoint_url: url,
+            endpoint_url: Url::parse(&url)?,
             auth_secret: descriptor.auth_secret,
         })
     }
@@ -106,7 +110,7 @@ impl CodeBridgeClient {
     }
 
     pub fn endpoint_url(&self) -> &str {
-        &self.endpoint_url
+        self.endpoint_url.as_str()
     }
 
     pub async fn hello(
@@ -203,7 +207,7 @@ impl CodeBridgeClient {
         let encoded_client_id = urlencoding::encode(&session.client_id);
         let response = self
             .http
-            .get(format!("{}/events/{encoded_client_id}", self.endpoint_url))
+            .get(self.endpoint_path_with_encoded_tail(&["events"], encoded_client_id.as_ref()))
             .bearer_auth(&self.auth_secret)
             .header(CLIENT_SESSION_HEADER, session.session_token.as_str())
             .header("last-event-id", last_event_id.to_string())
@@ -224,7 +228,7 @@ impl CodeBridgeClient {
     ) -> Result<BridgePayload, CodeBridgeClientError> {
         let mut request = self
             .http
-            .post(format!("{}/message", self.endpoint_url))
+            .post(self.endpoint_path(&["message"]))
             .bearer_auth(&self.auth_secret);
         if let Some(session) = session {
             request = request.header(CLIENT_SESSION_HEADER, session.session_token.as_str());
@@ -234,6 +238,27 @@ impl CodeBridgeClient {
             return Err(CodeBridgeClientError::HttpStatus(response.status()));
         }
         Ok(response.json::<BridgeMessageResponse>().await?.payload)
+    }
+
+    fn endpoint_path(&self, segments: &[&str]) -> Url {
+        let mut url = self.endpoint_url.clone();
+        {
+            let mut path_segments = url
+                .path_segments_mut()
+                .expect("validated loopback HTTP URLs support path segments");
+            path_segments.pop_if_empty();
+            for segment in segments {
+                path_segments.push(segment);
+            }
+        }
+        url
+    }
+
+    fn endpoint_path_with_encoded_tail(&self, segments: &[&str], encoded_tail: &str) -> String {
+        let mut url = self.endpoint_path(segments).to_string();
+        let suffix_start = query_or_fragment_start(&url).unwrap_or(url.len());
+        let suffix = url.split_off(suffix_start);
+        format!("{}/{encoded_tail}{suffix}", url.trim_end_matches('/'))
     }
 }
 
@@ -276,6 +301,10 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn query_or_fragment_start(url: &str) -> Option<usize> {
+    [url.find('?'), url.find('#')].into_iter().flatten().min()
 }
 
 fn session_from_hello_response(
@@ -549,6 +578,54 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[test]
+    fn endpoint_paths_preserve_base_path_and_encode_segments() {
+        let cases = [
+            (
+                "http://127.0.0.1:12345",
+                "http://127.0.0.1:12345/message",
+                "http://127.0.0.1:12345/events/client%2Fpath%20like%3F100%25%2F..%2F.%2F..",
+            ),
+            (
+                "http://127.0.0.1:12345/",
+                "http://127.0.0.1:12345/message",
+                "http://127.0.0.1:12345/events/client%2Fpath%20like%3F100%25%2F..%2F.%2F..",
+            ),
+            (
+                "http://127.0.0.1:12345/bridge",
+                "http://127.0.0.1:12345/bridge/message",
+                "http://127.0.0.1:12345/bridge/events/client%2Fpath%20like%3F100%25%2F..%2F.%2F..",
+            ),
+            (
+                "http://127.0.0.1:12345/bridge/",
+                "http://127.0.0.1:12345/bridge/message",
+                "http://127.0.0.1:12345/bridge/events/client%2Fpath%20like%3F100%25%2F..%2F.%2F..",
+            ),
+            (
+                "http://127.0.0.1:12345/bridge?token=local#ignored",
+                "http://127.0.0.1:12345/bridge/message?token=local#ignored",
+                "http://127.0.0.1:12345/bridge/events/client%2Fpath%20like%3F100%25%2F..%2F.%2F..?token=local#ignored",
+            ),
+            (
+                "http://127.0.0.1:12345/bridge%2Fv1?token=local#ignored",
+                "http://127.0.0.1:12345/bridge%2Fv1/message?token=local#ignored",
+                "http://127.0.0.1:12345/bridge%2Fv1/events/client%2Fpath%20like%3F100%25%2F..%2F.%2F..?token=local#ignored",
+            ),
+        ];
+
+        for (endpoint_url, message_url, events_url) in cases {
+            let client = client_for_endpoint(endpoint_url);
+            assert_eq!(client.endpoint_path(&["message"]).as_str(), message_url);
+            assert_eq!(
+                client.endpoint_path_with_encoded_tail(
+                    &["events"],
+                    urlencoding::encode("client/path like?100%/.././..").as_ref(),
+                ),
+                events_url
+            );
+        }
+    }
+
     fn metadata(label: &str) -> ClientMetadata {
         ClientMetadata {
             source_kind: SourceKind::TestFixture,
@@ -565,5 +642,17 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("timed out waiting for {context}"))
             .unwrap_or_else(|err| panic!("failed to read {context}: {err}"))
+    }
+
+    fn client_for_endpoint(endpoint_url: &str) -> CodeBridgeClient {
+        CodeBridgeClient::from_descriptor(BridgeDescriptor {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            endpoint: BridgeEndpoint::LoopbackHttp {
+                url: endpoint_url.to_string(),
+            },
+            auth_secret: "secret".to_string(),
+            pid: None,
+        })
+        .expect("client from descriptor")
     }
 }
