@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-code-bridge-witness",
         action="store_true",
-        help="Also run the local Code Bridge reconnect/replay witness test.",
+        help="Also run the local Code Bridge browser-app fixture witness test.",
     )
     return parser.parse_args()
 
@@ -215,13 +215,13 @@ def run_rust_tests(codex_lab: Path, env: dict[str, str]) -> None:
     )
 
 
-def run_code_bridge_live_test(codex_lab: Path) -> None:
+def run_code_bridge_browser_fixture_test(codex_lab: Path) -> None:
     bridge_cmd = [
         "cargo",
         "test",
         "-p",
         "codex-code-bridge-client",
-        "descriptor_client_round_trips_events_screenshot_and_control",
+        "browser_fixture_round_trips_nonblank_screenshot_and_control",
     ]
     subprocess.run(bridge_cmd, cwd=codex_lab / "codex-rs", check=True)
 
@@ -237,7 +237,7 @@ def main() -> int:
     if not args.skip_rust_test:
         run_rust_tests(codex_lab, env)
     if args.include_code_bridge_witness:
-        run_code_bridge_live_test(codex_lab)
+        run_code_bridge_browser_fixture_test(codex_lab)
 
     print("agent session contract ok")
     return 0
