@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only validate sibling checkout contracts; do not run the Codex Lab Rust test.",
     )
+    parser.add_argument(
+        "--include-code-bridge-witness",
+        action="store_true",
+        help="Also run the local Code Bridge reconnect/replay witness test.",
+    )
     return parser.parse_args()
 
 
@@ -210,6 +215,17 @@ def run_rust_tests(codex_lab: Path, env: dict[str, str]) -> None:
     )
 
 
+def run_code_bridge_live_test(codex_lab: Path) -> None:
+    bridge_cmd = [
+        "cargo",
+        "test",
+        "-p",
+        "codex-code-bridge-service",
+        "broadcast_event_replay_after_subscriber_reconnect",
+    ]
+    subprocess.run(bridge_cmd, cwd=codex_lab / "codex-rs", check=True)
+
+
 def main() -> int:
     args = parse_args()
     launchplane = require_repo(args.launchplane, "Launchplane")
@@ -220,6 +236,8 @@ def main() -> int:
     verify_discord_blue_routes(discord_blue)
     if not args.skip_rust_test:
         run_rust_tests(codex_lab, env)
+    if args.include_code_bridge_witness:
+        run_code_bridge_live_test(codex_lab)
 
     print("agent session contract ok")
     return 0
