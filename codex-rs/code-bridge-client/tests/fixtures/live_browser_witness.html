@@ -171,6 +171,15 @@
         };
       }
 
+      function decodedBase64ByteLength(dataBase64) {
+        const padding = dataBase64.endsWith("==")
+          ? 2
+          : dataBase64.endsWith("=")
+            ? 1
+            : 0;
+        return Math.floor((dataBase64.length * 3) / 4) - padding;
+      }
+
       async function handleScreenshotRequest(config, body) {
         const screenshot = screenshotPayload();
         await postMessage(config, {
@@ -195,7 +204,7 @@
                 width: screenshot.width,
                 height: screenshot.height,
                 mediaType: screenshot.mediaType,
-                bytes: screenshot.dataBase64.length,
+                bytes: decodedBase64ByteLength(screenshot.dataBase64),
               },
             },
           },
