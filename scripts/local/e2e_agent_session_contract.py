@@ -55,6 +55,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also run the local Code Bridge browser-app fixture witness test.",
     )
+    parser.add_argument(
+        "--include-code-bridge-live-browser-witness",
+        action="store_true",
+        help=(
+            "Also run the ignored Code Bridge live browser witness test; "
+            "this waits for a browser to open the printed local URL."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -226,6 +234,21 @@ def run_code_bridge_browser_fixture_test(codex_lab: Path) -> None:
     subprocess.run(bridge_cmd, cwd=codex_lab / "codex-rs", check=True)
 
 
+def run_code_bridge_live_browser_witness(codex_lab: Path) -> None:
+    bridge_cmd = [
+        "cargo",
+        "test",
+        "-p",
+        "codex-code-bridge-client",
+        "--test",
+        "live_browser_witness",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]
+    subprocess.run(bridge_cmd, cwd=codex_lab / "codex-rs", check=True)
+
+
 def main() -> int:
     args = parse_args()
     launchplane = require_repo(args.launchplane, "Launchplane")
@@ -238,6 +261,8 @@ def main() -> int:
         run_rust_tests(codex_lab, env)
     if args.include_code_bridge_witness:
         run_code_bridge_browser_fixture_test(codex_lab)
+    if args.include_code_bridge_live_browser_witness:
+        run_code_bridge_live_browser_witness(codex_lab)
 
     print("agent session contract ok")
     return 0
