@@ -514,11 +514,16 @@ fn session_from_hello_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use codex_code_bridge_protocol::ErrorCode;
     use codex_code_bridge_protocol::EventKind;
     use codex_code_bridge_protocol::ScreenshotMediaType;
     use codex_code_bridge_protocol::SourceKind;
     use codex_code_bridge_service::BridgeServiceConfig;
+    use image::ImageBuffer;
+    use image::ImageFormat;
+    use image::Rgba;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -886,6 +891,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_fixture_round_trips_nonblank_screenshot_and_control() {
+        // This is a browser-app protocol fixture, not DOM/browser automation. It
+        // proves the local bridge can carry browser-shaped events, a nonblank
+        // screenshot payload, and bounded JavaScript control responses end to end.
+        let temp = TempDir::new().expect("temp home");
+        let mut config = BridgeServiceConfig::new(temp.path().to_path_buf());
+        config.stale_client_timeout = Duration::from_secs(30);
+        config.stale_client_sweep_interval = Duration::from_secs(30);
+        let service = codex_code_bridge_service::start(config)
+            .await
+            .expect("start service");
+
+        let client = CodeBridgeClient::from_descriptor_path(service.descriptor_path())
+            .expect("descriptor client");
+        let browser = client
+            .hello(
+                "browser-fixture-1",
+                ClientRole::Producer,
+                CapabilitySet {
+                    publish_events: true,
+                    provide_screenshot: true,
+                    provide_control: true,
+                    provide_javascript_execution: true,
+                    ..CapabilitySet::default()
+                },
+                ClientMetadata {
+                    source_kind: SourceKind::BrowserApp,
+                    label: Some("browser witness".to_string()),
+                    ..ClientMetadata::default()
+                },
+            )
+            .await
+            .expect("browser hello");
+        let consumer = client
+            .hello(
+                "consumer-1",
+                ClientRole::Subscriber,
+                CapabilitySet {
+                    subscribe_events: true,
+                    request_screenshot: true,
+                    request_control: true,
+                    ..CapabilitySet::default()
+                },
+                metadata("consumer"),
+            )
+            .await
+            .expect("consumer hello");
+
+        client
+            .subscribe(
+                &consumer,
+                SubscriptionFilter {
+                    levels: Vec::new(),
+                    event_kinds: vec![EventKind::Console, EventKind::Pageview],
+                    client_ids: vec![browser.client_id.clone()],
+                },
+            )
+            .await
+            .expect("subscribe");
+        let mut consumer_events = client.events(&consumer, 0).await.expect("consumer events");
+
+        client
+            .publish_pageview(
+                &browser,
+                "pageview-1",
+                PageviewEvent {
+                    url: "http://127.0.0.1/browser-fixture".to_string(),
+                    title: Some("Code Bridge Browser Fixture".to_string()),
+                },
+            )
+            .await
+            .expect("publish pageview");
+        client
+            .publish_console(&browser, "console-1", ConsoleLevel::Info, "fixture ready")
+            .await
+            .expect("publish console");
+
+        assert!(matches!(
+            next_test_message(&mut consumer_events, "pageview event")
+                .await
+                .envelope
+                .payload,
+            BridgePayload::Event(EventPublishMessage {
+                event: BridgeEvent::Pageview(PageviewEvent { url, title }),
+                ..
+            }) if url == "http://127.0.0.1/browser-fixture"
+                && title.as_deref() == Some("Code Bridge Browser Fixture")
+        ));
+        let event_sequence = next_test_message(&mut consumer_events, "console event")
+            .await
+            .sequence;
+        drop(consumer_events);
+
+        client
+            .request_screenshot(
+                &consumer,
+                ScreenshotRequest {
+                    request_id: "browser-shot-1".to_string(),
+                    target_client_id: browser.client_id.clone(),
+                    timeout_ms: 1_000,
+                },
+            )
+            .await
+            .expect("request screenshot");
+        let mut browser_events = client.events(&browser, 0).await.expect("browser events");
+        assert!(matches!(
+            next_test_message(&mut browser_events, "screenshot request")
+                .await
+                .envelope
+                .payload,
+            BridgePayload::ScreenshotRequest(ScreenshotRequestMessage { request_id, .. })
+                if request_id == "browser-shot-1"
+        ));
+
+        let screenshot = browser_fixture_screenshot();
+        assert_nonblank_png(&screenshot);
+        client
+            .respond_screenshot(
+                &browser,
+                ScreenshotResponse {
+                    request_id: "browser-shot-1".to_string(),
+                    status: ControlStatus::Ok,
+                    screenshot: Some(screenshot),
+                    error: None,
+                },
+            )
+            .await
+            .expect("respond screenshot");
+        let mut consumer_events = client
+            .events(&consumer, event_sequence)
+            .await
+            .expect("consumer replay");
+        let response = next_test_message(&mut consumer_events, "screenshot response").await;
+        let BridgePayload::ScreenshotResponse(ScreenshotResponseMessage {
+            request_id,
+            screenshot: Some(screenshot),
+            ..
+        }) = response.envelope.payload
+        else {
+            panic!("expected screenshot response");
+        };
+        assert_eq!(request_id, "browser-shot-1");
+        assert_nonblank_png(&screenshot);
+
+        client
+            .request_control(
+                &consumer,
+                ControlRequest {
+                    request_id: "browser-js-1".to_string(),
+                    target_client_id: browser.client_id.clone(),
+                    command: ControlCommand::ExecuteJavascript {
+                        code: "window.location.href".to_string(),
+                    },
+                    timeout_ms: 1_000,
+                },
+            )
+            .await
+            .expect("request control");
+        assert!(matches!(
+            next_test_message(&mut browser_events, "control request")
+                .await
+                .envelope
+                .payload,
+            BridgePayload::ControlRequest(ControlRequestMessage { request_id, command, .. })
+                if request_id == "browser-js-1"
+                    && matches!(&command, ControlCommand::ExecuteJavascript { code } if code == "window.location.href")
+        ));
+        client
+            .respond_control(
+                &browser,
+                ControlResponse {
+                    request_id: "browser-js-1".to_string(),
+                    status: ControlStatus::Ok,
+                    summary: "http://127.0.0.1/browser-fixture".to_string(),
+                    error: None,
+                },
+            )
+            .await
+            .expect("respond control");
+        assert!(matches!(
+            next_test_message(&mut consumer_events, "control response")
+                .await
+                .envelope
+                .payload,
+            BridgePayload::ControlResponse(ControlResponseMessage { request_id, summary, .. })
+                if request_id == "browser-js-1"
+                    && summary == "http://127.0.0.1/browser-fixture"
+        ));
+
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn events_encodes_path_like_client_id() {
         let temp = TempDir::new().expect("temp home");
         let mut config = BridgeServiceConfig::new(temp.path().to_path_buf());
@@ -1024,5 +1222,39 @@ mod tests {
             pid: None,
         })
         .expect("client from descriptor")
+    }
+
+    fn browser_fixture_screenshot() -> ScreenshotPayload {
+        let image = ImageBuffer::from_fn(4, 3, |x, y| {
+            if x == 0 && y == 0 {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([40 + (x as u8 * 30), 90 + (y as u8 * 20), 180, 255])
+            }
+        });
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode browser fixture screenshot");
+        ScreenshotPayload {
+            width: 4,
+            height: 3,
+            media_type: ScreenshotMediaType::Png,
+            data_base64: BASE64_STANDARD.encode(bytes),
+        }
+    }
+
+    fn assert_nonblank_png(screenshot: &ScreenshotPayload) {
+        assert_eq!(screenshot.media_type, ScreenshotMediaType::Png);
+        let bytes = BASE64_STANDARD
+            .decode(&screenshot.data_base64)
+            .expect("decode screenshot");
+        let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
+            .expect("decode screenshot png")
+            .into_rgba8();
+        assert_eq!(decoded.width(), screenshot.width);
+        assert_eq!(decoded.height(), screenshot.height);
+        let first_pixel = decoded.get_pixel(0, 0);
+        assert!(decoded.pixels().any(|pixel| pixel != first_pixel));
     }
 }
