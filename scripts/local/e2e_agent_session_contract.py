@@ -220,8 +220,8 @@ def run_code_bridge_live_test(codex_lab: Path) -> None:
         "cargo",
         "test",
         "-p",
-        "codex-code-bridge-service",
-        "live_client_witness_round_trips_descriptor_replay_screenshot_and_control",
+        "codex-code-bridge-client",
+        "descriptor_client_round_trips_events_screenshot_and_control",
     ]
     subprocess.run(bridge_cmd, cwd=codex_lab / "codex-rs", check=True)
 

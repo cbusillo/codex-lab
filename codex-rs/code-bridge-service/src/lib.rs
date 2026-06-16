@@ -25,6 +25,7 @@ use codex_code_bridge_protocol::BridgeEnvelope;
 use codex_code_bridge_protocol::BridgeEvent;
 use codex_code_bridge_protocol::BridgeLimits;
 use codex_code_bridge_protocol::BridgePayload;
+use codex_code_bridge_protocol::CLIENT_SESSION_HEADER;
 use codex_code_bridge_protocol::CapabilitySet;
 use codex_code_bridge_protocol::ClientRole;
 use codex_code_bridge_protocol::ControlCommand;
@@ -70,10 +71,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
+pub use codex_code_bridge_protocol::BridgeMessageResponse;
+pub use codex_code_bridge_protocol::BridgeSseMessage;
+
 const DEFAULT_STALE_CLIENT_TIMEOUT: Duration = Duration::from_secs(45);
 const DEFAULT_STALE_CLIENT_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 const EVENT_STREAM_TOUCH_INTERVAL: Duration = Duration::from_secs(10);
-const CLIENT_SESSION_HEADER: &str = "x-code-bridge-client-session";
 const MAX_PENDING_REQUESTS: usize = 256;
 const MAX_RETAINED_DELIVERY_BYTES: usize = 8 * 1024 * 1024;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -977,13 +980,6 @@ enum PendingRequestKind {
     Control,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BridgeSseMessage {
-    pub sequence: u64,
-    pub envelope: BridgeEnvelope,
-}
-
 fn filter_matches(
     filter: &SubscriptionFilter,
     source_client_id: &str,
@@ -1069,12 +1065,6 @@ fn unknown_request_error(request_id: &str) -> BridgePayload {
 
 fn error_payload(code: ErrorCode, message: String) -> BridgePayload {
     BridgePayload::Error(ErrorMessage { code, message })
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BridgeMessageResponse {
-    pub payload: BridgePayload,
 }
 
 async fn readyz_handler() -> StatusCode {

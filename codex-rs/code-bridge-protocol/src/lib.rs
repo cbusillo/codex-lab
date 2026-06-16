@@ -4,6 +4,7 @@ use url::Url;
 
 pub const PROTOCOL_VERSION: &str = "code_bridge.v1";
 pub const DESCRIPTOR_RELATIVE_PATH: &str = "code-bridge/descriptor.json";
+pub const CLIENT_SESSION_HEADER: &str = "x-code-bridge-client-session";
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_SCREENSHOT_MESSAGE_BYTES: usize = MAX_SCREENSHOT_BYTES + MAX_MESSAGE_BYTES;
 pub const MAX_RETAINED_EVENTS: usize = 500;
@@ -30,6 +31,19 @@ pub struct BridgeDescriptor {
     pub endpoint: BridgeEndpoint,
     pub auth_secret: String,
     pub pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeMessageResponse {
+    pub payload: BridgePayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeSseMessage {
+    pub sequence: u64,
+    pub envelope: BridgeEnvelope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
