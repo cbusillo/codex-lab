@@ -34,12 +34,12 @@ class DistributionManifestTest(unittest.TestCase):
                 version="1.2.3",
                 bundle_version="42",
                 commit="abc123",
-                repository="cbusillo/codex",
+                repository="cbusillo/codex-lab",
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
                 release_tag="codex-lab-v1.2.3-lab.42",
-                download_base_url="https://github.com/cbusillo/codex/releases/download/codex-lab-v1.2.3-lab.42/",
+                download_base_url="https://github.com/cbusillo/codex-lab/releases/download/codex-lab-v1.2.3-lab.42/",
                 generated_at="2026-06-07T00:00:00Z",
             )
 
@@ -70,7 +70,7 @@ class DistributionManifestTest(unittest.TestCase):
                     "archiveRoot": "Codex Lab.app",
                     "description": "Canonical app update unit containing the embedded Codex Lab CLI.",
                     "fileName": APP_ZIP,
-                    "downloadUrl": "https://github.com/cbusillo/codex/releases/download/codex-lab-v1.2.3-lab.42/"
+                    "downloadUrl": "https://github.com/cbusillo/codex-lab/releases/download/codex-lab-v1.2.3-lab.42/"
                     + APP_ZIP,
                     "notarized": False,
                     "sha256": sha256_file(app_zip),
@@ -84,7 +84,7 @@ class DistributionManifestTest(unittest.TestCase):
                     "archiveRoot": "bin/codex-lab",
                     "description": "Companion CLI wrapper that resolves an installed or sibling Codex Lab.app.",
                     "fileName": SHIM_ZIP,
-                    "downloadUrl": "https://github.com/cbusillo/codex/releases/download/codex-lab-v1.2.3-lab.42/"
+                    "downloadUrl": "https://github.com/cbusillo/codex-lab/releases/download/codex-lab-v1.2.3-lab.42/"
                     + SHIM_ZIP,
                     "notarized": False,
                     "sha256": sha256_file(shim_zip),
@@ -131,7 +131,7 @@ class DistributionManifestTest(unittest.TestCase):
                 version="1.2.3",
                 bundle_version="42",
                 commit="abc123",
-                repository="cbusillo/codex",
+                repository="cbusillo/codex-lab",
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
@@ -156,7 +156,7 @@ class DistributionManifestTest(unittest.TestCase):
                 version="1.2.3",
                 bundle_version="42",
                 commit="abc123",
-                repository="cbusillo/codex",
+                repository="cbusillo/codex-lab",
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
@@ -183,16 +183,16 @@ class DistributionManifestTest(unittest.TestCase):
                 version="1.2.3",
                 bundle_version="42",
                 commit="abc123",
-                repository="cbusillo/codex",
+                repository="cbusillo/codex-lab",
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
                 release_tag="codex-lab-v1.2.3",
-                download_base_url="https://github.com/cbusillo/codex/releases/download/codex-lab-v1.2.3",
+                download_base_url="https://github.com/cbusillo/codex-lab/releases/download/codex-lab-v1.2.3",
                 generated_at="2026-06-07T00:00:00Z",
             )
             manifest["artifacts"]["appZip"]["downloadUrl"] = (
-                "https://github.com/cbusillo/codex/releases/download/codex-lab-v9.9.9/"
+                "https://github.com/cbusillo/codex-lab/releases/download/codex-lab-v9.9.9/"
                 + APP_ZIP
             )
 
@@ -213,7 +213,7 @@ class DistributionManifestTest(unittest.TestCase):
                 version="1.2.3",
                 bundle_version="42",
                 commit="abc123",
-                repository="cbusillo/codex",
+                repository="cbusillo/codex-lab",
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
@@ -238,7 +238,7 @@ class DistributionManifestTest(unittest.TestCase):
                 version="1.2.3",
                 bundle_version="42",
                 commit="abc123",
-                repository="cbusillo/codex",
+                repository="cbusillo/codex-lab",
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
@@ -267,7 +267,7 @@ class DistributionManifestTest(unittest.TestCase):
                     version="1.2.3",
                     bundle_version="42",
                     commit="abc123",
-                    repository="cbusillo/codex",
+                    repository="cbusillo/codex-lab",
                     workflow="codex-lab-app",
                     run_id="100",
                     run_attempt="2",
@@ -282,7 +282,7 @@ class DistributionManifestTest(unittest.TestCase):
                     version="1.2.3",
                     bundle_version="42",
                     commit="abc123",
-                    repository="cbusillo/codex",
+                    repository="cbusillo/codex-lab",
                     workflow="codex-lab-app",
                     run_id="100",
                     run_attempt="2",
@@ -304,7 +304,7 @@ class DistributionManifestTest(unittest.TestCase):
                 version="1.2.3",
                 bundle_version="42",
                 commit="abc123",
-                repository="cbusillo/codex",
+                repository="cbusillo/codex-lab",
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
@@ -331,7 +331,7 @@ class DistributionManifestTest(unittest.TestCase):
                 version="1.2.3",
                 bundle_version="42",
                 commit="abc123",
-                repository="cbusillo/codex",
+                repository="cbusillo/codex-lab",
                 workflow="codex-lab-app",
                 run_id="100",
                 run_attempt="2",
