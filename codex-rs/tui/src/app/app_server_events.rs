@@ -257,12 +257,37 @@ impl App {
         let Some(pending) = self.pending_auth_profile_login.take() else {
             return;
         };
+        let auth_home =
+            match codex_login::profile_home(&self.config.codex_home, &pending.profile_name) {
+                Ok(auth_home) => auth_home,
+                Err(err) => {
+                    self.chat_widget.add_error_message(format!(
+                        "Logged in, but failed to resolve auth profile {}: {err}",
+                        pending.profile_label
+                    ));
+                    return;
+                }
+            };
+        let (account_id, email) = match codex_login::load_auth_dot_json(
+            &auth_home,
+            self.config.cli_auth_credentials_store_mode,
+        ) {
+            Ok(Some(auth)) => (auth.account_id(), auth.account_email()),
+            Ok(None) => (None, None),
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Logged in, but failed to read auth profile {}: {err}",
+                    pending.profile_label
+                ));
+                return;
+            }
+        };
 
         if let Err(err) = codex_login::record_auth_profile_login(
             &self.config.codex_home,
             &pending.profile_name,
-            /*account_id*/ None,
-            /*email*/ None,
+            account_id,
+            email,
         ) {
             self.chat_widget.add_error_message(format!(
                 "Logged in, but failed to update auth profile {}: {err}",

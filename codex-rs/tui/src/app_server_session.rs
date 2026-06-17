@@ -1124,13 +1124,17 @@ impl AppServerSession {
         self.client.shutdown().await
     }
 
-    pub(crate) async fn replace_client(&mut self, client: AppServerClient) -> std::io::Result<()> {
+    pub(crate) fn into_client(self) -> AppServerClient {
+        self.client
+    }
+
+    pub(crate) fn swap_client(&mut self, client: AppServerClient) -> AppServerClient {
         let old_client = std::mem::replace(&mut self.client, client);
         self.next_request_id = 1;
         self.thread_settings_update_supported = true;
         self.default_model = None;
         self.available_models.clear();
-        old_client.shutdown().await
+        old_client
     }
 
     pub(crate) fn request_handle(&self) -> AppServerRequestHandle {

@@ -261,8 +261,15 @@ pub fn record_auth_profile_login(
     upsert_auth_profile(codex_home, profile_name, |metadata| {
         metadata.last_login_at = Some(now);
         metadata.last_used_at = Some(now);
-        metadata.account_id = account_id;
-        metadata.email = email;
+        if let Some(account_id) = account_id {
+            if metadata.account_id.as_deref() != Some(account_id.as_str()) && email.is_none() {
+                metadata.email = None;
+            }
+            metadata.account_id = Some(account_id);
+        }
+        if let Some(email) = email {
+            metadata.email = Some(email);
+        }
     })
 }
 
@@ -351,6 +358,56 @@ mod tests {
             profiles.profiles["work"].email.as_deref(),
             Some("updated@example.com")
         );
+    }
+
+    #[test]
+    fn record_login_preserves_existing_identity_when_new_values_are_missing() {
+        let temp = TempDir::new().expect("tempdir");
+
+        record_auth_profile_login(
+            temp.path(),
+            "work",
+            Some("account-1".to_string()),
+            Some("work@example.com".to_string()),
+        )
+        .expect("record initial login");
+
+        let updated = record_auth_profile_login(
+            temp.path(),
+            "work",
+            /*account_id*/ None,
+            /*email*/ None,
+        )
+        .expect("record login without metadata");
+
+        assert_eq!(updated.metadata.account_id.as_deref(), Some("account-1"));
+        assert_eq!(updated.metadata.email.as_deref(), Some("work@example.com"));
+        assert!(updated.metadata.last_login_at.is_some());
+        assert!(updated.metadata.last_used_at.is_some());
+    }
+
+    #[test]
+    fn record_login_clears_email_when_account_changes_without_new_email() {
+        let temp = TempDir::new().expect("tempdir");
+
+        record_auth_profile_login(
+            temp.path(),
+            "work",
+            Some("account-1".to_string()),
+            Some("work@example.com".to_string()),
+        )
+        .expect("record initial login");
+
+        let updated = record_auth_profile_login(
+            temp.path(),
+            "work",
+            Some("account-2".to_string()),
+            /*email*/ None,
+        )
+        .expect("record changed account login");
+
+        assert_eq!(updated.metadata.account_id.as_deref(), Some("account-2"));
+        assert!(updated.metadata.email.is_none());
     }
 
     #[cfg(unix)]
