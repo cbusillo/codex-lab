@@ -9,8 +9,36 @@ use crate::app_event::AuthProfileSelection;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
+use codex_cloud_config::cloud_config_bundle_loader_for_storage;
+use codex_config::CloudConfigBundleLoader;
 
 impl App {
+    async fn config_for_auth_profile_switch(
+        &self,
+        auth_home: AbsolutePathBuf,
+        cloud_config_bundle: CloudConfigBundleLoader,
+    ) -> std::io::Result<Config> {
+        ConfigBuilder::default()
+            .cli_overrides(self.cli_kv_overrides.clone())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(self.config.cwd.to_path_buf()),
+                approval_policy: Some(*self.config.permissions.approval_policy.get()),
+                codex_self_exe: self.config.codex_self_exe.clone(),
+                codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
+                main_execve_wrapper_exe: self.config.main_execve_wrapper_exe.clone(),
+                show_raw_agent_reasoning: Some(self.config.show_raw_agent_reasoning),
+                workspace_roots: Some(self.config.workspace_roots.clone()),
+                ..Default::default()
+            })
+            .loader_overrides(self.loader_overrides.clone())
+            .strict_config(self.strict_config)
+            .cloud_config_bundle(cloud_config_bundle)
+            .auth_home(auth_home.to_path_buf())
+            .build()
+            .await
+            .map_err(std::io::Error::other)
+    }
+
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
         let mut thread_ids = self.agent_navigation.tracked_thread_ids();
         for thread_id in self.thread_event_channels.keys().copied() {
@@ -769,12 +797,34 @@ impl App {
             return;
         }
 
-        let mut config = self.fresh_session_config();
-        config.auth_home = match AbsolutePathBuf::from_absolute_path(auth_home) {
+        let auth_home = match AbsolutePathBuf::from_absolute_path(auth_home) {
             Ok(auth_home) => auth_home,
             Err(err) => {
                 self.chat_widget.add_error_message(format!(
                     "Invalid auth profile home for {profile_label}: {err}"
+                ));
+                return;
+            }
+        };
+        let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            self.config.codex_home.to_path_buf(),
+            auth_home.to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.chatgpt_base_url.clone(),
+        )
+        .await;
+        let config = match self
+            .config_for_auth_profile_switch(
+                auth_home.clone(),
+                replacement_cloud_config_bundle.clone(),
+            )
+            .await
+        {
+            Ok(config) => config,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to load config for auth profile {profile_label}: {err}"
                 ));
                 return;
             }
@@ -786,7 +836,7 @@ impl App {
             self.cli_kv_overrides.clone(),
             self.loader_overrides.clone(),
             self.strict_config,
-            self.cloud_config_bundle.clone(),
+            replacement_cloud_config_bundle.clone(),
             self.feedback.clone(),
             /*log_db*/ None,
             self.state_db.clone(),
@@ -803,6 +853,27 @@ impl App {
             }
         };
 
+        let mut replacement_session =
+            AppServerSession::new(replacement_client, app_server.thread_params_mode())
+                .with_remote_cwd_override(app_server.remote_cwd_override().map(PathBuf::from));
+        let started = match replacement_session
+            .start_thread_with_session_start_source(&config, Some(ThreadStartSource::Clear))
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to start auth profile session for {profile_label}: {err}"
+                ));
+                if let Err(shutdown_err) = replacement_session.shutdown().await {
+                    tracing::warn!(
+                        "failed to shut down replacement app server after thread start failure: {shutdown_err}"
+                    );
+                }
+                return;
+            }
+        };
+
         self.shutdown_current_thread(app_server).await;
         let tracked_thread_ids: Vec<ThreadId> =
             self.thread_event_channels.keys().copied().collect();
@@ -812,26 +883,31 @@ impl App {
             }
         }
 
-        if let Err(err) = app_server.replace_client(replacement_client).await {
-            self.chat_widget.add_error_message(format!(
-                "Failed to switch app server to auth profile {profile_label}: {err}"
-            ));
-            return;
+        let old_client = app_server.swap_client(replacement_session.into_client());
+        self.config = config.clone();
+        self.cloud_config_bundle = replacement_cloud_config_bundle;
+        if let Err(err) = old_client.shutdown().await {
+            tracing::warn!(
+                "failed to shut down previous app server after auth profile switch: {err}"
+            );
         }
 
-        let switched = self
-            .start_fresh_session_with_config(
-                tui,
-                app_server,
-                config,
-                Some(ThreadStartSource::Clear),
-                /*initial_user_message*/ None,
-                /*cleanup_current_thread*/ false,
-                "To continue the previous session, run ",
-                "Failed to attach to auth profile session",
-                "Failed to start auth profile session",
+        let switched = match self
+            .replace_chat_widget_with_app_server_thread(
+                tui, app_server, started, /*initial_user_message*/ None,
             )
-            .await;
+            .await
+        {
+            Ok(()) => {
+                tui.frame_requester().schedule_frame();
+                true
+            }
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to attach to auth profile session: {err}"));
+                false
+            }
+        };
         if switched {
             self.chat_widget.add_info_message(
                 format!("Using auth profile {profile_label} for this session."),
