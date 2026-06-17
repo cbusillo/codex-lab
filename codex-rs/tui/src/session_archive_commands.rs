@@ -22,6 +22,7 @@ use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
+use codex_login::profile_home;
 use codex_protocol::ThreadId;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_home_dir::find_codex_home;
@@ -189,6 +190,11 @@ async fn start_app_server_for_archive_command(
         .parse_overrides()
         .map_err(|err| eyre!("failed to parse -c overrides: {err}"))?;
     let codex_home = find_codex_home().wrap_err("failed to find Codex home")?;
+    let auth_home = match cli.auth_profile.as_deref() {
+        Some(profile) => profile_home(codex_home.as_path(), profile)
+            .map_err(|err| eyre!("invalid --auth-profile {profile:?}: {err}"))?,
+        None => codex_home.to_path_buf(),
+    };
 
     let mut launch_loader_overrides = loader_overrides.clone();
     if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
@@ -203,7 +209,7 @@ async fn start_app_server_for_archive_command(
         &cli_kv_overrides,
         &launch_loader_overrides,
         strict_config,
-        cli.bypass_hook_trust,
+        cli.bypass_hook_trust || cli.auth_profile.is_some(),
     );
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
         super::maybe_probe_default_daemon_socket(codex_home.as_path()).await
@@ -263,7 +269,7 @@ async fn start_app_server_for_archive_command(
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
-        codex_home.to_path_buf(),
+        auth_home.clone(),
         /*enable_codex_api_key_env*/ false,
         config_toml.cli_auth_credentials_store.unwrap_or_default(),
         chatgpt_base_url,
@@ -284,6 +290,7 @@ async fn start_app_server_for_archive_command(
     let cwd = cli.cwd.clone();
     let config = ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides.clone())
+        .auth_home(auth_home)
         .harness_overrides(ConfigOverrides {
             model,
             cwd: if app_server_target.uses_remote_workspace() {

@@ -2657,6 +2657,19 @@ mod tests {
     }
 
     #[test]
+    fn archive_inherits_root_auth_profile_flag() {
+        let (_target, interactive, _remote) = finalize_archive_from_args(&[
+            "codex",
+            "--auth-profile",
+            "work",
+            "archive",
+            "session-id",
+        ]);
+
+        assert_eq!(interactive.auth_profile.as_deref(), Some("work"));
+    }
+
+    #[test]
     fn exec_resume_last_accepts_prompt_positional() {
         let cli =
             MultitoolCli::try_parse_from(["codex", "exec", "--json", "resume", "--last", "2+2"])
