@@ -24,7 +24,7 @@ from .layout import build_shim_script
 from .smoke import smoke_check
 
 
-DEFAULT_REPOSITORY = "cbusillo/codex"
+DEFAULT_REPOSITORY = "cbusillo/codex-lab"
 DEFAULT_APP_DIR = Path.home() / "Applications" / "Codex Lab.app"
 DEFAULT_SHIM_DIR = Path.home() / ".local" / "bin"
 DEFAULT_STATE_PATH = (

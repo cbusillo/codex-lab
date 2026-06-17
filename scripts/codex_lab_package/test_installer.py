@@ -787,7 +787,7 @@ class CodexLabInstallerTest(unittest.TestCase):
             artifacts["appZip"]["downloadUrl"] = artifacts["appZip"][
                 "downloadUrl"
             ].replace(
-                "cbusillo/codex",
+                "cbusillo/codex-lab",
                 "evil/example",
             )
             release.manifest = manifest
@@ -1187,7 +1187,7 @@ def build_test_release(
         version=version,
         bundle_version=bundle_version,
         commit=commit,
-        repository="cbusillo/codex",
+        repository="cbusillo/codex-lab",
         workflow="codex-lab-release",
         run_id="100",
         run_attempt="1",
