@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_event::AuthProfileSelection;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use pretty_assertions::assert_eq;
 use serial_test::serial;
@@ -113,6 +114,44 @@ async fn service_tier_commands_lowercase_catalog_names() {
             name: "fast".to_string(),
             description: expected_description,
         }]
+    );
+}
+
+#[tokio::test]
+async fn login_slash_command_opens_profile_picker() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    codex_login::record_auth_profile_login(
+        &chat.config.codex_home,
+        "work",
+        Some("account-1".to_string()),
+        Some("me@example.com".to_string()),
+    )
+    .expect("record profile login");
+
+    chat.dispatch_command(SlashCommand::Login);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Choose Login"));
+    assert!(popup.contains("default"));
+    assert!(popup.contains("work"));
+    assert!(popup.contains("me@example.com"));
+    assert!(popup.contains("Add login..."));
+    assert!(popup.contains("codex-lab login --profile <name>"));
+}
+
+#[tokio::test]
+async fn login_slash_command_with_profile_switches_session_profile() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    codex_login::record_auth_profile_login(&chat.config.codex_home, "work", None, None)
+        .expect("record profile login");
+
+    chat.dispatch_command_with_args(SlashCommand::Login, "work".to_string(), Vec::new());
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAuthProfile {
+            selection: AuthProfileSelection::Named { profile_name },
+        }) if profile_name == "work"
     );
 }
 

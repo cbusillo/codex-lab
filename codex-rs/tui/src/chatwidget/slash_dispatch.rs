@@ -7,6 +7,7 @@
 
 use super::goal_validation::GoalObjectiveValidationSource;
 use super::*;
+use crate::app_event::AuthProfileSelection;
 use crate::app_event::ThreadGoalSetMode;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
@@ -34,9 +35,111 @@ const SIDE_STARTING_CONTEXT_LABEL: &str = "Side starting...";
 const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
+const LOGIN_USAGE: &str = "Usage: /login [default|<profile>]";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 
 impl ChatWidget {
+    fn open_login_profile_picker(&mut self) {
+        let profiles = match codex_login::list_auth_profiles(&self.config.codex_home) {
+            Ok(profiles) => profiles,
+            Err(err) => {
+                self.add_error_message(format!("Failed to list auth profiles: {err}"));
+                return;
+            }
+        };
+
+        let current_auth_home = self.config.auth_home.to_path_buf();
+        let default_auth_home = self.config.codex_home.to_path_buf();
+        let codex_home = self.config.codex_home.to_path_buf();
+        let mut items = Vec::with_capacity(profiles.len() + 2);
+        items.push(SelectionItem {
+            name: "default".to_string(),
+            description: Some("Use the default Codex Lab login".to_string()),
+            is_current: current_auth_home == default_auth_home,
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::SwitchAuthProfile {
+                    selection: AuthProfileSelection::Default,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        for profile in profiles {
+            let name = profile.name.clone();
+            let description = login_profile_description(&profile);
+            let is_current = current_auth_home == profile.home;
+            items.push(SelectionItem {
+                name: name.clone(),
+                description: Some(description),
+                is_current,
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::SwitchAuthProfile {
+                        selection: AuthProfileSelection::Named {
+                            profile_name: name.clone(),
+                        },
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        items.push(SelectionItem {
+            name: "Add login...".to_string(),
+            description: Some("Run `codex-lab login --profile <name>` from your shell".to_string()),
+            is_disabled: true,
+            disabled_reason: Some(format!(
+                "Use `codex-lab login --profile <name>`; profiles are stored under {}",
+                codex_home.display()
+            )),
+            ..Default::default()
+        });
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Choose Login".to_string()),
+            subtitle: Some("Start a fresh session with the selected account.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search logins".to_string()),
+            ..Default::default()
+        });
+        self.request_redraw();
+    }
+
+    fn handle_login_command_args(&mut self, trimmed: &str) {
+        if trimmed.eq_ignore_ascii_case("default") {
+            self.app_event_tx.send(AppEvent::SwitchAuthProfile {
+                selection: AuthProfileSelection::Default,
+            });
+            return;
+        }
+
+        let profiles = match codex_login::list_auth_profiles(&self.config.codex_home) {
+            Ok(profiles) => profiles,
+            Err(err) => {
+                self.add_error_message(format!("Failed to list auth profiles: {err}"));
+                return;
+            }
+        };
+        if profiles.iter().any(|profile| profile.name == trimmed) {
+            self.app_event_tx.send(AppEvent::SwitchAuthProfile {
+                selection: AuthProfileSelection::Named {
+                    profile_name: trimmed.to_string(),
+                },
+            });
+        } else {
+            self.add_error_message(format!("Unknown auth profile `{trimmed}`."));
+            self.add_info_message(
+                LOGIN_USAGE.to_string(),
+                Some(format!(
+                    "Add it first with `codex-lab login --profile {trimmed}`."
+                )),
+            );
+        }
+    }
+
     /// Dispatch a bare slash command and record its staged local-history entry.
     ///
     /// The composer stages history before returning `InputResult::Command`; this wrapper commits
@@ -463,6 +566,9 @@ impl ChatWidget {
             SlashCommand::Plugins => {
                 self.add_plugins_output();
             }
+            SlashCommand::Login => {
+                self.open_login_profile_picker();
+            }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
                     self.add_info_message(
@@ -631,6 +737,9 @@ impl ChatWidget {
                 "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
                 _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
             },
+            SlashCommand::Login if !trimmed.is_empty() => {
+                self.handle_login_command_args(trimmed);
+            }
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {
                 "" => self.open_keymap_picker(),
                 "debug" => {
@@ -1016,6 +1125,7 @@ impl ChatWidget {
             | SlashCommand::Quit
             | SlashCommand::Exit
             | SlashCommand::Logout
+            | SlashCommand::Login
             | SlashCommand::Mention
             | SlashCommand::Skills
             | SlashCommand::Hooks
@@ -1074,5 +1184,20 @@ impl ChatWidget {
         ));
         self.bottom_pane.drain_pending_submission_state();
         false
+    }
+}
+
+fn login_profile_description(profile: &codex_login::AuthProfileEntry) -> String {
+    let mut details = Vec::new();
+    if let Some(email) = profile.metadata.email.as_deref() {
+        details.push(email.to_string());
+    }
+    if let Some(last_login_at) = profile.metadata.last_login_at.as_ref() {
+        details.push(format!("last login {last_login_at}"));
+    }
+    if details.is_empty() {
+        "Use this saved auth profile".to_string()
+    } else {
+        details.join(" - ")
     }
 }

@@ -321,6 +321,9 @@ impl App {
                         .add_error_message(format!("Logout failed: {err}"));
                 }
             },
+            AppEvent::SwitchAuthProfile { selection } => {
+                self.switch_auth_profile(tui, app_server, selection).await;
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }

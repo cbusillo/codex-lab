@@ -168,6 +168,10 @@ impl AccountRequestProcessor {
         }
     }
 
+    fn auth_storage_home(config: &Config) -> &Path {
+        config.auth_home.as_path()
+    }
+
     async fn maybe_refresh_remote_installed_plugins_cache_for_current_config(
         config_manager: &ConfigManager,
         thread_manager: &Arc<ThreadManager>,
@@ -283,7 +287,7 @@ impl AccountRequestProcessor {
         }
 
         match login_with_api_key(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             &params.api_key,
             self.config.cli_auth_credentials_store_mode,
         ) {
@@ -330,7 +334,7 @@ impl AccountRequestProcessor {
             open_browser: false,
             codex_streamlined_login,
             ..LoginServerOptions::new(
-                config.codex_home.to_path_buf(),
+                Self::auth_storage_home(config).to_path_buf(),
                 CLIENT_ID.to_string(),
                 config.forced_chatgpt_workspace_id.clone(),
                 config.cli_auth_credentials_store_mode,
@@ -588,7 +592,7 @@ impl AccountRequestProcessor {
         }
 
         login_with_chatgpt_auth_tokens(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             &access_token,
             &chatgpt_account_id,
             chatgpt_plan_type.as_deref(),
@@ -1016,7 +1020,26 @@ mod tests {
     use super::*;
     use codex_backend_client::TokenUsageProfileDailyBucket;
     use codex_backend_client::TokenUsageProfileStats;
+    use codex_core::config::ConfigBuilder;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn account_login_storage_uses_auth_home() {
+        let codex_home = TempDir::new().expect("codex home");
+        let auth_home = TempDir::new().expect("auth home");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .auth_home(auth_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("build config");
+
+        assert_eq!(
+            AccountRequestProcessor::auth_storage_home(&config),
+            auth_home.path()
+        );
+    }
 
     #[test]
     fn account_token_usage_response_maps_profile_stats_and_daily_buckets() {

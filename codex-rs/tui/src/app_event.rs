@@ -75,6 +75,12 @@ pub(crate) struct HistoryLookupResponse {
     pub(crate) entry: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AuthProfileSelection {
+    Default,
+    Named { profile_name: String },
+}
+
 impl RealtimeAudioDeviceKind {
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -233,6 +239,11 @@ pub(crate) enum AppEvent {
 
     /// Request app-server account logout, then exit after it succeeds.
     Logout,
+
+    /// Start a fresh session using the selected auth profile for credential storage.
+    SwitchAuthProfile {
+        selection: AuthProfileSelection,
+    },
 
     /// Request to exit the application due to a fatal error.
     #[allow(dead_code)]

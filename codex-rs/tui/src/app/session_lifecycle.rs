@@ -5,6 +5,7 @@
 //! cache used for multi-agent navigation.
 
 use super::*;
+use crate::app_event::AuthProfileSelection;
 
 impl App {
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
@@ -473,20 +474,49 @@ impl App {
         // until the new session is configured and any replayed turns have been rendered.
         self.refresh_in_memory_config_from_disk_best_effort("starting a new thread")
             .await;
-        let model = self.chat_widget.current_model().to_string();
         let config = self.fresh_session_config();
+        self.start_fresh_session_with_config(
+            tui,
+            app_server,
+            config,
+            session_start_source,
+            initial_user_message,
+            /*cleanup_current_thread*/ true,
+            "To continue this session, run ",
+            "Failed to attach to fresh app-server thread",
+            "Failed to start a fresh session through the app server",
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_fresh_session_with_config(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        config: Config,
+        session_start_source: Option<ThreadStartSource>,
+        initial_user_message: Option<crate::chatwidget::UserMessage>,
+        cleanup_current_thread: bool,
+        resume_hint_prefix: &'static str,
+        attach_error_prefix: &'static str,
+        start_error_prefix: &'static str,
+    ) -> bool {
+        let model = self.chat_widget.current_model().to_string();
         let summary = session_summary(
             self.chat_widget.token_usage(),
             self.chat_widget.thread_id(),
             self.chat_widget.thread_name(),
             self.chat_widget.rollout_path().as_deref(),
         );
-        self.shutdown_current_thread(app_server).await;
-        let tracked_thread_ids: Vec<ThreadId> =
-            self.thread_event_channels.keys().copied().collect();
-        for thread_id in tracked_thread_ids {
-            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
-                tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
+        if cleanup_current_thread {
+            self.shutdown_current_thread(app_server).await;
+            let tracked_thread_ids: Vec<ThreadId> =
+                self.thread_event_channels.keys().copied().collect();
+            for thread_id in tracked_thread_ids {
+                if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
+                    tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
+                }
             }
         }
         self.config = config.clone();
@@ -495,7 +525,7 @@ impl App {
             .await
         {
             Ok(started) => {
-                if let Err(err) = self
+                match self
                     .replace_chat_widget_with_app_server_thread(
                         tui,
                         app_server,
@@ -504,29 +534,37 @@ impl App {
                     )
                     .await
                 {
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to attach to fresh app-server thread: {err}"
-                    ));
-                } else if let Some(summary) = summary {
-                    let mut lines: Vec<Line<'static>> = Vec::new();
-                    if let Some(usage_line) = summary.usage_line {
-                        lines.push(usage_line.into());
+                    Ok(()) => {
+                        if let Some(summary) = summary {
+                            let mut lines: Vec<Line<'static>> = Vec::new();
+                            if let Some(usage_line) = summary.usage_line {
+                                lines.push(usage_line.into());
+                            }
+                            if let Some(command) = summary.resume_hint {
+                                let spans = vec![resume_hint_prefix.into(), command.cyan()];
+                                lines.push(spans.into());
+                            }
+                            self.chat_widget.add_plain_history_lines(lines);
+                        }
+                        tui.frame_requester().schedule_frame();
+                        true
                     }
-                    if let Some(command) = summary.resume_hint {
-                        let spans = vec!["To continue this session, run ".into(), command.cyan()];
-                        lines.push(spans.into());
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("{attach_error_prefix}: {err}"));
+                        tui.frame_requester().schedule_frame();
+                        false
                     }
-                    self.chat_widget.add_plain_history_lines(lines);
                 }
             }
             Err(err) => {
-                self.chat_widget.add_error_message(format!(
-                    "Failed to start a fresh session through the app server: {err}"
-                ));
+                self.chat_widget
+                    .add_error_message(format!("{start_error_prefix}: {err}"));
                 self.config.model = Some(model);
+                tui.frame_requester().schedule_frame();
+                false
             }
         }
-        tui.frame_requester().schedule_frame();
     }
 
     pub(super) async fn replace_chat_widget_with_app_server_thread(
@@ -659,6 +697,123 @@ impl App {
         config.service_tier = self.chat_widget.configured_service_tier();
         config
     }
+
+    pub(super) async fn switch_auth_profile(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        selection: AuthProfileSelection,
+    ) {
+        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            self.chat_widget.add_error_message(
+                "/login profile switching requires an embedded Codex Lab app server.".to_string(),
+            );
+            self.chat_widget.add_info_message(
+                "Restart Codex Lab with `--auth-profile <name>` to use a profile with a shared or remote app server."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
+        let (auth_home, profile_label) = match selection {
+            AuthProfileSelection::Default => {
+                (self.config.codex_home.to_path_buf(), "default".to_string())
+            }
+            AuthProfileSelection::Named { profile_name } => {
+                let auth_home =
+                    match codex_login::profile_home(&self.config.codex_home, &profile_name) {
+                        Ok(auth_home) => auth_home,
+                        Err(err) => {
+                            self.chat_widget.add_error_message(format!(
+                                "Invalid auth profile {profile_name:?}: {err}"
+                            ));
+                            return;
+                        }
+                    };
+                (auth_home, format!("`{profile_name}`"))
+            }
+        };
+
+        if auth_home == self.config.auth_home.as_path() {
+            self.chat_widget.add_info_message(
+                format!("Auth profile {profile_label} is already active."),
+                /*hint*/ None,
+            );
+            return;
+        }
+
+        let mut config = self.fresh_session_config();
+        config.auth_home = match AbsolutePathBuf::from_absolute_path(auth_home) {
+            Ok(auth_home) => auth_home,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Invalid auth profile home for {profile_label}: {err}"
+                ));
+                return;
+            }
+        };
+
+        let replacement_client = match crate::start_embedded_app_server(
+            self.arg0_paths.clone(),
+            config.clone(),
+            self.cli_kv_overrides.clone(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            self.cloud_config_bundle.clone(),
+            self.feedback.clone(),
+            /*log_db*/ None,
+            self.state_db.clone(),
+            self.environment_manager.clone(),
+        )
+        .await
+        {
+            Ok(client) => AppServerClient::InProcess(client),
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to start app server for auth profile {profile_label}: {err}"
+                ));
+                return;
+            }
+        };
+
+        self.shutdown_current_thread(app_server).await;
+        let tracked_thread_ids: Vec<ThreadId> =
+            self.thread_event_channels.keys().copied().collect();
+        for thread_id in tracked_thread_ids {
+            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
+                tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
+            }
+        }
+
+        if let Err(err) = app_server.replace_client(replacement_client).await {
+            self.chat_widget.add_error_message(format!(
+                "Failed to switch app server to auth profile {profile_label}: {err}"
+            ));
+            return;
+        }
+
+        let switched = self
+            .start_fresh_session_with_config(
+                tui,
+                app_server,
+                config,
+                Some(ThreadStartSource::Clear),
+                /*initial_user_message*/ None,
+                /*cleanup_current_thread*/ false,
+                "To continue the previous session, run ",
+                "Failed to attach to auth profile session",
+                "Failed to start auth profile session",
+            )
+            .await;
+        if switched {
+            self.chat_widget.add_info_message(
+                format!("Using auth profile {profile_label} for this session."),
+                Some("The previous session remains resumable.".to_string()),
+            );
+        }
+    }
+
     pub(super) async fn resume_target_session(
         &mut self,
         tui: &mut tui::Tui,
