@@ -456,6 +456,7 @@ pub async fn run_main_with_transport_options(
     .map_err(std::io::Error::other)?;
     let config_manager = ConfigManager::new(
         codex_home.to_path_buf(),
+        codex_home.to_path_buf(),
         cli_kv_overrides.clone(),
         loader_overrides,
         strict_config,
