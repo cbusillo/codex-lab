@@ -27,6 +27,7 @@ use tracing::warn;
 #[derive(Clone)]
 pub(crate) struct ConfigManager {
     codex_home: PathBuf,
+    auth_home: PathBuf,
     cli_overrides: Arc<RwLock<Vec<(String, TomlValue)>>>,
     runtime_feature_enablement: Arc<RwLock<BTreeMap<String, bool>>>,
     loader_overrides: LoaderOverrides,
@@ -39,6 +40,7 @@ pub(crate) struct ConfigManager {
 impl ConfigManager {
     pub(crate) fn new(
         codex_home: PathBuf,
+        auth_home: PathBuf,
         cli_overrides: Vec<(String, TomlValue)>,
         loader_overrides: LoaderOverrides,
         strict_config: bool,
@@ -48,6 +50,7 @@ impl ConfigManager {
     ) -> Self {
         Self {
             codex_home,
+            auth_home,
             cli_overrides: Arc::new(RwLock::new(cli_overrides)),
             runtime_feature_enablement: Arc::new(RwLock::new(BTreeMap::new())),
             loader_overrides,
@@ -168,6 +171,7 @@ impl ConfigManager {
             self.current_cli_overrides(),
         )
         .await?;
+        config.auth_home = AbsolutePathBuf::from_absolute_path(self.auth_home.clone())?;
         if self.loader_overrides.user_config_path.is_some()
             || self.loader_overrides.user_config_profile.is_some()
         {
@@ -240,6 +244,7 @@ impl ConfigManager {
 
         let mut config = codex_core::config::ConfigBuilder::default()
             .codex_home(self.codex_home.clone())
+            .auth_home(self.auth_home.clone())
             .cli_overrides(merged_cli_overrides)
             .loader_overrides(self.loader_overrides.clone())
             .strict_config(self.strict_config)
@@ -306,6 +311,7 @@ impl ConfigManager {
         cloud_config_bundle: CloudConfigBundleLoader,
     ) -> Self {
         Self::new(
+            codex_home.clone(),
             codex_home,
             cli_overrides,
             loader_overrides,

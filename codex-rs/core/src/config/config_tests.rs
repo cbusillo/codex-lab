@@ -209,6 +209,22 @@ async fn load_config_normalizes_relative_cwd_override() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn config_builder_auth_home_overrides_auth_storage_only() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let auth_home = codex_home.path().join("auth-profiles").join("work");
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .auth_home(auth_home.clone())
+        .build()
+        .await?;
+
+    assert_eq!(config.codex_home, codex_home.abs());
+    assert_eq!(config.auth_home.to_path_buf(), auth_home);
+    assert_eq!(AuthManagerConfig::codex_home(&config), auth_home);
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_loads_global_agents_instructions() -> std::io::Result<()> {
     let codex_home = tempdir()?;
     let global_agents_path = codex_home.abs().join(DEFAULT_AGENTS_MD_FILENAME);

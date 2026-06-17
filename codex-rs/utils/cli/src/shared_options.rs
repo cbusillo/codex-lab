@@ -34,6 +34,10 @@ pub struct SharedCliOptions {
     #[arg(long = "profile", short = 'p')]
     pub config_profile_v2: Option<ProfileV2Name>,
 
+    /// Use credentials from $CODEX_LAB_HOME/auth-profiles/<name>/auth.json for this invocation.
+    #[arg(long = "auth-profile", value_name = "NAME")]
+    pub auth_profile: Option<String>,
+
     /// Select the sandbox policy to use when executing model-generated shell
     /// commands.
     #[arg(long = "sandbox", short = 's')]
@@ -72,6 +76,7 @@ impl SharedCliOptions {
             oss,
             oss_provider,
             config_profile_v2,
+            auth_profile,
             sandbox_mode,
             dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust,
@@ -84,6 +89,7 @@ impl SharedCliOptions {
             oss: root_oss,
             oss_provider: root_oss_provider,
             config_profile_v2: root_config_profile_v2,
+            auth_profile: root_auth_profile,
             sandbox_mode: root_sandbox_mode,
             dangerously_bypass_approvals_and_sandbox: root_dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust: root_bypass_hook_trust,
@@ -102,6 +108,9 @@ impl SharedCliOptions {
         }
         if config_profile_v2.is_none() {
             config_profile_v2.clone_from(root_config_profile_v2);
+        }
+        if auth_profile.is_none() {
+            auth_profile.clone_from(root_auth_profile);
         }
         if sandbox_mode.is_none() {
             *sandbox_mode = *root_sandbox_mode;
@@ -137,6 +146,7 @@ impl SharedCliOptions {
             oss,
             oss_provider,
             config_profile_v2,
+            auth_profile,
             sandbox_mode,
             dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust,
@@ -155,6 +165,9 @@ impl SharedCliOptions {
         }
         if let Some(config_profile_v2) = config_profile_v2 {
             self.config_profile_v2 = Some(config_profile_v2);
+        }
+        if let Some(auth_profile) = auth_profile {
+            self.auth_profile = Some(auth_profile);
         }
         if subcommand_selected_sandbox_mode {
             self.sandbox_mode = sandbox_mode;

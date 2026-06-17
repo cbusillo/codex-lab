@@ -263,6 +263,7 @@ async fn start_app_server_for_archive_command(
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
+        codex_home.to_path_buf(),
         /*enable_codex_api_key_env*/ false,
         config_toml.cli_auth_credentials_store.unwrap_or_default(),
         chatgpt_base_url,

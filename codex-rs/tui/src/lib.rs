@@ -49,6 +49,7 @@ use codex_login::AuthConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::enforce_login_restrictions;
+use codex_login::profile_home;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::SandboxMode;
@@ -960,11 +961,21 @@ pub async fn run_main(
         launch_loader_overrides.user_config_path = Some(user_config_path);
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
+    let auth_home = match cli.auth_profile.as_deref() {
+        Some(profile) => match profile_home(&codex_home, profile) {
+            Ok(auth_home) => auth_home,
+            Err(err) => {
+                eprintln!("invalid --auth-profile {profile:?}: {err}");
+                std::process::exit(1);
+            }
+        },
+        None => codex_home.clone(),
+    };
     let reuse_implicit_local_daemon = can_reuse_implicit_local_daemon(
         &cli_kv_overrides,
         &launch_loader_overrides,
         strict_config,
-        cli.bypass_hook_trust,
+        cli.bypass_hook_trust || cli.auth_profile.is_some(),
     );
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
         maybe_probe_default_daemon_socket(&codex_home).await
@@ -1019,6 +1030,7 @@ pub async fn run_main(
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
+        auth_home.clone(),
         /*enable_codex_api_key_env*/ false,
         bootstrap_config_toml
             .cli_auth_credentials_store
@@ -1112,6 +1124,7 @@ pub async fn run_main(
         loader_overrides.clone(),
         cloud_config_bundle.clone(),
         strict_config,
+        Some(auth_home.clone()),
     )
     .await;
 
@@ -1168,6 +1181,7 @@ pub async fn run_main(
                         loader_overrides.clone(),
                         cloud_config_bundle.clone(),
                         strict_config,
+                        Some(auth_home.clone()),
                     )
                     .await;
                 }
@@ -1220,7 +1234,7 @@ pub async fn run_main(
     if !app_server_target.uses_remote_workspace() {
         #[allow(clippy::print_stderr)]
         if let Err(err) = enforce_login_restrictions(&AuthConfig {
-            codex_home: config.codex_home.to_path_buf(),
+            codex_home: config.auth_home.to_path_buf(),
             auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
             forced_login_method: config.forced_login_method,
             forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
@@ -1488,6 +1502,7 @@ async fn run_ratatui_app(
         if show_login_screen && !uses_remote_workspace {
             cloud_config_bundle = cloud_config_bundle_loader_for_storage(
                 initial_config.codex_home.to_path_buf(),
+                initial_config.auth_home.to_path_buf(),
                 /*enable_codex_api_key_env*/ false,
                 initial_config.cli_auth_credentials_store_mode,
                 initial_config.chatgpt_base_url.clone(),
@@ -1506,6 +1521,7 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
+                Some(initial_config.auth_home.to_path_buf()),
             )
             .await
         } else {
@@ -1702,6 +1718,7 @@ async fn run_ratatui_app(
         resume_picker::SessionSelection::StartFresh
     ) && (cli.resume_picker || cli.fork_picker);
 
+    let session_auth_home = config.auth_home.to_path_buf();
     let mut config = match &session_selection {
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
             load_config_or_exit_with_fallback_cwd(
@@ -1710,6 +1727,7 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
+                Some(session_auth_home.clone()),
                 fallback_cwd,
             )
             .await
@@ -1721,6 +1739,7 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
+                Some(session_auth_home),
             )
             .await
         }
@@ -1962,6 +1981,7 @@ async fn load_config_or_exit(
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
+    auth_home: Option<PathBuf>,
 ) -> Config {
     load_config_or_exit_with_fallback_cwd(
         cli_kv_overrides,
@@ -1969,6 +1989,7 @@ async fn load_config_or_exit(
         loader_overrides,
         cloud_config_bundle,
         strict_config,
+        auth_home,
         /*fallback_cwd*/ None,
     )
     .await
@@ -1980,19 +2001,21 @@ async fn load_config_or_exit_with_fallback_cwd(
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
+    auth_home: Option<PathBuf>,
     fallback_cwd: Option<PathBuf>,
 ) -> Config {
     #[allow(clippy::print_stderr)]
-    match ConfigBuilder::default()
+    let mut builder = ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides)
         .harness_overrides(overrides)
         .loader_overrides(loader_overrides)
         .strict_config(strict_config)
         .cloud_config_bundle(cloud_config_bundle)
-        .fallback_cwd(fallback_cwd)
-        .build()
-        .await
-    {
+        .fallback_cwd(fallback_cwd);
+    if let Some(auth_home) = auth_home {
+        builder = builder.auth_home(auth_home);
+    }
+    match builder.build().await {
         Ok(config) => config,
         Err(err) => {
             eprintln!("Error loading configuration: {err}");
@@ -2476,6 +2499,16 @@ mod tests {
             /*has_non_replayable_launch_overrides*/ true,
         ));
         Ok(())
+    }
+
+    #[test]
+    fn auth_profile_launch_cannot_reuse_implicit_local_daemon() {
+        assert!(!can_reuse_implicit_local_daemon(
+            &[],
+            &LoaderOverrides::default(),
+            /*strict_config*/ false,
+            /*has_non_replayable_launch_overrides*/ true,
+        ));
     }
 
     #[test]

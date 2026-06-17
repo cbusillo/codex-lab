@@ -213,6 +213,7 @@ mod tests {
         });
         let config_manager = ConfigManager::new(
             temp_dir.path().to_path_buf(),
+            temp_dir.path().to_path_buf(),
             Vec::new(),
             LoaderOverrides::without_managed_config_for_tests(),
             /*strict_config*/ false,

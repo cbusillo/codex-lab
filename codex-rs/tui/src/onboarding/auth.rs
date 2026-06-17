@@ -1035,6 +1035,7 @@ mod tests {
             strict_config: false,
             cloud_config_bundle: cloud_config_bundle_loader_for_storage(
                 codex_home_path.clone(),
+                codex_home_path.clone(),
                 /*enable_codex_api_key_env*/ false,
                 AuthCredentialsStoreMode::File,
                 "https://chatgpt.com/backend-api/".to_string(),

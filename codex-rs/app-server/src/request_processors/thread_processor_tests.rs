@@ -613,6 +613,7 @@ mod thread_processor_behavior_tests {
         };
         let config_manager = ConfigManager::new(
             temp_dir.path().to_path_buf(),
+            temp_dir.path().to_path_buf(),
             Vec::new(),
             LoaderOverrides::default(),
             /*strict_config*/ false,

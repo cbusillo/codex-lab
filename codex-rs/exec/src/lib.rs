@@ -75,6 +75,7 @@ use codex_login::AuthConfig;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
+use codex_login::profile_home;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_otel::set_parent_from_context;
@@ -265,6 +266,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         oss,
         oss_provider,
         config_profile_v2,
+        auth_profile,
         sandbox_mode: sandbox_mode_cli_arg,
         dangerously_bypass_approvals_and_sandbox,
         bypass_hook_trust,
@@ -323,6 +325,11 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let user_config_path = config_profile_v2
         .as_ref()
         .map(|profile_v2| resolve_profile_v2_config_path(&codex_home, profile_v2));
+    let auth_home = match auth_profile.as_deref() {
+        Some(profile) => profile_home(&codex_home, profile)
+            .map_err(|err| anyhow::anyhow!("invalid --auth-profile {profile:?}: {err}"))?,
+        None => codex_home.to_path_buf(),
+    };
     let loader_overrides = LoaderOverrides {
         user_config_path,
         user_config_profile: config_profile_v2,
@@ -347,6 +354,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
+        auth_home.clone(),
         /*enable_codex_api_key_env*/ false,
         bootstrap_config_toml
             .cli_auth_credentials_store
@@ -435,6 +443,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let build_config = |overrides| {
         ConfigBuilder::default()
             .codex_home(codex_home.to_path_buf())
+            .auth_home(auth_home.clone())
             .cli_overrides(cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(loader_overrides.clone())
@@ -464,7 +473,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     set_default_client_residency_requirement(config.enforce_residency.value());
 
     if let Err(err) = enforce_login_restrictions(&AuthConfig {
-        codex_home: config.codex_home.to_path_buf(),
+        codex_home: config.auth_home.to_path_buf(),
         auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
         forced_login_method: config.forced_login_method,
         forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
