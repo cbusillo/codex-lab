@@ -136,7 +136,7 @@ async fn login_slash_command_opens_profile_picker() {
     assert!(popup.contains("work"));
     assert!(popup.contains("me@example.com"));
     assert!(popup.contains("Add login..."));
-    assert!(popup.contains("codex-lab login --profile <name>"));
+    assert!(popup.contains("Create a named login profile"));
 }
 
 #[tokio::test]
@@ -150,8 +150,42 @@ async fn login_slash_command_with_profile_switches_session_profile() {
     assert_matches!(
         rx.try_recv(),
         Ok(AppEvent::SwitchAuthProfile {
-            selection: AuthProfileSelection::Named { profile_name },
-        }) if profile_name == "work"
+            selection: AuthProfileSelection::Named {
+                profile_name,
+                login_after_switch,
+            },
+        }) if profile_name == "work" && !login_after_switch
+    );
+}
+
+#[tokio::test]
+async fn login_slash_command_add_profile_starts_profile_login() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Login, "add work".to_string(), Vec::new());
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAuthProfile {
+            selection: AuthProfileSelection::Named {
+                profile_name,
+                login_after_switch,
+            },
+        }) if profile_name == "work" && login_after_switch
+    );
+}
+
+#[tokio::test]
+async fn login_slash_command_add_rejects_invalid_profile_name() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Login, "add ../work".to_string(), Vec::new());
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events
+            .iter()
+            .all(|event| { !matches!(event, AppEvent::SwitchAuthProfile { .. }) })
     );
 }
 

@@ -6,6 +6,9 @@
 
 use super::*;
 use crate::app_event::AuthProfileSelection;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::LoginAccountParams;
+use codex_app_server_protocol::LoginAccountResponse;
 
 impl App {
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
@@ -704,6 +707,8 @@ impl App {
         app_server: &mut AppServerSession,
         selection: AuthProfileSelection,
     ) {
+        self.pending_auth_profile_login = None;
+
         if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
             self.chat_widget.add_error_message(
                 "/login profile switching requires an embedded Codex Lab app server.".to_string(),
@@ -716,13 +721,18 @@ impl App {
             return;
         }
 
-        let (auth_home, profile_label) = match selection {
-            AuthProfileSelection::Default => {
-                (self.config.codex_home.to_path_buf(), "default".to_string())
-            }
-            AuthProfileSelection::Named { profile_name } => {
+        let (auth_home, profile_name, profile_label) = match selection {
+            AuthProfileSelection::Default => (
+                self.config.codex_home.to_path_buf(),
+                None,
+                "default".to_string(),
+            ),
+            AuthProfileSelection::Named {
+                ref profile_name, ..
+            } => {
                 let auth_home =
-                    match codex_login::profile_home(&self.config.codex_home, &profile_name) {
+                    match codex_login::profile_home(&self.config.codex_home, profile_name.as_str())
+                    {
                         Ok(auth_home) => auth_home,
                         Err(err) => {
                             self.chat_widget.add_error_message(format!(
@@ -731,15 +741,31 @@ impl App {
                             return;
                         }
                     };
-                (auth_home, format!("`{profile_name}`"))
+                (
+                    auth_home,
+                    Some(profile_name.clone()),
+                    format!("`{profile_name}`"),
+                )
             }
         };
+
+        let login_after_switch = matches!(
+            &selection,
+            AuthProfileSelection::Named {
+                login_after_switch: true,
+                ..
+            }
+        );
 
         if auth_home == self.config.auth_home.as_path() {
             self.chat_widget.add_info_message(
                 format!("Auth profile {profile_label} is already active."),
                 /*hint*/ None,
             );
+            if login_after_switch {
+                self.start_auth_profile_login(app_server, profile_name.as_deref(), &profile_label)
+                    .await;
+            }
             return;
         }
 
@@ -811,6 +837,71 @@ impl App {
                 format!("Using auth profile {profile_label} for this session."),
                 Some("The previous session remains resumable.".to_string()),
             );
+            if login_after_switch {
+                self.start_auth_profile_login(app_server, profile_name.as_deref(), &profile_label)
+                    .await;
+            }
+        }
+    }
+
+    async fn start_auth_profile_login(
+        &mut self,
+        app_server: &mut AppServerSession,
+        profile_name: Option<&str>,
+        profile_label: &str,
+    ) {
+        let request_handle = app_server.request_handle();
+        let response = request_handle
+            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
+                request_id: app_server.next_request_id(),
+                params: LoginAccountParams::Chatgpt {
+                    codex_streamlined_login: false,
+                },
+            })
+            .await;
+
+        match response {
+            Ok(LoginAccountResponse::Chatgpt { login_id, auth_url }) => {
+                if let Some(profile_name) = profile_name {
+                    self.pending_auth_profile_login = Some(PendingAuthProfileLogin {
+                        login_id,
+                        profile_name: profile_name.to_string(),
+                        profile_label: profile_label.to_string(),
+                    });
+                }
+                self.open_url_in_browser(auth_url.clone());
+                self.chat_widget.add_info_message(
+                    format!("Started ChatGPT login for auth profile {profile_label}."),
+                    Some(format!("If your browser did not open, visit {auth_url}")),
+                );
+            }
+            Ok(LoginAccountResponse::ApiKey {}) => {
+                self.chat_widget.add_info_message(
+                    format!("API key login configured for auth profile {profile_label}."),
+                    /*hint*/ None,
+                );
+            }
+            Ok(LoginAccountResponse::ChatgptDeviceCode {
+                verification_url,
+                user_code,
+                ..
+            }) => {
+                self.chat_widget.add_info_message(
+                    format!("Started device-code login for auth profile {profile_label}."),
+                    Some(format!("Visit {verification_url} and enter {user_code}.")),
+                );
+            }
+            Ok(LoginAccountResponse::ChatgptAuthTokens {}) => {
+                self.chat_widget.add_info_message(
+                    format!("ChatGPT tokens configured for auth profile {profile_label}."),
+                    /*hint*/ None,
+                );
+            }
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to start login for auth profile {profile_label}: {err}"
+                ));
+            }
         }
     }
 
