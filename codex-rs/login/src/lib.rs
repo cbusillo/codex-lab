@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod auth_env_telemetry;
+pub mod auth_profiles;
 pub mod token_data;
 
 mod device_code_auth;
@@ -47,4 +48,13 @@ pub use auth::read_openai_api_key_from_env;
 pub use auth::save_auth;
 pub use auth_env_telemetry::AuthEnvTelemetry;
 pub use auth_env_telemetry::collect_auth_env_telemetry;
+pub use auth_profiles::AuthProfileEntry;
+pub use auth_profiles::AuthProfileMetadata;
+pub use auth_profiles::AuthProfilesFile;
+pub use auth_profiles::list_auth_profiles;
+pub use auth_profiles::profile_home;
+pub use auth_profiles::record_auth_profile_login;
+pub use auth_profiles::remove_auth_profile_metadata;
+pub use auth_profiles::upsert_auth_profile;
+pub use auth_profiles::validate_profile_name;
 pub use token_data::TokenData;

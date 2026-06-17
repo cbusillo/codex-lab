@@ -14,6 +14,7 @@ use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::read_access_token_from_stdin;
 use codex_cli::read_api_key_from_stdin;
+use codex_cli::run_login_profiles;
 use codex_cli::run_login_status;
 use codex_cli::run_login_with_access_token;
 use codex_cli::run_login_with_api_key;
@@ -415,6 +416,10 @@ struct LoginCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
 
+    /// Store or inspect credentials for a named Codex Lab auth profile.
+    #[arg(long = "profile", value_name = "NAME", global = true)]
+    profile: Option<String>,
+
     #[arg(
         long = "with-api-key",
         help = "Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`)"
@@ -457,12 +462,19 @@ struct LoginCommand {
 enum LoginSubcommand {
     /// Show login status.
     Status,
+
+    /// List named auth profiles.
+    Profiles,
 }
 
 #[derive(Debug, Parser)]
 struct LogoutCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
+
+    /// Remove credentials for a named Codex Lab auth profile.
+    #[arg(long = "profile", value_name = "NAME")]
+    profile: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -1254,7 +1266,10 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths, command_name: &'static str) -> 
             );
             match login_cli.action {
                 Some(LoginSubcommand::Status) => {
-                    run_login_status(login_cli.config_overrides).await;
+                    run_login_status(login_cli.config_overrides, login_cli.profile).await;
+                }
+                Some(LoginSubcommand::Profiles) => {
+                    run_login_profiles(login_cli.config_overrides).await;
                 }
                 None => {
                     if login_cli.with_api_key && login_cli.with_access_token {
@@ -1265,6 +1280,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths, command_name: &'static str) -> 
                     } else if login_cli.use_device_code {
                         run_login_with_device_code(
                             login_cli.config_overrides,
+                            login_cli.profile,
                             login_cli.issuer_base_url,
                             login_cli.client_id,
                         )
@@ -1276,12 +1292,22 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths, command_name: &'static str) -> 
                         std::process::exit(1);
                     } else if login_cli.with_api_key {
                         let api_key = read_api_key_from_stdin();
-                        run_login_with_api_key(login_cli.config_overrides, api_key).await;
+                        run_login_with_api_key(
+                            login_cli.config_overrides,
+                            login_cli.profile,
+                            api_key,
+                        )
+                        .await;
                     } else if login_cli.with_access_token {
                         let access_token = read_access_token_from_stdin();
-                        run_login_with_access_token(login_cli.config_overrides, access_token).await;
+                        run_login_with_access_token(
+                            login_cli.config_overrides,
+                            login_cli.profile,
+                            access_token,
+                        )
+                        .await;
                     } else {
-                        run_login_with_chatgpt(login_cli.config_overrides).await;
+                        run_login_with_chatgpt(login_cli.config_overrides, login_cli.profile).await;
                     }
                 }
             }
@@ -1296,7 +1322,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths, command_name: &'static str) -> 
                 &mut logout_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            run_logout(logout_cli.config_overrides).await;
+            run_logout(logout_cli.config_overrides, logout_cli.profile).await;
         }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -2581,6 +2607,53 @@ mod tests {
         assert!(
             MultitoolCli::try_parse_from(["codex", "--profile", "nested/work", "resume"]).is_err()
         );
+    }
+
+    #[test]
+    fn login_accepts_auth_profile_flag() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "login", "--profile", "work", "--with-api-key"])
+                .expect("parse should succeed");
+
+        let Some(Subcommand::Login(login)) = cli.subcommand else {
+            panic!("expected login subcommand");
+        };
+        assert_eq!(login.profile.as_deref(), Some("work"));
+        assert!(login.with_api_key);
+    }
+
+    #[test]
+    fn login_status_accepts_auth_profile_flag() {
+        let cli = MultitoolCli::try_parse_from(["codex", "login", "status", "--profile", "backup"])
+            .expect("parse should succeed");
+
+        let Some(Subcommand::Login(login)) = cli.subcommand else {
+            panic!("expected login subcommand");
+        };
+        assert_eq!(login.profile.as_deref(), Some("backup"));
+        assert!(matches!(login.action, Some(LoginSubcommand::Status)));
+    }
+
+    #[test]
+    fn login_profiles_subcommand_parses() {
+        let cli = MultitoolCli::try_parse_from(["codex", "login", "profiles"])
+            .expect("parse should succeed");
+
+        let Some(Subcommand::Login(login)) = cli.subcommand else {
+            panic!("expected login subcommand");
+        };
+        assert!(matches!(login.action, Some(LoginSubcommand::Profiles)));
+    }
+
+    #[test]
+    fn logout_accepts_auth_profile_flag() {
+        let cli = MultitoolCli::try_parse_from(["codex", "logout", "--profile", "work"])
+            .expect("parse should succeed");
+
+        let Some(Subcommand::Logout(logout)) = cli.subcommand else {
+            panic!("expected logout subcommand");
+        };
+        assert_eq!(logout.profile.as_deref(), Some("work"));
     }
 
     #[test]
