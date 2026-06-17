@@ -795,7 +795,37 @@ fn remove_access_token_env_var() -> EnvVarGuard {
 
 #[tokio::test]
 #[serial(codex_auth_env)]
-async fn load_auth_reads_access_token_from_env() {
+async fn load_auth_ignores_access_token_env_when_env_auth_disabled() {
+    let codex_home = tempdir().unwrap();
+    let expected_record = agent_identity_record(WORKSPACE_ID_ALLOWED);
+    let agent_identity =
+        signed_agent_identity_jwt(&expected_record, json!(expected_record.plan_type))
+            .expect("signed agent identity");
+    let _access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, &agent_identity);
+
+    let server = MockServer::start().await;
+    let chatgpt_base_url = format!("{}/backend-api", server.uri());
+    let _authapi_guard =
+        EnvVarGuard::set("CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL", &chatgpt_base_url);
+    let auth = super::load_auth(
+        codex_home.path(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        Some(&chatgpt_base_url),
+    )
+    .await
+    .expect("auth load should succeed");
+
+    assert_eq!(auth, None);
+    assert!(
+        !get_auth_file(codex_home.path()).exists(),
+        "env auth should not write auth.json"
+    );
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn load_auth_reads_access_token_from_env_when_env_auth_enabled() {
     let codex_home = tempdir().unwrap();
     let expected_record = agent_identity_record(WORKSPACE_ID_ALLOWED);
     let agent_identity =
@@ -823,7 +853,7 @@ async fn load_auth_reads_access_token_from_env() {
         EnvVarGuard::set("CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL", &chatgpt_base_url);
     let auth = super::load_auth(
         codex_home.path(),
-        /*enable_codex_api_key_env*/ false,
+        /*enable_codex_api_key_env*/ true,
         AuthCredentialsStoreMode::File,
         Some(&chatgpt_base_url),
     )
@@ -845,7 +875,29 @@ async fn load_auth_reads_access_token_from_env() {
 
 #[tokio::test]
 #[serial(codex_auth_env)]
-async fn load_auth_reads_personal_access_token_from_env() {
+async fn load_auth_ignores_personal_access_token_env_when_env_auth_disabled() {
+    let codex_home = tempdir().unwrap();
+    let _access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "at-env-test");
+
+    let auth = super::load_auth(
+        codex_home.path(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await
+    .expect("auth load should succeed");
+
+    assert_eq!(auth, None);
+    assert!(
+        !get_auth_file(codex_home.path()).exists(),
+        "env auth should not write auth.json"
+    );
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn load_auth_reads_personal_access_token_from_env_when_env_auth_enabled() {
     let codex_home = tempdir().unwrap();
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -867,7 +919,7 @@ async fn load_auth_reads_personal_access_token_from_env() {
     ] {
         let auth = super::load_auth(
             codex_home.path(),
-            /*enable_codex_api_key_env*/ false,
+            /*enable_codex_api_key_env*/ true,
             auth_credentials_store_mode,
             /*chatgpt_base_url*/ None,
         )
@@ -917,7 +969,7 @@ async fn personal_access_token_does_not_offer_unauthorized_recovery() {
     let manager = Arc::new(
         AuthManager::new(
             codex_home.path().to_path_buf(),
-            /*enable_codex_api_key_env*/ false,
+            /*enable_codex_api_key_env*/ true,
             AuthCredentialsStoreMode::File,
             /*chatgpt_base_url*/ None,
         )

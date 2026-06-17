@@ -124,25 +124,105 @@ pub fn load_auth_profiles(codex_home: &Path) -> io::Result<AuthProfilesFile> {
 pub fn save_auth_profiles(codex_home: &Path, profiles: &AuthProfilesFile) -> io::Result<()> {
     fs::create_dir_all(codex_home)?;
     let path = profile_metadata_path(codex_home);
-    let tmp_path = path.with_extension("json.tmp");
     let raw = serde_json::to_string_pretty(profiles).map_err(io::Error::other)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    let mut file = options.open(&tmp_path)?;
+    let (tmp_path, mut file) = create_metadata_tmp_file(&path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     file.write_all(raw.as_bytes())?;
-    fs::rename(tmp_path, path)?;
+    file.flush()?;
+    drop(file);
+    if let Err(err) = replace_metadata_file(&tmp_path, &path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn create_metadata_tmp_file(path: &Path) -> io::Result<(PathBuf, fs::File)> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(PROFILE_METADATA_FILE);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    for attempt in 0..100 {
+        let tmp_path = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            attempt
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&tmp_path) {
+            Ok(file) => return Ok((tmp_path, file)),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "failed to allocate temporary metadata path for {}",
+            path.display()
+        ),
+    ))
+}
+
+fn replace_metadata_file(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        fs::rename(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        match replace_file_windows(src, dst) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => fs::rename(src, dst),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn replace_file_windows(src: &Path, dst: &Path) -> io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+
+    const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x0000_0002;
+
+    unsafe extern "system" {
+        fn ReplaceFileW(
+            lp_replaced_file_name: *const u16,
+            lp_replacement_file_name: *const u16,
+            lp_backup_file_name: *const u16,
+            dw_replace_flags: u32,
+            lp_exclude: *mut c_void,
+            lp_reserved: *mut c_void,
+        ) -> i32;
+    }
+
+    let dst_wide: Vec<u16> = dst.as_os_str().encode_wide().chain(Some(0)).collect();
+    let src_wide: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replaced = unsafe {
+        ReplaceFileW(
+            dst_wide.as_ptr(),
+            src_wide.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if replaced == 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -252,6 +332,27 @@ mod tests {
         assert_eq!(profiles[0].metadata.priming_enabled, Some(true));
     }
 
+    #[test]
+    fn save_profiles_replaces_existing_metadata() {
+        let temp = TempDir::new().expect("tempdir");
+
+        upsert_auth_profile(temp.path(), "work", |metadata| {
+            metadata.email = Some("work@example.com".to_string());
+        })
+        .expect("first upsert");
+        upsert_auth_profile(temp.path(), "work", |metadata| {
+            metadata.email = Some("updated@example.com".to_string());
+        })
+        .expect("second upsert");
+
+        let profiles = load_auth_profiles(temp.path()).expect("load profiles");
+        assert_eq!(profiles.profiles.len(), 1);
+        assert_eq!(
+            profiles.profiles["work"].email.as_deref(),
+            Some("updated@example.com")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn saved_profiles_metadata_is_private() {
@@ -275,7 +376,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = TempDir::new().expect("tempdir");
-        let tmp_path = profile_metadata_path(temp.path()).with_extension("json.tmp");
+        let tmp_path = temp
+            .path()
+            .join(format!(".auth-profiles.json.{}.0.tmp", std::process::id()));
         fs::write(&tmp_path, "{}").expect("write stale tmp");
         fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o644))
             .expect("make stale tmp permissive");
@@ -288,6 +391,7 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+        assert!(tmp_path.exists());
     }
 
     #[test]
