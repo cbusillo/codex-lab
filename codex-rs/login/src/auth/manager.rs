@@ -1014,6 +1014,40 @@ fn refresh_token_endpoint() -> String {
 }
 
 impl AuthDotJson {
+    pub fn account_email(&self) -> Option<String> {
+        match self.resolved_mode() {
+            ApiAuthMode::AgentIdentity => self
+                .agent_identity
+                .as_deref()
+                .and_then(|jwt| AgentIdentityAuthRecord::from_agent_identity_jwt(jwt).ok())
+                .map(|record| record.email),
+            ApiAuthMode::PersonalAccessToken => None,
+            ApiAuthMode::ApiKey | ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => self
+                .tokens
+                .as_ref()
+                .and_then(|tokens| tokens.id_token.email.clone()),
+        }
+    }
+
+    pub fn account_id(&self) -> Option<String> {
+        match self.resolved_mode() {
+            ApiAuthMode::AgentIdentity => self
+                .agent_identity
+                .as_deref()
+                .and_then(|jwt| AgentIdentityAuthRecord::from_agent_identity_jwt(jwt).ok())
+                .map(|record| record.account_id),
+            ApiAuthMode::PersonalAccessToken => None,
+            ApiAuthMode::ApiKey | ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => {
+                self.tokens.as_ref().and_then(|tokens| {
+                    tokens
+                        .account_id
+                        .clone()
+                        .or(tokens.id_token.chatgpt_account_id.clone())
+                })
+            }
+        }
+    }
+
     fn from_external_tokens(external: &ExternalAuthTokens) -> std::io::Result<Self> {
         let Some(chatgpt_metadata) = external.chatgpt_metadata() else {
             return Err(std::io::Error::other(

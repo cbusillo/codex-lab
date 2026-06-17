@@ -1,7 +1,16 @@
 use super::*;
 use crate::app_event::AuthProfileSelection;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
+use base64::Engine;
+use chrono::Utc;
+use codex_app_server_protocol::AuthMode;
+use codex_config::types::AuthCredentialsStoreMode;
+use codex_login::AuthDotJson;
+use codex_login::save_auth;
+use codex_login::token_data::TokenData;
 use pretty_assertions::assert_eq;
+use serde::Serialize;
+use serde_json::json;
 use serial_test::serial;
 
 fn force_pet_image_support(chat: &mut ChatWidget) {
@@ -34,6 +43,50 @@ fn fast_tier_command() -> ServiceTierCommand {
         name: "fast".to_string(),
         description: "Fastest inference with increased plan usage".to_string(),
     }
+}
+
+fn fake_jwt(email: &str, account_id: &str) -> String {
+    #[derive(Serialize)]
+    struct Header {
+        alg: &'static str,
+        typ: &'static str,
+    }
+
+    let header = Header {
+        alg: "none",
+        typ: "JWT",
+    };
+    let payload = json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+        },
+    });
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let header_b64 = encode(&serde_json::to_vec(&header).expect("serialize header"));
+    let payload_b64 = encode(&serde_json::to_vec(&payload).expect("serialize payload"));
+    let signature_b64 = encode(b"sig");
+    format!("{header_b64}.{payload_b64}.{signature_b64}")
+}
+
+fn write_chatgpt_auth(codex_home: &std::path::Path, email: &str, account_id: &str) {
+    let id_token = fake_jwt(email, account_id);
+    let access_token = fake_jwt(email, account_id);
+    let auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(TokenData {
+            id_token: codex_login::token_data::parse_chatgpt_jwt_claims(&id_token)
+                .expect("id token should parse"),
+            access_token,
+            refresh_token: "refresh-token".to_string(),
+            account_id: Some(account_id.to_string()),
+        }),
+        last_refresh: Some(Utc::now()),
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    save_auth(codex_home, &auth, AuthCredentialsStoreMode::File).expect("chatgpt auth saved");
 }
 
 fn complete_turn_with_message(chat: &mut ChatWidget, turn_id: &str, message: Option<&str>) {
@@ -120,6 +173,11 @@ async fn service_tier_commands_lowercase_catalog_names() {
 #[tokio::test]
 async fn login_slash_command_opens_profile_picker() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    write_chatgpt_auth(
+        &chat.config.codex_home,
+        "default@example.com",
+        "account-default",
+    );
     codex_login::record_auth_profile_login(
         &chat.config.codex_home,
         "work",
@@ -133,6 +191,8 @@ async fn login_slash_command_opens_profile_picker() {
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("Choose Login"));
     assert!(popup.contains("default"));
+    assert!(popup.contains("default@example.com"));
+    assert!(popup.contains("account-default"));
     assert!(popup.contains("work"));
     assert!(popup.contains("me@example.com"));
     assert!(popup.contains("Add login..."));

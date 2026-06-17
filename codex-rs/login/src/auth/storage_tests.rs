@@ -274,6 +274,34 @@ fn auth_with_prefix(prefix: &str) -> AuthDotJson {
     }
 }
 
+#[test]
+fn auth_dot_json_exposes_agent_identity_account_metadata() {
+    let agent_identity = jwt_with_payload(json!({
+        "iss": "https://chatgpt.com/codex-backend/agent-identity",
+        "aud": "codex-app-server",
+        "iat": 1_700_000_000usize,
+        "exp": 4_000_000_000usize,
+        "agent_runtime_id": "agent-runtime-id",
+        "agent_private_key": "private-key",
+        "account_id": "account-id",
+        "chatgpt_user_id": "user-id",
+        "email": "agent@example.com",
+        "plan_type": "pro",
+        "chatgpt_account_is_fedramp": false,
+    }));
+    let auth = AuthDotJson {
+        auth_mode: Some(AuthMode::AgentIdentity),
+        openai_api_key: None,
+        tokens: None,
+        last_refresh: None,
+        agent_identity: Some(agent_identity),
+        personal_access_token: None,
+    };
+
+    assert_eq!(auth.account_email().as_deref(), Some("agent@example.com"));
+    assert_eq!(auth.account_id().as_deref(), Some("account-id"));
+}
+
 fn jwt_with_payload(payload: serde_json::Value) -> String {
     let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let header_b64 = encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
