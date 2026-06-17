@@ -78,7 +78,10 @@ pub(crate) struct HistoryLookupResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AuthProfileSelection {
     Default,
-    Named { profile_name: String },
+    Named {
+        profile_name: String,
+        login_after_switch: bool,
+    },
 }
 
 impl RealtimeAudioDeviceKind {
@@ -214,6 +217,11 @@ pub(crate) enum AppEvent {
     /// This is the Plan Mode handoff path: the previous thread remains resumable, but the model
     /// sees only the explicit prompt carried in `text` once the new session is configured.
     ClearUiAndSubmitUserMessage {
+        text: String,
+    },
+
+    /// Replace the composer contents without submitting.
+    SetComposerText {
         text: String,
     },
 

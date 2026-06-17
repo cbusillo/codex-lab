@@ -35,7 +35,7 @@ const SIDE_STARTING_CONTEXT_LABEL: &str = "Side starting...";
 const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
-const LOGIN_USAGE: &str = "Usage: /login [default|<profile>]";
+const LOGIN_USAGE: &str = "Usage: /login [default|<profile>|add <profile>]";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 
 impl ChatWidget {
@@ -51,6 +51,7 @@ impl ChatWidget {
         let current_auth_home = self.config.auth_home.to_path_buf();
         let default_auth_home = self.config.codex_home.to_path_buf();
         let codex_home = self.config.codex_home.to_path_buf();
+        let add_command = "/login add ".to_string();
         let mut items = Vec::with_capacity(profiles.len() + 2);
         items.push(SelectionItem {
             name: "default".to_string(),
@@ -77,6 +78,7 @@ impl ChatWidget {
                     tx.send(AppEvent::SwitchAuthProfile {
                         selection: AuthProfileSelection::Named {
                             profile_name: name.clone(),
+                            login_after_switch: false,
                         },
                     });
                 })],
@@ -87,10 +89,15 @@ impl ChatWidget {
 
         items.push(SelectionItem {
             name: "Add login...".to_string(),
-            description: Some("Run `codex-lab login --profile <name>` from your shell".to_string()),
-            is_disabled: true,
-            disabled_reason: Some(format!(
-                "Use `codex-lab login --profile <name>`; profiles are stored under {}",
+            description: Some("Create a named login profile in this session".to_string()),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::SetComposerText {
+                    text: add_command.clone(),
+                });
+            })],
+            dismiss_on_select: true,
+            selected_description: Some(format!(
+                "Type a profile name. Profiles are stored under {}",
                 codex_home.display()
             )),
             ..Default::default()
@@ -116,6 +123,31 @@ impl ChatWidget {
             return;
         }
 
+        if let Some(profile_name) = trimmed.strip_prefix("add ").map(str::trim) {
+            if profile_name.eq_ignore_ascii_case("default") {
+                self.add_error_message(
+                    "`default` is reserved for the built-in Codex Lab login.".to_string(),
+                );
+                self.add_info_message(LOGIN_USAGE.to_string(), /*hint*/ None);
+                return;
+            }
+            match codex_login::validate_profile_name(profile_name) {
+                Ok(profile_name) => {
+                    self.app_event_tx.send(AppEvent::SwitchAuthProfile {
+                        selection: AuthProfileSelection::Named {
+                            profile_name: profile_name.to_string(),
+                            login_after_switch: true,
+                        },
+                    });
+                }
+                Err(err) => {
+                    self.add_error_message(format!("Invalid auth profile `{profile_name}`: {err}"));
+                    self.add_info_message(LOGIN_USAGE.to_string(), /*hint*/ None);
+                }
+            }
+            return;
+        }
+
         let profiles = match codex_login::list_auth_profiles(&self.config.codex_home) {
             Ok(profiles) => profiles,
             Err(err) => {
@@ -127,15 +159,14 @@ impl ChatWidget {
             self.app_event_tx.send(AppEvent::SwitchAuthProfile {
                 selection: AuthProfileSelection::Named {
                     profile_name: trimmed.to_string(),
+                    login_after_switch: false,
                 },
             });
         } else {
             self.add_error_message(format!("Unknown auth profile `{trimmed}`."));
             self.add_info_message(
                 LOGIN_USAGE.to_string(),
-                Some(format!(
-                    "Add it first with `codex-lab login --profile {trimmed}`."
-                )),
+                Some(format!("Add it with `/login add {trimmed}`.")),
             );
         }
     }

@@ -10,6 +10,8 @@ use crate::app_event::ConnectorsSnapshot;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use codex_app_server_client::AppServerEvent;
+use codex_app_server_protocol::AccountLoginCompletedNotification;
+use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::ServerNotification;
@@ -32,7 +34,7 @@ impl App {
 
     pub(super) async fn handle_app_server_event(
         &mut self,
-        app_server_client: &AppServerSession,
+        app_server_client: &mut AppServerSession,
         event: AppServerEvent,
     ) {
         match event {
@@ -62,7 +64,7 @@ impl App {
 
     async fn handle_server_notification_event(
         &mut self,
-        app_server_client: &AppServerSession,
+        app_server_client: &mut AppServerSession,
         notification: ServerNotification,
     ) {
         match &notification {
@@ -82,6 +84,10 @@ impl App {
                     .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
                 return;
             }
+            ServerNotification::AccountLoginCompleted(notification) => {
+                self.handle_auth_profile_login_completed(notification);
+                return;
+            }
             ServerNotification::AccountUpdated(notification) => {
                 self.chat_widget.update_account_state(
                     status_account_display_from_auth_mode(
@@ -93,6 +99,7 @@ impl App {
                         .auth_mode
                         .is_some_and(AuthMode::has_chatgpt_account),
                 );
+                self.maybe_record_completed_auth_profile_login(notification);
                 return;
             }
             ServerNotification::ExternalAgentConfigImportCompleted(_) => {
@@ -209,5 +216,64 @@ impl App {
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");
         }
+    }
+
+    fn handle_auth_profile_login_completed(
+        &mut self,
+        notification: &AccountLoginCompletedNotification,
+    ) {
+        let Some(login_id) = notification.login_id.as_deref() else {
+            return;
+        };
+        let Some(pending) = self.pending_auth_profile_login.as_ref() else {
+            return;
+        };
+        if pending.login_id != login_id {
+            return;
+        }
+        if !notification.success {
+            let pending = self.pending_auth_profile_login.take().unwrap();
+            self.chat_widget.add_error_message(format!(
+                "Login for auth profile {} failed.",
+                pending.profile_label
+            ));
+            if let Some(error) = notification.error.as_ref() {
+                self.chat_widget
+                    .add_info_message(error.clone(), /*hint*/ None);
+            }
+        }
+    }
+
+    fn maybe_record_completed_auth_profile_login(
+        &mut self,
+        notification: &AccountUpdatedNotification,
+    ) {
+        if !notification
+            .auth_mode
+            .is_some_and(AuthMode::has_chatgpt_account)
+        {
+            return;
+        }
+        let Some(pending) = self.pending_auth_profile_login.take() else {
+            return;
+        };
+
+        if let Err(err) = codex_login::record_auth_profile_login(
+            &self.config.codex_home,
+            &pending.profile_name,
+            /*account_id*/ None,
+            /*email*/ None,
+        ) {
+            self.chat_widget.add_error_message(format!(
+                "Logged in, but failed to update auth profile {}: {err}",
+                pending.profile_label
+            ));
+            return;
+        }
+
+        self.chat_widget.add_info_message(
+            format!("Logged in to auth profile {}.", pending.profile_label),
+            /*hint*/ None,
+        );
     }
 }

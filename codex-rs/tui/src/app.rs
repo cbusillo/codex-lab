@@ -569,6 +569,14 @@ pub(crate) struct App {
     // Serialize hook enablement writes per hook so stale completions cannot
     // persist an older toggle after a newer one.
     pending_hook_enabled_writes: HashMap<String, Option<bool>>,
+    pending_auth_profile_login: Option<PendingAuthProfileLogin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingAuthProfileLogin {
+    pub(crate) login_id: String,
+    pub(crate) profile_name: String,
+    pub(crate) profile_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1055,6 +1063,7 @@ See the Codex keymap documentation for supported actions and examples."
             pending_startup_thread_start,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            pending_auth_profile_login: None,
         };
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);
@@ -1189,7 +1198,7 @@ See the Codex keymap documentation for supported actions and examples."
                     }
                     app_server_event = app_server.next_event(), if listen_for_app_server_events => {
                         match app_server_event {
-                            Some(event) => app.handle_app_server_event(&app_server, event).await,
+                            Some(event) => app.handle_app_server_event(&mut app_server, event).await,
                             None => {
                                 listen_for_app_server_events = false;
                                 tracing::warn!("app-server event stream closed");
