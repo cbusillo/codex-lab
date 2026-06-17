@@ -828,7 +828,7 @@ async fn load_auth(
         return Ok(Some(auth));
     }
 
-    if let Some(access_token) = read_codex_access_token_from_env() {
+    if enable_codex_api_key_env && let Some(access_token) = read_codex_access_token_from_env() {
         return match classify_codex_access_token(&access_token) {
             CodexAccessToken::PersonalAccessToken(access_token) => {
                 CodexAuth::from_personal_access_token(access_token)
