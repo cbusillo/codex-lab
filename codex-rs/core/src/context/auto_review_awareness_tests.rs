@@ -5,6 +5,7 @@ use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
+use codex_auto_review::AutoReviewStore;
 use codex_protocol::protocol::ReviewCodeLocation;
 use codex_protocol::protocol::ReviewFinding;
 use codex_protocol::protocol::ReviewLineRange;
@@ -187,9 +188,10 @@ async fn awareness_is_absent_when_store_and_snapshot_are_empty() -> anyhow::Resu
 async fn awareness_is_absent_when_store_is_unreadable() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let repo = TempDir::new()?;
-    let runs_dir = codex_home.path().join("auto-review").join("runs");
-    std::fs::create_dir_all(&runs_dir)?;
-    std::fs::write(runs_dir.join("broken.json"), "not json")?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let runs_path = store.runs_path();
+    std::fs::create_dir_all(runs_path.parent().expect("runs path parent"))?;
+    std::fs::write(runs_path, "not json")?;
 
     let awareness = build_auto_review_awareness(
         codex_home.path(),

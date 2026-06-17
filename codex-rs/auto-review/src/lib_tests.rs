@@ -20,34 +20,85 @@ use super::SCHEMA_VERSION;
 #[test]
 fn save_and_load_run_round_trips_under_codex_home() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
-    let store = AutoReviewStore::new(codex_home.path());
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
     let run = sample_run("run_1", vec![sample_finding("f1", "Title")]);
 
     let path = store.save_run(&run)?;
     let loaded = store.load_run("run_1")?;
 
     assert_eq!(loaded, run);
+    assert_eq!(path, store.runs_path());
+    assert!(path.ends_with("auto-review/runs.json"));
+    assert!(store.output_path("run_1")?.exists());
+    Ok(())
+}
+
+#[test]
+fn scoped_stores_separate_repos_under_one_home() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope_a = tempfile::tempdir()?;
+    let scope_b = tempfile::tempdir()?;
+    let store_a = AutoReviewStore::for_scope(codex_home.path(), scope_a.path());
+    let store_b = AutoReviewStore::for_scope(codex_home.path(), scope_b.path());
+
+    store_a.save_run(&sample_run("run_a", Vec::new()))?;
+    store_b.save_run(&sample_run("run_b", Vec::new()))?;
+
     assert_eq!(
-        path,
-        codex_home
-            .path()
-            .join("auto-review")
-            .join("runs")
-            .join("run_1.json")
+        store_a
+            .list_runs()?
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect::<Vec<_>>(),
+        vec!["run_a".to_string()]
     );
+    assert_eq!(
+        store_b
+            .list_runs()?
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect::<Vec<_>>(),
+        vec!["run_b".to_string()]
+    );
+    assert_ne!(store_a.runs_path(), store_b.runs_path());
     Ok(())
 }
 
 #[test]
 fn list_runs_returns_valid_json_runs_in_id_order() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
-    let store = AutoReviewStore::new(codex_home.path());
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
     let run_b = sample_run("run_b", Vec::new());
     let run_a = sample_run("run_a", Vec::new());
     store.save_run(&run_b)?;
     store.save_run(&run_a)?;
-    let runs_dir = codex_home.path().join("auto-review").join("runs");
-    std::fs::write(runs_dir.join("ignored.txt"), "ignored")?;
+
+    let runs = store.list_runs()?;
+
+    assert_eq!(
+        runs.into_iter().map(|run| run.run_id).collect::<Vec<_>>(),
+        vec!["run_a".to_string(), "run_b".to_string()]
+    );
+    Ok(())
+}
+
+#[test]
+fn list_runs_recovers_runs_missing_from_index_but_present_in_outputs() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let run_a = sample_run("run_a", Vec::new());
+    let run_b = sample_run("run_b", Vec::new());
+    store.save_run(&run_a)?;
+    store.save_run(&run_b)?;
+
+    let index = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "runs": [run_b],
+    });
+    std::fs::write(store.runs_path(), format!("{index}\n"))?;
 
     let runs = store.list_runs()?;
 
@@ -61,7 +112,8 @@ fn list_runs_returns_valid_json_runs_in_id_order() -> anyhow::Result<()> {
 #[test]
 fn list_runs_returns_empty_when_store_is_missing() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
-    let runs = AutoReviewStore::new(codex_home.path()).list_runs()?;
+    let scope = tempfile::tempdir()?;
+    let runs = AutoReviewStore::for_scope(codex_home.path(), scope.path()).list_runs()?;
 
     assert!(runs.is_empty());
     Ok(())
@@ -70,31 +122,37 @@ fn list_runs_returns_empty_when_store_is_missing() -> anyhow::Result<()> {
 #[test]
 fn load_run_defaults_missing_worktree_diff_fingerprint() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
-    let store = AutoReviewStore::new(codex_home.path());
-    let runs_dir = codex_home.path().join("auto-review").join("runs");
-    let path = runs_dir.join("run_1.json");
-    std::fs::create_dir_all(&runs_dir)?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let path = store.runs_path();
+    let parent = path.parent().expect("runs path should have parent");
+    std::fs::create_dir_all(parent)?;
     std::fs::write(
         &path,
         r#"{
   "schema_version": 1,
-  "run_id": "run_1",
-  "status": "completed",
-  "source": "manual",
-  "target": {
-    "branch": "main",
-    "head_sha": "head-2",
-    "base_sha": "base-1",
-    "worktree_path": "/repo"
-  },
-  "review_target": {
-    "type": "uncommittedChanges"
-  },
-  "started_at_unix_secs": 1,
-  "completed_at_unix_secs": 2,
-  "model": "gpt-test",
-  "error_summary": null,
-  "findings": []
+  "runs": [
+    {
+      "schema_version": 1,
+      "run_id": "run_1",
+      "status": "completed",
+      "source": "manual",
+      "target": {
+        "branch": "main",
+        "head_sha": "head-2",
+        "base_sha": "base-1",
+        "worktree_path": "/repo"
+      },
+      "review_target": {
+        "type": "uncommittedChanges"
+      },
+      "started_at_unix_secs": 1,
+      "completed_at_unix_secs": 2,
+      "model": "gpt-test",
+      "error_summary": null,
+      "findings": []
+    }
+  ]
 }"#,
     )?;
 
@@ -107,7 +165,8 @@ fn load_run_defaults_missing_worktree_diff_fingerprint() -> anyhow::Result<()> {
 #[test]
 fn unsafe_run_ids_are_rejected() {
     let codex_home = tempfile::tempdir().expect("tempdir");
-    let store = AutoReviewStore::new(codex_home.path());
+    let scope = tempfile::tempdir().expect("tempdir");
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
     let run = sample_run("../run", Vec::new());
 
     let error = store.save_run(&run).expect_err("unsafe id should fail");
@@ -118,7 +177,8 @@ fn unsafe_run_ids_are_rejected() {
 #[test]
 fn unsafe_and_duplicate_finding_ids_are_rejected() {
     let codex_home = tempfile::tempdir().expect("tempdir");
-    let store = AutoReviewStore::new(codex_home.path());
+    let scope = tempfile::tempdir().expect("tempdir");
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
     let unsafe_id = sample_run("run_1", vec![sample_finding("../f1", "Title")]);
     let duplicate_id = sample_run(
         "run_1",
@@ -143,7 +203,8 @@ fn unsafe_and_duplicate_finding_ids_are_rejected() {
 #[test]
 fn unsupported_schema_versions_are_rejected() {
     let codex_home = tempfile::tempdir().expect("tempdir");
-    let store = AutoReviewStore::new(codex_home.path());
+    let scope = tempfile::tempdir().expect("tempdir");
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
     let run = AutoReviewRun {
         schema_version: SCHEMA_VERSION + 1,
         ..sample_run("run_1", Vec::new())
@@ -418,6 +479,22 @@ fn detail_lookup_returns_bounded_json() -> anyhow::Result<()> {
     );
     assert!(detail.original_bytes > detail.bytes);
     assert!(detail.content.len() <= 120);
+    Ok(())
+}
+
+#[test]
+fn store_detail_lookup_reads_completed_output_sidecar() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let run = sample_run("run_1", vec![sample_finding("f1", &"x".repeat(200))]);
+    store.save_run(&run)?;
+
+    let detail = store.finding_detail("run_1", "f1", 120)?;
+
+    assert_eq!(detail.finding_id, "f1");
+    assert!(detail.truncated);
+    assert!(detail.bytes <= 120);
     Ok(())
 }
 

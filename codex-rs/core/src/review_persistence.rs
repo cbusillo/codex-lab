@@ -28,6 +28,7 @@ pub(crate) const AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY: &str =
 pub(crate) struct ReviewPersistenceContext {
     run_id: String,
     source: AutoReviewRunSource,
+    store_scope: PathBuf,
     target: AutoReviewRunTarget,
     review_target: ReviewTarget,
     started_at_unix_secs: i64,
@@ -43,12 +44,17 @@ impl ReviewPersistenceContext {
         model: Option<String>,
     ) -> Self {
         let target = collect_auto_review_target(cwd, &review_target).await;
+        let store_scope = target
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| cwd.to_path_buf());
         Self {
             run_id,
             source: match mode {
                 ReviewPersistence::ManualAutoReview => AutoReviewRunSource::Manual,
                 ReviewPersistence::BackgroundAutoReview => AutoReviewRunSource::Background,
             },
+            store_scope,
             target,
             review_target,
             started_at_unix_secs: now_unix_secs(),
@@ -154,7 +160,7 @@ impl ReviewPersistenceContext {
         } else {
             None
         };
-        let store = AutoReviewStore::new(codex_home);
+        let store = AutoReviewStore::for_scope(codex_home, &self.store_scope);
         let _guard = AUTO_REVIEW_RUN_WRITE_LOCK.lock().unwrap_or_else(|err| {
             tracing::warn!("auto review run write lock was poisoned; continuing");
             err.into_inner()
@@ -283,7 +289,7 @@ mod tests {
         persistence.save_cancelled(codex_home.path());
         persistence.save_running(codex_home.path());
 
-        let store = AutoReviewStore::new(codex_home.path());
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
         let run = store
             .load_run("late-running")
             .expect("load persisted review run");
@@ -308,7 +314,7 @@ mod tests {
             "background auto review was cancelled by request".to_string(),
         );
 
-        let store = AutoReviewStore::new(codex_home.path());
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
         let run = store
             .load_run("custom-cancelled")
             .expect("load persisted review run");
@@ -335,7 +341,7 @@ mod tests {
         persistence.save_pending(codex_home.path());
         persistence.save_running(codex_home.path());
 
-        let store = AutoReviewStore::new(codex_home.path());
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
         let run = store
             .load_run("pending-running")
             .expect("load persisted review run");
@@ -359,7 +365,7 @@ mod tests {
         persistence.save_skipped(codex_home.path(), "duplicate fingerprint".to_string());
         persistence.save_running(codex_home.path());
 
-        let store = AutoReviewStore::new(codex_home.path());
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
         let run = store
             .load_run("skipped-running")
             .expect("load persisted review run");

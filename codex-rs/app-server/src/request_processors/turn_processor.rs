@@ -1355,7 +1355,11 @@ impl TurnRequestProcessor {
         let (_, thread) = self.load_thread(&thread_id).await?;
         let active_review_target = CoreReviewTarget::UncommittedChanges;
         let active_target = Self::auto_review_target_for_thread(thread.as_ref()).await;
-        let runs = AutoReviewStore::new(&self.config.codex_home)
+        let store_scope = active_target
+            .worktree_path
+            .as_deref()
+            .unwrap_or(self.config.cwd.as_path());
+        let runs = AutoReviewStore::for_scope(&self.config.codex_home, store_scope)
             .list_runs()
             .map_err(|err| internal_error(format!("failed to list auto review runs: {err}")))?;
 
@@ -1435,12 +1439,16 @@ impl TurnRequestProcessor {
         }
 
         let (_, thread) = self.load_thread(&thread_id).await?;
-        let store = AutoReviewStore::new(&self.config.codex_home);
+        let active_review_target = CoreReviewTarget::UncommittedChanges;
+        let active_target = Self::auto_review_target_for_thread(thread.as_ref()).await;
+        let store_scope = active_target
+            .worktree_path
+            .as_deref()
+            .unwrap_or(self.config.cwd.as_path());
+        let store = AutoReviewStore::for_scope(&self.config.codex_home, store_scope);
         let run = store
             .load_run(&run_id)
             .map_err(|_| invalid_request("auto review run not found"))?;
-        let active_review_target = CoreReviewTarget::UncommittedChanges;
-        let active_target = Self::auto_review_target_for_thread(thread.as_ref()).await;
         if run
             .visible_findings(&active_target, &active_review_target)
             .into_iter()
@@ -1448,12 +1456,14 @@ impl TurnRequestProcessor {
         {
             return Err(invalid_request("auto review finding not found"));
         }
-        let detail = run.finding_detail(&finding_id, max_bytes).map_err(|err| {
-            invalid_request(format!(
-                "failed to read auto review finding detail: {}",
-                Self::auto_review_detail_error_message(&err.to_string())
-            ))
-        })?;
+        let detail = store
+            .finding_detail(&run_id, &finding_id, max_bytes)
+            .map_err(|err| {
+                invalid_request(format!(
+                    "failed to read auto review finding detail: {}",
+                    Self::auto_review_detail_error_message(&err.to_string())
+                ))
+            })?;
 
         Ok(AutoReviewFindingDetailReadResponse {
             run_id,

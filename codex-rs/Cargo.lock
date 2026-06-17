@@ -2179,6 +2179,7 @@ dependencies = [
  "anyhow",
  "codex-protocol",
  "codex-utils-path",
+ "crc32fast",
  "pretty_assertions",
  "serde",
  "serde_json",

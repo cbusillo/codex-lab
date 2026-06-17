@@ -15,6 +15,7 @@ workspace = true
 anyhow = { workspace = true }
 codex-protocol = { workspace = true }
 codex-utils-path = { workspace = true }
+crc32fast = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
