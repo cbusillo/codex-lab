@@ -15,6 +15,7 @@ use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
+use codex_config::types::AuthCredentialsStoreMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -51,11 +52,15 @@ impl ChatWidget {
         let current_auth_home = self.config.auth_home.to_path_buf();
         let default_auth_home = self.config.codex_home.to_path_buf();
         let codex_home = self.config.codex_home.to_path_buf();
+        let default_description = default_login_profile_description(
+            &default_auth_home,
+            self.config.cli_auth_credentials_store_mode,
+        );
         let add_command = "/login add ".to_string();
         let mut items = Vec::with_capacity(profiles.len() + 2);
         items.push(SelectionItem {
             name: "default".to_string(),
-            description: Some("Use the default Codex Lab login".to_string()),
+            description: Some(default_description),
             is_current: current_auth_home == default_auth_home,
             actions: vec![Box::new(|tx| {
                 tx.send(AppEvent::SwitchAuthProfile {
@@ -1231,4 +1236,34 @@ fn login_profile_description(profile: &codex_login::AuthProfileEntry) -> String 
     } else {
         details.join(" - ")
     }
+}
+
+fn default_login_profile_description(
+    codex_home: &std::path::Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> String {
+    match codex_login::load_auth_dot_json(codex_home, auth_credentials_store_mode) {
+        Ok(Some(auth)) => auth_dot_json_login_description(&auth),
+        Ok(None) => "Use the default Codex Lab login".to_string(),
+        Err(err) => format!("Default login status unavailable: {err}"),
+    }
+}
+
+fn auth_dot_json_login_description(auth: &codex_login::AuthDotJson) -> String {
+    if auth.openai_api_key.is_some() {
+        return "API key login".to_string();
+    }
+
+    let mut details = Vec::new();
+    if let Some(email) = auth.account_email() {
+        details.push(email);
+    }
+    if let Some(account_id) = auth.account_id() {
+        details.push(account_id);
+    }
+    if !details.is_empty() {
+        return details.join(" - ");
+    }
+
+    "Use the default Codex Lab login".to_string()
 }
