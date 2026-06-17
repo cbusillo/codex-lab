@@ -83,6 +83,7 @@ use crate::version::CODEX_CLI_VERSION;
 use crate::workspace_command::AppServerWorkspaceCommandRunner;
 use crate::workspace_command::WorkspaceCommandRunner;
 use codex_ansi_escape::ansi_escape_line;
+use codex_app_server_client::AppServerClient;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
@@ -132,6 +133,8 @@ use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WriteStatus;
+use codex_arg0::Arg0DispatchPaths;
+use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::LoaderOverrides;
 use codex_config::types::ApprovalsReviewer;
@@ -529,6 +532,9 @@ pub(crate) struct App {
     feedback_audience: FeedbackAudience,
     environment_manager: Arc<EnvironmentManager>,
     app_server_target: AppServerTarget,
+    arg0_paths: Arg0DispatchPaths,
+    strict_config: bool,
+    cloud_config_bundle: CloudConfigBundleLoader,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
@@ -719,9 +725,12 @@ impl App {
         tui: &mut tui::Tui,
         mut app_server: AppServerSession,
         mut config: Config,
+        arg0_paths: Arg0DispatchPaths,
         cli_kv_overrides: Vec<(String, TomlValue)>,
         harness_overrides: ConfigOverrides,
         loader_overrides: LoaderOverrides,
+        strict_config: bool,
+        cloud_config_bundle: CloudConfigBundleLoader,
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         session_selection: SessionSelection,
@@ -1026,6 +1035,9 @@ See the Codex keymap documentation for supported actions and examples."
             feedback_audience,
             environment_manager,
             app_server_target,
+            arg0_paths,
+            strict_config,
+            cloud_config_bundle,
             pending_update_action: None,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),

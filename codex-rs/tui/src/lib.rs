@@ -297,7 +297,7 @@ const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(50);
 
 #[allow(clippy::too_many_arguments)]
-async fn start_embedded_app_server(
+pub(crate) async fn start_embedded_app_server(
     arg0_paths: Arg0DispatchPaths,
     config: Config,
     cli_kv_overrides: Vec<(String, toml::Value)>,
@@ -1793,7 +1793,7 @@ async fn run_ratatui_app(
         Some(app_server) => app_server,
         None => match start_app_server(
             &app_server_target,
-            arg0_paths,
+            arg0_paths.clone(),
             config.clone(),
             cli_kv_overrides.clone(),
             loader_overrides.clone(),
@@ -1864,9 +1864,12 @@ async fn run_ratatui_app(
         &mut tui,
         app_server,
         config,
+        arg0_paths,
         cli_kv_overrides.clone(),
         overrides.clone(),
         loader_overrides.clone(),
+        strict_config,
+        cloud_config_bundle.clone(),
         prompt,
         images,
         session_selection,
