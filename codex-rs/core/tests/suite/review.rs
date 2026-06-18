@@ -351,9 +351,13 @@ async fn review_op_with_persistence_writes_auto_review_run() {
     assert_eq!(run.model.as_deref(), Some("gpt-5.4"));
     assert!(run.completed_at_unix_secs.is_some());
     assert_eq!(run.error_summary, None);
-    assert_eq!(run.findings.len(), 1);
-    assert_eq!(run.findings[0].finding_id, "f1");
-    assert_eq!(run.findings[0].finding.title, "Persist this finding");
+    assert_eq!(run.finding_count, 1);
+    assert_eq!(run.finding_digests.len(), 1);
+    assert_eq!(run.finding_digests[0].finding_id, "f1");
+    assert_eq!(run.finding_digests[0].title, "Persist this finding");
+    let detail = load_auto_review_finding_detail(codex_home.path(), &run.run_id, "f1")
+        .expect("load auto review finding detail");
+    assert!(detail.content.contains("Persist this finding"));
 
     let _codex_home_guard = codex_home;
     server.verify().await;
@@ -404,7 +408,8 @@ async fn review_op_with_persistence_writes_failed_run_without_review_output() {
         run.error_summary.as_deref(),
         Some("review ended without producing review output")
     );
-    assert_eq!(run.findings.len(), 0);
+    assert_eq!(run.finding_count, 0);
+    assert!(run.finding_digests.is_empty());
 
     let _codex_home_guard = codex_home;
     server.verify().await;
@@ -468,7 +473,8 @@ async fn review_op_with_persistence_writes_cancelled_run_when_interrupted() {
         run.error_summary.as_deref(),
         Some("review was interrupted before producing structured output")
     );
-    assert_eq!(run.findings.len(), 0);
+    assert_eq!(run.finding_count, 0);
+    assert!(run.finding_digests.is_empty());
 
     let _codex_home_guard = codex_home;
     server.shutdown().await;
@@ -840,7 +846,9 @@ async fn session_startup_marks_orphaned_background_review_lost() -> anyhow::Resu
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,
-        findings: Vec::new(),
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        omitted_finding_digest_count: 0,
     };
     AutoReviewStore::for_scope(codex_home.path(), cwd.path())
         .save_run(&run)
@@ -882,13 +890,25 @@ async fn auto_review_awareness_injected_for_current_findings() -> anyhow::Result
     std::fs::write(&reviewed_path, "needs review\n")?;
     let codex_home = harness.test().codex_home_path().to_path_buf();
     let fingerprint = expected_worktree_diff_fingerprint(harness.cwd()).await;
-    let run = codex_auto_review::AutoReviewRun {
-        schema_version: codex_auto_review::SCHEMA_VERSION,
-        run_id: "awareness_run".to_string(),
-        status: AutoReviewRunStatus::Completed,
-        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
-        source: AutoReviewRunSource::Background,
-        target: codex_auto_review::AutoReviewRunTarget {
+    let output = ReviewOutputEvent {
+        findings: vec![ReviewFinding {
+            title: "Use a clearer fixture name".to_string(),
+            body: "full finding body must not be injected into normal turns".to_string(),
+            confidence_score: 0.9,
+            priority: 1,
+            code_location: ReviewCodeLocation {
+                absolute_file_path: reviewed_path,
+                line_range: ReviewLineRange { start: 1, end: 1 },
+            },
+        }],
+        overall_correctness: "patch is incorrect".to_string(),
+        overall_explanation: "summary".to_string(),
+        overall_confidence_score: 0.8,
+    };
+    let run = compact_auto_review_run(
+        "awareness_run",
+        AutoReviewRunStatus::Completed,
+        codex_auto_review::AutoReviewRunTarget {
             branch: Some("main".to_string()),
             head_sha: current_git_head(harness.cwd()),
             base_sha: None,
@@ -898,28 +918,11 @@ async fn auto_review_awareness_injected_for_current_findings() -> anyhow::Result
             head_at_launch: None,
             worktree_diff_fingerprint: Some(fingerprint),
         },
-        review_target: ReviewTarget::UncommittedChanges,
-        started_at_unix_secs: 1,
-        completed_at_unix_secs: Some(2),
-        model: Some("gpt-test".to_string()),
-        superseded_by: None,
-        cancel_reason: None,
-        error_summary: None,
-        findings: vec![codex_auto_review::AutoReviewFindingRecord {
-            finding_id: "f1".to_string(),
-            finding: ReviewFinding {
-                title: "Use a clearer fixture name".to_string(),
-                body: "full finding body must not be injected into normal turns".to_string(),
-                confidence_score: 0.9,
-                priority: 1,
-                code_location: ReviewCodeLocation {
-                    absolute_file_path: reviewed_path,
-                    line_range: ReviewLineRange { start: 1, end: 1 },
-                },
-            },
-        }],
-    };
-    AutoReviewStore::for_scope(&codex_home, harness.cwd()).save_run(&run)?;
+        &output,
+    );
+    let store = AutoReviewStore::for_scope(&codex_home, harness.cwd());
+    store.save_run(&run)?;
+    store.save_output("awareness_run", &output)?;
     let request_log = mount_sse_sequence(
         harness.server(),
         vec![sse(vec![
@@ -1512,13 +1515,25 @@ async fn automatic_background_review_reuses_completed_durable_duplicate() -> any
     )?;
     let fingerprint = expected_worktree_diff_fingerprint(test.cwd_path()).await;
     std::fs::remove_file(test.cwd_path().join("auto_background_review_duplicate.txt"))?;
-    let existing = codex_auto_review::AutoReviewRun {
-        schema_version: AUTO_REVIEW_SCHEMA_VERSION,
-        run_id: "existing_duplicate_review".to_string(),
-        status: AutoReviewRunStatus::Completed,
-        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
-        source: AutoReviewRunSource::Background,
-        target: codex_auto_review::AutoReviewRunTarget {
+    let output = ReviewOutputEvent {
+        findings: vec![ReviewFinding {
+            title: "Existing durable finding".to_string(),
+            body: "existing durable finding body".to_string(),
+            confidence_score: 0.9,
+            priority: 1,
+            code_location: ReviewCodeLocation {
+                absolute_file_path: test.cwd_path().join("auto_background_review_duplicate.txt"),
+                line_range: ReviewLineRange { start: 1, end: 1 },
+            },
+        }],
+        overall_correctness: "patch is incorrect".to_string(),
+        overall_explanation: "summary".to_string(),
+        overall_confidence_score: 0.8,
+    };
+    let existing = compact_auto_review_run(
+        "existing_duplicate_review",
+        AutoReviewRunStatus::Completed,
+        codex_auto_review::AutoReviewRunTarget {
             branch: Some("main".to_string()),
             head_sha: current_git_head(test.cwd_path()),
             base_sha: None,
@@ -1528,30 +1543,11 @@ async fn automatic_background_review_reuses_completed_durable_duplicate() -> any
             head_at_launch: None,
             worktree_diff_fingerprint: Some(fingerprint.clone()),
         },
-        review_target: ReviewTarget::UncommittedChanges,
-        started_at_unix_secs: 1,
-        completed_at_unix_secs: Some(2),
-        model: Some("gpt-test".to_string()),
-        superseded_by: None,
-        cancel_reason: None,
-        error_summary: None,
-        findings: vec![codex_auto_review::AutoReviewFindingRecord {
-            finding_id: "f1".to_string(),
-            finding: ReviewFinding {
-                title: "Existing durable finding".to_string(),
-                body: "existing durable finding body".to_string(),
-                confidence_score: 0.9,
-                priority: 1,
-                code_location: ReviewCodeLocation {
-                    absolute_file_path: test
-                        .cwd_path()
-                        .join("auto_background_review_duplicate.txt"),
-                    line_range: ReviewLineRange { start: 1, end: 1 },
-                },
-            },
-        }],
-    };
-    AutoReviewStore::for_scope(codex_home.path(), test.cwd_path()).save_run(&existing)?;
+        &output,
+    );
+    let store = AutoReviewStore::for_scope(codex_home.path(), test.cwd_path());
+    store.save_run(&existing)?;
+    store.save_output(&existing.run_id, &output)?;
 
     test.submit_turn("create a file with an already reviewed diff")
         .await?;
@@ -2373,6 +2369,52 @@ fn load_auto_review_runs(
     }
     runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
     Ok(runs)
+}
+
+fn load_auto_review_finding_detail(
+    codex_home: &std::path::Path,
+    run_id: &str,
+    finding_id: &str,
+) -> anyhow::Result<codex_auto_review::AutoReviewDetail> {
+    let review_dir = codex_home.join("state/review");
+    for entry in std::fs::read_dir(&review_dir)
+        .map_err(|err| anyhow::anyhow!("auto review state dir: {err}"))?
+    {
+        let entry = entry?;
+        let store_root = entry.path().join("auto-review");
+        let store = AutoReviewStore::from_store_root(store_root);
+        if store.load_run(run_id).is_ok() {
+            return Ok(store.finding_detail(run_id, finding_id, 4096)?);
+        }
+    }
+    anyhow::bail!("auto review run {run_id} not found")
+}
+
+fn compact_auto_review_run(
+    run_id: &str,
+    status: AutoReviewRunStatus,
+    target: codex_auto_review::AutoReviewRunTarget,
+    output: &ReviewOutputEvent,
+) -> codex_auto_review::AutoReviewRun {
+    let finding_digests = codex_auto_review::finding_digests(output);
+    codex_auto_review::AutoReviewRun {
+        schema_version: AUTO_REVIEW_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        status: status.clone(),
+        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
+        source: AutoReviewRunSource::Background,
+        target,
+        review_target: ReviewTarget::UncommittedChanges,
+        started_at_unix_secs: 1,
+        completed_at_unix_secs: status.is_terminal().then_some(2),
+        model: Some("gpt-test".to_string()),
+        superseded_by: None,
+        cancel_reason: None,
+        error_summary: None,
+        finding_count: output.findings.len(),
+        omitted_finding_digest_count: output.findings.len().saturating_sub(finding_digests.len()),
+        finding_digests,
+    }
 }
 
 fn load_auto_review_locks(

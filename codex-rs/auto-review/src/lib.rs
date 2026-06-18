@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_protocol::protocol::ReviewFinding;
+use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewTarget;
 use codex_utils_path::write_atomically;
 use serde::Deserialize;
@@ -26,7 +26,6 @@ pub const SCHEMA_VERSION: u32 = 1;
 const STORE_DIR: &str = "auto-review";
 const STATE_DIR: &str = "state";
 const REVIEW_DIR: &str = "review";
-const LEGACY_RUNS_DIR: &str = "runs";
 const RUNS_FILENAME: &str = "runs.json";
 const OUTPUTS_DIR: &str = "outputs";
 const OMITTED_TEMPLATE_PREFIX: &str = "... ";
@@ -35,13 +34,6 @@ const OMITTED_TEMPLATE_SUFFIX: &str = " more finding(s) omitted";
 #[derive(Debug, Clone)]
 pub struct AutoReviewStore {
     root: PathBuf,
-    legacy_root: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IndexLoadMode {
-    Strict,
-    Recovering,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,25 +57,20 @@ impl AutoReviewStore {
         let codex_home = codex_home.as_ref();
         Self {
             root: scoped_store_root(codex_home, scope.as_ref()),
-            legacy_root: Some(legacy_store_root(codex_home)),
         }
     }
 
     pub fn from_store_root(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            legacy_root: None,
-        }
+        Self { root: root.into() }
     }
 
     pub fn has_store_files(codex_home: impl AsRef<Path>) -> bool {
-        let codex_home = codex_home.as_ref();
-        has_loadable_legacy_run(codex_home) || has_scoped_store_files(codex_home)
+        has_scoped_store_files(codex_home.as_ref())
     }
 
     pub fn save_run(&self, run: &AutoReviewRun) -> Result<PathBuf> {
         validate_run(run)?;
-        let mut index = self.load_index()?;
+        let mut index = self.load_index_for_read()?;
         index.upsert(run.clone());
         let runs_path = self.runs_path();
         let json = serde_json::to_string_pretty(&index)?;
@@ -93,21 +80,20 @@ impl AutoReviewStore {
                 runs_path.display()
             )
         })?;
-        let _ = self.save_output(run);
         Ok(runs_path)
     }
 
     pub fn mark_superseded(&self, run_id: &str, superseded_by: &str) -> Result<bool> {
         validate_safe_id(run_id).context("auto review run_id")?;
         validate_safe_id(superseded_by).context("auto review superseded_by")?;
-        let mut index = self.load_index()?;
+        let mut index = self.load_index_for_read()?;
         let Some(run) = index.runs.iter_mut().find(|run| run.run_id == run_id) else {
             return Ok(false);
         };
         if run.run_id == superseded_by
             || run.status.is_in_flight()
             || run.status == AutoReviewRunStatus::Superseded
-            || !run.findings.is_empty()
+            || run.finding_count > 0
             || run.error_summary.is_some()
             || run.cancel_reason.is_some()
         {
@@ -149,7 +135,7 @@ impl AutoReviewStore {
         }
         validate_safe_id(superseded_by).context("auto review superseded_by")?;
         let mut changed = 0;
-        for run in self.load_index()?.runs {
+        for run in self.load_index_for_read()?.runs {
             if run.run_id == superseded_by
                 || run.target.worktree_diff_fingerprint.as_deref() != Some(fingerprint)
                 || !duplicate_target_matches_branch_head(&run, active_branch, active_head)
@@ -170,14 +156,45 @@ impl AutoReviewStore {
         I: IntoIterator,
         I::Item: AsRef<str>,
     {
+        self.reconcile_orphaned_in_flight_matching(live_run_ids, now_unix_secs, |_| true)
+    }
+
+    pub fn reconcile_orphaned_background_in_flight<I>(
+        &self,
+        live_run_ids: I,
+        now_unix_secs: i64,
+    ) -> Result<usize>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        self.reconcile_orphaned_in_flight_matching(live_run_ids, now_unix_secs, |run| {
+            run.source == AutoReviewRunSource::Background
+        })
+    }
+
+    fn reconcile_orphaned_in_flight_matching<I, F>(
+        &self,
+        live_run_ids: I,
+        now_unix_secs: i64,
+        should_reconcile: F,
+    ) -> Result<usize>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+        F: Fn(&AutoReviewRun) -> bool,
+    {
         let live_run_ids = live_run_ids
             .into_iter()
             .map(|run_id| run_id.as_ref().to_string())
             .collect::<BTreeSet<_>>();
-        let mut index = self.load_index()?;
+        let mut index = self.load_index_for_read()?;
         let mut changed = Vec::new();
         for run in &mut index.runs {
             if !run.status.is_in_flight() {
+                continue;
+            }
+            if !should_reconcile(run) {
                 continue;
             }
             if live_run_ids.contains(&run.run_id) {
@@ -254,7 +271,7 @@ impl AutoReviewStore {
                     run_id: run.run_id.clone(),
                     status: run.status.clone(),
                     disposition: duplicate_disposition(&run),
-                    finding_count: run.findings.len(),
+                    finding_count: run.finding_count,
                     model: run.model.clone(),
                 };
                 is_eligible(&duplicate).then_some((run, duplicate))
@@ -301,7 +318,7 @@ impl AutoReviewStore {
                     run_id: run.run_id.clone(),
                     status: run.status.clone(),
                     disposition: duplicate_disposition(&run),
-                    finding_count: run.findings.len(),
+                    finding_count: run.finding_count,
                     model: run.model.clone(),
                 };
                 is_eligible(&duplicate).then_some((run, duplicate))
@@ -342,7 +359,15 @@ impl AutoReviewStore {
         finding_id: &str,
         max_bytes: usize,
     ) -> Result<AutoReviewDetail> {
-        self.load_run(run_id)?.finding_detail(finding_id, max_bytes)
+        if max_bytes == 0 {
+            anyhow::bail!("auto review detail max_bytes must be positive");
+        }
+        let run = self.load_run(run_id)?;
+        if run.status != AutoReviewRunStatus::Completed {
+            anyhow::bail!("auto review run is not completed: {run_id}");
+        }
+        let output = self.load_output(run_id)?;
+        render_finding_detail(finding_id, max_bytes, &output)
     }
 
     pub fn output_path(&self, run_id: &str) -> Result<PathBuf> {
@@ -354,148 +379,28 @@ impl AutoReviewStore {
         self.root.join(RUNS_FILENAME)
     }
 
-    fn load_index(&self) -> Result<AutoReviewRunsIndex> {
-        self.load_index_with_mode(IndexLoadMode::Strict)
-    }
-
     fn load_index_for_read(&self) -> Result<AutoReviewRunsIndex> {
-        self.load_index_with_mode(IndexLoadMode::Recovering)
-    }
-
-    fn load_index_with_mode(&self, mode: IndexLoadMode) -> Result<AutoReviewRunsIndex> {
         let path = self.runs_path();
-        let mut index = AutoReviewRunsIndex::default();
-        for run in self.load_legacy_runs()? {
-            index.upsert(run);
+        if !path.exists() {
+            return Ok(AutoReviewRunsIndex::default());
         }
-        let mut indexed_run_ids = BTreeSet::new();
-        if path.exists() {
-            match load_runs_index_file(&path) {
-                Ok(parsed) => {
-                    for run in parsed.runs {
-                        indexed_run_ids.insert(run.run_id.clone());
-                        index.upsert(run);
-                    }
-                }
-                Err(err) if mode == IndexLoadMode::Recovering => {
-                    drop(err);
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        for run in self.load_output_runs() {
-            if indexed_run_ids.contains(&run.run_id) {
-                continue;
-            }
-            index.upsert(run);
-        }
-        index.validate()?;
-        Ok(index)
+        load_runs_index_file(&path)
     }
 
-    fn save_output(&self, run: &AutoReviewRun) -> Result<()> {
-        let path = self.output_path(&run.run_id)?;
-        let json = serde_json::to_string_pretty(run)?;
+    pub fn save_output(&self, run_id: &str, output: &ReviewOutputEvent) -> Result<PathBuf> {
+        let path = self.output_path(run_id)?;
+        let json = serde_json::to_string_pretty(output)?;
         write_atomically(&path, &format!("{json}\n"))
-            .with_context(|| format!("failed to write auto review output {}", path.display()))
+            .with_context(|| format!("failed to write auto review output {}", path.display()))?;
+        Ok(path)
     }
 
-    fn load_output(&self, run_id: &str) -> Result<AutoReviewRun> {
+    fn load_output(&self, run_id: &str) -> Result<ReviewOutputEvent> {
         let path = self.output_path(run_id)?;
         let json = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read auto review output {run_id}"))?;
-        let run = serde_json::from_str(&json)
-            .with_context(|| format!("failed to parse auto review output {run_id}"))?;
-        validate_run(&run)?;
-        Ok(run)
-    }
-
-    fn load_output_runs(&self) -> Vec<AutoReviewRun> {
-        let outputs_dir = self.root.join(OUTPUTS_DIR);
-        if !outputs_dir.exists() {
-            return Vec::new();
-        }
-
-        let mut run_ids = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&outputs_dir) else {
-            return Vec::new();
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if validate_safe_id(run_id).is_ok() {
-                run_ids.push(run_id.to_string());
-            }
-        }
-
-        run_ids.sort();
-        run_ids
-            .into_iter()
-            .filter_map(|run_id| match self.load_output(&run_id) {
-                Ok(run) => Some(run),
-                Err(_) => None,
-            })
-            .collect()
-    }
-
-    fn legacy_run_path(&self, run_id: &str) -> Result<Option<PathBuf>> {
-        validate_safe_id(run_id).context("auto review run_id")?;
-        Ok(self
-            .legacy_root
-            .as_ref()
-            .map(|root| root.join(LEGACY_RUNS_DIR).join(format!("{run_id}.json"))))
-    }
-
-    fn load_legacy_run(&self, run_id: &str) -> Result<AutoReviewRun> {
-        let Some(path) = self.legacy_run_path(run_id)? else {
-            anyhow::bail!("legacy auto review store is unavailable");
-        };
-        let json = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read legacy auto review run {run_id}"))?;
-        let run = serde_json::from_str(&json)
-            .with_context(|| format!("failed to parse legacy auto review run {run_id}"))?;
-        validate_run(&run)?;
-        Ok(run)
-    }
-
-    fn load_legacy_runs(&self) -> Result<Vec<AutoReviewRun>> {
-        let Some(root) = &self.legacy_root else {
-            return Ok(Vec::new());
-        };
-        let runs_dir = root.join(LEGACY_RUNS_DIR);
-        if !runs_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut run_ids = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&runs_dir) else {
-            return Ok(Vec::new());
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if validate_safe_id(run_id).is_ok() {
-                run_ids.push(run_id.to_string());
-            }
-        }
-
-        run_ids.sort();
-        let runs = run_ids
-            .into_iter()
-            .filter_map(|run_id| self.load_legacy_run(&run_id).ok())
-            .collect();
-        Ok(runs)
+        serde_json::from_str(&json)
+            .with_context(|| format!("failed to parse auto review output {run_id}"))
     }
 }
 
@@ -553,12 +458,12 @@ impl AutoReviewRunsIndex {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub struct AutoReviewRun {
     pub schema_version: u32,
     pub run_id: String,
     pub status: AutoReviewRunStatus,
-    #[serde(default)]
     pub freshness: AutoReviewRunFreshness,
     pub source: AutoReviewRunSource,
     pub target: AutoReviewRunTarget,
@@ -571,15 +476,17 @@ pub struct AutoReviewRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
     pub error_summary: Option<String>,
-    pub findings: Vec<AutoReviewFindingRecord>,
+    pub finding_count: usize,
+    pub finding_digests: Vec<AutoReviewFindingDigest>,
+    pub omitted_finding_digest_count: usize,
 }
 
 impl AutoReviewRun {
-    pub fn visible_findings<'a>(
+    pub fn visible_finding_digests<'a>(
         &'a self,
         active_target: &AutoReviewRunTarget,
         active_review_target: &ReviewTarget,
-    ) -> Vec<&'a AutoReviewFindingRecord> {
+    ) -> Vec<&'a AutoReviewFindingDigest> {
         if self.status != AutoReviewRunStatus::Completed {
             return Vec::new();
         }
@@ -589,7 +496,25 @@ impl AutoReviewRun {
         if !self.is_current_for(active_target, active_review_target) {
             return Vec::new();
         }
-        self.findings.iter().collect()
+        self.finding_digests.iter().collect()
+    }
+
+    pub fn can_read_finding_detail(
+        &self,
+        finding_id: &str,
+        active_target: &AutoReviewRunTarget,
+        active_review_target: &ReviewTarget,
+    ) -> bool {
+        if self.status != AutoReviewRunStatus::Completed {
+            return false;
+        }
+        if !review_target_matches(&self.review_target, active_review_target) {
+            return false;
+        }
+        if !self.is_current_for(active_target, active_review_target) {
+            return false;
+        }
+        parse_finding_id(finding_id).is_some_and(|index| index < self.finding_count)
     }
 
     pub fn freshness(&self, active_target: &AutoReviewRunTarget) -> AutoReviewFreshness {
@@ -618,36 +543,10 @@ impl AutoReviewRun {
         active_target: &AutoReviewRunTarget,
         active_review_target: &ReviewTarget,
     ) -> AutoReviewSummary {
-        render_summary(self.visible_findings(active_target, active_review_target))
-    }
-
-    pub fn finding_detail(&self, finding_id: &str, max_bytes: usize) -> Result<AutoReviewDetail> {
-        if max_bytes == 0 {
-            anyhow::bail!("auto review detail max_bytes must be positive");
-        }
-        if self.status != AutoReviewRunStatus::Completed {
-            anyhow::bail!("auto review run is not completed: {}", self.run_id);
-        }
-
-        let finding = self
-            .findings
-            .iter()
-            .find(|finding| finding.finding_id == finding_id)
-            .with_context(|| format!("unknown auto review finding id: {finding_id}"))?;
-        let effective_max_bytes = max_bytes.min(DETAIL_MAX_BYTES);
-        let json = serde_json::to_string_pretty(finding)?;
-        let original_bytes = json.len();
-        let (content, truncated) = truncate_utf8_with_marker(&json, effective_max_bytes);
-        let bytes = content.len();
-
-        Ok(AutoReviewDetail {
-            finding_id: finding_id.to_string(),
-            bytes,
-            original_bytes,
-            max_bytes: effective_max_bytes,
-            truncated,
-            content,
-        })
+        render_summary(
+            self.visible_finding_digests(active_target, active_review_target),
+            self.omitted_finding_digest_count,
+        )
     }
 }
 
@@ -762,24 +661,29 @@ pub enum AutoReviewFreshness {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub struct AutoReviewFindingRecord {
+pub struct AutoReviewFindingDigest {
     pub finding_id: String,
-    pub finding: ReviewFinding,
+    pub priority: i32,
+    pub title: String,
+    pub path: Option<PathBuf>,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
 }
 
-impl AutoReviewFindingRecord {
+impl AutoReviewFindingDigest {
     fn summary_line(&self) -> String {
-        let priority = self.finding.priority.to_string();
-        let title = truncate_utf8(&self.finding.title, SUMMARY_MAX_FIELD_BYTES);
-        let location = truncate_utf8(
-            &format!(
-                "{}:{}-{}",
-                self.finding.code_location.absolute_file_path.display(),
-                self.finding.code_location.line_range.start,
-                self.finding.code_location.line_range.end
-            ),
-            SUMMARY_MAX_FIELD_BYTES,
-        );
+        let priority = self.priority.to_string();
+        let title = truncate_utf8(&self.title, SUMMARY_MAX_FIELD_BYTES);
+        let location = self
+            .path
+            .as_ref()
+            .map(|path| match (self.line_start, self.line_end) {
+                (Some(start), Some(end)) => format!("{}:{start}-{end}", path.display()),
+                (Some(start), None) => format!("{}:{start}", path.display()),
+                _ => path.display().to_string(),
+            })
+            .unwrap_or_else(|| "unknown location".to_string());
+        let location = truncate_utf8(&location, SUMMARY_MAX_FIELD_BYTES);
         let finding_id = truncate_utf8(&self.finding_id, 80);
         format!("[P{priority}] {finding_id}: {title} ({location})")
     }
@@ -821,7 +725,7 @@ fn duplicate_priority(run: &AutoReviewRun) -> u8 {
     if run.status.is_adoptable_duplicate() {
         return 4;
     }
-    if !run.findings.is_empty() {
+    if run.finding_count > 0 {
         return 3;
     }
     if run.status == AutoReviewRunStatus::Completed {
@@ -878,12 +782,67 @@ fn auto_review_run_sort_key(run: &AutoReviewRun) -> (i64, &str) {
     )
 }
 
-fn render_summary(findings: Vec<&AutoReviewFindingRecord>) -> AutoReviewSummary {
+pub fn finding_digests(output: &ReviewOutputEvent) -> Vec<AutoReviewFindingDigest> {
+    output
+        .findings
+        .iter()
+        .take(SUMMARY_MAX_FINDINGS)
+        .enumerate()
+        .map(|(index, finding)| AutoReviewFindingDigest {
+            finding_id: format!("f{}", index + 1),
+            priority: finding.priority,
+            title: truncate_utf8(&finding.title, SUMMARY_MAX_FIELD_BYTES),
+            path: Some(finding.code_location.absolute_file_path.clone()),
+            line_start: Some(finding.code_location.line_range.start),
+            line_end: Some(finding.code_location.line_range.end),
+        })
+        .collect()
+}
+
+fn render_finding_detail(
+    finding_id: &str,
+    max_bytes: usize,
+    output: &ReviewOutputEvent,
+) -> Result<AutoReviewDetail> {
+    let finding_index = parse_finding_id(finding_id)
+        .with_context(|| format!("invalid auto review finding id: {finding_id}"))?;
+    let finding = output
+        .findings
+        .get(finding_index)
+        .with_context(|| format!("unknown auto review finding id: {finding_id}"))?;
+    let effective_max_bytes = max_bytes.min(DETAIL_MAX_BYTES);
+    let json = serde_json::to_string_pretty(finding)?;
+    let original_bytes = json.len();
+    let (content, truncated) = truncate_utf8_with_marker(&json, effective_max_bytes);
+    let bytes = content.len();
+
+    Ok(AutoReviewDetail {
+        finding_id: finding_id.to_string(),
+        bytes,
+        original_bytes,
+        max_bytes: effective_max_bytes,
+        truncated,
+        content,
+    })
+}
+
+fn parse_finding_id(finding_id: &str) -> Option<usize> {
+    finding_id
+        .strip_prefix('f')?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
+}
+
+fn render_summary(
+    findings: Vec<&AutoReviewFindingDigest>,
+    stored_omitted_findings: usize,
+) -> AutoReviewSummary {
     if findings.is_empty() {
         return AutoReviewSummary {
             content: String::new(),
             rendered_findings: 0,
-            omitted_findings: 0,
+            omitted_findings: stored_omitted_findings,
             truncated: false,
         };
     }
@@ -911,7 +870,7 @@ fn render_summary(findings: Vec<&AutoReviewFindingRecord>) -> AutoReviewSummary 
         lines = candidate_lines;
     }
 
-    let omitted_findings = findings.len() - lines.len();
+    let omitted_findings = findings.len() - lines.len() + stored_omitted_findings;
     if omitted_findings > 0 {
         lines.push(omitted_line(omitted_findings));
     }
@@ -956,18 +915,6 @@ fn scoped_review_root(codex_home: &Path, scope: &Path) -> PathBuf {
         .join(repo_key(scope))
 }
 
-fn legacy_store_root(codex_home: &Path) -> PathBuf {
-    codex_home.join(STORE_DIR)
-}
-
-fn has_loadable_legacy_run(codex_home: &Path) -> bool {
-    let store = AutoReviewStore {
-        root: scoped_store_root(codex_home, codex_home),
-        legacy_root: Some(legacy_store_root(codex_home)),
-    };
-    store.load_legacy_runs().is_ok_and(|runs| !runs.is_empty())
-}
-
 fn has_scoped_store_files(codex_home: &Path) -> bool {
     let review_dir = codex_home.join(STATE_DIR).join(REVIEW_DIR);
     let Ok(entries) = std::fs::read_dir(&review_dir) else {
@@ -1007,8 +954,40 @@ fn validate_run(run: &AutoReviewRun) -> Result<()> {
     }
     validate_safe_id(&run.run_id).context("auto review run_id")?;
 
+    if run.finding_digests.len() > run.finding_count {
+        anyhow::bail!(
+            "auto review run {} has more finding digests than findings",
+            run.run_id
+        );
+    }
+    if run.finding_digests.len() > SUMMARY_MAX_FINDINGS {
+        anyhow::bail!(
+            "auto review run {} stores too many finding digests: {} > {}",
+            run.run_id,
+            run.finding_digests.len(),
+            SUMMARY_MAX_FINDINGS,
+        );
+    }
+    let expected_omitted = run.finding_count.saturating_sub(run.finding_digests.len());
+    if run.omitted_finding_digest_count != expected_omitted {
+        anyhow::bail!(
+            "auto review run {} has inconsistent omitted finding digest count: {} != {}",
+            run.run_id,
+            run.omitted_finding_digest_count,
+            expected_omitted,
+        );
+    }
     let mut finding_ids = BTreeSet::new();
-    for finding in &run.findings {
+    for (index, finding) in run.finding_digests.iter().enumerate() {
+        let expected_id = format!("f{}", index + 1);
+        if finding.finding_id != expected_id {
+            anyhow::bail!(
+                "auto review run {} has non-canonical finding id: {} != {}",
+                run.run_id,
+                finding.finding_id,
+                expected_id,
+            );
+        }
         validate_safe_id(&finding.finding_id).context("auto review finding_id")?;
         if !finding_ids.insert(&finding.finding_id) {
             anyhow::bail!("duplicate auto review finding id: {}", finding.finding_id);

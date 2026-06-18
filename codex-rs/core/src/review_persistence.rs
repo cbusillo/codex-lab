@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use codex_auto_review::AutoReviewDuplicateMatch;
-use codex_auto_review::AutoReviewFindingRecord;
 use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunFreshness;
 use codex_auto_review::AutoReviewRunSource;
@@ -12,6 +11,7 @@ use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
 use codex_auto_review::ReviewCoordination;
 use codex_auto_review::SCHEMA_VERSION;
+use codex_auto_review::finding_digests;
 use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_worktree_diff_fingerprint;
@@ -86,13 +86,8 @@ impl ReviewPersistenceContext {
         &self.target
     }
 
-    pub(crate) async fn refresh_target(mut self, codex_home: &Path, cwd: &Path) -> Self {
-        let target = collect_auto_review_target(codex_home, cwd, &self.review_target).await;
-        self.store_scope = target
-            .worktree_path
-            .clone()
-            .unwrap_or_else(|| cwd.to_path_buf());
-        self.target = target;
+    pub(crate) fn with_snapshot_epoch(mut self, snapshot_epoch: u64) -> Self {
+        self.target.snapshot_epoch = Some(snapshot_epoch);
         self
     }
 
@@ -244,6 +239,29 @@ impl ReviewPersistenceContext {
             }
             return false;
         }
+        if let Err(err) = store.list_runs() {
+            tracing::warn!(
+                run_id = %self.run_id,
+                error = %err,
+                "failed to read auto review runs before persisting output"
+            );
+            return false;
+        }
+        if let Some(output) = output
+            && let Err(err) = store.save_output(&self.run_id, output)
+        {
+            tracing::warn!(
+                run_id = %self.run_id,
+                error = %err,
+                "failed to persist auto review output"
+            );
+            return false;
+        }
+        let finding_count = output
+            .map(|output| output.findings.len())
+            .unwrap_or_default();
+        let finding_digests = output.map(finding_digests).unwrap_or_default();
+        let omitted_finding_digest_count = finding_count.saturating_sub(finding_digests.len());
         let run = AutoReviewRun {
             schema_version: SCHEMA_VERSION,
             run_id: self.run_id.clone(),
@@ -258,9 +276,9 @@ impl ReviewPersistenceContext {
             superseded_by,
             cancel_reason,
             error_summary,
-            findings: output
-                .map(|output| finding_records(&output.findings))
-                .unwrap_or_default(),
+            finding_count,
+            finding_digests,
+            omitted_finding_digest_count,
         };
         if let Err(err) = store.save_run(&run) {
             tracing::warn!(
@@ -333,19 +351,6 @@ pub(crate) async fn collect_auto_review_target(
             .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
         worktree_diff_fingerprint,
     }
-}
-
-fn finding_records(
-    findings: &[codex_protocol::protocol::ReviewFinding],
-) -> Vec<AutoReviewFindingRecord> {
-    findings
-        .iter()
-        .enumerate()
-        .map(|(index, finding)| AutoReviewFindingRecord {
-            finding_id: format!("f{}", index + 1),
-            finding: finding.clone(),
-        })
-        .collect()
 }
 
 fn now_unix_secs() -> i64 {
