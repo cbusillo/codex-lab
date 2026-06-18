@@ -2180,10 +2180,12 @@ dependencies = [
  "codex-protocol",
  "codex-utils-path",
  "crc32fast",
+ "libc",
  "pretty_assertions",
  "serde",
  "serde_json",
  "tempfile",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
