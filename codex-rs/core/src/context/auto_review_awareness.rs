@@ -84,7 +84,7 @@ async fn build_auto_review_awareness_inner(
     }
 
     let active_review_target = ReviewTarget::UncommittedChanges;
-    let active_target = collect_auto_review_target(cwd, &active_review_target).await;
+    let active_target = collect_auto_review_target(codex_home, cwd, &active_review_target).await;
     let store_scope = active_target.worktree_path.as_deref().unwrap_or(cwd);
     let runs = AutoReviewStore::for_scope(codex_home, store_scope).list_runs()?;
     if runs.is_empty()

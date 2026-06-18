@@ -279,6 +279,7 @@ fn background_auto_review_skips_duplicate_fingerprint() {
 fn test_background_review_persistence(
     run_id: &str,
 ) -> (ReviewPersistenceContext, tempfile::TempDir) {
+    let codex_home = tempfile::TempDir::new().expect("create temp codex home");
     let cwd = tempfile::TempDir::new().expect("create temp cwd");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -288,6 +289,7 @@ fn test_background_review_persistence(
         run_id.to_string(),
         ReviewPersistence::BackgroundAutoReview,
         ReviewTarget::UncommittedChanges,
+        codex_home.path(),
         cwd.path(),
         Some("test-model".to_string()),
     ));

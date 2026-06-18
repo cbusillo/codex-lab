@@ -258,6 +258,7 @@ pub(super) async fn prepare_review_thread(
                     review_turn_id.clone(),
                     mode,
                     resolved.target.clone(),
+                    tc.config.codex_home.as_ref(),
                     target_cwd,
                     Some(model),
                 )

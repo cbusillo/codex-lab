@@ -10,6 +10,7 @@ use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::ReviewCoordination;
 use codex_auto_review::SCHEMA_VERSION;
 use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
@@ -42,10 +43,11 @@ impl ReviewPersistenceContext {
         run_id: String,
         mode: ReviewPersistence,
         review_target: ReviewTarget,
+        codex_home: &Path,
         cwd: &Path,
         model: Option<String>,
     ) -> Self {
-        let target = collect_auto_review_target(cwd, &review_target).await;
+        let target = collect_auto_review_target(codex_home, cwd, &review_target).await;
         let store_scope = target
             .worktree_path
             .clone()
@@ -82,6 +84,16 @@ impl ReviewPersistenceContext {
 
     pub(crate) fn target(&self) -> &AutoReviewRunTarget {
         &self.target
+    }
+
+    pub(crate) async fn refresh_target(mut self, codex_home: &Path, cwd: &Path) -> Self {
+        let target = collect_auto_review_target(codex_home, cwd, &self.review_target).await;
+        self.store_scope = target
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| cwd.to_path_buf());
+        self.target = target;
+        self
     }
 
     pub(crate) fn worktree_diff_fingerprint(&self) -> Option<&str> {
@@ -267,11 +279,22 @@ fn is_terminal_status(status: &AutoReviewRunStatus) -> bool {
 }
 
 pub(crate) async fn collect_auto_review_target(
+    codex_home: &Path,
     cwd: &Path,
     review_target: &ReviewTarget,
 ) -> AutoReviewRunTarget {
     let git_info = collect_git_info(cwd).await;
     let repo_root = get_git_repo_root(cwd);
+    let store_scope = repo_root.as_deref().unwrap_or(cwd);
+    let snapshot_epoch =
+        match ReviewCoordination::for_scope(codex_home, store_scope).current_snapshot_epoch() {
+            Ok(0) => None,
+            Ok(epoch) => Some(epoch),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to collect auto review snapshot epoch");
+                None
+            }
+        };
     let base_sha = match (repo_root.as_deref(), review_target) {
         (Some(repo_root), ReviewTarget::BaseBranch { branch }) => {
             match merge_base_with_head(repo_root, branch) {
@@ -301,6 +324,13 @@ pub(crate) async fn collect_auto_review_target(
             .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
         base_sha,
         worktree_path: repo_root.or_else(|| Some(PathBuf::from(cwd))),
+        snapshot_epoch,
+        snapshot_commit: git_info
+            .as_ref()
+            .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+        head_at_launch: git_info
+            .as_ref()
+            .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
         worktree_diff_fingerprint,
     }
 }
@@ -336,6 +366,7 @@ mod tests {
             "late-running".to_string(),
             ReviewPersistence::BackgroundAutoReview,
             ReviewTarget::UncommittedChanges,
+            codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
         )
@@ -359,6 +390,7 @@ mod tests {
             "custom-cancelled".to_string(),
             ReviewPersistence::BackgroundAutoReview,
             ReviewTarget::UncommittedChanges,
+            codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
         )
@@ -388,6 +420,7 @@ mod tests {
             "pending-running".to_string(),
             ReviewPersistence::BackgroundAutoReview,
             ReviewTarget::UncommittedChanges,
+            codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
         )
@@ -412,6 +445,7 @@ mod tests {
             "skipped-running".to_string(),
             ReviewPersistence::BackgroundAutoReview,
             ReviewTarget::UncommittedChanges,
+            codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
         )
@@ -436,6 +470,7 @@ mod tests {
             "duplicate-candidate".to_string(),
             ReviewPersistence::BackgroundAutoReview,
             ReviewTarget::UncommittedChanges,
+            codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
         )
@@ -465,5 +500,32 @@ mod tests {
             run.error_summary.as_deref(),
             Some("equivalent background auto review already exists: existing-run")
         );
+    }
+
+    #[tokio::test]
+    async fn collect_target_records_current_snapshot_epoch() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+
+        let target = collect_auto_review_target(
+            codex_home.path(),
+            cwd.path(),
+            &ReviewTarget::UncommittedChanges,
+        )
+        .await;
+        assert_eq!(target.snapshot_epoch, None);
+
+        ReviewCoordination::for_scope(codex_home.path(), cwd.path())
+            .bump_snapshot_epoch()
+            .expect("bump snapshot epoch");
+
+        let target = collect_auto_review_target(
+            codex_home.path(),
+            cwd.path(),
+            &ReviewTarget::UncommittedChanges,
+        )
+        .await;
+
+        assert_eq!(target.snapshot_epoch, Some(1));
     }
 }

@@ -111,10 +111,12 @@ impl Session {
             .review_model
             .clone()
             .unwrap_or_else(|| turn_context.model_info.slug.clone());
+        let codex_home = self.codex_home().await;
         let persistence = ReviewPersistenceContext::new(
             uuid::Uuid::new_v4().to_string(),
             ReviewPersistence::BackgroundAutoReview,
             ReviewTarget::UncommittedChanges,
+            codex_home.as_ref(),
             cwd.as_ref(),
             Some(model),
         )
@@ -296,6 +298,80 @@ impl Session {
             }
         }
 
+        if self.input_queue.has_trigger_turn_mailbox_items().await
+            || self.active_turn.lock().await.is_some()
+        {
+            debug!(
+                "background auto review skipped after prepare: foreground work pending or active"
+            );
+            let error_summary =
+                "foreground work became active before background auto review could start"
+                    .to_string();
+            self.record_skipped_background_auto_review(
+                &persistence,
+                generation,
+                &fingerprint,
+                error_summary,
+            )
+            .await;
+            return;
+        }
+        let coordination =
+            ReviewCoordination::for_scope(self.codex_home().await, persistence.store_scope());
+        let review_lock_guard = match acquire_background_auto_review_lock(
+            &coordination,
+            format!("background_auto_review:{}", persistence.run_id()),
+        )
+        .await
+        {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
+                let error_summary =
+                    "another background auto review is already running for this worktree"
+                        .to_string();
+                self.record_skipped_background_auto_review(
+                    &persistence,
+                    generation,
+                    &fingerprint,
+                    error_summary,
+                )
+                .await;
+                debug!("background auto review skipped: review lock is held");
+                return;
+            }
+            Err(err) => {
+                let error_summary = format!("failed to acquire background auto review lock: {err}");
+                self.record_skipped_background_auto_review(
+                    &persistence,
+                    generation,
+                    &fingerprint,
+                    error_summary,
+                )
+                .await;
+                warn!(error = %err, "failed to acquire background auto review lock");
+                return;
+            }
+        };
+        let persistence = match coordination.bump_snapshot_epoch() {
+            Ok(_snapshot_epoch) => {
+                persistence
+                    .refresh_target(turn_context.config.codex_home.as_ref(), cwd.as_ref())
+                    .await
+            }
+            Err(err) => {
+                let error_summary =
+                    format!("failed to bump background auto review snapshot epoch: {err}");
+                self.record_skipped_background_auto_review(
+                    &persistence,
+                    generation,
+                    &fingerprint,
+                    error_summary,
+                )
+                .await;
+                warn!(error = %err, "failed to bump background auto review snapshot epoch");
+                return;
+            }
+        };
         let prepared = prepare_review_thread(
             Arc::clone(self),
             Arc::clone(&turn_context.config),
@@ -359,44 +435,6 @@ impl Session {
             )
             .await;
         }
-        let coordination =
-            ReviewCoordination::for_scope(self.codex_home().await, persistence.store_scope());
-        let review_lock_guard = match acquire_background_auto_review_lock(
-            &coordination,
-            format!("background_auto_review:{}", persistence.run_id()),
-        )
-        .await
-        {
-            Ok(Some(guard)) => guard,
-            Ok(None) => {
-                let error_summary =
-                    "another background auto review is already running for this worktree"
-                        .to_string();
-                self.clear_background_auto_review(generation).await;
-                self.record_skipped_background_auto_review(
-                    &persistence,
-                    generation,
-                    &fingerprint,
-                    error_summary,
-                )
-                .await;
-                debug!("background auto review skipped: review lock is held");
-                return;
-            }
-            Err(err) => {
-                let error_summary = format!("failed to acquire background auto review lock: {err}");
-                self.clear_background_auto_review(generation).await;
-                self.record_skipped_background_auto_review(
-                    &persistence,
-                    generation,
-                    &fingerprint,
-                    error_summary,
-                )
-                .await;
-                warn!(error = %err, "failed to acquire background auto review lock");
-                return;
-            }
-        };
         if started_review
             .running_review
             .cancellation_token
@@ -549,10 +587,9 @@ impl Session {
             let state = self.state.lock().await;
             state.background_auto_review.active_snapshot()
         };
-        let duplicate = match store.find_duplicate_by_fingerprint_with_target_and_filter(
+        let duplicate = match store.find_duplicate_by_fingerprint_with_target_proof_and_filter(
             fingerprint,
-            persistence.target().branch.as_deref(),
-            persistence.target().head_sha.as_deref(),
+            Some(persistence.target()),
             |duplicate| match duplicate.disposition {
                 AutoReviewDuplicateDisposition::ReuseTerminal => true,
                 AutoReviewDuplicateDisposition::Adopt => {

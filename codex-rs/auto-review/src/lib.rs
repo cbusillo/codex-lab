@@ -152,7 +152,7 @@ impl AutoReviewStore {
         for run in self.load_index()?.runs {
             if run.run_id == superseded_by
                 || run.target.worktree_diff_fingerprint.as_deref() != Some(fingerprint)
-                || !duplicate_target_is_reusable(&run, active_branch, active_head)
+                || !duplicate_target_matches_branch_head(&run, active_branch, active_head)
             {
                 continue;
             }
@@ -248,7 +248,54 @@ impl AutoReviewStore {
                         | AutoReviewRunStatus::Superseded
                 )
             })
-            .filter(|run| duplicate_target_is_reusable(run, active_branch, active_head))
+            .filter(|run| duplicate_target_matches_branch_head(run, active_branch, active_head))
+            .filter_map(|run| {
+                let duplicate = AutoReviewDuplicateMatch {
+                    run_id: run.run_id.clone(),
+                    status: run.status.clone(),
+                    disposition: duplicate_disposition(&run),
+                    finding_count: run.findings.len(),
+                    model: run.model.clone(),
+                };
+                is_eligible(&duplicate).then_some((run, duplicate))
+            })
+            .max_by(|left, right| {
+                duplicate_priority(&left.0)
+                    .cmp(&duplicate_priority(&right.0))
+                    .then_with(|| {
+                        auto_review_run_sort_key(&left.0).cmp(&auto_review_run_sort_key(&right.0))
+                    })
+            })
+            .map(|(_run, duplicate)| duplicate))
+    }
+
+    pub fn find_duplicate_by_fingerprint_with_target_proof_and_filter<F>(
+        &self,
+        diff_fingerprint: &str,
+        active_target: Option<&AutoReviewRunTarget>,
+        is_eligible: F,
+    ) -> Result<Option<AutoReviewDuplicateMatch>>
+    where
+        F: Fn(&AutoReviewDuplicateMatch) -> bool,
+    {
+        let fingerprint = diff_fingerprint.trim();
+        if fingerprint.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .load_index_for_read()?
+            .runs
+            .into_iter()
+            .filter(|run| run.target.worktree_diff_fingerprint.as_deref() == Some(fingerprint))
+            .filter(|run| {
+                !matches!(
+                    run.status,
+                    AutoReviewRunStatus::Lost
+                        | AutoReviewRunStatus::Skipped
+                        | AutoReviewRunStatus::Superseded
+                )
+            })
+            .filter(|run| duplicate_target_is_reusable(run, active_target))
             .filter_map(|run| {
                 let duplicate = AutoReviewDuplicateMatch {
                     run_id: run.run_id.clone(),
@@ -670,6 +717,12 @@ pub struct AutoReviewRunTarget {
     pub base_sha: Option<String>,
     pub worktree_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_at_launch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_diff_fingerprint: Option<String>,
 }
 
@@ -682,6 +735,15 @@ impl AutoReviewRunTarget {
             return AutoReviewFreshness::Stale;
         }
         if self.base_sha != active.base_sha {
+            return AutoReviewFreshness::Stale;
+        }
+        if active.snapshot_epoch.is_some() && self.snapshot_epoch != active.snapshot_epoch {
+            return AutoReviewFreshness::Stale;
+        }
+        if self.snapshot_commit.is_some()
+            && active.snapshot_commit.is_some()
+            && self.snapshot_commit != active.snapshot_commit
+        {
             return AutoReviewFreshness::Stale;
         }
         if self.worktree_diff_fingerprint != active.worktree_diff_fingerprint {
@@ -778,7 +840,7 @@ fn duplicate_disposition(run: &AutoReviewRun) -> AutoReviewDuplicateDisposition 
     }
 }
 
-fn duplicate_target_is_reusable(
+fn duplicate_target_matches_branch_head(
     run: &AutoReviewRun,
     active_branch: Option<&str>,
     active_head: Option<&str>,
@@ -792,6 +854,15 @@ fn duplicate_target_is_reusable(
         return false;
     }
     run.target.head_sha.as_deref() == active_head.and_then(non_empty_str)
+}
+
+fn duplicate_target_is_reusable(
+    run: &AutoReviewRun,
+    active_target: Option<&AutoReviewRunTarget>,
+) -> bool {
+    active_target.is_none_or(|active_target| {
+        run.target.freshness(active_target) == AutoReviewFreshness::Current
+    })
 }
 
 fn non_empty_str(value: &str) -> Option<&str> {
