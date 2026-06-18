@@ -165,6 +165,115 @@ fn corrupt_sidecar_does_not_block_store_listing() -> anyhow::Result<()> {
 }
 
 #[test]
+fn list_runs_recovers_from_corrupt_index_using_outputs() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_a", Vec::new()))?;
+    store.save_run(&sample_run("run_b", Vec::new()))?;
+    corrupt_runs_index(&store)?;
+
+    let runs = store.list_runs()?;
+
+    assert_eq!(
+        runs.into_iter().map(|run| run.run_id).collect::<Vec<_>>(),
+        vec!["run_a".to_string(), "run_b".to_string()]
+    );
+    Ok(())
+}
+
+#[test]
+fn load_run_recovers_from_corrupt_index_using_output() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let run = sample_run("run_1", vec![sample_finding("f1", "Title")]);
+    store.save_run(&run)?;
+    corrupt_runs_index(&store)?;
+
+    let loaded = store.load_run("run_1")?;
+
+    assert_eq!(loaded, run);
+    Ok(())
+}
+
+#[test]
+fn finding_detail_recovers_from_corrupt_index_using_output() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let run = sample_run("run_1", vec![sample_finding("f1", "Title")]);
+    store.save_run(&run)?;
+    corrupt_runs_index(&store)?;
+
+    let detail = store.finding_detail("run_1", "f1", 1024)?;
+
+    assert_eq!(detail.finding_id, "f1");
+    assert!(detail.content.contains("Title"));
+    Ok(())
+}
+
+#[test]
+fn read_paths_recover_from_corrupt_index_using_legacy_runs() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let legacy_run = sample_run("legacy_run", vec![sample_finding("f1", "Legacy")]);
+    write_legacy_run(codex_home.path(), &legacy_run)?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    corrupt_runs_index(&store)?;
+
+    let runs = store.list_runs()?;
+    let loaded = store.load_run("legacy_run")?;
+    let detail = store.finding_detail("legacy_run", "f1", 1024)?;
+
+    assert_eq!(runs, vec![legacy_run.clone()]);
+    assert_eq!(loaded, legacy_run);
+    assert!(detail.content.contains("Legacy"));
+    Ok(())
+}
+
+#[test]
+fn corrupt_index_prefers_scoped_output_over_legacy_run() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let legacy_run = sample_run("same_run", vec![sample_finding("f1", "Legacy")]);
+    let scoped_run = sample_run("same_run", vec![sample_finding("f1", "Scoped")]);
+    write_legacy_run(codex_home.path(), &legacy_run)?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&scoped_run)?;
+    corrupt_runs_index(&store)?;
+
+    let loaded = store.load_run("same_run")?;
+    let detail = store.finding_detail("same_run", "f1", 1024)?;
+
+    assert_eq!(loaded, scoped_run);
+    assert!(detail.content.contains("Scoped"));
+    assert!(!detail.content.contains("Legacy"));
+    Ok(())
+}
+
+#[test]
+fn save_run_keeps_corrupt_index_strict() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", Vec::new()))?;
+    corrupt_runs_index(&store)?;
+
+    let error = store
+        .save_run(&sample_run("run_2", Vec::new()))
+        .expect_err("writing through a corrupt index should stay explicit");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to parse auto review runs index"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn list_runs_returns_empty_when_store_is_missing() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
@@ -1125,6 +1234,23 @@ fn sample_run(run_id: &str, findings: Vec<AutoReviewFindingRecord>) -> AutoRevie
         error_summary: None,
         findings,
     }
+}
+
+fn corrupt_runs_index(store: &AutoReviewStore) -> anyhow::Result<()> {
+    let runs_path = store.runs_path();
+    std::fs::create_dir_all(runs_path.parent().expect("runs path parent"))?;
+    std::fs::write(runs_path, "not json\n")?;
+    Ok(())
+}
+
+fn write_legacy_run(codex_home: &std::path::Path, run: &AutoReviewRun) -> anyhow::Result<()> {
+    let legacy_dir = codex_home.join("auto-review").join("runs");
+    std::fs::create_dir_all(&legacy_dir)?;
+    std::fs::write(
+        legacy_dir.join(format!("{}.json", run.run_id)),
+        format!("{}\n", serde_json::to_string_pretty(run)?),
+    )?;
+    Ok(())
 }
 
 fn target_with_fingerprint(fingerprint: &str) -> AutoReviewRunTarget {
