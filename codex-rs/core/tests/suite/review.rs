@@ -727,6 +727,7 @@ async fn auto_review_awareness_injected_for_current_findings() -> anyhow::Result
         schema_version: codex_auto_review::SCHEMA_VERSION,
         run_id: "awareness_run".to_string(),
         status: AutoReviewRunStatus::Completed,
+        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
         source: AutoReviewRunSource::Background,
         target: codex_auto_review::AutoReviewRunTarget {
             branch: Some("main".to_string()),
@@ -739,6 +740,8 @@ async fn auto_review_awareness_injected_for_current_findings() -> anyhow::Result
         started_at_unix_secs: 1,
         completed_at_unix_secs: Some(2),
         model: Some("gpt-test".to_string()),
+        superseded_by: None,
+        cancel_reason: None,
         error_summary: None,
         findings: vec![codex_auto_review::AutoReviewFindingRecord {
             finding_id: "f1".to_string(),

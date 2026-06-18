@@ -7,9 +7,11 @@ use codex_protocol::protocol::ReviewTarget;
 use pretty_assertions::assert_eq;
 
 use super::AutoReviewDetail;
+use super::AutoReviewDuplicateDisposition;
 use super::AutoReviewFindingRecord;
 use super::AutoReviewFreshness;
 use super::AutoReviewRun;
+use super::AutoReviewRunFreshness;
 use super::AutoReviewRunSource;
 use super::AutoReviewRunStatus;
 use super::AutoReviewRunTarget;
@@ -105,6 +107,59 @@ fn list_runs_recovers_runs_missing_from_index_but_present_in_outputs() -> anyhow
     assert_eq!(
         runs.into_iter().map(|run| run.run_id).collect::<Vec<_>>(),
         vec!["run_a".to_string(), "run_b".to_string()]
+    );
+    Ok(())
+}
+
+#[test]
+fn sidecar_does_not_override_index_run() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let indexed = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        findings: Vec::new(),
+        ..sample_run("run_1", Vec::new())
+    };
+    let sidecar = AutoReviewRun {
+        status: AutoReviewRunStatus::Completed,
+        findings: vec![sample_finding("f1", "Sidecar")],
+        ..sample_run("run_1", Vec::new())
+    };
+    let index = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "runs": [indexed],
+    });
+    let runs_path = store.runs_path();
+    std::fs::create_dir_all(runs_path.parent().expect("runs path parent"))?;
+    std::fs::write(&runs_path, format!("{index}\n"))?;
+    let output_path = store.output_path("run_1")?;
+    std::fs::create_dir_all(output_path.parent().expect("output path parent"))?;
+    std::fs::write(&output_path, serde_json::to_string_pretty(&sidecar)?)?;
+
+    let loaded = store.load_run("run_1")?;
+
+    assert_eq!(loaded.status, AutoReviewRunStatus::Running);
+    assert!(loaded.findings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn corrupt_sidecar_does_not_block_store_listing() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", Vec::new()))?;
+    let bad_path = store.output_path("bad_run")?;
+    std::fs::create_dir_all(bad_path.parent().expect("output path parent"))?;
+    std::fs::write(&bad_path, "not json\n")?;
+
+    let runs = store.list_runs()?;
+
+    assert_eq!(
+        runs.into_iter().map(|run| run.run_id).collect::<Vec<_>>(),
+        vec!["run_1".to_string()]
     );
     Ok(())
 }
@@ -324,6 +379,50 @@ fn load_run_defaults_missing_worktree_diff_fingerprint() -> anyhow::Result<()> {
 }
 
 #[test]
+fn load_run_defaults_missing_lifecycle_fields() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let path = store.runs_path();
+    std::fs::create_dir_all(path.parent().expect("runs path parent"))?;
+    std::fs::write(
+        &path,
+        r#"{
+  "schema_version": 1,
+  "runs": [
+    {
+      "schema_version": 1,
+      "run_id": "run_1",
+      "status": "completed",
+      "source": "manual",
+      "target": {
+        "branch": "main",
+        "head_sha": "head-2",
+        "base_sha": "base-1",
+        "worktree_path": "/repo"
+      },
+      "review_target": {
+        "type": "uncommittedChanges"
+      },
+      "started_at_unix_secs": 1,
+      "completed_at_unix_secs": 2,
+      "model": "gpt-test",
+      "error_summary": null,
+      "findings": []
+    }
+  ]
+}"#,
+    )?;
+
+    let loaded = store.load_run("run_1")?;
+
+    assert_eq!(loaded.freshness, AutoReviewRunFreshness::Unknown);
+    assert_eq!(loaded.superseded_by, None);
+    assert_eq!(loaded.cancel_reason, None);
+    Ok(())
+}
+
+#[test]
 fn unsafe_run_ids_are_rejected() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let scope = tempfile::tempdir().expect("tempdir");
@@ -472,10 +571,15 @@ fn visible_findings_require_completed_run_status() {
 
     for status in [
         AutoReviewRunStatus::Pending,
+        AutoReviewRunStatus::Snapshotting,
         AutoReviewRunStatus::Running,
+        AutoReviewRunStatus::Reviewing,
+        AutoReviewRunStatus::Resolving,
         AutoReviewRunStatus::Failed,
         AutoReviewRunStatus::Cancelled,
+        AutoReviewRunStatus::Superseded,
         AutoReviewRunStatus::Skipped,
+        AutoReviewRunStatus::Lost,
     ] {
         let run = AutoReviewRun {
             status,
@@ -487,6 +591,236 @@ fn visible_findings_require_completed_run_status() {
                 .is_empty()
         );
         assert_eq!(run.summary(&active, &active_review_target).content, "");
+    }
+}
+
+#[test]
+fn duplicate_lookup_prefers_adoptable_in_flight_match() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let completed = AutoReviewRun {
+        target: target_with_fingerprint("sha256:abc"),
+        ..sample_run("completed", Vec::new())
+    };
+    let reviewing = AutoReviewRun {
+        status: AutoReviewRunStatus::Reviewing,
+        completed_at_unix_secs: None,
+        target: target_with_fingerprint("sha256:abc"),
+        ..sample_run("reviewing", Vec::new())
+    };
+    store.save_run(&completed)?;
+    store.save_run(&reviewing)?;
+
+    let duplicate = store
+        .find_duplicate_by_fingerprint("sha256:abc")?
+        .expect("duplicate match");
+
+    assert_eq!(duplicate.run_id, "reviewing");
+    assert_eq!(duplicate.disposition, AutoReviewDuplicateDisposition::Adopt);
+    Ok(())
+}
+
+#[test]
+fn duplicate_lookup_can_filter_stale_target_matches() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        target: AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: Some("old-head".to_string()),
+            worktree_diff_fingerprint: Some("sha256:abc".to_string()),
+            ..sample_target("main", "old-head", "/repo")
+        },
+        ..sample_run("old", Vec::new())
+    })?;
+
+    assert!(
+        store
+            .find_duplicate_by_fingerprint_with_target(
+                "sha256:abc",
+                Some("main"),
+                Some("new-head")
+            )?
+            .is_none()
+    );
+    assert!(
+        store
+            .find_duplicate_by_fingerprint_with_target(
+                "sha256:abc",
+                Some("main"),
+                Some("old-head")
+            )?
+            .is_some()
+    );
+    Ok(())
+}
+
+#[test]
+fn duplicate_lookup_reports_pending_but_ignores_lost_skipped_and_superseded() -> anyhow::Result<()>
+{
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        status: AutoReviewRunStatus::Pending,
+        target: target_with_fingerprint("sha256:pending"),
+        ..sample_run("pending", Vec::new())
+    })?;
+    for (run_id, status) in [
+        ("lost", AutoReviewRunStatus::Lost),
+        ("skipped", AutoReviewRunStatus::Skipped),
+        ("superseded", AutoReviewRunStatus::Superseded),
+    ] {
+        store.save_run(&AutoReviewRun {
+            status,
+            target: target_with_fingerprint("sha256:abc"),
+            ..sample_run(run_id, Vec::new())
+        })?;
+    }
+
+    assert_eq!(store.find_duplicate_by_fingerprint("sha256:abc")?, None);
+    let duplicate = store
+        .find_duplicate_by_fingerprint("sha256:pending")?
+        .expect("pending duplicate match");
+    assert_eq!(duplicate.run_id, "pending");
+    assert_eq!(
+        duplicate.disposition,
+        AutoReviewDuplicateDisposition::SupersedeTerminal
+    );
+    Ok(())
+}
+
+#[test]
+fn mark_superseded_preserves_runs_with_evidence() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("clean", Vec::new()))?;
+    store.save_run(&sample_run(
+        "with_finding",
+        vec![sample_finding("f1", "Keep")],
+    ))?;
+
+    assert!(store.mark_superseded("clean", "new_run")?);
+    assert!(!store.mark_superseded("with_finding", "new_run")?);
+
+    let clean = store.load_run("clean")?;
+    let with_finding = store.load_run("with_finding")?;
+    assert_eq!(clean.status, AutoReviewRunStatus::Superseded);
+    assert_eq!(clean.freshness, AutoReviewRunFreshness::Superseded);
+    assert_eq!(clean.superseded_by.as_deref(), Some("new_run"));
+    assert_eq!(with_finding.status, AutoReviewRunStatus::Completed);
+    Ok(())
+}
+
+#[test]
+fn mark_superseded_by_fingerprint_only_supersedes_matching_scope() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        target: target_with_fingerprint("sha256:abc"),
+        ..sample_run("same_scope", Vec::new())
+    })?;
+    store.save_run(&AutoReviewRun {
+        target: target_with_fingerprint("sha256:other"),
+        ..sample_run("other_scope", Vec::new())
+    })?;
+
+    let changed = store.mark_superseded_by_fingerprint("sha256:abc", "new_run")?;
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        store.load_run("same_scope")?.status,
+        AutoReviewRunStatus::Superseded
+    );
+    assert_eq!(
+        store.load_run("other_scope")?.status,
+        AutoReviewRunStatus::Completed
+    );
+    Ok(())
+}
+
+#[test]
+fn reconcile_orphaned_in_flight_marks_lost() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        status: AutoReviewRunStatus::Reviewing,
+        completed_at_unix_secs: None,
+        ..sample_run("reviewing", Vec::new())
+    })?;
+    store.save_run(&sample_run("completed", Vec::new()))?;
+
+    let changed = store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 42)?;
+
+    assert_eq!(changed, 1);
+    let lost = store.load_run("reviewing")?;
+    assert_eq!(lost.status, AutoReviewRunStatus::Lost);
+    assert_eq!(lost.freshness, AutoReviewRunFreshness::Lost);
+    assert_eq!(lost.completed_at_unix_secs, Some(42));
+    assert_eq!(
+        lost.cancel_reason.as_deref(),
+        Some("agent_missing_after_restart")
+    );
+    assert_eq!(
+        store.load_run("completed")?.status,
+        AutoReviewRunStatus::Completed
+    );
+    Ok(())
+}
+
+#[test]
+fn reconcile_orphaned_in_flight_preserves_live_runs() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        status: AutoReviewRunStatus::Reviewing,
+        completed_at_unix_secs: None,
+        ..sample_run("live", Vec::new())
+    })?;
+    store.save_run(&AutoReviewRun {
+        status: AutoReviewRunStatus::Reviewing,
+        completed_at_unix_secs: None,
+        ..sample_run("orphan", Vec::new())
+    })?;
+
+    let changed = store.reconcile_orphaned_in_flight(["live"], 42)?;
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        store.load_run("live")?.status,
+        AutoReviewRunStatus::Reviewing
+    );
+    assert_eq!(store.load_run("orphan")?.status, AutoReviewRunStatus::Lost);
+    Ok(())
+}
+
+#[test]
+fn lifecycle_freshness_overrides_matching_target_freshness() {
+    let active = sample_target("main", "head-2", "/repo");
+    for (freshness, status) in [
+        (AutoReviewRunFreshness::Lost, AutoReviewRunStatus::Lost),
+        (
+            AutoReviewRunFreshness::Superseded,
+            AutoReviewRunStatus::Superseded,
+        ),
+    ] {
+        let run = AutoReviewRun {
+            freshness,
+            status,
+            ..sample_run("run_1", vec![sample_finding("f1", "Title")])
+        };
+
+        assert_eq!(run.freshness(&active), AutoReviewFreshness::Stale);
+        assert!(
+            run.visible_findings(&active, &ReviewTarget::UncommittedChanges)
+                .is_empty()
+        );
     }
 }
 
@@ -702,14 +1036,24 @@ fn sample_run(run_id: &str, findings: Vec<AutoReviewFindingRecord>) -> AutoRevie
         schema_version: SCHEMA_VERSION,
         run_id: run_id.to_string(),
         status: AutoReviewRunStatus::Completed,
+        freshness: AutoReviewRunFreshness::Current,
         source: AutoReviewRunSource::Manual,
         target: sample_target("main", "head-2", "/repo"),
         review_target: ReviewTarget::UncommittedChanges,
         started_at_unix_secs: 1,
         completed_at_unix_secs: Some(2),
         model: Some("gpt-test".to_string()),
+        superseded_by: None,
+        cancel_reason: None,
         error_summary: None,
         findings,
+    }
+}
+
+fn target_with_fingerprint(fingerprint: &str) -> AutoReviewRunTarget {
+    AutoReviewRunTarget {
+        worktree_diff_fingerprint: Some(fingerprint.to_string()),
+        ..sample_target("main", "head-2", "/repo")
     }
 }
 
