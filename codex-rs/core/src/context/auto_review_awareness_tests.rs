@@ -233,6 +233,9 @@ fn sample_target(branch: &str, head_sha: &str, worktree_path: &str) -> AutoRevie
         head_sha: Some(head_sha.to_string()),
         base_sha: Some("base-1".to_string()),
         worktree_path: Some(PathBuf::from(worktree_path)),
+        snapshot_epoch: None,
+        snapshot_commit: None,
+        head_at_launch: None,
         worktree_diff_fingerprint: None,
     }
 }

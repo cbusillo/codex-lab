@@ -1,4 +1,5 @@
 use super::*;
+use codex_auto_review::ReviewCoordination;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
@@ -355,7 +356,7 @@ impl TurnRequestProcessor {
         Ok(environment_selections)
     }
 
-    async fn auto_review_target_for_thread(thread: &CodexThread) -> AutoReviewRunTarget {
+    async fn auto_review_target_for_thread(&self, thread: &CodexThread) -> AutoReviewRunTarget {
         let snapshot = thread.config_snapshot().await;
         let environments = thread.environment_selections().await;
         let cwd = match environments.as_slice() {
@@ -366,6 +367,19 @@ impl TurnRequestProcessor {
         };
         let git_info = collect_git_info(cwd.as_path()).await;
         let repo_root = get_git_repo_root(cwd.as_path());
+        let worktree_path = repo_root.or_else(|| Some(cwd.as_path().to_path_buf()));
+        let snapshot_epoch = worktree_path.as_ref().and_then(|scope| {
+            match ReviewCoordination::for_scope(self.config.codex_home.as_ref(), scope)
+                .current_snapshot_epoch()
+            {
+                Ok(0) => None,
+                Ok(epoch) => Some(epoch),
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to collect app-server auto review snapshot epoch");
+                    None
+                }
+            }
+        });
         let worktree_diff_fingerprint = get_worktree_diff_fingerprint(cwd.as_path()).await;
 
         AutoReviewRunTarget {
@@ -374,7 +388,14 @@ impl TurnRequestProcessor {
                 .as_ref()
                 .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
             base_sha: None,
-            worktree_path: repo_root.or_else(|| Some(cwd.as_path().to_path_buf())),
+            worktree_path,
+            snapshot_epoch,
+            snapshot_commit: git_info
+                .as_ref()
+                .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+            head_at_launch: git_info
+                .as_ref()
+                .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
             worktree_diff_fingerprint,
         }
     }
@@ -1359,7 +1380,7 @@ impl TurnRequestProcessor {
         let AutoReviewSummaryReadParams { thread_id } = params;
         let (_, thread) = self.load_thread(&thread_id).await?;
         let active_review_target = CoreReviewTarget::UncommittedChanges;
-        let active_target = Self::auto_review_target_for_thread(thread.as_ref()).await;
+        let active_target = self.auto_review_target_for_thread(thread.as_ref()).await;
         let store_scope = active_target
             .worktree_path
             .as_deref()
@@ -1445,7 +1466,7 @@ impl TurnRequestProcessor {
 
         let (_, thread) = self.load_thread(&thread_id).await?;
         let active_review_target = CoreReviewTarget::UncommittedChanges;
-        let active_target = Self::auto_review_target_for_thread(thread.as_ref()).await;
+        let active_target = self.auto_review_target_for_thread(thread.as_ref()).await;
         let store_scope = active_target
             .worktree_path
             .as_deref()

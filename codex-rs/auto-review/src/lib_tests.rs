@@ -616,6 +616,66 @@ fn freshness_classifies_current_stale_and_detached() {
 }
 
 #[test]
+fn freshness_treats_known_snapshot_epoch_mismatch_as_stale() {
+    let epoch_zero_active = AutoReviewRunTarget {
+        snapshot_epoch: None,
+        ..sample_target("main", "head-2", "/repo")
+    };
+    let active = AutoReviewRunTarget {
+        snapshot_epoch: Some(2),
+        ..sample_target("main", "head-2", "/repo")
+    };
+    let stale_epoch = AutoReviewRunTarget {
+        snapshot_epoch: Some(1),
+        ..sample_target("main", "head-2", "/repo")
+    };
+    let legacy_without_epoch = sample_target("main", "head-2", "/repo");
+
+    assert_eq!(
+        legacy_without_epoch.freshness(&epoch_zero_active),
+        AutoReviewFreshness::Current
+    );
+    assert_eq!(stale_epoch.freshness(&active), AutoReviewFreshness::Stale);
+    assert_eq!(
+        legacy_without_epoch.freshness(&active),
+        AutoReviewFreshness::Stale
+    );
+}
+
+#[test]
+fn freshness_treats_known_snapshot_commit_mismatch_as_stale() {
+    let active = AutoReviewRunTarget {
+        snapshot_commit: Some("snapshot-new".to_string()),
+        ..sample_target("main", "head-2", "/repo")
+    };
+    let stale_snapshot = AutoReviewRunTarget {
+        snapshot_commit: Some("snapshot-old".to_string()),
+        ..sample_target("main", "head-2", "/repo")
+    };
+
+    assert_eq!(
+        stale_snapshot.freshness(&active),
+        AutoReviewFreshness::Stale
+    );
+}
+
+#[test]
+fn legacy_run_targets_without_snapshot_proof_still_deserialize() -> anyhow::Result<()> {
+    let target: AutoReviewRunTarget = serde_json::from_value(serde_json::json!({
+        "branch": "main",
+        "head_sha": "head-2",
+        "base_sha": "base-1",
+        "worktree_path": "/repo"
+    }))?;
+
+    assert_eq!(target.snapshot_epoch, None);
+    assert_eq!(target.snapshot_commit, None);
+    assert_eq!(target.head_at_launch, None);
+    assert_eq!(target.worktree_diff_fingerprint, None);
+    Ok(())
+}
+
+#[test]
 fn summary_only_surfaces_current_findings() {
     let active = sample_target("main", "head-2", "/repo");
     let mut run = sample_run("run_1", vec![sample_finding("f1", "Title")]);
@@ -797,6 +857,35 @@ fn duplicate_lookup_can_filter_stale_target_matches() -> anyhow::Result<()> {
             )?
             .is_some()
     );
+    Ok(())
+}
+
+#[test]
+fn duplicate_lookup_with_target_proof_rejects_mismatched_snapshot_epoch() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        target: AutoReviewRunTarget {
+            snapshot_epoch: Some(1),
+            worktree_diff_fingerprint: Some("sha256:abc".to_string()),
+            ..sample_target("main", "head-2", "/repo")
+        },
+        ..sample_run("stale_duplicate", vec![sample_finding("f1", "Old")])
+    })?;
+    let active_target = AutoReviewRunTarget {
+        snapshot_epoch: Some(2),
+        worktree_diff_fingerprint: Some("sha256:abc".to_string()),
+        ..sample_target("main", "head-2", "/repo")
+    };
+
+    let duplicate = store.find_duplicate_by_fingerprint_with_target_proof_and_filter(
+        "sha256:abc",
+        Some(&active_target),
+        |_| true,
+    )?;
+
+    assert_eq!(duplicate, None);
     Ok(())
 }
 
@@ -1067,6 +1156,9 @@ fn commit_review_targets_ignore_checkout_metadata_when_reopened() {
             head_sha: Some("abc123".to_string()),
             base_sha: Some("base-old".to_string()),
             worktree_path: Some(PathBuf::from("/repo-old")),
+            snapshot_epoch: None,
+            snapshot_commit: None,
+            head_at_launch: None,
             worktree_diff_fingerprint: Some("sha256:old".to_string()),
         },
         review_target: ReviewTarget::Commit {
@@ -1080,6 +1172,9 @@ fn commit_review_targets_ignore_checkout_metadata_when_reopened() {
         head_sha: Some("abc123".to_string()),
         base_sha: None,
         worktree_path: None,
+        snapshot_epoch: None,
+        snapshot_commit: None,
+        head_at_launch: None,
         worktree_diff_fingerprint: Some("sha256:new".to_string()),
     };
     let reopened_renamed_branch = AutoReviewRunTarget {
@@ -1087,6 +1182,9 @@ fn commit_review_targets_ignore_checkout_metadata_when_reopened() {
         head_sha: Some("abc123".to_string()),
         base_sha: Some("base-new".to_string()),
         worktree_path: Some(PathBuf::from("/repo-new")),
+        snapshot_epoch: None,
+        snapshot_commit: None,
+        head_at_launch: None,
         worktree_diff_fingerprint: Some("sha256:new".to_string()),
     };
 
@@ -1266,6 +1364,9 @@ fn sample_target(branch: &str, head_sha: &str, worktree_path: &str) -> AutoRevie
         head_sha: Some(head_sha.to_string()),
         base_sha: Some("base-1".to_string()),
         worktree_path: Some(PathBuf::from(worktree_path)),
+        snapshot_epoch: None,
+        snapshot_commit: None,
+        head_at_launch: None,
         worktree_diff_fingerprint: None,
     }
 }
