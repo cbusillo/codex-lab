@@ -11,6 +11,12 @@ use codex_utils_path::write_atomically;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod review_coord;
+
+pub use review_coord::ReviewCoordination;
+pub use review_coord::ReviewLockGuard;
+pub use review_coord::ReviewLockInfo;
+
 pub const SUMMARY_MAX_FINDINGS: usize = 20;
 pub const SUMMARY_MAX_FIELD_BYTES: usize = 240;
 pub const SUMMARY_MAX_BYTES: usize = 4096;
@@ -850,11 +856,14 @@ fn validate_safe_id(value: &str) -> Result<()> {
 }
 
 fn scoped_store_root(codex_home: &Path, scope: &Path) -> PathBuf {
+    scoped_review_root(codex_home, scope).join(STORE_DIR)
+}
+
+fn scoped_review_root(codex_home: &Path, scope: &Path) -> PathBuf {
     codex_home
         .join(STATE_DIR)
         .join(REVIEW_DIR)
         .join(repo_key(scope))
-        .join(STORE_DIR)
 }
 
 fn legacy_store_root(codex_home: &Path) -> PathBuf {
