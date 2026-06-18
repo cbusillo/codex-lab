@@ -38,6 +38,12 @@ pub struct AutoReviewStore {
     legacy_root: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexLoadMode {
+    Strict,
+    Recovering,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoReviewDuplicateMatch {
     pub run_id: String,
@@ -230,7 +236,7 @@ impl AutoReviewStore {
             return Ok(None);
         }
         Ok(self
-            .load_index()?
+            .load_index_for_read()?
             .runs
             .into_iter()
             .filter(|run| run.target.worktree_diff_fingerprint.as_deref() == Some(fingerprint))
@@ -266,7 +272,7 @@ impl AutoReviewStore {
     pub fn load_run(&self, run_id: &str) -> Result<AutoReviewRun> {
         validate_safe_id(run_id).context("auto review run_id")?;
         let Some(run) = self
-            .load_index()?
+            .load_index_for_read()?
             .runs
             .into_iter()
             .find(|run| run.run_id == run_id)
@@ -278,7 +284,7 @@ impl AutoReviewStore {
     }
 
     pub fn list_runs(&self) -> Result<Vec<AutoReviewRun>> {
-        let mut runs = self.load_index()?.runs;
+        let mut runs = self.load_index_for_read()?.runs;
         runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
         Ok(runs)
     }
@@ -302,24 +308,39 @@ impl AutoReviewStore {
     }
 
     fn load_index(&self) -> Result<AutoReviewRunsIndex> {
+        self.load_index_with_mode(IndexLoadMode::Strict)
+    }
+
+    fn load_index_for_read(&self) -> Result<AutoReviewRunsIndex> {
+        self.load_index_with_mode(IndexLoadMode::Recovering)
+    }
+
+    fn load_index_with_mode(&self, mode: IndexLoadMode) -> Result<AutoReviewRunsIndex> {
         let path = self.runs_path();
         let mut index = AutoReviewRunsIndex::default();
         for run in self.load_legacy_runs()? {
             index.upsert(run);
         }
+        let mut indexed_run_ids = BTreeSet::new();
         if path.exists() {
-            let json = std::fs::read_to_string(&path).with_context(|| {
-                format!("failed to read auto review runs index {}", path.display())
-            })?;
-            let parsed: AutoReviewRunsIndex = serde_json::from_str(&json).with_context(|| {
-                format!("failed to parse auto review runs index {}", path.display())
-            })?;
-            for run in parsed.runs {
-                index.upsert(run);
+            match load_runs_index_file(&path) {
+                Ok(parsed) => {
+                    for run in parsed.runs {
+                        indexed_run_ids.insert(run.run_id.clone());
+                        index.upsert(run);
+                    }
+                }
+                Err(err) if mode == IndexLoadMode::Recovering => {
+                    drop(err);
+                }
+                Err(err) => return Err(err),
             }
         }
         for run in self.load_output_runs() {
-            index.upsert_if_absent(run);
+            if indexed_run_ids.contains(&run.run_id) {
+                continue;
+            }
+            index.upsert(run);
         }
         index.validate()?;
         Ok(index)
@@ -431,6 +452,15 @@ impl AutoReviewStore {
     }
 }
 
+fn load_runs_index_file(path: &Path) -> Result<AutoReviewRunsIndex> {
+    let json = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read auto review runs index {}", path.display()))?;
+    let parsed: AutoReviewRunsIndex = serde_json::from_str(&json)
+        .with_context(|| format!("failed to parse auto review runs index {}", path.display()))?;
+    parsed.validate()?;
+    Ok(parsed)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AutoReviewRunsIndex {
     schema_version: u32,
@@ -472,17 +502,6 @@ impl AutoReviewRunsIndex {
             .collect::<BTreeMap<_, _>>();
         by_id.insert(run.run_id.clone(), run);
         self.runs = by_id.into_values().collect();
-    }
-
-    fn upsert_if_absent(&mut self, run: AutoReviewRun) {
-        if self
-            .runs
-            .iter()
-            .any(|existing| existing.run_id == run.run_id)
-        {
-            return;
-        }
-        self.upsert(run);
     }
 }
 
