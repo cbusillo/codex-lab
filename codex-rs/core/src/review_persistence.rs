@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use codex_auto_review::AutoReviewFindingRecord;
 use codex_auto_review::AutoReviewRun;
+use codex_auto_review::AutoReviewRunFreshness;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
@@ -181,12 +182,15 @@ impl ReviewPersistenceContext {
             schema_version: SCHEMA_VERSION,
             run_id: self.run_id.clone(),
             status,
+            freshness: AutoReviewRunFreshness::Current,
             source: self.source.clone(),
             target: self.target.clone(),
             review_target: self.review_target.clone(),
             started_at_unix_secs: self.started_at_unix_secs,
             completed_at_unix_secs,
             model: self.model.clone(),
+            superseded_by: None,
+            cancel_reason: None,
             error_summary,
             findings: output
                 .map(|output| finding_records(&output.findings))
@@ -205,10 +209,7 @@ impl ReviewPersistenceContext {
 }
 
 fn is_terminal_status(status: &AutoReviewRunStatus) -> bool {
-    !matches!(
-        status,
-        AutoReviewRunStatus::Pending | AutoReviewRunStatus::Running
-    )
+    status.is_terminal()
 }
 
 pub(crate) async fn collect_auto_review_target(

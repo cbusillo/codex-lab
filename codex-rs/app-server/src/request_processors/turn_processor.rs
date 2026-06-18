@@ -415,11 +415,16 @@ impl TurnRequestProcessor {
     fn api_auto_review_status(status: AutoReviewRunStatus) -> ApiBackgroundAutoReviewStatus {
         match status {
             AutoReviewRunStatus::Pending => ApiBackgroundAutoReviewStatus::Pending,
-            AutoReviewRunStatus::Running => ApiBackgroundAutoReviewStatus::Running,
+            AutoReviewRunStatus::Snapshotting
+            | AutoReviewRunStatus::Running
+            | AutoReviewRunStatus::Reviewing
+            | AutoReviewRunStatus::Resolving => ApiBackgroundAutoReviewStatus::Running,
             AutoReviewRunStatus::Completed => ApiBackgroundAutoReviewStatus::Completed,
             AutoReviewRunStatus::Failed => ApiBackgroundAutoReviewStatus::Failed,
             AutoReviewRunStatus::Cancelled => ApiBackgroundAutoReviewStatus::Cancelled,
+            AutoReviewRunStatus::Superseded => ApiBackgroundAutoReviewStatus::Skipped,
             AutoReviewRunStatus::Skipped => ApiBackgroundAutoReviewStatus::Skipped,
+            AutoReviewRunStatus::Lost => ApiBackgroundAutoReviewStatus::Cancelled,
         }
     }
 

@@ -202,11 +202,16 @@ fn status_count_key(
     };
     let status = match &run.status {
         AutoReviewRunStatus::Pending => "pending",
+        AutoReviewRunStatus::Snapshotting => "snapshotting",
         AutoReviewRunStatus::Running => "running",
+        AutoReviewRunStatus::Reviewing => "reviewing",
+        AutoReviewRunStatus::Resolving => "resolving",
         AutoReviewRunStatus::Completed => "completed",
         AutoReviewRunStatus::Failed => "failed",
         AutoReviewRunStatus::Cancelled => "cancelled",
+        AutoReviewRunStatus::Superseded => "superseded",
         AutoReviewRunStatus::Skipped => "skipped",
+        AutoReviewRunStatus::Lost => "lost",
     };
     let source = match &run.source {
         AutoReviewRunSource::Manual => "manual",

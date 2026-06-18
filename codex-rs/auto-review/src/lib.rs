@@ -32,6 +32,22 @@ pub struct AutoReviewStore {
     legacy_root: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoReviewDuplicateMatch {
+    pub run_id: String,
+    pub status: AutoReviewRunStatus,
+    pub disposition: AutoReviewDuplicateDisposition,
+    pub finding_count: usize,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoReviewDuplicateDisposition {
+    Adopt,
+    ReuseTerminal,
+    SupersedeTerminal,
+}
+
 impl AutoReviewStore {
     pub fn for_scope(codex_home: impl AsRef<Path>, scope: impl AsRef<Path>) -> Self {
         let codex_home = codex_home.as_ref();
@@ -55,7 +71,6 @@ impl AutoReviewStore {
 
     pub fn save_run(&self, run: &AutoReviewRun) -> Result<PathBuf> {
         validate_run(run)?;
-        self.save_output(run)?;
         let mut index = self.load_index()?;
         index.upsert(run.clone());
         let runs_path = self.runs_path();
@@ -66,7 +81,142 @@ impl AutoReviewStore {
                 runs_path.display()
             )
         })?;
+        let _ = self.save_output(run);
         Ok(runs_path)
+    }
+
+    pub fn mark_superseded(&self, run_id: &str, superseded_by: &str) -> Result<bool> {
+        validate_safe_id(run_id).context("auto review run_id")?;
+        validate_safe_id(superseded_by).context("auto review superseded_by")?;
+        let mut index = self.load_index()?;
+        let Some(run) = index.runs.iter_mut().find(|run| run.run_id == run_id) else {
+            return Ok(false);
+        };
+        if run.run_id == superseded_by
+            || run.status.is_in_flight()
+            || run.status == AutoReviewRunStatus::Superseded
+            || !run.findings.is_empty()
+            || run.error_summary.is_some()
+            || run.cancel_reason.is_some()
+        {
+            return Ok(false);
+        }
+        run.status = AutoReviewRunStatus::Superseded;
+        run.freshness = AutoReviewRunFreshness::Superseded;
+        run.completed_at_unix_secs = run
+            .completed_at_unix_secs
+            .or(Some(run.started_at_unix_secs));
+        run.superseded_by = Some(superseded_by.to_string());
+        self.save_run(&run.clone())?;
+        Ok(true)
+    }
+
+    pub fn mark_superseded_by_fingerprint(
+        &self,
+        diff_fingerprint: &str,
+        superseded_by: &str,
+    ) -> Result<usize> {
+        let fingerprint = diff_fingerprint.trim();
+        if fingerprint.is_empty() {
+            return Ok(0);
+        }
+        validate_safe_id(superseded_by).context("auto review superseded_by")?;
+        let mut changed = 0;
+        for run in self.load_index()?.runs {
+            if run.run_id == superseded_by
+                || run.target.worktree_diff_fingerprint.as_deref() != Some(fingerprint)
+            {
+                continue;
+            }
+            changed += usize::from(self.mark_superseded(&run.run_id, superseded_by)?);
+        }
+        Ok(changed)
+    }
+
+    pub fn reconcile_orphaned_in_flight<I>(
+        &self,
+        live_run_ids: I,
+        now_unix_secs: i64,
+    ) -> Result<usize>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        let live_run_ids = live_run_ids
+            .into_iter()
+            .map(|run_id| run_id.as_ref().to_string())
+            .collect::<BTreeSet<_>>();
+        let mut index = self.load_index()?;
+        let mut changed = Vec::new();
+        for run in &mut index.runs {
+            if !run.status.is_in_flight() {
+                continue;
+            }
+            if live_run_ids.contains(&run.run_id) {
+                continue;
+            }
+            run.status = AutoReviewRunStatus::Lost;
+            run.freshness = AutoReviewRunFreshness::Lost;
+            run.completed_at_unix_secs = Some(now_unix_secs);
+            run.cancel_reason = Some("agent_missing_after_restart".to_string());
+            changed.push(run.clone());
+        }
+        let changed_count = changed.len();
+        for run in changed {
+            self.save_run(&run)?;
+        }
+        Ok(changed_count)
+    }
+
+    pub fn find_duplicate_by_fingerprint(
+        &self,
+        diff_fingerprint: &str,
+    ) -> Result<Option<AutoReviewDuplicateMatch>> {
+        self.find_duplicate_by_fingerprint_with_target(
+            diff_fingerprint,
+            /*active_branch*/ None,
+            /*active_head*/ None,
+        )
+    }
+
+    pub fn find_duplicate_by_fingerprint_with_target(
+        &self,
+        diff_fingerprint: &str,
+        active_branch: Option<&str>,
+        active_head: Option<&str>,
+    ) -> Result<Option<AutoReviewDuplicateMatch>> {
+        let fingerprint = diff_fingerprint.trim();
+        if fingerprint.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .load_index()?
+            .runs
+            .into_iter()
+            .filter(|run| run.target.worktree_diff_fingerprint.as_deref() == Some(fingerprint))
+            .filter(|run| {
+                !matches!(
+                    run.status,
+                    AutoReviewRunStatus::Lost
+                        | AutoReviewRunStatus::Skipped
+                        | AutoReviewRunStatus::Superseded
+                )
+            })
+            .filter(|run| duplicate_target_is_reusable(run, active_branch, active_head))
+            .max_by(|left, right| {
+                duplicate_priority(left)
+                    .cmp(&duplicate_priority(right))
+                    .then_with(|| {
+                        auto_review_run_sort_key(left).cmp(&auto_review_run_sort_key(right))
+                    })
+            })
+            .map(|run| AutoReviewDuplicateMatch {
+                run_id: run.run_id.clone(),
+                status: run.status.clone(),
+                disposition: duplicate_disposition(&run),
+                finding_count: run.findings.len(),
+                model: run.model,
+            }))
     }
 
     pub fn load_run(&self, run_id: &str) -> Result<AutoReviewRun> {
@@ -124,8 +274,8 @@ impl AutoReviewStore {
                 index.upsert(run);
             }
         }
-        for run in self.load_output_runs()? {
-            index.upsert(run);
+        for run in self.load_output_runs() {
+            index.upsert_if_absent(run);
         }
         index.validate()?;
         Ok(index)
@@ -148,25 +298,17 @@ impl AutoReviewStore {
         Ok(run)
     }
 
-    fn load_output_runs(&self) -> Result<Vec<AutoReviewRun>> {
+    fn load_output_runs(&self) -> Vec<AutoReviewRun> {
         let outputs_dir = self.root.join(OUTPUTS_DIR);
         if !outputs_dir.exists() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         let mut run_ids = Vec::new();
-        for entry in std::fs::read_dir(&outputs_dir).with_context(|| {
-            format!(
-                "failed to read auto review outputs dir {}",
-                outputs_dir.display()
-            )
-        })? {
-            let entry = entry.with_context(|| {
-                format!(
-                    "failed to read auto review outputs dir entry {}",
-                    outputs_dir.display()
-                )
-            })?;
+        let Ok(entries) = std::fs::read_dir(&outputs_dir) else {
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
@@ -174,14 +316,18 @@ impl AutoReviewStore {
             let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            validate_safe_id(run_id).context("auto review run_id")?;
-            run_ids.push(run_id.to_string());
+            if validate_safe_id(run_id).is_ok() {
+                run_ids.push(run_id.to_string());
+            }
         }
 
         run_ids.sort();
         run_ids
             .into_iter()
-            .map(|run_id| self.load_output(&run_id))
+            .filter_map(|run_id| match self.load_output(&run_id) {
+                Ok(run) => Some(run),
+                Err(_) => None,
+            })
             .collect()
     }
 
@@ -283,6 +429,17 @@ impl AutoReviewRunsIndex {
         by_id.insert(run.run_id.clone(), run);
         self.runs = by_id.into_values().collect();
     }
+
+    fn upsert_if_absent(&mut self, run: AutoReviewRun) {
+        if self
+            .runs
+            .iter()
+            .any(|existing| existing.run_id == run.run_id)
+        {
+            return;
+        }
+        self.upsert(run);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -291,12 +448,18 @@ pub struct AutoReviewRun {
     pub schema_version: u32,
     pub run_id: String,
     pub status: AutoReviewRunStatus,
+    #[serde(default)]
+    pub freshness: AutoReviewRunFreshness,
     pub source: AutoReviewRunSource,
     pub target: AutoReviewRunTarget,
     pub review_target: ReviewTarget,
     pub started_at_unix_secs: i64,
     pub completed_at_unix_secs: Option<i64>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
     pub error_summary: Option<String>,
     pub findings: Vec<AutoReviewFindingRecord>,
 }
@@ -320,6 +483,12 @@ impl AutoReviewRun {
     }
 
     pub fn freshness(&self, active_target: &AutoReviewRunTarget) -> AutoReviewFreshness {
+        if self.freshness == AutoReviewRunFreshness::Lost {
+            return AutoReviewFreshness::Stale;
+        }
+        if self.freshness == AutoReviewRunFreshness::Superseded {
+            return AutoReviewFreshness::Stale;
+        }
         self.target.freshness(active_target)
     }
 
@@ -376,11 +545,51 @@ impl AutoReviewRun {
 #[serde(rename_all = "snake_case")]
 pub enum AutoReviewRunStatus {
     Pending,
+    Snapshotting,
     Running,
+    Reviewing,
+    Resolving,
     Completed,
     Failed,
     Cancelled,
+    Superseded,
     Skipped,
+    Lost,
+}
+
+impl AutoReviewRunStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed
+                | Self::Failed
+                | Self::Cancelled
+                | Self::Superseded
+                | Self::Skipped
+                | Self::Lost
+        )
+    }
+
+    pub fn is_in_flight(&self) -> bool {
+        !self.is_terminal()
+    }
+
+    pub fn is_adoptable_duplicate(&self) -> bool {
+        matches!(self, Self::Running | Self::Reviewing | Self::Resolving)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReviewRunFreshness {
+    Current,
+    LongRunning,
+    Inactive,
+    Superseded,
+    Obsolete,
+    Lost,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -481,6 +690,58 @@ fn review_target_matches(stored: &ReviewTarget, active: &ReviewTarget) -> bool {
         ) => stored_sha == active_sha,
         _ => stored == active,
     }
+}
+
+fn duplicate_priority(run: &AutoReviewRun) -> u8 {
+    if run.status.is_adoptable_duplicate() {
+        return 4;
+    }
+    if !run.findings.is_empty() {
+        return 3;
+    }
+    if run.status == AutoReviewRunStatus::Completed {
+        return 2;
+    }
+    1
+}
+
+fn duplicate_disposition(run: &AutoReviewRun) -> AutoReviewDuplicateDisposition {
+    if run.status.is_adoptable_duplicate() {
+        AutoReviewDuplicateDisposition::Adopt
+    } else if run.status == AutoReviewRunStatus::Completed {
+        AutoReviewDuplicateDisposition::ReuseTerminal
+    } else {
+        AutoReviewDuplicateDisposition::SupersedeTerminal
+    }
+}
+
+fn duplicate_target_is_reusable(
+    run: &AutoReviewRun,
+    active_branch: Option<&str>,
+    active_head: Option<&str>,
+) -> bool {
+    if active_head.and_then(non_empty_str).is_none() {
+        return true;
+    }
+    if let Some(active_branch) = active_branch.and_then(non_empty_str)
+        && run.target.branch.as_deref() != Some(active_branch)
+    {
+        return false;
+    }
+    run.target.head_sha.as_deref() == active_head.and_then(non_empty_str)
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn auto_review_run_sort_key(run: &AutoReviewRun) -> (i64, &str) {
+    (
+        run.completed_at_unix_secs
+            .unwrap_or(run.started_at_unix_secs),
+        run.run_id.as_str(),
+    )
 }
 
 fn render_summary(findings: Vec<&AutoReviewFindingRecord>) -> AutoReviewSummary {

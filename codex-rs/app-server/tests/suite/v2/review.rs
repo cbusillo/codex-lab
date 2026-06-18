@@ -934,6 +934,7 @@ fn sample_auto_review_run(
         schema_version: SCHEMA_VERSION,
         run_id: run_id.to_string(),
         status: AutoReviewRunStatus::Completed,
+        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
         source: AutoReviewRunSource::Background,
         target: AutoReviewRunTarget {
             branch: None,
@@ -946,6 +947,8 @@ fn sample_auto_review_run(
         started_at_unix_secs: 1,
         completed_at_unix_secs: Some(2),
         model: Some("review-model".to_string()),
+        superseded_by: None,
+        cancel_reason: None,
         error_summary: None,
         findings: vec![AutoReviewFindingRecord {
             finding_id: finding_id.to_string(),
