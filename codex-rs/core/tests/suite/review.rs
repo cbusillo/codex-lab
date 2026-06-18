@@ -228,8 +228,8 @@ async fn review_op_emits_lifecycle_and_review_output() {
         "assistant review output contains user_action markup"
     );
     assert!(
-        !codex_home.path().join("auto-review/runs").exists(),
-        "default review should not write an auto-review sidecar"
+        load_auto_review_runs(codex_home.path()).unwrap().is_empty(),
+        "default review should not write an auto-review run"
     );
 
     let _codex_home_guard = codex_home;
@@ -339,22 +339,8 @@ async fn review_op_with_persistence_writes_auto_review_run() {
     let _exited = wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExitedReviewMode(_))).await;
     let _complete = wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    let runs_dir = codex_home.path().join("auto-review/runs");
-    let mut runs = std::fs::read_dir(&runs_dir)
-        .expect("auto review runs dir")
-        .map(|entry| entry.expect("run dir entry").path())
-        .collect::<Vec<_>>();
-    assert_eq!(runs.len(), 1, "expected exactly one auto review run");
-    let run_id = runs
-        .pop()
-        .and_then(|path| {
-            path.file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-        })
-        .expect("run file stem");
-    let run = AutoReviewStore::new(codex_home.path())
-        .load_run(&run_id)
-        .expect("load auto review run");
+    let run = load_single_auto_review_run(codex_home.path()).expect("load auto review run");
+    let run_id = run.run_id.clone();
 
     assert_eq!(run.run_id, run_id);
     assert_eq!(run.status, AutoReviewRunStatus::Completed);
@@ -404,22 +390,8 @@ async fn review_op_with_persistence_writes_failed_run_without_review_output() {
     }
     let _complete = wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    let runs_dir = codex_home.path().join("auto-review/runs");
-    let mut runs = std::fs::read_dir(&runs_dir)
-        .expect("auto review runs dir")
-        .map(|entry| entry.expect("run dir entry").path())
-        .collect::<Vec<_>>();
-    assert_eq!(runs.len(), 1, "expected exactly one auto review run");
-    let run_id = runs
-        .pop()
-        .and_then(|path| {
-            path.file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-        })
-        .expect("run file stem");
-    let run = AutoReviewStore::new(codex_home.path())
-        .load_run(&run_id)
-        .expect("load auto review run");
+    let run = load_single_auto_review_run(codex_home.path()).expect("load auto review run");
+    let run_id = run.run_id.clone();
 
     assert_eq!(run.run_id, run_id);
     assert_eq!(run.status, AutoReviewRunStatus::Failed);
@@ -482,22 +454,8 @@ async fn review_op_with_persistence_writes_cancelled_run_when_interrupted() {
     let _aborted = wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnAborted(_))).await;
     let _ = gate_completed_tx.send(());
 
-    let runs_dir = codex_home.path().join("auto-review/runs");
-    let mut runs = std::fs::read_dir(&runs_dir)
-        .expect("auto review runs dir")
-        .map(|entry| entry.expect("run dir entry").path())
-        .collect::<Vec<_>>();
-    assert_eq!(runs.len(), 1, "expected exactly one auto review run");
-    let run_id = runs
-        .pop()
-        .and_then(|path| {
-            path.file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-        })
-        .expect("run file stem");
-    let run = AutoReviewStore::new(codex_home.path())
-        .load_run(&run_id)
-        .expect("load auto review run");
+    let run = load_single_auto_review_run(codex_home.path()).expect("load auto review run");
+    let run_id = run.run_id.clone();
 
     assert_eq!(run.run_id, run_id);
     assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
@@ -796,7 +754,7 @@ async fn auto_review_awareness_injected_for_current_findings() -> anyhow::Result
             },
         }],
     };
-    AutoReviewStore::new(&codex_home).save_run(&run)?;
+    AutoReviewStore::for_scope(&codex_home, harness.cwd()).save_run(&run)?;
     let request_log = mount_sse_sequence(
         harness.server(),
         vec![sse(vec![
@@ -2112,29 +2070,19 @@ fn load_single_auto_review_run(
 fn load_auto_review_runs(
     codex_home: &std::path::Path,
 ) -> anyhow::Result<Vec<codex_auto_review::AutoReviewRun>> {
-    let runs_dir = codex_home.join("auto-review/runs");
-    if !runs_dir.exists() {
+    let review_dir = codex_home.join("state/review");
+    if !review_dir.exists() {
         return Ok(Vec::new());
     }
-    let mut runs = std::fs::read_dir(&runs_dir)
-        .map_err(|err| anyhow::anyhow!("auto review runs dir: {err}"))?
-        .filter_map(|entry| match entry {
-            Ok(entry) => {
-                let path = entry.path();
-                (path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-                    .then_some(Ok(path))
-            }
-            Err(err) => Some(Err(err)),
-        })
-        .map(|path| {
-            let path = path?;
-            let run_id = path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-                .ok_or_else(|| anyhow::anyhow!("run file stem"))?;
-            AutoReviewStore::new(codex_home).load_run(&run_id)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut runs = Vec::new();
+    for entry in std::fs::read_dir(&review_dir)
+        .map_err(|err| anyhow::anyhow!("auto review state dir: {err}"))?
+    {
+        let entry = entry?;
+        let store_root = entry.path().join("auto-review");
+        let store = AutoReviewStore::from_store_root(store_root);
+        runs.extend(store.list_runs()?);
+    }
     runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
     Ok(runs)
 }

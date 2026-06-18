@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -17,7 +18,10 @@ pub const DETAIL_MAX_BYTES: usize = 16384;
 pub const SCHEMA_VERSION: u32 = 1;
 
 const STORE_DIR: &str = "auto-review";
-const RUNS_DIR: &str = "runs";
+const STATE_DIR: &str = "state";
+const REVIEW_DIR: &str = "review";
+const RUNS_FILENAME: &str = "runs.json";
+const OUTPUTS_DIR: &str = "outputs";
 const OMITTED_TEMPLATE_PREFIX: &str = "... ";
 const OMITTED_TEMPLATE_SUFFIX: &str = " more finding(s) omitted";
 
@@ -27,45 +31,124 @@ pub struct AutoReviewStore {
 }
 
 impl AutoReviewStore {
-    pub fn new(codex_home: impl AsRef<Path>) -> Self {
+    pub fn for_scope(codex_home: impl AsRef<Path>, scope: impl AsRef<Path>) -> Self {
         Self {
-            root: codex_home.as_ref().join(STORE_DIR),
+            root: scoped_store_root(codex_home.as_ref(), scope.as_ref()),
         }
+    }
+
+    pub fn from_store_root(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
     }
 
     pub fn save_run(&self, run: &AutoReviewRun) -> Result<PathBuf> {
         validate_run(run)?;
-        let path = self.run_path(&run.run_id)?;
-        let json = serde_json::to_string_pretty(run)?;
-        write_atomically(&path, &format!("{json}\n"))
-            .with_context(|| format!("failed to write auto review run {}", run.run_id))?;
-        Ok(path)
+        self.save_output(run)?;
+        let mut index = self.load_index()?;
+        index.upsert(run.clone());
+        let runs_path = self.runs_path();
+        let json = serde_json::to_string_pretty(&index)?;
+        write_atomically(&runs_path, &format!("{json}\n")).with_context(|| {
+            format!(
+                "failed to write auto review runs index {}",
+                runs_path.display()
+            )
+        })?;
+        Ok(runs_path)
     }
 
     pub fn load_run(&self, run_id: &str) -> Result<AutoReviewRun> {
-        let path = self.run_path(run_id)?;
-        let json = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read auto review run {run_id}"))?;
-        let run = serde_json::from_str(&json)
-            .with_context(|| format!("failed to parse auto review run {run_id}"))?;
+        validate_safe_id(run_id).context("auto review run_id")?;
+        let Some(run) = self
+            .load_index()?
+            .runs
+            .into_iter()
+            .find(|run| run.run_id == run_id)
+        else {
+            anyhow::bail!("unknown auto review run id: {run_id}");
+        };
         validate_run(&run)?;
         Ok(run)
     }
 
     pub fn list_runs(&self) -> Result<Vec<AutoReviewRun>> {
-        let runs_dir = self.root.join(RUNS_DIR);
-        if !runs_dir.exists() {
+        let mut runs = self.load_index()?.runs;
+        runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+        Ok(runs)
+    }
+
+    pub fn finding_detail(
+        &self,
+        run_id: &str,
+        finding_id: &str,
+        max_bytes: usize,
+    ) -> Result<AutoReviewDetail> {
+        self.load_output(run_id)?
+            .finding_detail(finding_id, max_bytes)
+    }
+
+    pub fn output_path(&self, run_id: &str) -> Result<PathBuf> {
+        validate_safe_id(run_id).context("auto review run_id")?;
+        Ok(self.root.join(OUTPUTS_DIR).join(format!("{run_id}.json")))
+    }
+
+    pub fn runs_path(&self) -> PathBuf {
+        self.root.join(RUNS_FILENAME)
+    }
+
+    fn load_index(&self) -> Result<AutoReviewRunsIndex> {
+        let path = self.runs_path();
+        let mut index = if path.exists() {
+            let json = std::fs::read_to_string(&path).with_context(|| {
+                format!("failed to read auto review runs index {}", path.display())
+            })?;
+            serde_json::from_str(&json).with_context(|| {
+                format!("failed to parse auto review runs index {}", path.display())
+            })?
+        } else {
+            AutoReviewRunsIndex::default()
+        };
+        for run in self.load_output_runs()? {
+            index.upsert(run);
+        }
+        index.validate()?;
+        Ok(index)
+    }
+
+    fn save_output(&self, run: &AutoReviewRun) -> Result<()> {
+        let path = self.output_path(&run.run_id)?;
+        let json = serde_json::to_string_pretty(run)?;
+        write_atomically(&path, &format!("{json}\n"))
+            .with_context(|| format!("failed to write auto review output {}", path.display()))
+    }
+
+    fn load_output(&self, run_id: &str) -> Result<AutoReviewRun> {
+        let path = self.output_path(run_id)?;
+        let json = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read auto review output {run_id}"))?;
+        let run = serde_json::from_str(&json)
+            .with_context(|| format!("failed to parse auto review output {run_id}"))?;
+        validate_run(&run)?;
+        Ok(run)
+    }
+
+    fn load_output_runs(&self) -> Result<Vec<AutoReviewRun>> {
+        let outputs_dir = self.root.join(OUTPUTS_DIR);
+        if !outputs_dir.exists() {
             return Ok(Vec::new());
         }
 
         let mut run_ids = Vec::new();
-        for entry in std::fs::read_dir(&runs_dir).with_context(|| {
-            format!("failed to read auto review runs dir {}", runs_dir.display())
+        for entry in std::fs::read_dir(&outputs_dir).with_context(|| {
+            format!(
+                "failed to read auto review outputs dir {}",
+                outputs_dir.display()
+            )
         })? {
             let entry = entry.with_context(|| {
                 format!(
-                    "failed to read auto review runs dir entry {}",
-                    runs_dir.display()
+                    "failed to read auto review outputs dir entry {}",
+                    outputs_dir.display()
                 )
             })?;
             let path = entry.path();
@@ -82,13 +165,52 @@ impl AutoReviewStore {
         run_ids.sort();
         run_ids
             .into_iter()
-            .map(|run_id| self.load_run(&run_id))
+            .map(|run_id| self.load_output(&run_id))
             .collect()
     }
+}
 
-    fn run_path(&self, run_id: &str) -> Result<PathBuf> {
-        validate_safe_id(run_id).context("auto review run_id")?;
-        Ok(self.root.join(RUNS_DIR).join(format!("{run_id}.json")))
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AutoReviewRunsIndex {
+    schema_version: u32,
+    runs: Vec<AutoReviewRun>,
+}
+
+impl Default for AutoReviewRunsIndex {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            runs: Vec::new(),
+        }
+    }
+}
+
+impl AutoReviewRunsIndex {
+    fn validate(&self) -> Result<()> {
+        if self.schema_version != SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported auto review runs index schema version: {}",
+                self.schema_version
+            );
+        }
+        let mut run_ids = BTreeSet::new();
+        for run in &self.runs {
+            validate_run(run)?;
+            if !run_ids.insert(&run.run_id) {
+                anyhow::bail!("duplicate auto review run id: {}", run.run_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn upsert(&mut self, run: AutoReviewRun) {
+        let mut by_id = self
+            .runs
+            .drain(..)
+            .map(|run| (run.run_id.clone(), run))
+            .collect::<BTreeMap<_, _>>();
+        by_id.insert(run.run_id.clone(), run);
+        self.runs = by_id.into_values().collect();
     }
 }
 
@@ -355,6 +477,20 @@ fn validate_safe_id(value: &str) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!("contains unsafe path characters: {value:?}")
+}
+
+fn scoped_store_root(codex_home: &Path, scope: &Path) -> PathBuf {
+    codex_home
+        .join(STATE_DIR)
+        .join(REVIEW_DIR)
+        .join(repo_key(scope))
+        .join(STORE_DIR)
+}
+
+fn repo_key(scope: &Path) -> String {
+    let normalized_scope = scope.canonicalize().unwrap_or_else(|_| scope.to_path_buf());
+    let key = crc32fast::hash(normalized_scope.to_string_lossy().as_bytes());
+    format!("repo-{key:08x}")
 }
 
 fn validate_run(run: &AutoReviewRun) -> Result<()> {
