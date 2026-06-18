@@ -38,7 +38,6 @@ use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
-use codex_auto_review::AutoReviewFindingRecord;
 use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
@@ -48,6 +47,7 @@ use codex_auto_review::SCHEMA_VERSION;
 use codex_protocol::protocol::ReviewCodeLocation;
 use codex_protocol::protocol::ReviewFinding;
 use codex_protocol::protocol::ReviewLineRange;
+use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -404,7 +404,8 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
     assert_eq!(run.status, AutoReviewRunStatus::Completed);
     assert_eq!(run.source, AutoReviewRunSource::Manual);
     assert_eq!(run.run_id, turn.id);
-    assert_eq!(run.findings.len(), 0);
+    assert_eq!(run.finding_count, 0);
+    assert!(run.finding_digests.is_empty());
 
     Ok(())
 }
@@ -582,9 +583,8 @@ async fn auto_review_summary_read_returns_current_summary_and_counts() -> Result
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
     let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    AutoReviewStore::for_scope(codex_home.path(), &thread_cwd).save_run(
-        &sample_auto_review_run("run_summary", "finding_summary", &thread_cwd, "Stored body"),
-    )?;
+    let (run, output) = sample_auto_review_run("run_summary", &thread_cwd, "Stored body");
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
 
     let request_id = mcp
         .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
@@ -603,7 +603,7 @@ async fn auto_review_summary_read_returns_current_summary_and_counts() -> Result
     assert_eq!(current.freshness, ApiAutoReviewFreshness::Current);
     assert_eq!(current.rendered_findings, 1);
     assert_eq!(current.omitted_findings, 0);
-    assert!(current.content.contains("finding_summary"));
+    assert!(current.content.contains("f1"));
     assert_eq!(
         summary.latest.as_ref().map(|run| run.run_id.as_str()),
         Some("run_summary")
@@ -624,21 +624,21 @@ async fn auto_review_summary_read_suppresses_stale_findings_by_default() -> Resu
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
     let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let mut current_run = sample_auto_review_run(
-        "run_current",
-        "finding_current",
-        &thread_cwd,
-        "Current body",
-    );
+    let (mut current_run, current_output) =
+        sample_auto_review_run("run_current", &thread_cwd, "Current body");
     current_run.completed_at_unix_secs = Some(2);
-    let mut stale_run =
-        sample_auto_review_run("run_stale", "finding_stale", &thread_cwd, "Stale body");
+    let (mut stale_run, stale_output) =
+        sample_auto_review_run("run_stale", &thread_cwd, "Stale body");
     stale_run.target.head_sha = Some("old-head".to_string());
     stale_run.started_at_unix_secs = 10;
     stale_run.completed_at_unix_secs = Some(11);
-    let store = AutoReviewStore::for_scope(codex_home.path(), &thread_cwd);
-    store.save_run(&current_run)?;
-    store.save_run(&stale_run)?;
+    save_auto_review_fixture(
+        codex_home.path(),
+        &thread_cwd,
+        &current_run,
+        &current_output,
+    )?;
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &stale_run, &stale_output)?;
 
     let request_id = mcp
         .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
@@ -652,13 +652,13 @@ async fn auto_review_summary_read_suppresses_stale_findings_by_default() -> Resu
     let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
     let current = summary.current.expect("current run summary");
     assert_eq!(current.run_id, "run_current");
-    assert!(current.content.contains("finding_current"));
+    assert!(current.content.contains("f1"));
 
     let latest = summary.latest.expect("latest run summary");
     assert_eq!(latest.run_id, "run_stale");
     assert_eq!(latest.freshness, ApiAutoReviewFreshness::Stale);
     assert_eq!(latest.rendered_findings, 0);
-    assert!(!latest.content.contains("finding_stale"));
+    assert!(!latest.content.contains("Stale body"));
     assert!(summary.status_counts.iter().any(|count| {
         count.freshness == ApiAutoReviewFreshness::Current && count.target_matches
     }));
@@ -687,21 +687,18 @@ async fn auto_review_finding_detail_read_returns_bounded_detail() -> Result<()> 
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
     let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    AutoReviewStore::for_scope(codex_home.path(), &thread_cwd).save_run(
-        &sample_auto_review_run(
-            "run_detail",
-            "finding_detail",
-            &thread_cwd,
-            &"Use the existing bounded detail store instead of embedding the whole finding. "
-                .repeat(8),
-        ),
-    )?;
+    let (run, output) = sample_auto_review_run(
+        "run_detail",
+        &thread_cwd,
+        &"Use the existing bounded detail store instead of embedding the whole finding. ".repeat(8),
+    );
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
 
     let request_id = mcp
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id,
             run_id: "run_detail".to_string(),
-            finding_id: "finding_detail".to_string(),
+            finding_id: "f1".to_string(),
             max_bytes: Some(180),
         })
         .await?;
@@ -713,12 +710,12 @@ async fn auto_review_finding_detail_read_returns_bounded_detail() -> Result<()> 
 
     let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
     assert_eq!(detail.run_id, "run_detail");
-    assert_eq!(detail.finding_id, "finding_detail");
+    assert_eq!(detail.finding_id, "f1");
     assert_eq!(detail.max_bytes, 180);
     assert!(detail.truncated);
     assert!(detail.bytes <= 180);
     assert!(detail.original_bytes > detail.bytes);
-    assert!(detail.content.contains("finding_detail"));
+    assert!(detail.content.contains("Prefer bounded details"));
 
     Ok(())
 }
@@ -755,20 +752,18 @@ async fn auto_review_finding_detail_read_uses_selected_environment_cwd() -> Resu
     )
     .await??;
 
-    AutoReviewStore::for_scope(codex_home.path(), environment_cwd.path()).save_run(
-        &sample_auto_review_run(
-            "run_environment_detail",
-            "environment_finding",
-            environment_cwd.path(),
-            "Stored environment body",
-        ),
-    )?;
+    let (run, output) = sample_auto_review_run(
+        "run_environment_detail",
+        environment_cwd.path(),
+        "Stored environment body",
+    );
+    save_auto_review_fixture(codex_home.path(), environment_cwd.path(), &run, &output)?;
 
     let request_id = mcp
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id: thread.id,
             run_id: "run_environment_detail".to_string(),
-            finding_id: "environment_finding".to_string(),
+            finding_id: "f1".to_string(),
             max_bytes: Some(1024),
         })
         .await?;
@@ -780,7 +775,49 @@ async fn auto_review_finding_detail_read_uses_selected_environment_cwd() -> Resu
 
     let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
     assert_eq!(detail.run_id, "run_environment_detail");
-    assert_eq!(detail.finding_id, "environment_finding");
+    assert_eq!(detail.finding_id, "f1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_finding_detail_read_allows_omitted_summary_findings() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    let (run, output) = sample_auto_review_run_with_findings(
+        "run_omitted_detail",
+        &thread_cwd,
+        (1..=21)
+            .map(|index| (format!("Finding {index}"), format!("Stored body {index}")))
+            .collect(),
+    );
+    assert_eq!(run.finding_count, 21);
+    assert_eq!(run.finding_digests.len(), 20);
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: "run_omitted_detail".to_string(),
+            finding_id: "f21".to_string(),
+            max_bytes: Some(4096),
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
+    assert_eq!(detail.finding_id, "f21");
+    assert!(detail.content.contains("Stored body 21"));
 
     Ok(())
 }
@@ -828,9 +865,8 @@ async fn auto_review_finding_detail_read_rejects_unknown_finding_id() -> Result<
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
     let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    AutoReviewStore::for_scope(codex_home.path(), &thread_cwd).save_run(
-        &sample_auto_review_run("run_detail", "finding_detail", &thread_cwd, "Stored body"),
-    )?;
+    let (run, output) = sample_auto_review_run("run_detail", &thread_cwd, "Stored body");
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
 
     let request_id = mcp
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
@@ -868,20 +904,18 @@ async fn auto_review_finding_detail_read_rejects_stale_run() -> Result<()> {
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
     let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    AutoReviewStore::for_scope(codex_home.path(), &thread_cwd).save_run(
-        &sample_auto_review_run(
-            "run_detail",
-            "finding_detail",
-            &thread_cwd.join("other-worktree"),
-            "Stored body",
-        ),
-    )?;
+    let (run, output) = sample_auto_review_run(
+        "run_detail",
+        &thread_cwd.join("other-worktree"),
+        "Stored body",
+    );
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
 
     let request_id = mcp
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id,
             run_id: "run_detail".to_string(),
-            finding_id: "finding_detail".to_string(),
+            finding_id: "f1".to_string(),
             max_bytes: Some(180),
         })
         .await?;
@@ -926,11 +960,48 @@ async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
 
 fn sample_auto_review_run(
     run_id: &str,
-    finding_id: &str,
     worktree_path: &std::path::Path,
     body: &str,
-) -> AutoReviewRun {
-    AutoReviewRun {
+) -> (AutoReviewRun, ReviewOutputEvent) {
+    sample_auto_review_run_with_findings(
+        run_id,
+        worktree_path,
+        vec![("Prefer bounded details".to_string(), body.to_string())],
+    )
+}
+
+fn sample_auto_review_run_with_findings(
+    run_id: &str,
+    worktree_path: &std::path::Path,
+    findings: Vec<(String, String)>,
+) -> (AutoReviewRun, ReviewOutputEvent) {
+    let output = ReviewOutputEvent {
+        findings: findings
+            .into_iter()
+            .enumerate()
+            .map(|(index, (title, body))| {
+                let line = u32::try_from(index + 1).expect("test fixture line number fits u32");
+                ReviewFinding {
+                    title,
+                    body,
+                    confidence_score: 0.92,
+                    priority: 1,
+                    code_location: ReviewCodeLocation {
+                        absolute_file_path: PathBuf::from("/repo/src/lib.rs"),
+                        line_range: ReviewLineRange {
+                            start: line,
+                            end: line,
+                        },
+                    },
+                }
+            })
+            .collect(),
+        overall_correctness: "patch is incorrect".to_string(),
+        overall_explanation: "summary".to_string(),
+        overall_confidence_score: 0.8,
+    };
+    let finding_digests = codex_auto_review::finding_digests(&output);
+    let run = AutoReviewRun {
         schema_version: SCHEMA_VERSION,
         run_id: run_id.to_string(),
         status: AutoReviewRunStatus::Completed,
@@ -953,20 +1024,23 @@ fn sample_auto_review_run(
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,
-        findings: vec![AutoReviewFindingRecord {
-            finding_id: finding_id.to_string(),
-            finding: ReviewFinding {
-                title: "Prefer bounded details".to_string(),
-                body: body.to_string(),
-                confidence_score: 0.92,
-                priority: 1,
-                code_location: ReviewCodeLocation {
-                    absolute_file_path: PathBuf::from("/repo/src/lib.rs"),
-                    line_range: ReviewLineRange { start: 12, end: 14 },
-                },
-            },
-        }],
-    }
+        finding_count: output.findings.len(),
+        omitted_finding_digest_count: output.findings.len().saturating_sub(finding_digests.len()),
+        finding_digests,
+    };
+    (run, output)
+}
+
+fn save_auto_review_fixture(
+    codex_home: &std::path::Path,
+    store_scope: &std::path::Path,
+    run: &AutoReviewRun,
+    output: &ReviewOutputEvent,
+) -> Result<()> {
+    let store = AutoReviewStore::for_scope(codex_home, store_scope);
+    store.save_run(run)?;
+    store.save_output(&run.run_id, output)?;
+    Ok(())
 }
 
 fn load_auto_review_runs(codex_home: &std::path::Path) -> Result<Vec<AutoReviewRun>> {

@@ -352,30 +352,10 @@ impl Session {
                 return;
             }
         };
-        let persistence = match coordination.bump_snapshot_epoch() {
-            Ok(_snapshot_epoch) => {
-                persistence
-                    .refresh_target(turn_context.config.codex_home.as_ref(), cwd.as_ref())
-                    .await
-            }
-            Err(err) => {
-                let error_summary =
-                    format!("failed to bump background auto review snapshot epoch: {err}");
-                self.record_skipped_background_auto_review(
-                    &persistence,
-                    generation,
-                    &fingerprint,
-                    error_summary,
-                )
-                .await;
-                warn!(error = %err, "failed to bump background auto review snapshot epoch");
-                return;
-            }
-        };
         let prepared = prepare_review_thread(
             Arc::clone(self),
             Arc::clone(&turn_context.config),
-            turn_context,
+            Arc::clone(&turn_context),
             sub_id,
             resolved,
             Some(ReviewPersistenceSpec::Context(persistence.clone())),
@@ -403,31 +383,49 @@ impl Session {
             .await;
             return;
         }
-        let Some(started_review) = self
+        let started_review = match self
             .record_started_background_auto_review_if_idle(
                 generation,
                 &fingerprint,
                 persistence.clone(),
+                &coordination,
             )
             .await
-        else {
-            let error_summary =
-                "background auto review schedule was superseded or foreground work became active \
-                 before start"
-                    .to_string();
-            self.record_skipped_background_auto_review(
-                &persistence,
-                generation,
-                &fingerprint,
-                error_summary,
-            )
-            .await;
-            debug!(
-                "background auto review skipped after prepare: schedule superseded or foreground \
-                 work active"
-            );
-            return;
+        {
+            Ok(Some(started_review)) => started_review,
+            Ok(None) => {
+                let error_summary =
+                    "background auto review schedule was superseded or foreground work became \
+                     active before start"
+                        .to_string();
+                self.record_skipped_background_auto_review(
+                    &persistence,
+                    generation,
+                    &fingerprint,
+                    error_summary,
+                )
+                .await;
+                debug!(
+                    "background auto review skipped after prepare: schedule superseded or \
+                     foreground work active"
+                );
+                return;
+            }
+            Err(err) => {
+                let error_summary =
+                    format!("failed to bump background auto review snapshot epoch: {err}");
+                self.record_skipped_background_auto_review(
+                    &persistence,
+                    generation,
+                    &fingerprint,
+                    error_summary,
+                )
+                .await;
+                warn!(error = %err, "failed to bump background auto review snapshot epoch");
+                return;
+            }
         };
+        let persistence = started_review.running_review.persistence.clone();
         if let Some(displaced_running_review) = started_review.displaced_running_review {
             self.cancel_running_background_auto_review(
                 displaced_running_review,
@@ -443,26 +441,9 @@ impl Session {
             debug!("background auto review skipped after lock: review was cancelled");
             return;
         }
-        if self.input_queue.has_trigger_turn_mailbox_items().await
-            || self.active_turn.lock().await.is_some()
-        {
-            let error_summary =
-                "foreground work became active before background auto review could start"
-                    .to_string();
-            self.clear_background_auto_review(generation).await;
-            self.record_skipped_background_auto_review(
-                &persistence,
-                generation,
-                &fingerprint,
-                error_summary,
-            )
-            .await;
-            debug!("background auto review skipped after lock: foreground work active");
-            return;
-        }
         spawn_detached_review_thread(
             Arc::clone(self),
-            prepared,
+            prepared.with_persistence(persistence),
             started_review.running_review,
             review_lock_guard,
             generation,
@@ -503,7 +484,7 @@ impl Session {
                 }
             }
             let store = AutoReviewStore::for_scope(&codex_home, &scope);
-            if let Err(err) = store.reconcile_orphaned_in_flight(
+            if let Err(err) = store.reconcile_orphaned_background_in_flight(
                 std::iter::empty::<&str>(),
                 now_unix_timestamp_ms() / 1000,
             ) {
@@ -647,19 +628,28 @@ impl Session {
         generation: u64,
         fingerprint: &str,
         persistence: crate::review_persistence::ReviewPersistenceContext,
-    ) -> Option<crate::state::BackgroundAutoReviewStart> {
+        coordination: &ReviewCoordination,
+    ) -> anyhow::Result<Option<crate::state::BackgroundAutoReviewStart>> {
         let trigger_turn_mailbox = self.input_queue.lock_trigger_turn_mailbox_items().await;
         if trigger_turn_mailbox.has_trigger_turn_items() {
-            return None;
+            return Ok(None);
         }
         let active_turn = self.active_turn.lock().await;
         if active_turn.is_some() {
-            return None;
+            return Ok(None);
         }
         let mut state = self.state.lock().await;
-        state
+        if !state
             .background_auto_review
-            .record_started(generation, fingerprint, persistence)
+            .is_current_schedule(generation, fingerprint)
+        {
+            return Ok(None);
+        }
+        let snapshot_epoch = coordination.bump_snapshot_epoch()?;
+        let persistence = persistence.with_snapshot_epoch(snapshot_epoch);
+        Ok(state
+            .background_auto_review
+            .record_started(generation, fingerprint, persistence))
     }
 
     pub(crate) async fn cancel_background_auto_review(self: &Arc<Self>) {

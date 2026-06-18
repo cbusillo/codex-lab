@@ -18,6 +18,13 @@ pub(super) struct PreparedReviewThread {
     manual_review_request: Option<ReviewRequest>,
 }
 
+impl PreparedReviewThread {
+    pub(super) fn with_persistence(mut self, persistence: ReviewPersistenceContext) -> Self {
+        self.task = ReviewTask::with_persistence(persistence);
+        self
+    }
+}
+
 pub(super) enum ReviewPersistenceSpec {
     Mode(ReviewPersistence),
     Context(ReviewPersistenceContext),

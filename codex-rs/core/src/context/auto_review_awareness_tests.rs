@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use codex_auto_review::AutoReviewFindingRecord;
+use codex_auto_review::AutoReviewFindingDigest;
 use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
@@ -9,6 +9,7 @@ use codex_auto_review::AutoReviewStore;
 use codex_protocol::protocol::ReviewCodeLocation;
 use codex_protocol::protocol::ReviewFinding;
 use codex_protocol::protocol::ReviewLineRange;
+use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewTarget;
 use tempfile::TempDir;
 
@@ -207,7 +208,7 @@ async fn awareness_is_absent_when_store_is_unreadable() -> anyhow::Result<()> {
 fn sample_run(
     run_id: &str,
     status: AutoReviewRunStatus,
-    findings: Vec<AutoReviewFindingRecord>,
+    findings: Vec<AutoReviewFindingDigest>,
 ) -> AutoReviewRun {
     AutoReviewRun {
         schema_version: codex_auto_review::SCHEMA_VERSION,
@@ -223,7 +224,9 @@ fn sample_run(
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,
-        findings,
+        finding_count: findings.len(),
+        omitted_finding_digest_count: 0,
+        finding_digests: findings,
     }
 }
 
@@ -240,18 +243,28 @@ fn sample_target(branch: &str, head_sha: &str, worktree_path: &str) -> AutoRevie
     }
 }
 
-fn sample_finding(finding_id: &str, title: &str, body: &str) -> AutoReviewFindingRecord {
-    AutoReviewFindingRecord {
-        finding_id: finding_id.to_string(),
-        finding: ReviewFinding {
-            title: title.to_string(),
-            body: body.to_string(),
-            confidence_score: 0.9,
-            priority: 1,
-            code_location: ReviewCodeLocation {
-                absolute_file_path: PathBuf::from("/tmp/example.rs"),
-                line_range: ReviewLineRange { start: 7, end: 9 },
-            },
+fn sample_finding(finding_id: &str, title: &str, body: &str) -> AutoReviewFindingDigest {
+    let finding = ReviewFinding {
+        title: title.to_string(),
+        body: body.to_string(),
+        confidence_score: 0.9,
+        priority: 1,
+        code_location: ReviewCodeLocation {
+            absolute_file_path: PathBuf::from("/tmp/example.rs"),
+            line_range: ReviewLineRange { start: 7, end: 9 },
         },
-    }
+    };
+    codex_auto_review::finding_digests(&ReviewOutputEvent {
+        findings: vec![finding],
+        overall_correctness: String::new(),
+        overall_explanation: String::new(),
+        overall_confidence_score: 0.0,
+    })
+    .into_iter()
+    .next()
+    .map(|digest| AutoReviewFindingDigest {
+        finding_id: finding_id.to_string(),
+        ..digest
+    })
+    .expect("digest")
 }

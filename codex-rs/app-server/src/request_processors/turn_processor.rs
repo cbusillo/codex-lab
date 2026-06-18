@@ -1475,11 +1475,7 @@ impl TurnRequestProcessor {
         let run = store
             .load_run(&run_id)
             .map_err(|_| invalid_request("auto review run not found"))?;
-        if run
-            .visible_findings(&active_target, &active_review_target)
-            .into_iter()
-            .all(|finding| finding.finding_id != finding_id)
-        {
+        if !run.can_read_finding_detail(&finding_id, &active_target, &active_review_target) {
             return Err(invalid_request("auto review finding not found"));
         }
         let detail = store
