@@ -27,6 +27,7 @@ use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::PathBufExt;
 use core_test_support::responses;
 use core_test_support::responses::ResponseMock;
@@ -711,6 +712,160 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         "background review request should use the uncommitted-changes review prompt"
     );
     harness.server().verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_holds_coordination_lock_until_completion() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let call_id = "auto-bg-lock-apply-patch";
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_lock.txt\n+review lock\n*** End Patch";
+    let review_json = serde_json::json!({
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "Automatic background review completed.",
+        "overall_confidence_score": 0.9
+    })
+    .to_string();
+    let (gate_background_completed_tx, gate_background_completed_rx) = oneshot::channel();
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call(call_id, patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let background_review = vec![
+        StreamingSseChunk {
+            gate: None,
+            body: streaming_sse_event(responses::ev_response_created("resp-3")),
+        },
+        StreamingSseChunk {
+            gate: Some(gate_background_completed_rx),
+            body: streaming_sse_event(responses::ev_assistant_message("msg-3", &review_json)),
+        },
+        StreamingSseChunk {
+            gate: None,
+            body: streaming_sse_event(responses::ev_completed("resp-3")),
+        },
+    ];
+    let (server, _completions) = start_streaming_sse_server(vec![
+        foreground_tool,
+        foreground_complete,
+        background_review,
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file to review").await?;
+    let pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+    let running_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Running,
+        Some(pending_status.run_id.as_str()),
+    )
+    .await;
+    let lock_info = wait_for_auto_review_lock(codex_home.path()).await;
+    assert_eq!(
+        lock_info.intent,
+        format!("background_auto_review:{}", running_status.run_id)
+    );
+    assert_eq!(lock_info.git_head, current_git_head(test.cwd_path()));
+
+    let _ = gate_background_completed_tx.send(());
+    let completed_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Completed,
+        Some(running_status.run_id.as_str()),
+    )
+    .await;
+    assert_eq!(completed_status.error_summary, None);
+    wait_for_auto_review_lock_absent(codex_home.path()).await;
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_startup_marks_orphaned_background_review_lost() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let cwd = Arc::new(TempDir::new()?);
+    let cwd_path = AbsolutePathBuf::try_from(cwd.path().to_path_buf())?;
+    init_git_repo(cwd.path());
+
+    let run = codex_auto_review::AutoReviewRun {
+        schema_version: AUTO_REVIEW_SCHEMA_VERSION,
+        run_id: "orphaned_background_review".to_string(),
+        status: AutoReviewRunStatus::Running,
+        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
+        source: AutoReviewRunSource::Background,
+        target: codex_auto_review::AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: current_git_head(cwd.path()),
+            base_sha: None,
+            worktree_path: Some(cwd.path().to_path_buf()),
+            worktree_diff_fingerprint: Some("orphaned-fingerprint".to_string()),
+        },
+        review_target: ReviewTarget::UncommittedChanges,
+        started_at_unix_secs: 1,
+        completed_at_unix_secs: None,
+        model: Some("gpt-test".to_string()),
+        superseded_by: None,
+        cancel_reason: None,
+        error_summary: None,
+        findings: Vec::new(),
+    };
+    AutoReviewStore::for_scope(codex_home.path(), cwd.path())
+        .save_run(&run)
+        .expect("save orphaned background review run");
+
+    let cwd_path_for_config = cwd_path.clone();
+    let test = test_codex()
+        .with_home(Arc::clone(&codex_home))
+        .with_config(move |config| {
+            config.cwd = cwd_path_for_config;
+        })
+        .build(&server)
+        .await?;
+
+    let run = load_single_auto_review_run(codex_home.path())?;
+
+    assert_eq!(run.run_id, "orphaned_background_review");
+    assert_eq!(run.status, AutoReviewRunStatus::Lost);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert_eq!(
+        run.cancel_reason.as_deref(),
+        Some("agent_missing_after_restart")
+    );
+    assert!(run.completed_at_unix_secs.is_some());
+
+    let _test_guard = test;
+    let _codex_home_guard = codex_home;
+    let _cwd_guard = cwd;
     Ok(())
 }
 
@@ -2209,6 +2364,63 @@ fn load_auto_review_runs(
     }
     runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
     Ok(runs)
+}
+
+fn load_auto_review_locks(
+    codex_home: &std::path::Path,
+) -> anyhow::Result<Vec<codex_auto_review::ReviewLockInfo>> {
+    let review_dir = codex_home.join("state/review");
+    if !review_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut locks: Vec<codex_auto_review::ReviewLockInfo> = Vec::new();
+    for entry in std::fs::read_dir(&review_dir)
+        .map_err(|err| anyhow::anyhow!("auto review state dir: {err}"))?
+    {
+        let entry = entry?;
+        let lock_path = entry.path().join("review.lock");
+        if !lock_path.exists() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&lock_path)?;
+        locks.push(serde_json::from_str(&text)?);
+    }
+    locks.sort_by(|left, right| left.intent.cmp(&right.intent));
+    Ok(locks)
+}
+
+async fn wait_for_auto_review_lock(
+    codex_home: &std::path::Path,
+) -> codex_auto_review::ReviewLockInfo {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(mut locks) = load_auto_review_locks(codex_home)
+            && let Some(lock) = locks.pop()
+        {
+            assert!(locks.is_empty(), "expected one auto review lock");
+            return lock;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timeout waiting for auto review lock"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_auto_review_lock_absent(codex_home: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match load_auto_review_locks(codex_home) {
+            Ok(locks) if locks.is_empty() => return,
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timeout waiting for auto review lock removal"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn expected_worktree_diff_fingerprint(cwd: &Path) -> String {

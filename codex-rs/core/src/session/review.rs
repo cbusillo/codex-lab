@@ -1,3 +1,4 @@
+use codex_auto_review::ReviewLockGuard;
 use codex_core_skills::HostLoadedSkills;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::BackgroundAutoReviewStatus;
@@ -284,6 +285,7 @@ pub(super) fn spawn_detached_review_thread(
     sess: Arc<Session>,
     prepared: PreparedReviewThread,
     running_review: BackgroundAutoReviewRunningHandle,
+    review_lock_guard: ReviewLockGuard,
     generation: u64,
 ) {
     let turn_extension_data = Arc::clone(&prepared.turn_context.extension_data);
@@ -297,6 +299,7 @@ pub(super) fn spawn_detached_review_thread(
     let cancellation_token = running_review.cancellation_token;
     let completion = running_review.completion;
     tokio::spawn(async move {
+        let _review_lock_guard = review_lock_guard;
         task.run(session_ctx, turn_context, input, cancellation_token)
             .await;
         sess.clear_background_auto_review(generation).await;
