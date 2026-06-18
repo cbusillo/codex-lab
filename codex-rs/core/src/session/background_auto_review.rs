@@ -1,6 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use codex_auto_review::AutoReviewDuplicateDisposition;
+use codex_auto_review::AutoReviewDuplicateMatch;
+use codex_auto_review::AutoReviewStore;
 use codex_git_utils::get_worktree_diff_byte_count;
 use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::protocol::BackgroundAutoReviewControlAction;
@@ -109,6 +112,24 @@ impl Session {
             Some(model),
         )
         .await;
+        if let Some(duplicate) = self
+            .resolve_durable_background_auto_review_duplicate(&persistence)
+            .await
+        {
+            self.record_skipped_duplicate_background_auto_review(
+                &persistence,
+                schedule.generation,
+                &schedule.fingerprint,
+                &duplicate,
+            )
+            .await;
+            debug!(
+                duplicate_run_id = %duplicate.run_id,
+                duplicate_status = ?duplicate.status,
+                "background auto review skipped: equivalent durable review already exists"
+            );
+            return;
+        }
         if !self
             .record_pending_background_auto_review(
                 schedule.generation,
@@ -137,6 +158,8 @@ impl Session {
             )
             .await;
         }
+        self.supersede_clean_durable_background_auto_review_duplicates(&persistence)
+            .await;
 
         let sess = Arc::clone(&self);
         tokio::spawn(async move {
@@ -376,6 +399,101 @@ impl Session {
                 Some(error_summary),
             )
             .await;
+        }
+    }
+
+    async fn record_skipped_duplicate_background_auto_review(
+        self: &Arc<Self>,
+        persistence: &ReviewPersistenceContext,
+        generation: u64,
+        fingerprint: &str,
+        duplicate: &AutoReviewDuplicateMatch,
+    ) {
+        let codex_home = self.codex_home().await;
+        let error_summary = format!(
+            "equivalent background auto review already exists: {}",
+            duplicate.run_id
+        );
+        let mut state = self.state.lock().await;
+        state
+            .background_auto_review
+            .clear_pending_review(generation, fingerprint);
+        drop(state);
+        if persistence.save_skipped_duplicate(codex_home, duplicate) {
+            record_background_review_status(
+                Arc::clone(self),
+                persistence,
+                BackgroundAutoReviewStatus::Skipped,
+                Some(error_summary),
+            )
+            .await;
+        }
+    }
+
+    async fn resolve_durable_background_auto_review_duplicate(
+        &self,
+        persistence: &ReviewPersistenceContext,
+    ) -> Option<AutoReviewDuplicateMatch> {
+        let fingerprint = persistence.worktree_diff_fingerprint()?;
+        let codex_home = self.codex_home().await;
+        let store = AutoReviewStore::for_scope(codex_home, persistence.store_scope());
+        let active_run_ids = {
+            let state = self.state.lock().await;
+            state.background_auto_review.active_snapshot()
+        };
+        let duplicate = match store.find_duplicate_by_fingerprint_with_target_and_filter(
+            fingerprint,
+            persistence.target().branch.as_deref(),
+            persistence.target().head_sha.as_deref(),
+            |duplicate| match duplicate.disposition {
+                AutoReviewDuplicateDisposition::ReuseTerminal => true,
+                AutoReviewDuplicateDisposition::Adopt => {
+                    active_run_ids.pending_run_id.as_deref() == Some(duplicate.run_id.as_str())
+                        || active_run_ids.running_run_id.as_deref()
+                            == Some(duplicate.run_id.as_str())
+                }
+                AutoReviewDuplicateDisposition::SupersedeTerminal => false,
+            },
+        ) {
+            Ok(duplicate) => duplicate,
+            Err(err) => {
+                warn!(error = %err, "failed to query durable background auto review duplicates");
+                None
+            }
+        }?;
+        if duplicate.run_id == persistence.run_id() {
+            return None;
+        }
+        Some(duplicate)
+    }
+
+    async fn supersede_clean_durable_background_auto_review_duplicates(
+        &self,
+        persistence: &ReviewPersistenceContext,
+    ) {
+        let Some(fingerprint) = persistence.worktree_diff_fingerprint() else {
+            return;
+        };
+        let codex_home = self.codex_home().await;
+        let store = AutoReviewStore::for_scope(codex_home, persistence.store_scope());
+        match store.mark_superseded_by_fingerprint_with_target(
+            fingerprint,
+            persistence.run_id(),
+            persistence.target().branch.as_deref(),
+            persistence.target().head_sha.as_deref(),
+        ) {
+            Ok(changed) => {
+                if changed > 0 {
+                    debug!(
+                        run_id = %persistence.run_id(),
+                        changed,
+                        "superseded clean durable background auto review duplicates"
+                    );
+                }
+            }
+            Err(err) => {
+                warn!(error = %err, "failed to supersede durable background auto review duplicates");
+            }
         }
     }
 

@@ -2,6 +2,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use codex_auto_review::AutoReviewDuplicateMatch;
 use codex_auto_review::AutoReviewFindingRecord;
 use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunFreshness;
@@ -73,6 +74,18 @@ impl ReviewPersistenceContext {
 
     pub(crate) fn run_id(&self) -> &str {
         &self.run_id
+    }
+
+    pub(crate) fn store_scope(&self) -> &Path {
+        &self.store_scope
+    }
+
+    pub(crate) fn target(&self) -> &AutoReviewRunTarget {
+        &self.target
+    }
+
+    pub(crate) fn worktree_diff_fingerprint(&self) -> Option<&str> {
+        self.target.worktree_diff_fingerprint.as_deref()
     }
 
     pub(crate) fn review_target(&self) -> &ReviewTarget {
@@ -148,12 +161,53 @@ impl ReviewPersistenceContext {
         )
     }
 
+    pub(crate) fn save_skipped_duplicate(
+        &self,
+        codex_home: impl AsRef<Path>,
+        duplicate: &AutoReviewDuplicateMatch,
+    ) -> bool {
+        let error_summary = format!(
+            "equivalent background auto review already exists: {}",
+            duplicate.run_id
+        );
+        self.save_run_with_metadata(
+            codex_home,
+            AutoReviewRunStatus::Skipped,
+            /*output*/ None,
+            Some(error_summary),
+            AutoReviewRunFreshness::Superseded,
+            Some(duplicate.run_id.clone()),
+            Some("duplicate_auto_review_scope".to_string()),
+        )
+    }
+
     fn save_run(
         &self,
         codex_home: impl AsRef<Path>,
         status: AutoReviewRunStatus,
         output: Option<&ReviewOutputEvent>,
         error_summary: Option<String>,
+    ) -> bool {
+        self.save_run_with_metadata(
+            codex_home,
+            status,
+            output,
+            error_summary,
+            AutoReviewRunFreshness::Current,
+            None,
+            None,
+        )
+    }
+
+    fn save_run_with_metadata(
+        &self,
+        codex_home: impl AsRef<Path>,
+        status: AutoReviewRunStatus,
+        output: Option<&ReviewOutputEvent>,
+        error_summary: Option<String>,
+        freshness: AutoReviewRunFreshness,
+        superseded_by: Option<String>,
+        cancel_reason: Option<String>,
     ) -> bool {
         let codex_home = codex_home.as_ref();
         let completed_at_unix_secs = if is_terminal_status(&status) {
@@ -182,15 +236,15 @@ impl ReviewPersistenceContext {
             schema_version: SCHEMA_VERSION,
             run_id: self.run_id.clone(),
             status,
-            freshness: AutoReviewRunFreshness::Current,
+            freshness,
             source: self.source.clone(),
             target: self.target.clone(),
             review_target: self.review_target.clone(),
             started_at_unix_secs: self.started_at_unix_secs,
             completed_at_unix_secs,
             model: self.model.clone(),
-            superseded_by: None,
-            cancel_reason: None,
+            superseded_by,
+            cancel_reason,
             error_summary,
             findings: output
                 .map(|output| finding_records(&output.findings))
@@ -372,5 +426,44 @@ mod tests {
             .expect("load persisted review run");
         assert_eq!(run.status, AutoReviewRunStatus::Skipped);
         assert_eq!(run.error_summary.as_deref(), Some("duplicate fingerprint"));
+    }
+
+    #[tokio::test]
+    async fn save_skipped_duplicate_records_duplicate_metadata() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "duplicate-candidate".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            cwd.path(),
+            Some("test-model".to_string()),
+        )
+        .await;
+        let duplicate = AutoReviewDuplicateMatch {
+            run_id: "existing-run".to_string(),
+            status: AutoReviewRunStatus::Completed,
+            disposition: codex_auto_review::AutoReviewDuplicateDisposition::ReuseTerminal,
+            finding_count: 1,
+            model: Some("test-model".to_string()),
+        };
+
+        persistence.save_skipped_duplicate(codex_home.path(), &duplicate);
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let run = store
+            .load_run("duplicate-candidate")
+            .expect("load persisted duplicate skip");
+        assert_eq!(run.status, AutoReviewRunStatus::Skipped);
+        assert_eq!(run.freshness, AutoReviewRunFreshness::Superseded);
+        assert_eq!(run.superseded_by.as_deref(), Some("existing-run"));
+        assert_eq!(
+            run.cancel_reason.as_deref(),
+            Some("duplicate_auto_review_scope")
+        );
+        assert_eq!(
+            run.error_summary.as_deref(),
+            Some("equivalent background auto review already exists: existing-run")
+        );
     }
 }
