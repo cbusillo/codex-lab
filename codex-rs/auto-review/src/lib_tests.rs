@@ -120,6 +120,167 @@ fn list_runs_returns_empty_when_store_is_missing() -> anyhow::Result<()> {
 }
 
 #[test]
+fn scoped_store_reads_legacy_unscoped_runs() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let legacy_run = sample_run("legacy_run", vec![sample_finding("f1", "Legacy")]);
+    let legacy_dir = codex_home.path().join("auto-review").join("runs");
+    std::fs::create_dir_all(&legacy_dir)?;
+    std::fs::write(
+        legacy_dir.join("legacy_run.json"),
+        format!("{}\n", serde_json::to_string_pretty(&legacy_run)?),
+    )?;
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let runs = store.list_runs()?;
+    let loaded = store.load_run("legacy_run")?;
+    let detail = store.finding_detail("legacy_run", "f1", 1024)?;
+
+    assert_eq!(runs, vec![legacy_run.clone()]);
+    assert_eq!(loaded, legacy_run);
+    assert!(detail.content.contains("Legacy"));
+    Ok(())
+}
+
+#[test]
+fn scoped_store_prefers_new_runs_over_legacy_runs() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let legacy_run = sample_run("same_run", vec![sample_finding("f1", "Legacy")]);
+    let new_run = sample_run("same_run", vec![sample_finding("f1", "New")]);
+    let legacy_dir = codex_home.path().join("auto-review").join("runs");
+    std::fs::create_dir_all(&legacy_dir)?;
+    std::fs::write(
+        legacy_dir.join("same_run.json"),
+        format!("{}\n", serde_json::to_string_pretty(&legacy_run)?),
+    )?;
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&new_run)?;
+
+    assert_eq!(store.load_run("same_run")?, new_run);
+    Ok(())
+}
+
+#[test]
+fn detects_new_or_legacy_store_files() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+
+    assert!(!AutoReviewStore::has_store_files(codex_home.path()));
+
+    std::fs::create_dir_all(
+        codex_home
+            .path()
+            .join("state")
+            .join("review")
+            .join("repo-empty")
+            .join("auto-review")
+            .join("outputs"),
+    )?;
+    assert!(!AutoReviewStore::has_store_files(codex_home.path()));
+
+    std::fs::create_dir_all(codex_home.path().join("auto-review").join("runs"))?;
+    assert!(!AutoReviewStore::has_store_files(codex_home.path()));
+    std::fs::write(
+        codex_home
+            .path()
+            .join("auto-review")
+            .join("runs")
+            .join("bad_run.json"),
+        "not json\n",
+    )?;
+    std::fs::write(
+        codex_home
+            .path()
+            .join("auto-review")
+            .join("runs")
+            .join("bad run.json"),
+        "not json\n",
+    )?;
+    assert!(!AutoReviewStore::has_store_files(codex_home.path()));
+    std::fs::write(
+        codex_home
+            .path()
+            .join("auto-review")
+            .join("runs")
+            .join("legacy_run.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&sample_run("legacy_run", Vec::new()))?
+        ),
+    )?;
+    assert!(AutoReviewStore::has_store_files(codex_home.path()));
+
+    let codex_home = tempfile::tempdir()?;
+    AutoReviewStore::for_scope(codex_home.path(), scope.path())
+        .save_run(&sample_run("run_1", Vec::new()))?;
+
+    assert!(AutoReviewStore::has_store_files(codex_home.path()));
+    Ok(())
+}
+
+#[test]
+fn detail_lookup_uses_new_index_before_legacy_run() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let legacy_run = sample_run("same_run", vec![sample_finding("f1", "Legacy")]);
+    let new_run = sample_run("same_run", vec![sample_finding("f1", "New")]);
+    let legacy_dir = codex_home.path().join("auto-review").join("runs");
+    std::fs::create_dir_all(&legacy_dir)?;
+    std::fs::write(
+        legacy_dir.join("same_run.json"),
+        format!("{}\n", serde_json::to_string_pretty(&legacy_run)?),
+    )?;
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let index = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "runs": [new_run],
+    });
+    let runs_path = store.runs_path();
+    std::fs::create_dir_all(runs_path.parent().expect("runs path parent"))?;
+    std::fs::write(&runs_path, format!("{index}\n"))?;
+
+    let detail = store.finding_detail("same_run", "f1", 1024)?;
+
+    assert!(detail.content.contains("New"));
+    assert!(!detail.content.contains("Legacy"));
+    Ok(())
+}
+
+#[test]
+fn corrupt_legacy_run_does_not_hide_new_store() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let new_run = sample_run("new_run", vec![sample_finding("f1", "New")]);
+    let legacy_dir = codex_home.path().join("auto-review").join("runs");
+    std::fs::create_dir_all(&legacy_dir)?;
+    std::fs::write(legacy_dir.join("bad_run.json"), "not json\n")?;
+    std::fs::write(legacy_dir.join("bad run.json"), "not json\n")?;
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&new_run)?;
+
+    assert_eq!(
+        store
+            .list_runs()?
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect::<Vec<_>>(),
+        vec!["new_run".to_string()]
+    );
+    assert_eq!(store.load_run("new_run")?.run_id, "new_run");
+    assert!(
+        store
+            .finding_detail("new_run", "f1", 1024)?
+            .content
+            .contains("New")
+    );
+    Ok(())
+}
+
+#[test]
 fn load_run_defaults_missing_worktree_diff_fingerprint() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;

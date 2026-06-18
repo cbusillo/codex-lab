@@ -20,6 +20,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 const STORE_DIR: &str = "auto-review";
 const STATE_DIR: &str = "state";
 const REVIEW_DIR: &str = "review";
+const LEGACY_RUNS_DIR: &str = "runs";
 const RUNS_FILENAME: &str = "runs.json";
 const OUTPUTS_DIR: &str = "outputs";
 const OMITTED_TEMPLATE_PREFIX: &str = "... ";
@@ -28,17 +29,28 @@ const OMITTED_TEMPLATE_SUFFIX: &str = " more finding(s) omitted";
 #[derive(Debug, Clone)]
 pub struct AutoReviewStore {
     root: PathBuf,
+    legacy_root: Option<PathBuf>,
 }
 
 impl AutoReviewStore {
     pub fn for_scope(codex_home: impl AsRef<Path>, scope: impl AsRef<Path>) -> Self {
+        let codex_home = codex_home.as_ref();
         Self {
-            root: scoped_store_root(codex_home.as_ref(), scope.as_ref()),
+            root: scoped_store_root(codex_home, scope.as_ref()),
+            legacy_root: Some(legacy_store_root(codex_home)),
         }
     }
 
     pub fn from_store_root(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            legacy_root: None,
+        }
+    }
+
+    pub fn has_store_files(codex_home: impl AsRef<Path>) -> bool {
+        let codex_home = codex_home.as_ref();
+        has_loadable_legacy_run(codex_home) || has_scoped_store_files(codex_home)
     }
 
     pub fn save_run(&self, run: &AutoReviewRun) -> Result<PathBuf> {
@@ -83,8 +95,7 @@ impl AutoReviewStore {
         finding_id: &str,
         max_bytes: usize,
     ) -> Result<AutoReviewDetail> {
-        self.load_output(run_id)?
-            .finding_detail(finding_id, max_bytes)
+        self.load_run(run_id)?.finding_detail(finding_id, max_bytes)
     }
 
     pub fn output_path(&self, run_id: &str) -> Result<PathBuf> {
@@ -98,16 +109,21 @@ impl AutoReviewStore {
 
     fn load_index(&self) -> Result<AutoReviewRunsIndex> {
         let path = self.runs_path();
-        let mut index = if path.exists() {
+        let mut index = AutoReviewRunsIndex::default();
+        for run in self.load_legacy_runs()? {
+            index.upsert(run);
+        }
+        if path.exists() {
             let json = std::fs::read_to_string(&path).with_context(|| {
                 format!("failed to read auto review runs index {}", path.display())
             })?;
-            serde_json::from_str(&json).with_context(|| {
+            let parsed: AutoReviewRunsIndex = serde_json::from_str(&json).with_context(|| {
                 format!("failed to parse auto review runs index {}", path.display())
-            })?
-        } else {
-            AutoReviewRunsIndex::default()
-        };
+            })?;
+            for run in parsed.runs {
+                index.upsert(run);
+            }
+        }
         for run in self.load_output_runs()? {
             index.upsert(run);
         }
@@ -167,6 +183,61 @@ impl AutoReviewStore {
             .into_iter()
             .map(|run_id| self.load_output(&run_id))
             .collect()
+    }
+
+    fn legacy_run_path(&self, run_id: &str) -> Result<Option<PathBuf>> {
+        validate_safe_id(run_id).context("auto review run_id")?;
+        Ok(self
+            .legacy_root
+            .as_ref()
+            .map(|root| root.join(LEGACY_RUNS_DIR).join(format!("{run_id}.json"))))
+    }
+
+    fn load_legacy_run(&self, run_id: &str) -> Result<AutoReviewRun> {
+        let Some(path) = self.legacy_run_path(run_id)? else {
+            anyhow::bail!("legacy auto review store is unavailable");
+        };
+        let json = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read legacy auto review run {run_id}"))?;
+        let run = serde_json::from_str(&json)
+            .with_context(|| format!("failed to parse legacy auto review run {run_id}"))?;
+        validate_run(&run)?;
+        Ok(run)
+    }
+
+    fn load_legacy_runs(&self) -> Result<Vec<AutoReviewRun>> {
+        let Some(root) = &self.legacy_root else {
+            return Ok(Vec::new());
+        };
+        let runs_dir = root.join(LEGACY_RUNS_DIR);
+        if !runs_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut run_ids = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&runs_dir) else {
+            return Ok(Vec::new());
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if validate_safe_id(run_id).is_ok() {
+                run_ids.push(run_id.to_string());
+            }
+        }
+
+        run_ids.sort();
+        let runs = run_ids
+            .into_iter()
+            .filter_map(|run_id| self.load_legacy_run(&run_id).ok())
+            .collect();
+        Ok(runs)
     }
 }
 
@@ -485,6 +556,42 @@ fn scoped_store_root(codex_home: &Path, scope: &Path) -> PathBuf {
         .join(REVIEW_DIR)
         .join(repo_key(scope))
         .join(STORE_DIR)
+}
+
+fn legacy_store_root(codex_home: &Path) -> PathBuf {
+    codex_home.join(STORE_DIR)
+}
+
+fn has_loadable_legacy_run(codex_home: &Path) -> bool {
+    let store = AutoReviewStore {
+        root: scoped_store_root(codex_home, codex_home),
+        legacy_root: Some(legacy_store_root(codex_home)),
+    };
+    store.load_legacy_runs().is_ok_and(|runs| !runs.is_empty())
+}
+
+fn has_scoped_store_files(codex_home: &Path) -> bool {
+    let review_dir = codex_home.join(STATE_DIR).join(REVIEW_DIR);
+    let Ok(entries) = std::fs::read_dir(&review_dir) else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let store_root = entry.path().join(STORE_DIR);
+        if store_root.join(RUNS_FILENAME).exists() || has_json_file(&store_root.join(OUTPUTS_DIR)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_json_file(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
 }
 
 fn repo_key(scope: &Path) -> String {
