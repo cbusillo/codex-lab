@@ -1,6 +1,7 @@
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::SCHEMA_VERSION as AUTO_REVIEW_SCHEMA_VERSION;
 use codex_core::CodexThread;
 use codex_core::REVIEW_PROMPT;
 use codex_core::config::Config;
@@ -1309,6 +1310,126 @@ async fn automatic_background_review_suppresses_unchanged_dirty_diff() -> anyhow
         .assert_request_count_stays(4, Duration::from_millis(2500))
         .await;
     assert_eq!(load_auto_review_runs(codex_home.path())?.len(), 1);
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_reuses_completed_durable_duplicate() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_duplicate.txt\n+reuse durable review\n*** End Patch";
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call("auto-bg-duplicate", patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let (server, _completions) =
+        start_streaming_sse_server(vec![foreground_tool, foreground_complete]).await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    std::fs::write(
+        test.cwd_path().join("auto_background_review_duplicate.txt"),
+        "reuse durable review\n",
+    )?;
+    let fingerprint = expected_worktree_diff_fingerprint(test.cwd_path()).await;
+    std::fs::remove_file(test.cwd_path().join("auto_background_review_duplicate.txt"))?;
+    let existing = codex_auto_review::AutoReviewRun {
+        schema_version: AUTO_REVIEW_SCHEMA_VERSION,
+        run_id: "existing_duplicate_review".to_string(),
+        status: AutoReviewRunStatus::Completed,
+        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
+        source: AutoReviewRunSource::Background,
+        target: codex_auto_review::AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: current_git_head(test.cwd_path()),
+            base_sha: None,
+            worktree_path: Some(test.cwd_path().to_path_buf()),
+            worktree_diff_fingerprint: Some(fingerprint.clone()),
+        },
+        review_target: ReviewTarget::UncommittedChanges,
+        started_at_unix_secs: 1,
+        completed_at_unix_secs: Some(2),
+        model: Some("gpt-test".to_string()),
+        superseded_by: None,
+        cancel_reason: None,
+        error_summary: None,
+        findings: vec![codex_auto_review::AutoReviewFindingRecord {
+            finding_id: "f1".to_string(),
+            finding: ReviewFinding {
+                title: "Existing durable finding".to_string(),
+                body: "existing durable finding body".to_string(),
+                confidence_score: 0.9,
+                priority: 1,
+                code_location: ReviewCodeLocation {
+                    absolute_file_path: test
+                        .cwd_path()
+                        .join("auto_background_review_duplicate.txt"),
+                    line_range: ReviewLineRange { start: 1, end: 1 },
+                },
+            },
+        }],
+    };
+    AutoReviewStore::for_scope(codex_home.path(), test.cwd_path()).save_run(&existing)?;
+
+    test.submit_turn("create a file with an already reviewed diff")
+        .await?;
+
+    let skipped_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Skipped,
+        None,
+    )
+    .await;
+    assert_eq!(
+        skipped_status.error_summary.as_deref(),
+        Some("equivalent background auto review already exists: existing_duplicate_review")
+    );
+    server
+        .assert_request_count_stays(2, Duration::from_millis(2500))
+        .await;
+
+    let runs = load_auto_review_runs(codex_home.path())?;
+    assert_eq!(runs.len(), 2);
+    let skipped = runs
+        .iter()
+        .find(|run| run.run_id == skipped_status.run_id)
+        .expect("expected duplicate candidate run");
+    assert_eq!(skipped.status, AutoReviewRunStatus::Skipped);
+    assert_eq!(
+        skipped.superseded_by.as_deref(),
+        Some("existing_duplicate_review")
+    );
+    assert_eq!(
+        skipped.cancel_reason.as_deref(),
+        Some("duplicate_auto_review_scope")
+    );
+    let completed = runs
+        .iter()
+        .find(|run| run.run_id == "existing_duplicate_review")
+        .expect("expected completed duplicate to remain visible");
+    assert_eq!(completed.status, AutoReviewRunStatus::Completed);
+    assert_eq!(
+        completed.target.worktree_diff_fingerprint.as_deref(),
+        Some(fingerprint.as_str())
+    );
 
     let _codex_home_guard = codex_home;
     server.shutdown().await;

@@ -116,6 +116,21 @@ impl AutoReviewStore {
         diff_fingerprint: &str,
         superseded_by: &str,
     ) -> Result<usize> {
+        self.mark_superseded_by_fingerprint_with_target(
+            diff_fingerprint,
+            superseded_by,
+            /*active_branch*/ None,
+            /*active_head*/ None,
+        )
+    }
+
+    pub fn mark_superseded_by_fingerprint_with_target(
+        &self,
+        diff_fingerprint: &str,
+        superseded_by: &str,
+        active_branch: Option<&str>,
+        active_head: Option<&str>,
+    ) -> Result<usize> {
         let fingerprint = diff_fingerprint.trim();
         if fingerprint.is_empty() {
             return Ok(0);
@@ -125,6 +140,7 @@ impl AutoReviewStore {
         for run in self.load_index()?.runs {
             if run.run_id == superseded_by
                 || run.target.worktree_diff_fingerprint.as_deref() != Some(fingerprint)
+                || !duplicate_target_is_reusable(&run, active_branch, active_head)
             {
                 continue;
             }
@@ -185,6 +201,24 @@ impl AutoReviewStore {
         active_branch: Option<&str>,
         active_head: Option<&str>,
     ) -> Result<Option<AutoReviewDuplicateMatch>> {
+        self.find_duplicate_by_fingerprint_with_target_and_filter(
+            diff_fingerprint,
+            active_branch,
+            active_head,
+            |_| true,
+        )
+    }
+
+    pub fn find_duplicate_by_fingerprint_with_target_and_filter<F>(
+        &self,
+        diff_fingerprint: &str,
+        active_branch: Option<&str>,
+        active_head: Option<&str>,
+        is_eligible: F,
+    ) -> Result<Option<AutoReviewDuplicateMatch>>
+    where
+        F: Fn(&AutoReviewDuplicateMatch) -> bool,
+    {
         let fingerprint = diff_fingerprint.trim();
         if fingerprint.is_empty() {
             return Ok(None);
@@ -203,20 +237,24 @@ impl AutoReviewStore {
                 )
             })
             .filter(|run| duplicate_target_is_reusable(run, active_branch, active_head))
+            .filter_map(|run| {
+                let duplicate = AutoReviewDuplicateMatch {
+                    run_id: run.run_id.clone(),
+                    status: run.status.clone(),
+                    disposition: duplicate_disposition(&run),
+                    finding_count: run.findings.len(),
+                    model: run.model.clone(),
+                };
+                is_eligible(&duplicate).then_some((run, duplicate))
+            })
             .max_by(|left, right| {
-                duplicate_priority(left)
-                    .cmp(&duplicate_priority(right))
+                duplicate_priority(&left.0)
+                    .cmp(&duplicate_priority(&right.0))
                     .then_with(|| {
-                        auto_review_run_sort_key(left).cmp(&auto_review_run_sort_key(right))
+                        auto_review_run_sort_key(&left.0).cmp(&auto_review_run_sort_key(&right.0))
                     })
             })
-            .map(|run| AutoReviewDuplicateMatch {
-                run_id: run.run_id.clone(),
-                status: run.status.clone(),
-                disposition: duplicate_disposition(&run),
-                finding_count: run.findings.len(),
-                model: run.model,
-            }))
+            .map(|(_run, duplicate)| duplicate))
     }
 
     pub fn load_run(&self, run_id: &str) -> Result<AutoReviewRun> {

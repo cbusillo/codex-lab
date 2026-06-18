@@ -622,6 +622,40 @@ fn duplicate_lookup_prefers_adoptable_in_flight_match() -> anyhow::Result<()> {
 }
 
 #[test]
+fn duplicate_lookup_filter_can_fall_back_from_ineligible_adopt_to_completed() -> anyhow::Result<()>
+{
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        target: target_with_fingerprint("sha256:abc"),
+        ..sample_run("completed", vec![sample_finding("f1", "Keep")])
+    })?;
+    store.save_run(&AutoReviewRun {
+        status: AutoReviewRunStatus::Reviewing,
+        completed_at_unix_secs: None,
+        target: target_with_fingerprint("sha256:abc"),
+        ..sample_run("unowned_reviewing", Vec::new())
+    })?;
+
+    let duplicate = store
+        .find_duplicate_by_fingerprint_with_target_and_filter(
+            "sha256:abc",
+            None,
+            None,
+            |duplicate| duplicate.disposition != AutoReviewDuplicateDisposition::Adopt,
+        )?
+        .expect("eligible completed duplicate");
+
+    assert_eq!(duplicate.run_id, "completed");
+    assert_eq!(
+        duplicate.disposition,
+        AutoReviewDuplicateDisposition::ReuseTerminal
+    );
+    Ok(())
+}
+
+#[test]
 fn duplicate_lookup_can_filter_stale_target_matches() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
@@ -739,6 +773,49 @@ fn mark_superseded_by_fingerprint_only_supersedes_matching_scope() -> anyhow::Re
     assert_eq!(
         store.load_run("other_scope")?.status,
         AutoReviewRunStatus::Completed
+    );
+    Ok(())
+}
+
+#[test]
+fn mark_superseded_by_fingerprint_with_target_preserves_stale_head() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        target: AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: Some("old-head".to_string()),
+            worktree_diff_fingerprint: Some("sha256:abc".to_string()),
+            ..sample_target("main", "old-head", "/repo")
+        },
+        ..sample_run("old_head", Vec::new())
+    })?;
+    store.save_run(&AutoReviewRun {
+        target: AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: Some("new-head".to_string()),
+            worktree_diff_fingerprint: Some("sha256:abc".to_string()),
+            ..sample_target("main", "new-head", "/repo")
+        },
+        ..sample_run("new_head", Vec::new())
+    })?;
+
+    let changed = store.mark_superseded_by_fingerprint_with_target(
+        "sha256:abc",
+        "new_run",
+        Some("main"),
+        Some("new-head"),
+    )?;
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        store.load_run("old_head")?.status,
+        AutoReviewRunStatus::Completed
+    );
+    assert_eq!(
+        store.load_run("new_head")?.status,
+        AutoReviewRunStatus::Superseded
     );
     Ok(())
 }
