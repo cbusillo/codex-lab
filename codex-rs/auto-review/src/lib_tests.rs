@@ -269,6 +269,65 @@ fn diagnostics_counts_terminal_skipped_duplicates_and_stale_suppression() {
 }
 
 #[test]
+fn diagnostics_do_not_count_off_target_current_runs_as_stale_suppression() {
+    let active_target = sample_target("main", "head-2", "/repo");
+    let current_commit_finding = AutoReviewRun {
+        run_id: "current_commit_finding".to_string(),
+        review_target: ReviewTarget::Commit {
+            sha: "head-2".to_string(),
+            title: None,
+        },
+        ..sample_run(
+            "unused",
+            &sample_output(vec![sample_finding("Current commit")]),
+        )
+    };
+
+    let diagnostics = AutoReviewDiagnostics::from_runs(
+        [&current_commit_finding],
+        Some(&active_target),
+        Some(&ReviewTarget::UncommittedChanges),
+    )
+    .expect("diagnostics");
+
+    assert_eq!(diagnostics.recent_runs, 1);
+    assert_eq!(diagnostics.terminal_runs, 1);
+    assert_eq!(diagnostics.suppressed_stale_runs, 0);
+    assert_eq!(
+        diagnostics.compact_line(),
+        "recent_runs=1 in_flight=0 terminal=1"
+    );
+}
+
+#[test]
+fn diagnostics_count_stale_current_turn_diff_as_stale_suppression_for_uncommitted_changes() {
+    let active_target = sample_target("main", "head-2", "/repo");
+    let stale_turn_diff_finding = AutoReviewRun {
+        run_id: "stale_turn_diff_finding".to_string(),
+        target: sample_target("main", "head-1", "/repo"),
+        review_target: ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:first-turn".to_string(),
+        },
+        ..sample_run("unused", &sample_output(vec![sample_finding("Stale turn")]))
+    };
+
+    let diagnostics = AutoReviewDiagnostics::from_runs(
+        [&stale_turn_diff_finding],
+        Some(&active_target),
+        Some(&ReviewTarget::UncommittedChanges),
+    )
+    .expect("diagnostics");
+
+    assert_eq!(diagnostics.recent_runs, 1);
+    assert_eq!(diagnostics.terminal_runs, 1);
+    assert_eq!(diagnostics.suppressed_stale_runs, 1);
+    assert_eq!(
+        diagnostics.compact_line(),
+        "recent_runs=1 in_flight=0 terminal=1 suppressed_stale=1"
+    );
+}
+
+#[test]
 fn diagnostics_are_absent_for_empty_runs() {
     assert_eq!(AutoReviewDiagnostics::from_runs([], None, None), None);
 }
