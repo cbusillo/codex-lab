@@ -1,7 +1,0 @@
----
-source: tui/src/chatwidget/tests/app_server.rs
-expression: rendered
----
-○ Auto Review running for uncommitted changes · run-background-1
-
-✔ Auto Review completed for uncommitted changes · run-background-1

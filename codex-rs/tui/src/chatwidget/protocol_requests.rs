@@ -57,13 +57,16 @@ impl ChatWidget {
         &mut self,
         notification: codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
     ) {
+        let should_render_status = background_auto_review_status_needs_history(&notification);
         self.review.current_background_review = Some(BackgroundAutoReviewSnapshot {
             run_id: notification.run_id.clone(),
             status: notification.status,
             review_target: notification.review_target.clone(),
             error_summary: notification.error_summary.clone(),
         });
-        self.add_to_history(history_cell::new_auto_review_status_cell(&notification));
+        if should_render_status {
+            self.add_to_history(history_cell::new_auto_review_status_cell(&notification));
+        }
         self.request_redraw();
     }
 
@@ -200,4 +203,22 @@ fn auto_review_summary_contains_run(
             .latest
             .as_ref()
             .is_some_and(|summary| summary.run_id == run_id)
+}
+
+fn background_auto_review_status_needs_history(
+    notification: &codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
+) -> bool {
+    // Progress and normal completion live in status state; transcript history is
+    // reserved for terminal statuses that carry a reason the user should see.
+    match notification.status {
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => notification
+            .error_summary
+            .as_deref()
+            .is_some_and(|summary| !summary.trim().is_empty()),
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Running
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Completed => false,
+    }
 }

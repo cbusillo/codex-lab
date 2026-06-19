@@ -60,6 +60,22 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
     }
 }
 
+fn background_auto_review_status_notification(
+    run_id: &str,
+    status: BackgroundAutoReviewStatus,
+    error_summary: Option<&str>,
+) -> ServerNotification {
+    ServerNotification::BackgroundAutoReviewStatusChanged(
+        BackgroundAutoReviewStatusChangedNotification {
+            thread_id: "thread-1".to_string(),
+            run_id: run_id.to_string(),
+            status,
+            review_target: ReviewTarget::UncommittedChanges,
+            error_summary: error_summary.map(str::to_string),
+        },
+    )
+}
+
 #[tokio::test]
 async fn invalid_url_elicitation_is_declined() {
     let (mut chat, _app_event_tx, mut rx, _op_rx) = make_chatwidget_manual_with_sender().await;
@@ -297,40 +313,27 @@ async fn live_app_server_user_message_item_completed_does_not_duplicate_rendered
 }
 
 #[tokio::test]
-async fn live_app_server_background_auto_review_status_renders_history() {
+async fn live_app_server_background_auto_review_transient_status_stays_quiet() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.handle_server_notification(
-        ServerNotification::BackgroundAutoReviewStatusChanged(
-            BackgroundAutoReviewStatusChangedNotification {
-                thread_id: "thread-1".to_string(),
-                run_id: "run-background-1".to_string(),
-                status: BackgroundAutoReviewStatus::Running,
-                review_target: ReviewTarget::UncommittedChanges,
-                error_summary: None,
-            },
+        background_auto_review_status_notification(
+            "run-background-1",
+            BackgroundAutoReviewStatus::Running,
+            None,
         ),
         /*replay_kind*/ None,
     );
     chat.handle_server_notification(
-        ServerNotification::BackgroundAutoReviewStatusChanged(
-            BackgroundAutoReviewStatusChangedNotification {
-                thread_id: "thread-1".to_string(),
-                run_id: "run-background-1".to_string(),
-                status: BackgroundAutoReviewStatus::Completed,
-                review_target: ReviewTarget::UncommittedChanges,
-                error_summary: None,
-            },
+        background_auto_review_status_notification(
+            "run-background-1",
+            BackgroundAutoReviewStatus::Completed,
+            None,
         ),
         /*replay_kind*/ None,
     );
 
-    let rendered = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<Vec<_>>()
-        .join("");
-    assert_chatwidget_snapshot!("background_auto_review_status_history", rendered);
+    assert!(drain_insert_history(&mut rx).is_empty());
     let snapshot = chat
         .review
         .current_background_review
@@ -338,6 +341,65 @@ async fn live_app_server_background_auto_review_status_renders_history() {
         .expect("background review snapshot");
     assert_eq!(snapshot.run_id, "run-background-1");
     assert_eq!(snapshot.status, BackgroundAutoReviewStatus::Completed);
+}
+
+#[tokio::test]
+async fn live_app_server_background_auto_review_terminal_status_without_reason_stays_quiet() {
+    for status in [
+        BackgroundAutoReviewStatus::Failed,
+        BackgroundAutoReviewStatus::Cancelled,
+        BackgroundAutoReviewStatus::Skipped,
+    ] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+        chat.handle_server_notification(
+            background_auto_review_status_notification("run-background-terminal", status, None),
+            /*replay_kind*/ None,
+        );
+
+        assert!(drain_insert_history(&mut rx).is_empty());
+        let snapshot = chat
+            .review
+            .current_background_review
+            .as_ref()
+            .expect("background review snapshot");
+        assert_eq!(snapshot.run_id, "run-background-terminal");
+        assert_eq!(snapshot.status, status);
+    }
+}
+
+#[tokio::test]
+async fn live_app_server_background_auto_review_cancelled_and_skipped_render_error_summary() {
+    for (status, expected_status) in [
+        (BackgroundAutoReviewStatus::Cancelled, "cancelled"),
+        (BackgroundAutoReviewStatus::Skipped, "skipped"),
+    ] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        let reason = format!("{expected_status} reason");
+
+        chat.handle_server_notification(
+            background_auto_review_status_notification(
+                "run-background-terminal",
+                status,
+                Some(&reason),
+            ),
+            /*replay_kind*/ None,
+        );
+
+        let rendered = drain_insert_history(&mut rx)
+            .iter()
+            .map(|lines| lines_to_single_string(lines))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            rendered.contains(expected_status),
+            "expected status label {expected_status:?}, got {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&reason),
+            "expected reason {reason:?}, got {rendered:?}"
+        );
+    }
 }
 
 #[tokio::test]
