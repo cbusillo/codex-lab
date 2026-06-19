@@ -109,25 +109,13 @@ impl AutoReviewStore {
         Ok(true)
     }
 
-    pub fn mark_superseded_by_fingerprint(
-        &self,
-        diff_fingerprint: &str,
-        superseded_by: &str,
-    ) -> Result<usize> {
-        self.mark_superseded_by_fingerprint_with_target(
-            diff_fingerprint,
-            superseded_by,
-            /*active_branch*/ None,
-            /*active_head*/ None,
-        )
-    }
-
     pub fn mark_superseded_by_fingerprint_with_target(
         &self,
         diff_fingerprint: &str,
         superseded_by: &str,
         active_branch: Option<&str>,
         active_head: Option<&str>,
+        active_review_target: Option<&ReviewTarget>,
     ) -> Result<usize> {
         let fingerprint = diff_fingerprint.trim();
         if fingerprint.is_empty() {
@@ -139,6 +127,8 @@ impl AutoReviewStore {
             if run.run_id == superseded_by
                 || run.target.worktree_diff_fingerprint.as_deref() != Some(fingerprint)
                 || !duplicate_target_matches_branch_head(&run, active_branch, active_head)
+                || active_review_target
+                    .is_some_and(|active_review_target| run.review_target != *active_review_target)
             {
                 continue;
             }
@@ -182,83 +172,11 @@ impl AutoReviewStore {
         Ok(changed_count)
     }
 
-    pub fn find_duplicate_by_fingerprint(
-        &self,
-        diff_fingerprint: &str,
-    ) -> Result<Option<AutoReviewDuplicateMatch>> {
-        self.find_duplicate_by_fingerprint_with_target(
-            diff_fingerprint,
-            /*active_branch*/ None,
-            /*active_head*/ None,
-        )
-    }
-
-    pub fn find_duplicate_by_fingerprint_with_target(
-        &self,
-        diff_fingerprint: &str,
-        active_branch: Option<&str>,
-        active_head: Option<&str>,
-    ) -> Result<Option<AutoReviewDuplicateMatch>> {
-        self.find_duplicate_by_fingerprint_with_target_and_filter(
-            diff_fingerprint,
-            active_branch,
-            active_head,
-            |_| true,
-        )
-    }
-
-    pub fn find_duplicate_by_fingerprint_with_target_and_filter<F>(
-        &self,
-        diff_fingerprint: &str,
-        active_branch: Option<&str>,
-        active_head: Option<&str>,
-        is_eligible: F,
-    ) -> Result<Option<AutoReviewDuplicateMatch>>
-    where
-        F: Fn(&AutoReviewDuplicateMatch) -> bool,
-    {
-        let fingerprint = diff_fingerprint.trim();
-        if fingerprint.is_empty() {
-            return Ok(None);
-        }
-        Ok(self
-            .load_index_for_read()?
-            .runs
-            .into_iter()
-            .filter(|run| run.target.worktree_diff_fingerprint.as_deref() == Some(fingerprint))
-            .filter(|run| {
-                !matches!(
-                    run.status,
-                    AutoReviewRunStatus::Lost
-                        | AutoReviewRunStatus::Skipped
-                        | AutoReviewRunStatus::Superseded
-                )
-            })
-            .filter(|run| duplicate_target_matches_branch_head(run, active_branch, active_head))
-            .filter_map(|run| {
-                let duplicate = AutoReviewDuplicateMatch {
-                    run_id: run.run_id.clone(),
-                    status: run.status.clone(),
-                    disposition: duplicate_disposition(&run),
-                    finding_count: run.finding_count,
-                    model: run.model.clone(),
-                };
-                is_eligible(&duplicate).then_some((run, duplicate))
-            })
-            .max_by(|left, right| {
-                duplicate_priority(&left.0)
-                    .cmp(&duplicate_priority(&right.0))
-                    .then_with(|| {
-                        auto_review_run_sort_key(&left.0).cmp(&auto_review_run_sort_key(&right.0))
-                    })
-            })
-            .map(|(_run, duplicate)| duplicate))
-    }
-
     pub fn find_duplicate_by_fingerprint_with_target_proof_and_filter<F>(
         &self,
         diff_fingerprint: &str,
         active_target: Option<&AutoReviewRunTarget>,
+        active_review_target: Option<&ReviewTarget>,
         is_eligible: F,
     ) -> Result<Option<AutoReviewDuplicateMatch>>
     where
@@ -282,6 +200,10 @@ impl AutoReviewStore {
                 )
             })
             .filter(|run| duplicate_target_is_reusable(run, active_target))
+            .filter(|run| {
+                active_review_target
+                    .is_none_or(|active_review_target| run.review_target == *active_review_target)
+            })
             .filter_map(|run| {
                 let duplicate = AutoReviewDuplicateMatch {
                     run_id: run.run_id.clone(),
@@ -686,6 +608,8 @@ fn review_target_matches(stored: &ReviewTarget, active: &ReviewTarget) -> bool {
                 sha: active_sha, ..
             },
         ) => stored_sha == active_sha,
+        (ReviewTarget::CurrentTurnDiff { .. }, ReviewTarget::UncommittedChanges)
+        | (ReviewTarget::UncommittedChanges, ReviewTarget::CurrentTurnDiff { .. }) => true,
         _ => stored == active,
     }
 }

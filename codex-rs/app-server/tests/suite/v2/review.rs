@@ -26,7 +26,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
-use codex_app_server_protocol::ReviewTarget;
+use codex_app_server_protocol::ReviewStartTarget;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadStartParams;
@@ -43,7 +43,11 @@ use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::ReviewCoordination;
 use codex_auto_review::SCHEMA_VERSION;
+use codex_git_utils::collect_git_info;
+use codex_git_utils::get_git_repo_root;
+use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::protocol::ReviewCodeLocation;
 use codex_protocol::protocol::ReviewFinding;
 use codex_protocol::protocol::ReviewLineRange;
@@ -92,7 +96,7 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
         .send_review_start_request(ReviewStartParams {
             thread_id: thread_id.clone(),
             delivery: Some(ReviewDelivery::Inline),
-            target: ReviewTarget::Commit {
+            target: ReviewStartTarget::Commit {
                 sha: "1234567deadbeef".to_string(),
                 title: Some("Tidy UI colors".to_string()),
             },
@@ -206,7 +210,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
         .send_review_start_request(ReviewStartParams {
             thread_id,
             delivery: Some(ReviewDelivery::Inline),
-            target: ReviewTarget::Commit {
+            target: ReviewStartTarget::Commit {
                 sha: "1234567deadbeef".to_string(),
                 title: Some("Check review approvals".to_string()),
             },
@@ -288,7 +292,7 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
         .send_review_start_request(ReviewStartParams {
             thread_id,
             delivery: Some(ReviewDelivery::Inline),
-            target: ReviewTarget::BaseBranch {
+            target: ReviewStartTarget::BaseBranch {
                 branch: "   ".to_string(),
             },
         })
@@ -301,6 +305,44 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
     assert!(
         error.error.message.contains("branch must not be empty"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_start_rejects_current_turn_diff_target() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+
+    let request_id = mcp
+        .send_raw_request(
+            "review/start",
+            Some(json!({
+                "threadId": thread_id,
+                "delivery": "inline",
+                "target": {
+                    "type": "currentTurnDiff",
+                    "fingerprint": "sha256:turn"
+                }
+            })),
+        )
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error.error.message.contains("unknown variant"),
         "unexpected message: {}",
         error.error.message
     );
@@ -333,7 +375,7 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
         .send_review_start_request(ReviewStartParams {
             thread_id: thread_id.clone(),
             delivery: Some(ReviewDelivery::Detached),
-            target: ReviewTarget::Custom {
+            target: ReviewStartTarget::Custom {
                 instructions: "detached review".to_string(),
             },
         })
@@ -424,7 +466,7 @@ async fn review_start_rejects_empty_commit_sha() -> Result<()> {
         .send_review_start_request(ReviewStartParams {
             thread_id,
             delivery: Some(ReviewDelivery::Inline),
-            target: ReviewTarget::Commit {
+            target: ReviewStartTarget::Commit {
                 sha: "\t".to_string(),
                 title: None,
             },
@@ -459,7 +501,7 @@ async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
         .send_review_start_request(ReviewStartParams {
             thread_id,
             delivery: Some(ReviewDelivery::Inline),
-            target: ReviewTarget::Custom {
+            target: ReviewStartTarget::Custom {
                 instructions: "\n\n".to_string(),
             },
         })
@@ -610,6 +652,49 @@ async fn auto_review_summary_read_returns_current_summary_and_counts() -> Result
     );
     assert_eq!(summary.status_counts.len(), 1);
     assert_eq!(summary.status_counts[0].count, 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_summary_read_treats_current_turn_diff_as_current() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    let repo = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    init_git_repo(repo.path())?;
+    std::fs::write(repo.path().join("tracked.txt"), "base\nchange\n")?;
+    let thread_cwd = std::fs::canonicalize(repo.path())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_thread_with_cwd(&mut mcp, &thread_cwd).await?;
+    let active_target = auto_review_target_for_cwd(codex_home.path(), &thread_cwd).await;
+    let (mut run, output) = sample_auto_review_run("run_turn_diff", &thread_cwd, "Stored body");
+    run.review_target = CoreReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:synthetic-turn-diff".to_string(),
+    };
+    run.target = active_target;
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
+
+    let request_id = mcp
+        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
+    let current = summary.current.expect("current run summary");
+    assert_eq!(current.run_id, "run_turn_diff");
+    assert_eq!(current.freshness, ApiAutoReviewFreshness::Current);
+    assert_eq!(current.rendered_findings, 1);
+    assert!(current.content.contains("f1"));
+    assert!(summary.status_counts.iter().any(|count| {
+        count.freshness == ApiAutoReviewFreshness::Current && count.target_matches
+    }));
 
     Ok(())
 }
@@ -938,8 +1023,17 @@ async fn auto_review_finding_detail_read_rejects_stale_run() -> Result<()> {
 }
 
 async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
+    start_thread(mcp, /*cwd*/ None).await
+}
+
+async fn start_thread_with_cwd(mcp: &mut TestAppServer, cwd: &std::path::Path) -> Result<String> {
+    start_thread(mcp, Some(cwd.to_string_lossy().into_owned())).await
+}
+
+async fn start_thread(mcp: &mut TestAppServer, cwd: Option<String>) -> Result<String> {
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
+            cwd,
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -1040,6 +1134,63 @@ fn save_auto_review_fixture(
     let store = AutoReviewStore::for_scope(codex_home, store_scope);
     store.save_run(run)?;
     store.save_output(&run.run_id, output)?;
+    Ok(())
+}
+
+async fn auto_review_target_for_cwd(
+    codex_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> AutoReviewRunTarget {
+    let git_info = collect_git_info(cwd).await;
+    let repo_root = get_git_repo_root(cwd);
+    let worktree_path = repo_root.or_else(|| Some(cwd.to_path_buf()));
+    let snapshot_epoch = worktree_path.as_ref().and_then(|scope| {
+        ReviewCoordination::for_scope(codex_home, scope)
+            .current_snapshot_epoch()
+            .ok()
+            .filter(|epoch| *epoch > 0)
+    });
+    AutoReviewRunTarget {
+        branch: git_info.as_ref().and_then(|git| git.branch.clone()),
+        head_sha: git_info
+            .as_ref()
+            .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+        base_sha: None,
+        worktree_path,
+        snapshot_epoch,
+        snapshot_commit: git_info
+            .as_ref()
+            .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+        head_at_launch: git_info
+            .as_ref()
+            .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+        worktree_diff_fingerprint: get_worktree_diff_fingerprint(cwd).await,
+    }
+}
+
+fn init_git_repo(repo_path: &std::path::Path) -> Result<()> {
+    run_git(repo_path, &["init", "-b", "main"])?;
+    run_git(repo_path, &["config", "user.email", "test@example.com"])?;
+    run_git(repo_path, &["config", "user.name", "Test User"])?;
+    std::fs::write(repo_path.join("tracked.txt"), "base\n")?;
+    run_git(repo_path, &["add", "tracked.txt"])?;
+    run_git(repo_path, &["commit", "-m", "initial"])?;
+    Ok(())
+}
+
+fn run_git(repo_path: &std::path::Path, args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(args)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {:?} failed: stdout={:?} stderr={:?}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 

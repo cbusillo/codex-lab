@@ -303,6 +303,16 @@ pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
     Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
+pub fn diff_fingerprint(diff: &str) -> Option<String> {
+    if diff.trim().is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(diff.as_bytes());
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
 pub async fn get_worktree_diff_byte_count(cwd: &Path) -> Option<usize> {
     get_git_repo_root(cwd)?;
     let diff = diff_against_sha(cwd, &GitSha::new("HEAD")).await?;

@@ -11760,7 +11760,7 @@
           "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`)."
         },
         "target": {
-          "$ref": "#/definitions/ReviewTarget"
+          "$ref": "#/definitions/ReviewStartTarget"
         },
         "threadId": {
           "type": "string"
@@ -11791,6 +11791,97 @@
       "title": "ReviewStartResponse",
       "type": "object"
     },
+    "ReviewStartTarget": {
+      "oneOf": [
+        {
+          "description": "Review the working tree: staged, unstaged, and untracked files.",
+          "properties": {
+            "type": {
+              "enum": [
+                "uncommittedChanges"
+              ],
+              "title": "UncommittedChangesReviewStartTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UncommittedChangesReviewStartTarget",
+          "type": "object"
+        },
+        {
+          "description": "Review changes between the current branch and the given base branch.",
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "baseBranch"
+              ],
+              "title": "BaseBranchReviewStartTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch",
+            "type"
+          ],
+          "title": "BaseBranchReviewStartTarget",
+          "type": "object"
+        },
+        {
+          "description": "Review the changes introduced by a specific commit.",
+          "properties": {
+            "sha": {
+              "type": "string"
+            },
+            "title": {
+              "description": "Optional human-readable label (e.g., commit subject) for UIs.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "commit"
+              ],
+              "title": "CommitReviewStartTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha",
+            "type"
+          ],
+          "title": "CommitReviewStartTarget",
+          "type": "object"
+        },
+        {
+          "description": "Arbitrary instructions, equivalent to the old free-form prompt.",
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "custom"
+              ],
+              "title": "CustomReviewStartTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "instructions",
+            "type"
+          ],
+          "title": "CustomReviewStartTarget",
+          "type": "object"
+        }
+      ]
+    },
     "ReviewTarget": {
       "oneOf": [
         {
@@ -11808,6 +11899,27 @@
             "type"
           ],
           "title": "UncommittedChangesReviewTarget",
+          "type": "object"
+        },
+        {
+          "description": "Review the changes made by a completed turn.",
+          "properties": {
+            "fingerprint": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "currentTurnDiff"
+              ],
+              "title": "CurrentTurnDiffReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "fingerprint",
+            "type"
+          ],
+          "title": "CurrentTurnDiffReviewTarget",
           "type": "object"
         },
         {

@@ -27,7 +27,7 @@ use codex_app_server_protocol::McpServerElicitationRequestResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
-use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
+use codex_app_server_protocol::ReviewStartTarget as ApiReviewStartTarget;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread as AppServerThread;
@@ -1193,12 +1193,15 @@ fn session_configured_from_thread_resume_response(
     )
 }
 
-fn review_target_to_api(target: ReviewTarget) -> ApiReviewTarget {
+fn review_target_to_api(target: ReviewTarget) -> ApiReviewStartTarget {
     match target {
-        ReviewTarget::UncommittedChanges => ApiReviewTarget::UncommittedChanges,
-        ReviewTarget::BaseBranch { branch } => ApiReviewTarget::BaseBranch { branch },
-        ReviewTarget::Commit { sha, title } => ApiReviewTarget::Commit { sha, title },
-        ReviewTarget::Custom { instructions } => ApiReviewTarget::Custom { instructions },
+        ReviewTarget::UncommittedChanges => ApiReviewStartTarget::UncommittedChanges,
+        ReviewTarget::CurrentTurnDiff { .. } => {
+            unreachable!("current-turn diff reviews are background status targets only")
+        }
+        ReviewTarget::BaseBranch { branch } => ApiReviewStartTarget::BaseBranch { branch },
+        ReviewTarget::Commit { sha, title } => ApiReviewStartTarget::Commit { sha, title },
+        ReviewTarget::Custom { instructions } => ApiReviewStartTarget::Custom { instructions },
     }
 }
 

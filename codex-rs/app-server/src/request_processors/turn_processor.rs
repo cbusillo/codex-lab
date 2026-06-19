@@ -285,18 +285,18 @@ impl TurnRequestProcessor {
     }
 
     fn review_request_from_target(
-        target: ApiReviewTarget,
+        target: ApiReviewStartTarget,
     ) -> Result<(ReviewRequest, String), JSONRPCErrorError> {
         let cleaned_target = match target {
-            ApiReviewTarget::UncommittedChanges => ApiReviewTarget::UncommittedChanges,
-            ApiReviewTarget::BaseBranch { branch } => {
+            ApiReviewStartTarget::UncommittedChanges => ApiReviewStartTarget::UncommittedChanges,
+            ApiReviewStartTarget::BaseBranch { branch } => {
                 let branch = branch.trim().to_string();
                 if branch.is_empty() {
                     return Err(invalid_request("branch must not be empty".to_string()));
                 }
-                ApiReviewTarget::BaseBranch { branch }
+                ApiReviewStartTarget::BaseBranch { branch }
             }
-            ApiReviewTarget::Commit { sha, title } => {
+            ApiReviewStartTarget::Commit { sha, title } => {
                 let sha = sha.trim().to_string();
                 if sha.is_empty() {
                     return Err(invalid_request("sha must not be empty".to_string()));
@@ -304,26 +304,28 @@ impl TurnRequestProcessor {
                 let title = title
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty());
-                ApiReviewTarget::Commit { sha, title }
+                ApiReviewStartTarget::Commit { sha, title }
             }
-            ApiReviewTarget::Custom { instructions } => {
+            ApiReviewStartTarget::Custom { instructions } => {
                 let trimmed = instructions.trim().to_string();
                 if trimmed.is_empty() {
                     return Err(invalid_request(
                         "instructions must not be empty".to_string(),
                     ));
                 }
-                ApiReviewTarget::Custom {
+                ApiReviewStartTarget::Custom {
                     instructions: trimmed,
                 }
             }
         };
 
         let core_target = match cleaned_target {
-            ApiReviewTarget::UncommittedChanges => CoreReviewTarget::UncommittedChanges,
-            ApiReviewTarget::BaseBranch { branch } => CoreReviewTarget::BaseBranch { branch },
-            ApiReviewTarget::Commit { sha, title } => CoreReviewTarget::Commit { sha, title },
-            ApiReviewTarget::Custom { instructions } => CoreReviewTarget::Custom { instructions },
+            ApiReviewStartTarget::UncommittedChanges => CoreReviewTarget::UncommittedChanges,
+            ApiReviewStartTarget::BaseBranch { branch } => CoreReviewTarget::BaseBranch { branch },
+            ApiReviewStartTarget::Commit { sha, title } => CoreReviewTarget::Commit { sha, title },
+            ApiReviewStartTarget::Custom { instructions } => {
+                CoreReviewTarget::Custom { instructions }
+            }
         };
 
         let hint = codex_core::review_prompts::user_facing_hint(&core_target);
@@ -429,6 +431,10 @@ impl TurnRequestProcessor {
                     sha: active_sha, ..
                 },
             ) => stored_sha == active_sha,
+            (CoreReviewTarget::CurrentTurnDiff { .. }, CoreReviewTarget::UncommittedChanges)
+            | (CoreReviewTarget::UncommittedChanges, CoreReviewTarget::CurrentTurnDiff { .. }) => {
+                true
+            }
             _ => stored == active,
         }
     }

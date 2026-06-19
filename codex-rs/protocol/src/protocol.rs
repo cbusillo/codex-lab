@@ -3109,6 +3109,11 @@ pub enum ReviewTarget {
     /// Review the working tree: staged, unstaged, and untracked files.
     UncommittedChanges,
 
+    /// Review the changes made by a completed turn.
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    CurrentTurnDiff { fingerprint: String },
+
     /// Review changes between the current branch and the given base branch.
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]

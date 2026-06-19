@@ -36,6 +36,22 @@ fn review_prompt_template_renders_commit_variant() {
 }
 
 #[test]
+fn review_prompt_template_rejects_current_turn_diff_without_content() {
+    let err = review_prompt(
+        &ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:abc".to_string(),
+        },
+        &AbsolutePathBuf::current_dir().expect("cwd"),
+    )
+    .expect_err("current turn diff prompt should require captured diff content");
+
+    assert_eq!(
+        err.to_string(),
+        "current-turn diff reviews require captured diff content"
+    );
+}
+
+#[test]
 fn review_prompt_template_renders_commit_variant_with_title() {
     assert_eq!(
         review_prompt(

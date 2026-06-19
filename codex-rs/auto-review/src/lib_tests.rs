@@ -280,6 +280,24 @@ fn summary_only_surfaces_current_finding_digests() {
 }
 
 #[test]
+fn summary_treats_current_turn_diff_as_current_uncommitted_target() {
+    let active = target_with_fingerprint("sha256:turn");
+    let run = AutoReviewRun {
+        target: target_with_fingerprint("sha256:turn"),
+        review_target: ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:turn".to_string(),
+        },
+        ..sample_run("run_1", &sample_output(vec![sample_finding("Title")]))
+    };
+
+    assert_eq!(
+        run.summary(&active, &ReviewTarget::UncommittedChanges)
+            .content,
+        "[P1] f1: Title (/tmp/example.rs:7-9)"
+    );
+}
+
+#[test]
 fn summary_hides_findings_for_mismatched_review_target() {
     let active = sample_target("main", "head-2", "/repo");
     let run = sample_run("run_1", &sample_output(vec![sample_finding("Title")]));
@@ -383,7 +401,12 @@ fn duplicate_lookup_prefers_adoptable_in_flight_match() -> anyhow::Result<()> {
     store.save_run(&reviewing)?;
 
     let duplicate = store
-        .find_duplicate_by_fingerprint_with_target("sha256:abc", Some("main"), Some("head-2"))?
+        .find_duplicate_by_fingerprint_with_target_proof_and_filter(
+            "sha256:abc",
+            Some(&target_with_fingerprint("sha256:abc")),
+            Some(&ReviewTarget::UncommittedChanges),
+            |_| true,
+        )?
         .expect("duplicate should be found");
 
     assert_eq!(duplicate.run_id, "reviewing");
@@ -408,7 +431,12 @@ fn duplicate_lookup_uses_finding_count_for_completed_priority() -> anyhow::Resul
     store.save_run(&finding)?;
 
     let duplicate = store
-        .find_duplicate_by_fingerprint_with_target("sha256:abc", Some("main"), Some("head-2"))?
+        .find_duplicate_by_fingerprint_with_target_proof_and_filter(
+            "sha256:abc",
+            Some(&target_with_fingerprint("sha256:abc")),
+            Some(&ReviewTarget::UncommittedChanges),
+            |_| true,
+        )?
         .expect("duplicate should be found");
 
     assert_eq!(duplicate.run_id, "finding");
@@ -467,6 +495,7 @@ fn mark_superseded_by_fingerprint_only_supersedes_clean_matching_scope() -> anyh
         "new_run",
         Some("main"),
         Some("head-2"),
+        /*active_review_target*/ None,
     )?;
 
     assert_eq!(changed, 1);
@@ -481,6 +510,50 @@ fn mark_superseded_by_fingerprint_only_supersedes_clean_matching_scope() -> anyh
     assert_eq!(
         store.load_run("other")?.status,
         AutoReviewRunStatus::Completed
+    );
+    Ok(())
+}
+
+#[test]
+fn mark_superseded_by_fingerprint_requires_matching_review_target() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let different_turn_diff = AutoReviewRun {
+        target: target_with_fingerprint("sha256:abc"),
+        review_target: ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:first-turn".to_string(),
+        },
+        ..sample_run("different_turn_diff", &sample_output(Vec::new()))
+    };
+    let matching_turn_diff = AutoReviewRun {
+        target: target_with_fingerprint("sha256:abc"),
+        review_target: ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:second-turn".to_string(),
+        },
+        ..sample_run("matching_turn_diff", &sample_output(Vec::new()))
+    };
+    store.save_run(&different_turn_diff)?;
+    store.save_run(&matching_turn_diff)?;
+
+    let changed = store.mark_superseded_by_fingerprint_with_target(
+        "sha256:abc",
+        "new_run",
+        Some("main"),
+        Some("head-2"),
+        Some(&ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:second-turn".to_string(),
+        }),
+    )?;
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        store.load_run("different_turn_diff")?.status,
+        AutoReviewRunStatus::Completed
+    );
+    assert_eq!(
+        store.load_run("matching_turn_diff")?.status,
+        AutoReviewRunStatus::Superseded
     );
     Ok(())
 }

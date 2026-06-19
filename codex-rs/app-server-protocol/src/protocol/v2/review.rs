@@ -74,13 +74,40 @@ pub struct BackgroundAutoReviewStatusChangedNotification {
 #[ts(export_to = "v2/")]
 pub struct ReviewStartParams {
     pub thread_id: String,
-    pub target: ReviewTarget,
+    pub target: ReviewStartTarget,
 
     /// Where to run the review: inline (default) on the current thread or
     /// detached on a new thread (returned in `reviewThreadId`).
     #[serde(default)]
     #[ts(optional = nullable)]
     pub delivery: Option<ReviewDelivery>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type", export_to = "v2/")]
+pub enum ReviewStartTarget {
+    /// Review the working tree: staged, unstaged, and untracked files.
+    UncommittedChanges,
+
+    /// Review changes between the current branch and the given base branch.
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    BaseBranch { branch: String },
+
+    /// Review the changes introduced by a specific commit.
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Commit {
+        sha: String,
+        /// Optional human-readable label (e.g., commit subject) for UIs.
+        title: Option<String>,
+    },
+
+    /// Arbitrary instructions, equivalent to the old free-form prompt.
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Custom { instructions: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -206,6 +233,11 @@ pub enum ReviewTarget {
     /// Review the working tree: staged, unstaged, and untracked files.
     UncommittedChanges,
 
+    /// Review the changes made by a completed turn.
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    CurrentTurnDiff { fingerprint: String },
+
     /// Review changes between the current branch and the given base branch.
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -231,6 +263,9 @@ impl From<codex_protocol::protocol::ReviewTarget> for ReviewTarget {
         match value {
             codex_protocol::protocol::ReviewTarget::UncommittedChanges => {
                 ReviewTarget::UncommittedChanges
+            }
+            codex_protocol::protocol::ReviewTarget::CurrentTurnDiff { fingerprint } => {
+                ReviewTarget::CurrentTurnDiff { fingerprint }
             }
             codex_protocol::protocol::ReviewTarget::BaseBranch { branch } => {
                 ReviewTarget::BaseBranch { branch }

@@ -59,6 +59,9 @@ pub fn resolve_review_request(
 pub fn review_prompt(target: &ReviewTarget, cwd: &AbsolutePathBuf) -> anyhow::Result<String> {
     match target {
         ReviewTarget::UncommittedChanges => Ok(UNCOMMITTED_PROMPT.to_string()),
+        ReviewTarget::CurrentTurnDiff { .. } => {
+            anyhow::bail!("current-turn diff reviews require captured diff content")
+        }
         ReviewTarget::BaseBranch { branch } => {
             if let Some(commit) = merge_base_with_head(cwd, branch)? {
                 Ok(render_review_prompt(
@@ -110,6 +113,7 @@ fn render_review_prompt<'a, const N: usize>(
 pub fn user_facing_hint(target: &ReviewTarget) -> String {
     match target {
         ReviewTarget::UncommittedChanges => "current changes".to_string(),
+        ReviewTarget::CurrentTurnDiff { .. } => "current turn changes".to_string(),
         ReviewTarget::BaseBranch { branch } => format!("changes against '{branch}'"),
         ReviewTarget::Commit { sha, title } => {
             let short_sha: String = sha.chars().take(7).collect();

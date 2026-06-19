@@ -61,6 +61,41 @@ fn awareness_includes_current_summary_without_finding_body() {
 }
 
 #[test]
+fn awareness_treats_current_turn_diff_as_current_uncommitted_target() {
+    let run = AutoReviewRun {
+        target: AutoReviewRunTarget {
+            worktree_diff_fingerprint: Some("sha256:turn".to_string()),
+            ..sample_target("main", "head-2", "/repo")
+        },
+        review_target: ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:turn".to_string(),
+        },
+        ..sample_run(
+            "run_current",
+            AutoReviewRunStatus::Completed,
+            vec![sample_finding("f1", "Use checked add", "hidden body")],
+        )
+    };
+    let active_target = AutoReviewRunTarget {
+        worktree_diff_fingerprint: Some("sha256:turn".to_string()),
+        ..sample_target("main", "head-2", "/repo")
+    };
+
+    let awareness = render_awareness(
+        &[run],
+        &active_target,
+        &ReviewTarget::UncommittedChanges,
+        &BackgroundAutoReviewActiveSnapshot::default(),
+    )
+    .expect("current turn diff findings should render awareness");
+    let body = awareness.body();
+
+    assert!(body.contains("current findings from run run_current"));
+    assert!(body.contains("[P1] f1: Use checked add"));
+    assert!(!body.contains("hidden body"));
+}
+
+#[test]
 fn awareness_reports_stale_status_without_stale_findings() {
     let stale_run = AutoReviewRun {
         target: sample_target("main", "head-1", "/repo"),

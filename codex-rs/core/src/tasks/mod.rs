@@ -598,12 +598,18 @@ impl Session {
             .input_queue
             .take_pending_input_for_turn_state(turn_state.as_ref())
             .await;
-        let (turn_had_memory_citation, turn_tool_calls, token_usage_at_turn_start) = {
+        let (
+            turn_had_memory_citation,
+            turn_tool_calls,
+            token_usage_at_turn_start,
+            completed_turn_diff,
+        ) = {
             let ts = turn_state.lock().await;
             (
                 ts.has_memory_citation,
                 ts.tool_calls,
                 ts.token_usage_at_turn_start.clone(),
+                ts.completed_turn_diff.clone(),
             )
         };
         if !pending_input.is_empty() {
@@ -792,8 +798,11 @@ impl Session {
             return;
         }
         if background_review_trigger_eligible {
-            self.maybe_schedule_background_auto_review(Arc::clone(&turn_context))
-                .await;
+            self.maybe_schedule_background_auto_review(
+                Arc::clone(&turn_context),
+                completed_turn_diff,
+            )
+            .await;
         }
         self.emit_thread_idle_lifecycle_if_idle().await;
     }

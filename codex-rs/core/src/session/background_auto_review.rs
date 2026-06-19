@@ -7,8 +7,8 @@ use codex_auto_review::AutoReviewDuplicateMatch;
 use codex_auto_review::AutoReviewStore;
 use codex_auto_review::ReviewCoordination;
 use codex_auto_review::ReviewLockGuard;
+use codex_git_utils::diff_fingerprint;
 use codex_git_utils::get_git_repo_root;
-use codex_git_utils::get_worktree_diff_byte_count;
 use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::protocol::BackgroundAutoReviewControlAction;
 use codex_protocol::protocol::BackgroundAutoReviewControlReason;
@@ -58,10 +58,11 @@ impl Session {
     pub(crate) async fn maybe_schedule_background_auto_review(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
+        turn_diff: Option<String>,
     ) {
         let sess = Arc::clone(self);
         tokio::spawn(async move {
-            sess.schedule_background_auto_review_after_turn(turn_context)
+            sess.schedule_background_auto_review_after_turn(turn_context, turn_diff)
                 .await;
         });
     }
@@ -69,6 +70,7 @@ impl Session {
     async fn schedule_background_auto_review_after_turn(
         self: Arc<Self>,
         turn_context: Arc<TurnContext>,
+        turn_diff: Option<String>,
     ) {
         let start = {
             let mut state = self.state.lock().await;
@@ -106,6 +108,17 @@ impl Session {
             debug!("background auto review skipped: no single local worktree");
             return;
         };
+        let Some(turn_diff) = turn_diff.and_then(non_empty_turn_diff) else {
+            debug!("background auto review skipped: current-turn diff unavailable");
+            return;
+        };
+        let Some(turn_diff_fingerprint) = diff_fingerprint(&turn_diff) else {
+            debug!("background auto review skipped: current-turn diff unavailable");
+            return;
+        };
+        let review_target = ReviewTarget::CurrentTurnDiff {
+            fingerprint: turn_diff_fingerprint,
+        };
         let model = turn_context
             .config
             .review_model
@@ -115,7 +128,7 @@ impl Session {
         let persistence = ReviewPersistenceContext::new(
             uuid::Uuid::new_v4().to_string(),
             ReviewPersistence::BackgroundAutoReview,
-            ReviewTarget::UncommittedChanges,
+            review_target.clone(),
             codex_home.as_ref(),
             cwd.as_ref(),
             Some(model),
@@ -190,38 +203,12 @@ impl Session {
                 debug!("background auto review debounce superseded");
                 return;
             }
-            let Some(current_fingerprint) =
-                background_review_fingerprint(turn_context.as_ref()).await
-            else {
-                sess.record_skipped_background_auto_review(
-                    &persistence,
-                    schedule.generation,
-                    &schedule.fingerprint,
-                    "worktree became clean or unsupported before background auto review started"
-                        .to_string(),
-                )
-                .await;
-                debug!(
-                    "background auto review skipped after debounce: clean or unsupported worktree"
-                );
-                return;
-            };
-            if current_fingerprint != schedule.fingerprint {
-                sess.record_skipped_background_auto_review(
-                    &persistence,
-                    schedule.generation,
-                    &schedule.fingerprint,
-                    "worktree diff changed before background auto review started".to_string(),
-                )
-                .await;
-                debug!("background auto review skipped after debounce: fingerprint changed");
-                return;
-            }
             sess.start_detached_background_auto_review(
                 turn_context,
                 schedule.generation,
                 schedule.fingerprint,
                 persistence,
+                turn_diff,
             )
             .await;
         });
@@ -244,6 +231,7 @@ impl Session {
         generation: u64,
         fingerprint: String,
         persistence: ReviewPersistenceContext,
+        turn_diff: String,
     ) {
         if self.input_queue.has_trigger_turn_mailbox_items().await
             || self.active_turn.lock().await.is_some()
@@ -266,8 +254,10 @@ impl Session {
         };
         let sub_id = persistence.run_id().to_string();
         let review_request = ReviewRequest {
-            target: ReviewTarget::UncommittedChanges,
-            user_facing_hint: None,
+            target: ReviewTarget::Custom {
+                instructions: background_auto_review_turn_diff_prompt(&turn_diff),
+            },
+            user_facing_hint: Some("current turn changes".to_string()),
         };
         let resolved = match resolve_review_request(review_request, cwd) {
             Ok(resolved) => resolved,
@@ -277,15 +267,12 @@ impl Session {
             }
         };
         if let Some(max_diff_bytes) = turn_context.config.background_auto_review_max_diff_bytes {
-            let diff_byte_count = get_worktree_diff_byte_count(cwd.as_ref()).await;
-            if diff_byte_count.is_none_or(|diff_bytes| diff_bytes > max_diff_bytes) {
-                let error_summary = match diff_byte_count {
-                    Some(diff_bytes) => format!(
-                        "diff exceeds background review size limit: {diff_bytes} bytes > \
-                         {max_diff_bytes} bytes"
-                    ),
-                    None => "failed to measure diff size for background review".to_string(),
-                };
+            let diff_byte_count = turn_diff.len();
+            if diff_byte_count > max_diff_bytes {
+                let error_summary = format!(
+                    "diff exceeds background review size limit: {diff_byte_count} bytes > \
+                     {max_diff_bytes} bytes"
+                );
                 debug!(%error_summary, "background auto review skipped: oversized diff");
                 self.record_skipped_background_auto_review(
                     &persistence,
@@ -578,6 +565,7 @@ impl Session {
         let duplicate = match store.find_duplicate_by_fingerprint_with_target_proof_and_filter(
             fingerprint,
             Some(persistence.target()),
+            Some(persistence.review_target()),
             |duplicate| match duplicate.disposition {
                 AutoReviewDuplicateDisposition::ReuseTerminal => true,
                 AutoReviewDuplicateDisposition::Adopt => {
@@ -614,6 +602,7 @@ impl Session {
             persistence.run_id(),
             persistence.target().branch.as_deref(),
             persistence.target().head_sha.as_deref(),
+            Some(persistence.review_target()),
         ) {
             Ok(changed) => {
                 if changed > 0 {
@@ -847,4 +836,17 @@ fn background_auto_review_control_summary(
 
 async fn background_review_fingerprint_for_cwd(cwd: &AbsolutePathBuf) -> Option<String> {
     get_worktree_diff_fingerprint(cwd.as_ref()).await
+}
+
+fn non_empty_turn_diff(diff: String) -> Option<String> {
+    (!diff.trim().is_empty()).then_some(diff)
+}
+
+fn background_auto_review_turn_diff_prompt(turn_diff: &str) -> String {
+    format!(
+        "Review only the following unified diff from the just-completed turn. Do not review \
+         unrelated pre-existing staged, unstaged, or untracked worktree changes except where \
+         necessary to understand this diff. Provide prioritized findings.\n\n```diff\n{}\n```",
+        turn_diff.trim()
+    )
 }

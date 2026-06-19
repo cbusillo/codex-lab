@@ -223,6 +223,7 @@ fn status_label(status: BackgroundAutoReviewStatus) -> &'static str {
 fn review_target_label(target: &ReviewTarget) -> String {
     match target {
         ReviewTarget::UncommittedChanges => "uncommitted changes".to_string(),
+        ReviewTarget::CurrentTurnDiff { .. } => "current turn changes".to_string(),
         ReviewTarget::BaseBranch { branch } => format!("base branch {branch}"),
         ReviewTarget::Commit { sha, title } => title
             .as_ref()
