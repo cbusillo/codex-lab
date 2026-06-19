@@ -85,6 +85,20 @@ impl ReviewCoordination {
         Ok(next)
     }
 
+    pub fn publish_next_snapshot_epoch_after<F>(&self, publish: F) -> Result<Option<u64>>
+    where
+        F: FnOnce(u64) -> bool,
+    {
+        let _guard = self.try_acquire_epoch_lock()?;
+        let current = self.current_snapshot_epoch()?;
+        let next = current.saturating_add(1);
+        if !publish(next) {
+            return Ok(None);
+        }
+        self.write_snapshot_epoch(next)?;
+        Ok(Some(next))
+    }
+
     pub fn try_acquire_lock(&self, intent: impl Into<String>) -> Result<Option<ReviewLockGuard>> {
         fs::create_dir_all(&self.root).with_context(|| {
             format!("failed to create review state dir {}", self.root.display())

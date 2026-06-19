@@ -450,9 +450,16 @@ impl Session {
         );
     }
 
-    pub(crate) async fn recover_background_auto_review_after_restart(&self) {
+    pub(crate) async fn recover_auto_review_after_restart(&self) {
         let (codex_home, scopes) = {
             let state = self.state.lock().await;
+            if state
+                .session_configuration
+                .session_source
+                .is_non_root_agent()
+            {
+                return;
+            }
             let mut scopes = vec![state.session_configuration.cwd.clone()];
             scopes.extend(
                 state
@@ -475,20 +482,20 @@ impl Session {
                 warn!(error = %err, "failed to clear stale background auto review lock");
                 continue;
             }
-            match coordination.read_lock_info() {
-                Ok(Some(_lock_info)) => continue,
-                Ok(None) => {}
+            let live_run_id = match coordination.read_lock_info() {
+                Ok(Some(lock_info)) => auto_review_run_id_from_lock_intent(&lock_info.intent),
+                Ok(None) => None,
                 Err(err) => {
                     warn!(error = %err, "failed to read background auto review lock");
                     continue;
                 }
-            }
+            };
             let store = AutoReviewStore::for_scope(&codex_home, &scope);
-            if let Err(err) = store.reconcile_orphaned_background_in_flight(
-                std::iter::empty::<&str>(),
+            if let Err(err) = store.reconcile_orphaned_in_flight(
+                live_run_id.iter().map(String::as_str),
                 now_unix_timestamp_ms() / 1000,
             ) {
-                warn!(error = %err, "failed to reconcile durable background auto review runs");
+                warn!(error = %err, "failed to reconcile durable auto review runs");
             }
         }
     }
@@ -780,6 +787,13 @@ impl Session {
         let mut state = self.state.lock().await;
         state.background_auto_review.remove_regular_turn(turn_id);
     }
+}
+
+fn auto_review_run_id_from_lock_intent(intent: &str) -> Option<String> {
+    intent
+        .strip_prefix("background_auto_review:")
+        .or_else(|| intent.strip_prefix("manual_auto_review:"))
+        .map(str::to_string)
 }
 
 async fn acquire_background_auto_review_lock(

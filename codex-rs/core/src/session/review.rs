@@ -21,7 +21,12 @@ pub(super) struct PreparedReviewThread {
 
 impl PreparedReviewThread {
     pub(super) fn with_persistence(mut self, persistence: ReviewPersistenceContext) -> Self {
-        self.task = ReviewTask::with_persistence(persistence);
+        self.task = self.task.replace_persistence(persistence);
+        self
+    }
+
+    fn with_review_lock(mut self, review_lock_guard: ReviewLockGuard) -> Self {
+        self.task = self.task.with_review_lock(review_lock_guard);
         self
     }
 
@@ -65,7 +70,9 @@ pub(super) async fn spawn_review_thread(
             && persistence.is_manual()
         {
             prepared = match record_started_manual_auto_review(&sess, persistence).await {
-                Some(persistence) => prepared.with_persistence(persistence),
+                Some((persistence, review_lock_guard)) => prepared
+                    .with_persistence(persistence)
+                    .with_review_lock(review_lock_guard),
                 None => prepared.without_persistence(),
             };
         }
@@ -89,28 +96,63 @@ pub(super) async fn spawn_review_thread(
 async fn record_started_manual_auto_review(
     sess: &Arc<Session>,
     persistence: ReviewPersistenceContext,
-) -> Option<ReviewPersistenceContext> {
+) -> Option<(ReviewPersistenceContext, ReviewLockGuard)> {
     let codex_home = sess.codex_home().await;
     let coordination = ReviewCoordination::for_scope(&codex_home, persistence.store_scope());
-    let persistence = match coordination.bump_snapshot_epoch() {
-        Ok(snapshot_epoch) => persistence.with_snapshot_epoch(snapshot_epoch),
+    let review_lock_guard = match coordination
+        .try_acquire_lock(format!("manual_auto_review:{}", persistence.run_id()))
+    {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            tracing::warn!(
+                run_id = %persistence.run_id(),
+                "another auto review is already running for this worktree"
+            );
+            return None;
+        }
         Err(err) => {
             tracing::warn!(
                 run_id = %persistence.run_id(),
                 error = %err,
-                "failed to bump manual auto review snapshot epoch"
+                "failed to acquire manual auto review lock"
             );
             return None;
         }
     };
-    if !persistence.save_pending(&codex_home) {
-        tracing::warn!(
-            run_id = %persistence.run_id(),
-            "failed to persist pending manual auto review run"
-        );
-        return None;
+    let mut published = None;
+    let result = coordination.publish_next_snapshot_epoch_after(|snapshot_epoch| {
+        let pending = persistence.clone().with_snapshot_epoch(snapshot_epoch);
+        if pending.save_pending(&codex_home) {
+            published = Some(pending);
+            true
+        } else {
+            false
+        }
+    });
+    match result {
+        Ok(Some(_snapshot_epoch)) => published.map(|pending| (pending, review_lock_guard)),
+        Ok(None) => {
+            tracing::warn!(
+                run_id = %persistence.run_id(),
+                "failed to persist pending manual auto review run"
+            );
+            None
+        }
+        Err(err) => {
+            if let Some(pending) = published {
+                pending.save_failed(
+                    &codex_home,
+                    format!("failed to publish manual auto review snapshot epoch: {err}"),
+                );
+            }
+            tracing::warn!(
+                run_id = %persistence.run_id(),
+                error = %err,
+                "failed to publish manual auto review snapshot epoch"
+            );
+            None
+        }
     }
-    Some(persistence)
 }
 
 pub(super) async fn prepare_review_thread(

@@ -512,12 +512,12 @@ fn reconcile_orphaned_in_flight_marks_lost() -> anyhow::Result<()> {
 }
 
 #[test]
-fn reconcile_orphaned_background_in_flight_preserves_manual_runs() -> anyhow::Result<()> {
+fn reconcile_orphaned_in_flight_marks_manual_and_background_lost() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
     let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
     let manual = AutoReviewRun {
-        status: AutoReviewRunStatus::Running,
+        status: AutoReviewRunStatus::Pending,
         completed_at_unix_secs: None,
         ..sample_run("manual", &sample_output(Vec::new()))
     };
@@ -527,20 +527,30 @@ fn reconcile_orphaned_background_in_flight_preserves_manual_runs() -> anyhow::Re
         completed_at_unix_secs: None,
         ..sample_run("background", &sample_output(Vec::new()))
     };
+    let live_manual = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("live_manual", &sample_output(Vec::new()))
+    };
     store.save_run(&manual)?;
     store.save_run(&background)?;
+    store.save_run(&live_manual)?;
 
-    let changed = store.reconcile_orphaned_background_in_flight(std::iter::empty::<&str>(), 99)?;
+    let changed = store.reconcile_orphaned_in_flight(["live_manual"], 99)?;
 
     let manual = store.load_run("manual")?;
     let background = store.load_run("background")?;
-    assert_eq!(changed, 1);
-    assert_eq!(manual.status, AutoReviewRunStatus::Running);
-    assert_eq!(manual.freshness, AutoReviewRunFreshness::Current);
-    assert_eq!(manual.completed_at_unix_secs, None);
+    let live_manual = store.load_run("live_manual")?;
+    assert_eq!(changed, 2);
+    assert_eq!(manual.status, AutoReviewRunStatus::Lost);
+    assert_eq!(manual.freshness, AutoReviewRunFreshness::Lost);
+    assert_eq!(manual.completed_at_unix_secs, Some(99));
     assert_eq!(background.status, AutoReviewRunStatus::Lost);
     assert_eq!(background.freshness, AutoReviewRunFreshness::Lost);
     assert_eq!(background.completed_at_unix_secs, Some(99));
+    assert_eq!(live_manual.status, AutoReviewRunStatus::Running);
+    assert_eq!(live_manual.freshness, AutoReviewRunFreshness::Current);
+    assert_eq!(live_manual.completed_at_unix_secs, None);
     Ok(())
 }
 

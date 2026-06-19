@@ -1004,6 +1004,226 @@ async fn session_startup_marks_orphaned_background_review_lost() -> anyhow::Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_startup_marks_orphaned_manual_review_lost() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let cwd = Arc::new(TempDir::new()?);
+    let cwd_path = AbsolutePathBuf::try_from(cwd.path().to_path_buf())?;
+    init_git_repo(cwd.path());
+
+    let run = codex_auto_review::AutoReviewRun {
+        schema_version: AUTO_REVIEW_SCHEMA_VERSION,
+        run_id: "orphaned_manual_review".to_string(),
+        status: AutoReviewRunStatus::Pending,
+        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
+        source: AutoReviewRunSource::Manual,
+        target: codex_auto_review::AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: current_git_head(cwd.path()),
+            base_sha: None,
+            worktree_path: Some(cwd.path().to_path_buf()),
+            snapshot_epoch: Some(1),
+            snapshot_commit: None,
+            head_at_launch: None,
+            worktree_diff_fingerprint: Some("orphaned-manual-fingerprint".to_string()),
+        },
+        review_target: ReviewTarget::UncommittedChanges,
+        started_at_unix_secs: 1,
+        completed_at_unix_secs: None,
+        model: Some("gpt-test".to_string()),
+        superseded_by: None,
+        cancel_reason: None,
+        error_summary: None,
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        omitted_finding_digest_count: 0,
+    };
+    AutoReviewStore::for_scope(codex_home.path(), cwd.path())
+        .save_run(&run)
+        .expect("save orphaned manual review run");
+
+    let cwd_path_for_config = cwd_path.clone();
+    let test = test_codex()
+        .with_home(Arc::clone(&codex_home))
+        .with_config(move |config| {
+            config.cwd = cwd_path_for_config;
+        })
+        .build(&server)
+        .await?;
+
+    let run = load_single_auto_review_run(codex_home.path())?;
+
+    assert_eq!(run.run_id, "orphaned_manual_review");
+    assert_eq!(run.status, AutoReviewRunStatus::Lost);
+    assert_eq!(run.source, AutoReviewRunSource::Manual);
+    assert_eq!(
+        run.cancel_reason.as_deref(),
+        Some("agent_missing_after_restart")
+    );
+    assert!(run.completed_at_unix_secs.is_some());
+
+    let _test_guard = test;
+    let _codex_home_guard = codex_home;
+    let _cwd_guard = cwd;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_startup_preserves_locked_manual_review() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let cwd = Arc::new(TempDir::new()?);
+    let cwd_path = AbsolutePathBuf::try_from(cwd.path().to_path_buf())?;
+    init_git_repo(cwd.path());
+
+    let coordination = ReviewCoordination::for_scope(codex_home.path(), cwd.path());
+    let _review_lock_guard = coordination
+        .try_acquire_lock("manual_auto_review:live_manual_review")?
+        .expect("manual review lock should be available");
+    let run = codex_auto_review::AutoReviewRun {
+        schema_version: AUTO_REVIEW_SCHEMA_VERSION,
+        run_id: "live_manual_review".to_string(),
+        status: AutoReviewRunStatus::Running,
+        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
+        source: AutoReviewRunSource::Manual,
+        target: codex_auto_review::AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: current_git_head(cwd.path()),
+            base_sha: None,
+            worktree_path: Some(cwd.path().to_path_buf()),
+            snapshot_epoch: Some(1),
+            snapshot_commit: None,
+            head_at_launch: None,
+            worktree_diff_fingerprint: Some("live-manual-fingerprint".to_string()),
+        },
+        review_target: ReviewTarget::UncommittedChanges,
+        started_at_unix_secs: 1,
+        completed_at_unix_secs: None,
+        model: Some("gpt-test".to_string()),
+        superseded_by: None,
+        cancel_reason: None,
+        error_summary: None,
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        omitted_finding_digest_count: 0,
+    };
+    AutoReviewStore::for_scope(codex_home.path(), cwd.path())
+        .save_run(&run)
+        .expect("save live manual review run");
+
+    let cwd_path_for_config = cwd_path.clone();
+    let test = test_codex()
+        .with_home(Arc::clone(&codex_home))
+        .with_config(move |config| {
+            config.cwd = cwd_path_for_config;
+        })
+        .build(&server)
+        .await?;
+
+    let run = load_single_auto_review_run(codex_home.path())?;
+
+    assert_eq!(run.run_id, "live_manual_review");
+    assert_eq!(run.status, AutoReviewRunStatus::Running);
+    assert_eq!(run.source, AutoReviewRunSource::Manual);
+    assert_eq!(run.cancel_reason, None);
+    assert_eq!(run.completed_at_unix_secs, None);
+
+    let _test_guard = test;
+    let _codex_home_guard = codex_home;
+    let _cwd_guard = cwd;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_startup_reconciles_unlocked_runs_while_preserving_locked_manual_review()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let cwd = Arc::new(TempDir::new()?);
+    let cwd_path = AbsolutePathBuf::try_from(cwd.path().to_path_buf())?;
+    init_git_repo(cwd.path());
+
+    let coordination = ReviewCoordination::for_scope(codex_home.path(), cwd.path());
+    let _review_lock_guard = coordination
+        .try_acquire_lock("manual_auto_review:live_manual_review")?
+        .expect("manual review lock should be available");
+    let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+    for (run_id, fingerprint) in [
+        ("live_manual_review", "live-manual-fingerprint"),
+        ("orphaned_manual_review", "orphaned-manual-fingerprint"),
+    ] {
+        let run = codex_auto_review::AutoReviewRun {
+            schema_version: AUTO_REVIEW_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            status: AutoReviewRunStatus::Running,
+            freshness: codex_auto_review::AutoReviewRunFreshness::Current,
+            source: AutoReviewRunSource::Manual,
+            target: codex_auto_review::AutoReviewRunTarget {
+                branch: Some("main".to_string()),
+                head_sha: current_git_head(cwd.path()),
+                base_sha: None,
+                worktree_path: Some(cwd.path().to_path_buf()),
+                snapshot_epoch: Some(1),
+                snapshot_commit: None,
+                head_at_launch: None,
+                worktree_diff_fingerprint: Some(fingerprint.to_string()),
+            },
+            review_target: ReviewTarget::UncommittedChanges,
+            started_at_unix_secs: 1,
+            completed_at_unix_secs: None,
+            model: Some("gpt-test".to_string()),
+            superseded_by: None,
+            cancel_reason: None,
+            error_summary: None,
+            finding_count: 0,
+            finding_digests: Vec::new(),
+            omitted_finding_digest_count: 0,
+        };
+        store.save_run(&run).expect("save manual review run");
+    }
+
+    let cwd_path_for_config = cwd_path.clone();
+    let test = test_codex()
+        .with_home(Arc::clone(&codex_home))
+        .with_config(move |config| {
+            config.cwd = cwd_path_for_config;
+        })
+        .build(&server)
+        .await?;
+
+    let runs = load_auto_review_runs(codex_home.path())?;
+    let live = runs
+        .iter()
+        .find(|run| run.run_id == "live_manual_review")
+        .expect("live manual review should remain");
+    let orphaned = runs
+        .iter()
+        .find(|run| run.run_id == "orphaned_manual_review")
+        .expect("orphaned manual review should remain");
+
+    assert_eq!(live.status, AutoReviewRunStatus::Running);
+    assert_eq!(live.cancel_reason, None);
+    assert_eq!(live.completed_at_unix_secs, None);
+    assert_eq!(orphaned.status, AutoReviewRunStatus::Lost);
+    assert_eq!(
+        orphaned.cancel_reason.as_deref(),
+        Some("agent_missing_after_restart")
+    );
+    assert!(orphaned.completed_at_unix_secs.is_some());
+
+    let _test_guard = test;
+    let _codex_home_guard = codex_home;
+    let _cwd_guard = cwd;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_review_awareness_injected_for_current_findings() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 

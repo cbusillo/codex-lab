@@ -183,6 +183,50 @@ fn epoch_bump_is_repo_scoped_and_monotonic() {
 }
 
 #[test]
+fn publish_next_snapshot_epoch_after_does_not_advance_when_publish_fails() {
+    let home = TempDir::new().expect("temp home");
+    let repo = TempDir::new().expect("temp repo");
+    let coordination = ReviewCoordination::for_scope(home.path(), repo.path());
+
+    let result = coordination
+        .publish_next_snapshot_epoch_after(|snapshot_epoch| {
+            assert_eq!(snapshot_epoch, 1);
+            false
+        })
+        .expect("publish callback result");
+
+    assert_eq!(result, None);
+    assert_eq!(
+        coordination
+            .current_snapshot_epoch()
+            .expect("current epoch"),
+        0
+    );
+}
+
+#[test]
+fn publish_next_snapshot_epoch_after_advances_after_publish_succeeds() {
+    let home = TempDir::new().expect("temp home");
+    let repo = TempDir::new().expect("temp repo");
+    let coordination = ReviewCoordination::for_scope(home.path(), repo.path());
+
+    let result = coordination
+        .publish_next_snapshot_epoch_after(|snapshot_epoch| {
+            assert_eq!(snapshot_epoch, 1);
+            true
+        })
+        .expect("publish callback result");
+
+    assert_eq!(result, Some(1));
+    assert_eq!(
+        coordination
+            .current_snapshot_epoch()
+            .expect("current epoch"),
+        1
+    );
+}
+
+#[test]
 fn epoch_bump_waits_for_existing_epoch_lock() {
     let home = TempDir::new().expect("temp home");
     let repo = TempDir::new().expect("temp repo");
