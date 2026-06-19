@@ -225,10 +225,20 @@ pub enum AutoReviewFreshness {
 pub struct AutoReviewFindingDetailReadParams {
     pub thread_id: String,
     pub run_id: String,
-    pub finding_id: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub finding_id: Option<String>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub max_bytes: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AutoReviewDetailKind {
+    Run,
+    Finding,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -236,7 +246,10 @@ pub struct AutoReviewFindingDetailReadParams {
 #[ts(export_to = "v2/")]
 pub struct AutoReviewFindingDetailReadResponse {
     pub run_id: String,
-    pub finding_id: String,
+    pub detail_kind: AutoReviewDetailKind,
+    pub finding_id: Option<String>,
+    pub finding_count: usize,
+    pub omitted_findings: usize,
     pub bytes: usize,
     pub original_bytes: usize,
     pub max_bytes: usize,

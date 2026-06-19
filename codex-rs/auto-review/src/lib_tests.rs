@@ -7,6 +7,7 @@ use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewTarget;
 use pretty_assertions::assert_eq;
 
+use super::AutoReviewDetailKind;
 use super::AutoReviewDiagnostics;
 use super::AutoReviewDuplicateDisposition;
 use super::AutoReviewFreshness;
@@ -183,9 +184,91 @@ fn finding_detail_reads_completed_output_sidecar() -> anyhow::Result<()> {
 
     let detail = store.finding_detail("run_1", "f1", 120)?;
 
-    assert_eq!(detail.finding_id, "f1");
+    assert_eq!(detail.kind, AutoReviewDetailKind::Finding);
+    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
     assert!(detail.truncated);
     assert!(detail.bytes <= 120);
+    Ok(())
+}
+
+#[test]
+fn detail_formats_finding_for_direct_llm_use() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let output = sample_output(vec![sample_finding("Body text")]);
+    let run = sample_run("run_1", &output);
+    store.save_run(&run)?;
+    store.save_output("run_1", &output)?;
+
+    let detail = store.finding_detail("run_1", "f1", DETAIL_MAX_BYTES)?;
+
+    assert_eq!(detail.kind, AutoReviewDetailKind::Finding);
+    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
+    assert_eq!(detail.finding_count, 1);
+    assert_eq!(detail.omitted_findings, 0);
+    assert!(detail.content.contains("finding_id=f1 priority=1"));
+    assert!(detail.content.contains("location=/tmp/example.rs:7-9"));
+    assert!(detail.content.contains("title: Body text"));
+    assert!(detail.content.contains("body:\nBody Body text"));
+    assert!(!detail.content.contains("code_location"));
+    Ok(())
+}
+
+#[test]
+fn finding_detail_reports_other_findings_without_marking_content_truncated() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let output = sample_output(vec![sample_finding("First"), sample_finding("Second")]);
+    let run = sample_run("run_1", &output);
+    store.save_run(&run)?;
+    store.save_output("run_1", &output)?;
+
+    let detail = store.finding_detail("run_1", "f2", DETAIL_MAX_BYTES)?;
+
+    assert_eq!(detail.kind, AutoReviewDetailKind::Finding);
+    assert_eq!(detail.finding_id.as_deref(), Some("f2"));
+    assert_eq!(detail.finding_count, 2);
+    assert_eq!(detail.omitted_findings, 1);
+    assert!(!detail.truncated);
+    assert!(detail.content.contains("title: Second"));
+    assert!(!detail.content.contains("title: First"));
+    Ok(())
+}
+
+#[test]
+fn detail_formats_bounded_run_overview() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let output = sample_output(
+        (1..=12)
+            .map(|index| sample_finding(&format!("Body {index}")))
+            .collect(),
+    );
+    let run = sample_run("run_1", &output);
+    store.save_run(&run)?;
+    store.save_output("run_1", &output)?;
+
+    let detail = store.detail("run_1", None, DETAIL_MAX_BYTES)?;
+
+    assert_eq!(detail.kind, AutoReviewDetailKind::Run);
+    assert_eq!(detail.finding_id, None);
+    assert_eq!(detail.finding_count, 12);
+    assert_eq!(detail.omitted_findings, 2);
+    assert!(detail.truncated);
+    assert!(
+        detail
+            .content
+            .contains("overall_correctness: patch is incorrect")
+    );
+    assert!(detail.content.contains("finding_id=f1"));
+    assert!(detail.content.contains("finding_id=f10"));
+    assert!(!detail.content.contains("finding_id=f11"));
+    assert!(detail.content.contains(
+        "... omitted 2 additional finding(s); request a specific findingId for full detail"
+    ));
     Ok(())
 }
 
@@ -220,6 +303,13 @@ fn diagnostics_counts_terminal_skipped_duplicates_and_stale_suppression() {
         target: sample_target("main", "head-1", "/repo"),
         ..sample_run("unused", &sample_output(vec![sample_finding("Stale")]))
     };
+    let stale_clean = AutoReviewRun {
+        run_id: "stale_clean".to_string(),
+        target: sample_target("main", "head-1", "/repo"),
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        ..sample_run("unused", &sample_output(Vec::new()))
+    };
     let duplicate_skipped = AutoReviewRun {
         run_id: "duplicate_skipped".to_string(),
         status: AutoReviewRunStatus::Skipped,
@@ -249,22 +339,28 @@ fn diagnostics_counts_terminal_skipped_duplicates_and_stale_suppression() {
     };
 
     let diagnostics = AutoReviewDiagnostics::from_runs(
-        [&stale_finding, &duplicate_skipped, &failed, &running],
+        [
+            &stale_finding,
+            &stale_clean,
+            &duplicate_skipped,
+            &failed,
+            &running,
+        ],
         Some(&active_target),
         Some(&ReviewTarget::UncommittedChanges),
     )
     .expect("diagnostics");
 
-    assert_eq!(diagnostics.recent_runs, 4);
+    assert_eq!(diagnostics.recent_runs, 5);
     assert_eq!(diagnostics.in_flight_runs, 1);
-    assert_eq!(diagnostics.terminal_runs, 3);
+    assert_eq!(diagnostics.terminal_runs, 4);
     assert_eq!(diagnostics.skipped_runs, 1);
     assert_eq!(diagnostics.duplicate_skipped_runs, 1);
     assert_eq!(diagnostics.failed_runs, 1);
-    assert_eq!(diagnostics.suppressed_stale_runs, 1);
+    assert_eq!(diagnostics.suppressed_stale_runs, 2);
     assert_eq!(
         diagnostics.compact_line(),
-        "recent_runs=4 in_flight=1 terminal=3 suppressed_stale=1 skipped=1 duplicate_skipped=1 failed=1"
+        "recent_runs=5 in_flight=1 terminal=4 suppressed_stale=2 skipped=1 duplicate_skipped=1 failed=1"
     );
 }
 

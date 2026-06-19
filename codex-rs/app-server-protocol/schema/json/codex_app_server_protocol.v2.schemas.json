@@ -1035,6 +1035,13 @@
       ],
       "type": "string"
     },
+    "AutoReviewDetailKind": {
+      "enum": [
+        "run",
+        "finding"
+      ],
+      "type": "string"
+    },
     "AutoReviewDiagnosticsSummary": {
       "properties": {
         "cancelledRuns": {
@@ -1110,7 +1117,11 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
         "findingId": {
-          "type": "string"
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "maxBytes": {
           "default": null,
@@ -1129,7 +1140,6 @@
         }
       },
       "required": [
-        "findingId",
         "runId",
         "threadId"
       ],
@@ -1147,10 +1157,26 @@
         "content": {
           "type": "string"
         },
+        "detailKind": {
+          "$ref": "#/definitions/AutoReviewDetailKind"
+        },
+        "findingCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "findingId": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "maxBytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "omittedFindings": {
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
@@ -1170,8 +1196,10 @@
       "required": [
         "bytes",
         "content",
-        "findingId",
+        "detailKind",
+        "findingCount",
         "maxBytes",
+        "omittedFindings",
         "originalBytes",
         "runId",
         "truncated"

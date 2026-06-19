@@ -21,6 +21,7 @@ pub const SUMMARY_MAX_FINDINGS: usize = 20;
 pub const SUMMARY_MAX_FIELD_BYTES: usize = 240;
 pub const SUMMARY_MAX_BYTES: usize = 4096;
 pub const DETAIL_MAX_BYTES: usize = 16384;
+pub const DETAIL_MAX_FINDINGS: usize = 10;
 pub const SCHEMA_VERSION: u32 = 1;
 
 const STORE_DIR: &str = "auto-review";
@@ -95,7 +96,6 @@ impl AutoReviewDiagnostics {
             if let (Some(active_target), Some(active_review_target)) =
                 (active_target, active_review_target)
                 && run.status == AutoReviewRunStatus::Completed
-                && run.finding_count > 0
                 && run.findings_suppressed_as_stale(active_target, active_review_target)
             {
                 diagnostics.suppressed_stale_runs += 1;
@@ -320,10 +320,10 @@ impl AutoReviewStore {
         Ok(runs)
     }
 
-    pub fn finding_detail(
+    pub fn detail(
         &self,
         run_id: &str,
-        finding_id: &str,
+        finding_id: Option<&str>,
         max_bytes: usize,
     ) -> Result<AutoReviewDetail> {
         if max_bytes == 0 {
@@ -334,7 +334,16 @@ impl AutoReviewStore {
             anyhow::bail!("auto review run is not completed: {run_id}");
         }
         let output = self.load_output(run_id)?;
-        render_finding_detail(finding_id, max_bytes, &output)
+        render_detail(finding_id, max_bytes, &output)
+    }
+
+    pub fn finding_detail(
+        &self,
+        run_id: &str,
+        finding_id: &str,
+        max_bytes: usize,
+    ) -> Result<AutoReviewDetail> {
+        self.detail(run_id, Some(finding_id), max_bytes)
     }
 
     pub fn output_path(&self, run_id: &str) -> Result<PathBuf> {
@@ -482,16 +491,20 @@ impl AutoReviewRun {
         active_target: &AutoReviewRunTarget,
         active_review_target: &ReviewTarget,
     ) -> bool {
-        if self.status != AutoReviewRunStatus::Completed {
-            return false;
-        }
-        if !review_target_matches(&self.review_target, active_review_target) {
-            return false;
-        }
-        if !self.is_current_for(active_target, active_review_target) {
+        if !self.can_read_detail(active_target, active_review_target) {
             return false;
         }
         parse_finding_id(finding_id).is_some_and(|index| index < self.finding_count)
+    }
+
+    pub fn can_read_detail(
+        &self,
+        active_target: &AutoReviewRunTarget,
+        active_review_target: &ReviewTarget,
+    ) -> bool {
+        self.status == AutoReviewRunStatus::Completed
+            && review_target_matches(&self.review_target, active_review_target)
+            && self.is_current_for(active_target, active_review_target)
     }
 
     pub fn freshness(&self, active_target: &AutoReviewRunTarget) -> AutoReviewFreshness {
@@ -679,9 +692,18 @@ pub struct AutoReviewSummary {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoReviewDetailKind {
+    Run,
+    Finding,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoReviewDetail {
-    pub finding_id: String,
+    pub kind: AutoReviewDetailKind,
+    pub finding_id: Option<String>,
+    pub finding_count: usize,
+    pub omitted_findings: usize,
     pub bytes: usize,
     pub original_bytes: usize,
     pub max_bytes: usize,
@@ -789,31 +811,91 @@ pub fn finding_digests(output: &ReviewOutputEvent) -> Vec<AutoReviewFindingDiges
         .collect()
 }
 
-fn render_finding_detail(
-    finding_id: &str,
+fn render_detail(
+    finding_id: Option<&str>,
     max_bytes: usize,
     output: &ReviewOutputEvent,
 ) -> Result<AutoReviewDetail> {
-    let finding_index = parse_finding_id(finding_id)
-        .with_context(|| format!("invalid auto review finding id: {finding_id}"))?;
-    let finding = output
-        .findings
-        .get(finding_index)
-        .with_context(|| format!("unknown auto review finding id: {finding_id}"))?;
     let effective_max_bytes = max_bytes.min(DETAIL_MAX_BYTES);
-    let json = serde_json::to_string_pretty(finding)?;
-    let original_bytes = json.len();
-    let (content, truncated) = truncate_utf8_with_marker(&json, effective_max_bytes);
+    let (kind, content, omitted_findings, findings_capped) = match finding_id {
+        Some(finding_id) => {
+            let finding_index = parse_finding_id(finding_id)
+                .with_context(|| format!("invalid auto review finding id: {finding_id}"))?;
+            let finding = output
+                .findings
+                .get(finding_index)
+                .with_context(|| format!("unknown auto review finding id: {finding_id}"))?;
+            (
+                AutoReviewDetailKind::Finding,
+                format_finding_detail(finding_id, finding),
+                output.findings.len().saturating_sub(1),
+                false,
+            )
+        }
+        None => (
+            AutoReviewDetailKind::Run,
+            format_run_detail(output),
+            output.findings.len().saturating_sub(DETAIL_MAX_FINDINGS),
+            output.findings.len() > DETAIL_MAX_FINDINGS,
+        ),
+    };
+    let original_bytes = content.len();
+    let (content, truncated_by_bytes) = truncate_utf8_with_marker(&content, effective_max_bytes);
     let bytes = content.len();
 
     Ok(AutoReviewDetail {
-        finding_id: finding_id.to_string(),
+        kind,
+        finding_id: finding_id.map(str::to_string),
+        finding_count: output.findings.len(),
+        omitted_findings,
         bytes,
         original_bytes,
         max_bytes: effective_max_bytes,
-        truncated,
+        truncated: truncated_by_bytes || findings_capped,
         content,
     })
+}
+
+fn format_run_detail(output: &ReviewOutputEvent) -> String {
+    let mut sections = vec![format!(
+        "overall_correctness: {}\noverall_confidence: {}\noverall_explanation:\n{}",
+        output.overall_correctness.trim(),
+        output.overall_confidence_score,
+        output.overall_explanation.trim()
+    )];
+    if !output.findings.is_empty() {
+        let mut findings = String::new();
+        for (index, finding) in output.findings.iter().take(DETAIL_MAX_FINDINGS).enumerate() {
+            if !findings.is_empty() {
+                findings.push_str("\n\n");
+            }
+            findings.push_str(&format_finding_detail(&format!("f{}", index + 1), finding));
+        }
+        if output.findings.len() > DETAIL_MAX_FINDINGS {
+            findings.push_str(&format!(
+                "\n... omitted {} additional finding(s); request a specific findingId for full detail",
+                output.findings.len() - DETAIL_MAX_FINDINGS
+            ));
+        }
+        sections.push(findings);
+    }
+    sections.join("\n\n")
+}
+
+fn format_finding_detail(
+    finding_id: &str,
+    finding: &codex_protocol::protocol::ReviewFinding,
+) -> String {
+    format!(
+        "finding_id={finding_id} priority={} confidence={} location={}:{}-{}\ntitle: {}\nbody:\n{}",
+        finding.priority,
+        finding.confidence_score,
+        finding.code_location.absolute_file_path.display(),
+        finding.code_location.line_range.start,
+        finding.code_location.line_range.end,
+        finding.title.trim(),
+        finding.body.trim()
+    )
 }
 
 fn parse_finding_id(finding_id: &str) -> Option<usize> {

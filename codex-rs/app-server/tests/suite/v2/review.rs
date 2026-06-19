@@ -5,6 +5,7 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_shell_command_sse_response;
 use app_test_support::to_response;
+use codex_app_server_protocol::AutoReviewDetailKind;
 use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
 use codex_app_server_protocol::AutoReviewFindingDetailReadResponse;
 use codex_app_server_protocol::AutoReviewFreshness as ApiAutoReviewFreshness;
@@ -834,7 +835,7 @@ async fn auto_review_finding_detail_read_returns_bounded_detail() -> Result<()> 
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id,
             run_id: "run_detail".to_string(),
-            finding_id: "f1".to_string(),
+            finding_id: Some("f1".to_string()),
             max_bytes: Some(180),
         })
         .await?;
@@ -846,12 +847,66 @@ async fn auto_review_finding_detail_read_returns_bounded_detail() -> Result<()> 
 
     let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
     assert_eq!(detail.run_id, "run_detail");
-    assert_eq!(detail.finding_id, "f1");
+    assert_eq!(detail.detail_kind, AutoReviewDetailKind::Finding);
+    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
+    assert_eq!(detail.finding_count, 1);
+    assert_eq!(detail.omitted_findings, 0);
     assert_eq!(detail.max_bytes, 180);
     assert!(detail.truncated);
     assert!(detail.bytes <= 180);
     assert!(detail.original_bytes > detail.bytes);
     assert!(detail.content.contains("Prefer bounded details"));
+    assert!(detail.content.contains("body:"));
+    assert!(!detail.content.contains("code_location"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_finding_detail_read_returns_bounded_run_detail() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    let (run, output) = sample_auto_review_run_with_findings(
+        "run_detail_all",
+        &thread_cwd,
+        (1..=12)
+            .map(|index| (format!("Finding {index}"), format!("Stored body {index}")))
+            .collect(),
+    );
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: "run_detail_all".to_string(),
+            finding_id: None,
+            max_bytes: Some(4096),
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
+    assert_eq!(detail.run_id, "run_detail_all");
+    assert_eq!(detail.detail_kind, AutoReviewDetailKind::Run);
+    assert_eq!(detail.finding_id, None);
+    assert_eq!(detail.finding_count, 12);
+    assert_eq!(detail.omitted_findings, 2);
+    assert!(detail.truncated);
+    assert!(detail.content.contains("overall_correctness"));
+    assert!(detail.content.contains("finding_id=f1"));
+    assert!(detail.content.contains("finding_id=f10"));
+    assert!(!detail.content.contains("finding_id=f11"));
+    assert!(detail.content.contains("request a specific findingId"));
 
     Ok(())
 }
@@ -899,7 +954,7 @@ async fn auto_review_finding_detail_read_uses_selected_environment_cwd() -> Resu
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id: thread.id,
             run_id: "run_environment_detail".to_string(),
-            finding_id: "f1".to_string(),
+            finding_id: Some("f1".to_string()),
             max_bytes: Some(1024),
         })
         .await?;
@@ -911,7 +966,7 @@ async fn auto_review_finding_detail_read_uses_selected_environment_cwd() -> Resu
 
     let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
     assert_eq!(detail.run_id, "run_environment_detail");
-    assert_eq!(detail.finding_id, "f1");
+    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
 
     Ok(())
 }
@@ -941,7 +996,7 @@ async fn auto_review_finding_detail_read_allows_omitted_summary_findings() -> Re
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id,
             run_id: "run_omitted_detail".to_string(),
-            finding_id: "f21".to_string(),
+            finding_id: Some("f21".to_string()),
             max_bytes: Some(4096),
         })
         .await?;
@@ -952,14 +1007,14 @@ async fn auto_review_finding_detail_read_allows_omitted_summary_findings() -> Re
     .await??;
 
     let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
-    assert_eq!(detail.finding_id, "f21");
+    assert_eq!(detail.finding_id.as_deref(), Some("f21"));
     assert!(detail.content.contains("Stored body 21"));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn auto_review_finding_detail_read_rejects_empty_finding_id() -> Result<()> {
+async fn auto_review_finding_detail_read_rejects_empty_finding_id_when_provided() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
@@ -972,7 +1027,7 @@ async fn auto_review_finding_detail_read_rejects_empty_finding_id() -> Result<()
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id,
             run_id: "run_detail".to_string(),
-            finding_id: " \t ".to_string(),
+            finding_id: Some(" \t ".to_string()),
             max_bytes: Some(180),
         })
         .await?;
@@ -983,7 +1038,10 @@ async fn auto_review_finding_detail_read_rejects_empty_finding_id() -> Result<()
     .await??;
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
     assert!(
-        error.error.message.contains("findingId must not be empty"),
+        error
+            .error
+            .message
+            .contains("findingId must not be empty when provided"),
         "unexpected message: {}",
         error.error.message
     );
@@ -1008,7 +1066,7 @@ async fn auto_review_finding_detail_read_rejects_unknown_finding_id() -> Result<
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id,
             run_id: "run_detail".to_string(),
-            finding_id: "missing".to_string(),
+            finding_id: Some("missing".to_string()),
             max_bytes: Some(180),
         })
         .await?;
@@ -1019,10 +1077,7 @@ async fn auto_review_finding_detail_read_rejects_unknown_finding_id() -> Result<
     .await??;
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
     assert!(
-        error
-            .error
-            .message
-            .contains("auto review finding not found"),
+        error.error.message.contains("auto review detail not found"),
         "unexpected message: {}",
         error.error.message
     );
@@ -1051,7 +1106,7 @@ async fn auto_review_finding_detail_read_rejects_stale_run() -> Result<()> {
         .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
             thread_id,
             run_id: "run_detail".to_string(),
-            finding_id: "f1".to_string(),
+            finding_id: Some("f1".to_string()),
             max_bytes: Some(180),
         })
         .await?;
@@ -1062,10 +1117,47 @@ async fn auto_review_finding_detail_read_rejects_stale_run() -> Result<()> {
     .await??;
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
     assert!(
-        error
-            .error
-            .message
-            .contains("auto review finding not found"),
+        error.error.message.contains("auto review detail not found"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_finding_detail_read_rejects_stale_run_detail() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    let (run, output) = sample_auto_review_run(
+        "run_detail",
+        &thread_cwd.join("other-worktree"),
+        "Stored body",
+    );
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: "run_detail".to_string(),
+            finding_id: None,
+            max_bytes: Some(180),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error.error.message.contains("auto review detail not found"),
         "unexpected message: {}",
         error.error.message
     );
