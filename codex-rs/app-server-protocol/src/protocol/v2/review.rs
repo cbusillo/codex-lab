@@ -13,7 +13,7 @@ v2_enum_from_core!(
 
 v2_enum_from_core!(
     pub enum BackgroundAutoReviewStatus from codex_protocol::protocol::BackgroundAutoReviewStatus {
-        Pending, Running, Completed, Failed, Cancelled, Skipped
+        Pending, Running, Completed, Failed, Cancelled, Superseded, Skipped
     }
 );
 

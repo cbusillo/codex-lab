@@ -362,6 +362,32 @@ fn auto_review_summary_failed_current_snapshot() {
 }
 
 #[test]
+fn auto_review_summary_superseded_current_snapshot() {
+    let mut summary = auto_review_summary(
+        "run-superseded",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 0,
+        "",
+    );
+    summary.status = BackgroundAutoReviewStatus::Superseded;
+    summary.error_summary =
+        Some("background auto review was superseded by run next-run".to_string());
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(summary.clone()),
+        current: Some(summary),
+        status_counts: Vec::new(),
+        diagnostics: None,
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 100)).join("\n"), @"
+○ Auto Review superseded · run-superseded
+  superseded · current · code-gpt-5.5 · background auto review was superseded by run next-run
+");
+}
+
+#[test]
 fn auto_review_summary_diagnostics_snapshot() {
     let response = AutoReviewSummaryReadResponse {
         latest: None,

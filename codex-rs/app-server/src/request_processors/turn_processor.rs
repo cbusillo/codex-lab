@@ -450,7 +450,7 @@ impl TurnRequestProcessor {
             AutoReviewRunStatus::Completed => ApiBackgroundAutoReviewStatus::Completed,
             AutoReviewRunStatus::Failed => ApiBackgroundAutoReviewStatus::Failed,
             AutoReviewRunStatus::Cancelled => ApiBackgroundAutoReviewStatus::Cancelled,
-            AutoReviewRunStatus::Superseded => ApiBackgroundAutoReviewStatus::Skipped,
+            AutoReviewRunStatus::Superseded => ApiBackgroundAutoReviewStatus::Superseded,
             AutoReviewRunStatus::Skipped => ApiBackgroundAutoReviewStatus::Skipped,
             AutoReviewRunStatus::Lost => ApiBackgroundAutoReviewStatus::Cancelled,
         }

@@ -701,26 +701,47 @@ impl Session {
             return;
         };
         let error_summary = background_auto_review_control_summary(&action, &reason);
+        let superseded_by = background_auto_review_control_superseded_by(&reason);
         let codex_home = self.codex_home().await;
         match controlled_run {
             BackgroundAutoReviewControlledRun::Pending(pending_review) => {
-                if pending_review
-                    .persistence
-                    .save_cancelled_with_summary(codex_home, error_summary.clone())
-                {
+                let status = background_auto_review_control_status(&action);
+                let saved = match action {
+                    BackgroundAutoReviewControlAction::Cancel => pending_review
+                        .persistence
+                        .save_cancelled_with_summary(codex_home, error_summary.clone()),
+                    BackgroundAutoReviewControlAction::Supersede => {
+                        pending_review.persistence.save_superseded_with_summary(
+                            codex_home,
+                            error_summary.clone(),
+                            superseded_by,
+                        )
+                    }
+                };
+                if saved {
                     record_background_review_status(
                         Arc::clone(self),
                         &pending_review.persistence,
-                        BackgroundAutoReviewStatus::Cancelled,
+                        status,
                         Some(error_summary),
                     )
                     .await;
                 }
             }
-            BackgroundAutoReviewControlledRun::Running(running_review) => {
-                self.cancel_running_background_auto_review(running_review, error_summary)
+            BackgroundAutoReviewControlledRun::Running(running_review) => match action {
+                BackgroundAutoReviewControlAction::Cancel => {
+                    self.cancel_running_background_auto_review(running_review, error_summary)
+                        .await;
+                }
+                BackgroundAutoReviewControlAction::Supersede => {
+                    self.supersede_running_background_auto_review(
+                        running_review,
+                        error_summary,
+                        superseded_by,
+                    )
                     .await;
-            }
+                }
+            },
         }
     }
 
@@ -757,6 +778,44 @@ impl Session {
             .is_err()
         {
             warn!("background auto review did not finish promptly after cancellation");
+        }
+    }
+
+    async fn supersede_running_background_auto_review(
+        self: &Arc<Self>,
+        running_review: BackgroundAutoReviewRunningHandle,
+        error_summary: String,
+        superseded_by: Option<String>,
+    ) {
+        if running_review.persistence.save_superseded_with_summary(
+            self.codex_home().await,
+            error_summary.clone(),
+            superseded_by,
+        ) {
+            record_background_review_status(
+                Arc::clone(self),
+                &running_review.persistence,
+                BackgroundAutoReviewStatus::Superseded,
+                Some(error_summary),
+            )
+            .await;
+        }
+        let completion = running_review.completion;
+        if completion.is_done() {
+            return;
+        }
+        let notified = completion.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        running_review.cancellation_token.cancel();
+        if completion.is_done() {
+            return;
+        }
+        if tokio::time::timeout(Duration::from_millis(100), notified.as_mut())
+            .await
+            .is_err()
+        {
+            warn!("background auto review did not finish promptly after supersede");
         }
     }
 
@@ -826,6 +885,26 @@ fn background_auto_review_control_summary(
         (_, BackgroundAutoReviewControlReason::ThreadClosing) => {
             "thread closed before background auto review could finish".to_string()
         }
+    }
+}
+
+fn background_auto_review_control_status(
+    action: &BackgroundAutoReviewControlAction,
+) -> BackgroundAutoReviewStatus {
+    match action {
+        BackgroundAutoReviewControlAction::Cancel => BackgroundAutoReviewStatus::Cancelled,
+        BackgroundAutoReviewControlAction::Supersede => BackgroundAutoReviewStatus::Superseded,
+    }
+}
+
+fn background_auto_review_control_superseded_by(
+    reason: &BackgroundAutoReviewControlReason,
+) -> Option<String> {
+    match reason {
+        BackgroundAutoReviewControlReason::SupersededByRun { run_id } => Some(run_id.clone()),
+        BackgroundAutoReviewControlReason::UserRequested
+        | BackgroundAutoReviewControlReason::ForegroundWorkStarted
+        | BackgroundAutoReviewControlReason::ThreadClosing => None,
     }
 }
 
