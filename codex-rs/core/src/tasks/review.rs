@@ -55,13 +55,6 @@ impl ReviewTask {
         }
     }
 
-    pub(crate) fn without_persistence(self) -> Self {
-        Self {
-            persistence: None,
-            review_lock_guard: self.review_lock_guard,
-        }
-    }
-
     pub(crate) fn replace_persistence(mut self, persistence: ReviewPersistenceContext) -> Self {
         self.persistence = Some(persistence);
         self

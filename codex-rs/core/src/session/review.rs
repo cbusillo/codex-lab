@@ -29,11 +29,6 @@ impl PreparedReviewThread {
         self.task = self.task.with_review_lock(review_lock_guard);
         self
     }
-
-    fn without_persistence(mut self) -> Self {
-        self.task = self.task.without_persistence();
-        self
-    }
 }
 
 pub(super) enum ReviewPersistenceSpec {
@@ -62,10 +57,8 @@ pub(super) async fn spawn_review_thread(
 
     let manual_review_request = prepared.manual_review_request.clone();
     if let Some(review_request) = manual_review_request {
-        sess.abort_all_tasks(TurnAbortReason::Replaced).await;
         sess.cancel_background_auto_review_for_foreground_work()
             .await;
-        sess.clear_connector_selection().await;
         if let Some(persistence) = prepared.task.persistence_context()
             && persistence.is_manual()
         {
@@ -73,9 +66,21 @@ pub(super) async fn spawn_review_thread(
                 Some((persistence, review_lock_guard)) => prepared
                     .with_persistence(persistence)
                     .with_review_lock(review_lock_guard),
-                None => prepared.without_persistence(),
+                None => {
+                    sess.send_event(
+                        prepared.turn_context.as_ref(),
+                        EventMsg::Error(ErrorEvent {
+                            message: "failed to start persisted manual review".to_string(),
+                            codex_error_info: Some(CodexErrorInfo::Other),
+                        }),
+                    )
+                    .await;
+                    return;
+                }
             };
         }
+        sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+        sess.clear_connector_selection().await;
         sess.send_event(
             prepared.turn_context.as_ref(),
             EventMsg::EnteredReviewMode(review_request),
