@@ -96,9 +96,7 @@ impl AutoReviewDiagnostics {
                 (active_target, active_review_target)
                 && run.status == AutoReviewRunStatus::Completed
                 && run.finding_count > 0
-                && run
-                    .visible_finding_digests(active_target, active_review_target)
-                    .is_empty()
+                && run.findings_suppressed_as_stale(active_target, active_review_target)
             {
                 diagnostics.suppressed_stale_runs += 1;
             }
@@ -466,6 +464,16 @@ impl AutoReviewRun {
             return Vec::new();
         }
         self.finding_digests.iter().collect()
+    }
+
+    fn findings_suppressed_as_stale(
+        &self,
+        active_target: &AutoReviewRunTarget,
+        active_review_target: &ReviewTarget,
+    ) -> bool {
+        self.status == AutoReviewRunStatus::Completed
+            && review_target_matches(&self.review_target, active_review_target)
+            && !self.is_current_for(active_target, active_review_target)
     }
 
     pub fn can_read_finding_detail(
