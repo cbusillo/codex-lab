@@ -166,7 +166,7 @@ jobs:
             runner: ubuntu-24.04
             timeout_minutes: 30
           - name: macOS
-            runner: macos-15-xlarge
+            runner: macos-26
             timeout_minutes: 30
           - name: Windows
             runner: windows-x64
