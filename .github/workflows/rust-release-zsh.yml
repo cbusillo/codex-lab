@@ -69,13 +69,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-large
+          - runner: macos-26-intel
             target: x86_64-apple-darwin
-            variant: macos-15
+            variant: macos-26
             archive_name: codex-zsh-x86_64-apple-darwin.tar.gz
-          - runner: macos-15-xlarge
+          - runner: macos-26
             target: aarch64-apple-darwin
-            variant: macos-15
+            variant: macos-26
             archive_name: codex-zsh-aarch64-apple-darwin.tar.gz
 
     steps:
