@@ -217,12 +217,10 @@ impl Session {
     async fn is_current_background_auto_review_schedule(
         &self,
         generation: u64,
-        fingerprint: &str,
+        _fingerprint: &str,
     ) -> bool {
         let state = self.state.lock().await;
-        state
-            .background_auto_review
-            .is_current_schedule(generation, fingerprint)
+        state.background_auto_review.is_current_schedule(generation)
     }
 
     async fn start_detached_background_auto_review(
@@ -635,10 +633,7 @@ impl Session {
             return Ok(None);
         }
         let mut state = self.state.lock().await;
-        if !state
-            .background_auto_review
-            .is_current_schedule(generation, fingerprint)
-        {
+        if !state.background_auto_review.is_current_schedule(generation) {
             return Ok(None);
         }
         let snapshot_epoch = coordination.bump_snapshot_epoch()?;
