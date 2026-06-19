@@ -9,6 +9,7 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::session_state::ThreadSessionState;
 use crate::wrapping::word_wrap_lines;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AutoReviewDiagnosticsSummary;
 use codex_app_server_protocol::AutoReviewFreshness;
 use codex_app_server_protocol::AutoReviewRunSource;
 use codex_app_server_protocol::AutoReviewRunSummary;
@@ -258,6 +259,7 @@ fn auto_review_summary_clean_snapshot() {
         latest: Some(summary.clone()),
         current: Some(summary),
         status_counts: Vec::new(),
+        diagnostics: None,
     };
 
     let cell = new_auto_review_summary_cell(&response);
@@ -283,6 +285,7 @@ fn auto_review_summary_findings_snapshot() {
         latest: Some(summary.clone()),
         current: Some(summary),
         status_counts: Vec::new(),
+        diagnostics: None,
     };
 
     let cell = new_auto_review_summary_cell(&response);
@@ -313,6 +316,7 @@ fn auto_review_summary_stale_latest_snapshot() {
             target_matches: false,
             count: 1,
         }],
+        diagnostics: None,
     };
 
     let cell = new_auto_review_summary_cell(&response);
@@ -346,6 +350,7 @@ fn auto_review_summary_failed_current_snapshot() {
         latest: Some(summary.clone()),
         current: Some(summary),
         status_counts: Vec::new(),
+        diagnostics: None,
     };
 
     let cell = new_auto_review_summary_cell(&response);
@@ -353,6 +358,37 @@ fn auto_review_summary_failed_current_snapshot() {
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
 ✗ Auto Review failed · run-failed
   failed · current · code-gpt-5.5 · review model unavailable
+");
+}
+
+#[test]
+fn auto_review_summary_diagnostics_snapshot() {
+    let response = AutoReviewSummaryReadResponse {
+        latest: None,
+        current: None,
+        status_counts: Vec::new(),
+        diagnostics: Some(AutoReviewDiagnosticsSummary {
+            recent_runs: 4,
+            in_flight_runs: 0,
+            terminal_runs: 4,
+            skipped_runs: 2,
+            duplicate_skipped_runs: 1,
+            superseded_runs: 0,
+            failed_runs: 1,
+            cancelled_runs: 0,
+            lost_runs: 0,
+            suppressed_stale_runs: 1,
+            compact: "recent_runs=4 in_flight=0 terminal=4 suppressed_stale=1 skipped=2 \
+                      duplicate_skipped=1 failed=1"
+                .to_string(),
+        }),
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 120)).join("\n"), @"
+✔ Auto Review has no stored result for this thread
+  diagnostics recent_runs=4 in_flight=0 terminal=4 suppressed_stale=1 skipped=2 duplicate_skipped=1 failed=1
 ");
 }
 

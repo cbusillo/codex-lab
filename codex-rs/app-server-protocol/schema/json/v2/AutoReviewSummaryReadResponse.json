@@ -1,6 +1,77 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "AutoReviewDiagnosticsSummary": {
+      "properties": {
+        "cancelledRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "compact": {
+          "type": "string"
+        },
+        "duplicateSkippedRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "failedRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "inFlightRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lostRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "recentRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "skippedRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "supersededRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "suppressedStaleRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "terminalRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cancelledRuns",
+        "compact",
+        "duplicateSkippedRuns",
+        "failedRuns",
+        "inFlightRuns",
+        "lostRuns",
+        "recentRuns",
+        "skippedRuns",
+        "supersededRuns",
+        "suppressedStaleRuns",
+        "terminalRuns"
+      ],
+      "type": "object"
+    },
     "AutoReviewFreshness": {
       "enum": [
         "current",
@@ -129,6 +200,16 @@
       "anyOf": [
         {
           "$ref": "#/definitions/AutoReviewRunSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diagnostics": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AutoReviewDiagnosticsSummary"
         },
         {
           "type": "null"

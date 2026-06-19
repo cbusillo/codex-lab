@@ -30,6 +30,7 @@ const RUNS_FILENAME: &str = "runs.json";
 const OUTPUTS_DIR: &str = "outputs";
 const OMITTED_TEMPLATE_PREFIX: &str = "... ";
 const OMITTED_TEMPLATE_SUFFIX: &str = " more finding(s) omitted";
+const DUPLICATE_AUTO_REVIEW_SCOPE_CANCEL_REASON: &str = "duplicate_auto_review_scope";
 
 #[derive(Debug, Clone)]
 pub struct AutoReviewStore {
@@ -43,6 +44,83 @@ pub struct AutoReviewDuplicateMatch {
     pub disposition: AutoReviewDuplicateDisposition,
     pub finding_count: usize,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoReviewDiagnostics {
+    pub recent_runs: usize,
+    pub in_flight_runs: usize,
+    pub terminal_runs: usize,
+    pub skipped_runs: usize,
+    pub duplicate_skipped_runs: usize,
+    pub superseded_runs: usize,
+    pub failed_runs: usize,
+    pub cancelled_runs: usize,
+    pub lost_runs: usize,
+    pub suppressed_stale_runs: usize,
+}
+
+impl AutoReviewDiagnostics {
+    pub fn from_runs<'a>(
+        runs: impl IntoIterator<Item = &'a AutoReviewRun>,
+        active_target: Option<&AutoReviewRunTarget>,
+        active_review_target: Option<&ReviewTarget>,
+    ) -> Option<Self> {
+        let mut diagnostics = Self::default();
+        for run in runs {
+            diagnostics.recent_runs += 1;
+            if run.status.is_in_flight() {
+                diagnostics.in_flight_runs += 1;
+            } else {
+                diagnostics.terminal_runs += 1;
+            }
+            match &run.status {
+                AutoReviewRunStatus::Superseded => diagnostics.superseded_runs += 1,
+                AutoReviewRunStatus::Skipped => {
+                    diagnostics.skipped_runs += 1;
+                    if run.is_duplicate_skipped() {
+                        diagnostics.duplicate_skipped_runs += 1;
+                    }
+                }
+                AutoReviewRunStatus::Failed => diagnostics.failed_runs += 1,
+                AutoReviewRunStatus::Cancelled => diagnostics.cancelled_runs += 1,
+                AutoReviewRunStatus::Lost => diagnostics.lost_runs += 1,
+                AutoReviewRunStatus::Pending
+                | AutoReviewRunStatus::Snapshotting
+                | AutoReviewRunStatus::Running
+                | AutoReviewRunStatus::Reviewing
+                | AutoReviewRunStatus::Resolving
+                | AutoReviewRunStatus::Completed => {}
+            }
+            if let (Some(active_target), Some(active_review_target)) =
+                (active_target, active_review_target)
+                && run.status == AutoReviewRunStatus::Completed
+                && run.finding_count > 0
+                && run
+                    .visible_finding_digests(active_target, active_review_target)
+                    .is_empty()
+            {
+                diagnostics.suppressed_stale_runs += 1;
+            }
+        }
+        (diagnostics.recent_runs > 0).then_some(diagnostics)
+    }
+
+    pub fn compact_line(&self) -> String {
+        let mut parts = vec![
+            format!("recent_runs={}", self.recent_runs),
+            format!("in_flight={}", self.in_flight_runs),
+            format!("terminal={}", self.terminal_runs),
+        ];
+        push_nonzero(&mut parts, "suppressed_stale", self.suppressed_stale_runs);
+        push_nonzero(&mut parts, "skipped", self.skipped_runs);
+        push_nonzero(&mut parts, "duplicate_skipped", self.duplicate_skipped_runs);
+        push_nonzero(&mut parts, "superseded", self.superseded_runs);
+        push_nonzero(&mut parts, "failed", self.failed_runs);
+        push_nonzero(&mut parts, "cancelled", self.cancelled_runs);
+        push_nonzero(&mut parts, "lost", self.lost_runs);
+        parts.join(" ")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +517,11 @@ impl AutoReviewRun {
             self.omitted_finding_digest_count,
         )
     }
+
+    pub fn is_duplicate_skipped(&self) -> bool {
+        self.status == AutoReviewRunStatus::Skipped
+            && self.cancel_reason.as_deref() == Some(DUPLICATE_AUTO_REVIEW_SCOPE_CANCEL_REASON)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -634,6 +717,12 @@ fn duplicate_disposition(run: &AutoReviewRun) -> AutoReviewDuplicateDisposition 
         AutoReviewDuplicateDisposition::ReuseTerminal
     } else {
         AutoReviewDuplicateDisposition::SupersedeTerminal
+    }
+}
+
+fn push_nonzero(parts: &mut Vec<String>, label: &str, count: usize) {
+    if count > 0 {
+        parts.push(format!("{label}={count}"));
     }
 }
 

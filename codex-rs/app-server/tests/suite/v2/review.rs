@@ -652,6 +652,57 @@ async fn auto_review_summary_read_returns_current_summary_and_counts() -> Result
     );
     assert_eq!(summary.status_counts.len(), 1);
     assert_eq!(summary.status_counts[0].count, 1);
+    assert_eq!(
+        summary.diagnostics.as_ref().map(|diagnostics| (
+            diagnostics.recent_runs,
+            diagnostics.terminal_runs,
+            diagnostics.suppressed_stale_runs
+        )),
+        Some((1, 1, 0))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_summary_read_returns_duplicate_skip_diagnostics() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    let (mut run, output) = sample_auto_review_run("run_duplicate_skip", &thread_cwd, "");
+    run.status = AutoReviewRunStatus::Skipped;
+    run.freshness = codex_auto_review::AutoReviewRunFreshness::Superseded;
+    run.superseded_by = Some("existing-run".to_string());
+    run.cancel_reason = Some("duplicate_auto_review_scope".to_string());
+    run.error_summary = Some("equivalent background auto review already exists".to_string());
+    run.finding_count = 0;
+    run.omitted_finding_digest_count = 0;
+    run.finding_digests.clear();
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
+
+    let request_id = mcp
+        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
+    let diagnostics = summary.diagnostics.expect("diagnostics");
+    assert_eq!(diagnostics.recent_runs, 1);
+    assert_eq!(diagnostics.skipped_runs, 1);
+    assert_eq!(diagnostics.duplicate_skipped_runs, 1);
+    assert_eq!(
+        diagnostics.compact,
+        "recent_runs=1 in_flight=0 terminal=1 skipped=1 duplicate_skipped=1"
+    );
 
     Ok(())
 }

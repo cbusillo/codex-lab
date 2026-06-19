@@ -453,6 +453,7 @@ async fn stale_auto_review_summary_result_is_ignored() {
             latest: Some(summary.clone()),
             current: Some(summary),
             status_counts: Vec::new(),
+            diagnostics: None,
         }),
     );
 
