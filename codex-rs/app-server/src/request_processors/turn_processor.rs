@@ -1,4 +1,5 @@
 use super::*;
+use codex_auto_review::AutoReviewDiagnostics;
 use codex_auto_review::ReviewCoordination;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
@@ -489,6 +490,25 @@ impl TurnRequestProcessor {
             omitted_findings: summary.omitted_findings,
             truncated: summary.truncated,
             content: summary.content,
+        }
+    }
+
+    fn auto_review_diagnostics_summary(
+        diagnostics: AutoReviewDiagnostics,
+    ) -> AutoReviewDiagnosticsSummary {
+        let compact = diagnostics.compact_line();
+        AutoReviewDiagnosticsSummary {
+            recent_runs: diagnostics.recent_runs,
+            in_flight_runs: diagnostics.in_flight_runs,
+            terminal_runs: diagnostics.terminal_runs,
+            skipped_runs: diagnostics.skipped_runs,
+            duplicate_skipped_runs: diagnostics.duplicate_skipped_runs,
+            superseded_runs: diagnostics.superseded_runs,
+            failed_runs: diagnostics.failed_runs,
+            cancelled_runs: diagnostics.cancelled_runs,
+            lost_runs: diagnostics.lost_runs,
+            suppressed_stale_runs: diagnostics.suppressed_stale_runs,
+            compact,
         }
     }
 
@@ -1444,6 +1464,12 @@ impl TurnRequestProcessor {
             latest,
             current,
             status_counts,
+            diagnostics: AutoReviewDiagnostics::from_runs(
+                &runs,
+                Some(&active_target),
+                Some(&active_review_target),
+            )
+            .map(Self::auto_review_diagnostics_summary),
         })
     }
 

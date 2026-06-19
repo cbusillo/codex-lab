@@ -151,6 +151,24 @@ pub struct AutoReviewSummaryReadResponse {
     pub latest: Option<AutoReviewRunSummary>,
     pub current: Option<AutoReviewRunSummary>,
     pub status_counts: Vec<AutoReviewStatusCount>,
+    pub diagnostics: Option<AutoReviewDiagnosticsSummary>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewDiagnosticsSummary {
+    pub recent_runs: usize,
+    pub in_flight_runs: usize,
+    pub terminal_runs: usize,
+    pub skipped_runs: usize,
+    pub duplicate_skipped_runs: usize,
+    pub superseded_runs: usize,
+    pub failed_runs: usize,
+    pub cancelled_runs: usize,
+    pub lost_runs: usize,
+    pub suppressed_stale_runs: usize,
+    pub compact: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

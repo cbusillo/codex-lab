@@ -38,6 +38,7 @@ use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::AutoReviewDiagnosticsSummary;
 use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
 use codex_app_server_protocol::AutoReviewFindingDetailReadResponse;
 use codex_app_server_protocol::AutoReviewFreshness as ApiAutoReviewFreshness;

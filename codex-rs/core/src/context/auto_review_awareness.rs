@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
+use codex_auto_review::AutoReviewDiagnostics;
 use codex_auto_review::AutoReviewFreshness;
 use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunSource;
@@ -112,6 +113,8 @@ fn render_awareness(
     let mut status_lines = Vec::new();
     let mut counts = BTreeMap::<String, usize>::new();
     let mut current_summary: Option<(&AutoReviewRun, AutoReviewSummary)> = None;
+    let diagnostics =
+        AutoReviewDiagnostics::from_runs(runs, Some(active_target), Some(active_review_target));
 
     if let Some(run_id) = &active_snapshot.pending_run_id {
         status_lines.push(format!("- pending background run: {run_id}"));
@@ -168,6 +171,12 @@ fn render_awareness(
         for (key, count) in counts.into_iter().take(MAX_STATUS_LINES) {
             lines.push(format!("  - {key}: {count}"));
         }
+    }
+    if let Some(diagnostics) = diagnostics {
+        lines.push(format!(
+            "- recent run diagnostics: {}",
+            diagnostics.compact_line()
+        ));
     }
 
     AutoReviewAwareness::new(lines.join("\n"))

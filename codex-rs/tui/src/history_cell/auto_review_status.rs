@@ -1,6 +1,7 @@
 //! Native Auto Review status transcript cells.
 
 use super::*;
+use codex_app_server_protocol::AutoReviewDiagnosticsSummary;
 use codex_app_server_protocol::AutoReviewFreshness;
 use codex_app_server_protocol::AutoReviewRunSummary;
 use codex_app_server_protocol::AutoReviewStatusCount;
@@ -50,6 +51,7 @@ pub(crate) fn new_auto_review_summary_cell(
         Some(summary) => push_current_summary_lines(&mut lines, summary),
         None => push_no_current_summary_lines(&mut lines, response),
     }
+    push_diagnostics(&mut lines, response.diagnostics.as_ref());
     PlainHistoryCell::new(lines)
 }
 
@@ -191,6 +193,24 @@ fn push_status_counts(lines: &mut Vec<Line<'static>>, counts: &[AutoReviewStatus
         .collect::<Vec<_>>()
         .join(", ");
     lines.push(Line::from(vec!["  ".into(), labels.dim()]));
+}
+
+fn push_diagnostics(
+    lines: &mut Vec<Line<'static>>,
+    diagnostics: Option<&AutoReviewDiagnosticsSummary>,
+) {
+    let Some(diagnostics) = diagnostics else {
+        return;
+    };
+    let compact = diagnostics.compact.trim();
+    if compact.is_empty() {
+        return;
+    }
+    lines.push(Line::from(vec![
+        "  ".into(),
+        "diagnostics ".dim(),
+        Span::from(compact.to_string()).dim(),
+    ]));
 }
 
 fn finding_count_label(count: usize) -> String {

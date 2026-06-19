@@ -7,6 +7,7 @@ use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewTarget;
 use pretty_assertions::assert_eq;
 
+use super::AutoReviewDiagnostics;
 use super::AutoReviewDuplicateDisposition;
 use super::AutoReviewFreshness;
 use super::AutoReviewRun;
@@ -209,6 +210,67 @@ fn finding_detail_requires_completed_run_and_sidecar() -> anyhow::Result<()> {
             .contains("auto review run is not completed: run_1")
     );
     Ok(())
+}
+
+#[test]
+fn diagnostics_counts_terminal_skipped_duplicates_and_stale_suppression() {
+    let active_target = sample_target("main", "head-2", "/repo");
+    let stale_finding = AutoReviewRun {
+        run_id: "stale_finding".to_string(),
+        target: sample_target("main", "head-1", "/repo"),
+        ..sample_run("unused", &sample_output(vec![sample_finding("Stale")]))
+    };
+    let duplicate_skipped = AutoReviewRun {
+        run_id: "duplicate_skipped".to_string(),
+        status: AutoReviewRunStatus::Skipped,
+        freshness: AutoReviewRunFreshness::Superseded,
+        superseded_by: Some("existing".to_string()),
+        cancel_reason: Some("duplicate_auto_review_scope".to_string()),
+        completed_at_unix_secs: Some(3),
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        ..sample_run("unused", &sample_output(Vec::new()))
+    };
+    let failed = AutoReviewRun {
+        run_id: "failed".to_string(),
+        status: AutoReviewRunStatus::Failed,
+        completed_at_unix_secs: Some(4),
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        ..sample_run("unused", &sample_output(Vec::new()))
+    };
+    let running = AutoReviewRun {
+        run_id: "running".to_string(),
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        ..sample_run("unused", &sample_output(Vec::new()))
+    };
+
+    let diagnostics = AutoReviewDiagnostics::from_runs(
+        [&stale_finding, &duplicate_skipped, &failed, &running],
+        Some(&active_target),
+        Some(&ReviewTarget::UncommittedChanges),
+    )
+    .expect("diagnostics");
+
+    assert_eq!(diagnostics.recent_runs, 4);
+    assert_eq!(diagnostics.in_flight_runs, 1);
+    assert_eq!(diagnostics.terminal_runs, 3);
+    assert_eq!(diagnostics.skipped_runs, 1);
+    assert_eq!(diagnostics.duplicate_skipped_runs, 1);
+    assert_eq!(diagnostics.failed_runs, 1);
+    assert_eq!(diagnostics.suppressed_stale_runs, 1);
+    assert_eq!(
+        diagnostics.compact_line(),
+        "recent_runs=4 in_flight=1 terminal=3 suppressed_stale=1 skipped=1 duplicate_skipped=1 failed=1"
+    );
+}
+
+#[test]
+fn diagnostics_are_absent_for_empty_runs() {
+    assert_eq!(AutoReviewDiagnostics::from_runs([], None, None), None);
 }
 
 #[test]

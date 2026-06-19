@@ -116,8 +116,39 @@ fn awareness_reports_stale_status_without_stale_findings() {
     let body = awareness.body();
 
     assert!(body.contains("background/completed/stale/off_target: 1"));
+    assert!(body.contains(
+        "recent run diagnostics: recent_runs=1 in_flight=0 terminal=1 suppressed_stale=1"
+    ));
     assert!(!body.contains("Stale title"));
     assert!(!body.contains("stale body"));
+}
+
+#[test]
+fn awareness_reports_duplicate_skipped_diagnostics() {
+    let duplicate_skipped = AutoReviewRun {
+        status: AutoReviewRunStatus::Skipped,
+        freshness: codex_auto_review::AutoReviewRunFreshness::Superseded,
+        superseded_by: Some("existing-run".to_string()),
+        cancel_reason: Some("duplicate_auto_review_scope".to_string()),
+        error_summary: Some("equivalent background auto review already exists".to_string()),
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        ..sample_run("duplicate-skip", AutoReviewRunStatus::Skipped, Vec::new())
+    };
+
+    let awareness = render_awareness(
+        &[duplicate_skipped],
+        &sample_target("main", "head-2", "/repo"),
+        &ReviewTarget::UncommittedChanges,
+        &BackgroundAutoReviewActiveSnapshot::default(),
+    )
+    .expect("duplicate skipped status should render awareness");
+    let body = awareness.body();
+
+    assert!(body.contains("background/skipped/stale/off_target: 1"));
+    assert!(body.contains(
+        "recent run diagnostics: recent_runs=1 in_flight=0 terminal=1 skipped=1 duplicate_skipped=1"
+    ));
 }
 
 #[test]
