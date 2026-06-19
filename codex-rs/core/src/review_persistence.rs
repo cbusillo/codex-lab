@@ -331,7 +331,9 @@ pub(crate) async fn collect_auto_review_target(
     };
 
     let worktree_diff_fingerprint = match review_target {
-        ReviewTarget::UncommittedChanges => get_worktree_diff_fingerprint(cwd).await,
+        ReviewTarget::UncommittedChanges | ReviewTarget::CurrentTurnDiff { .. } => {
+            get_worktree_diff_fingerprint(cwd).await
+        }
         _ => None,
     };
 
@@ -532,5 +534,57 @@ mod tests {
         .await;
 
         assert_eq!(target.snapshot_epoch, Some(1));
+    }
+
+    #[tokio::test]
+    async fn current_turn_diff_target_records_live_worktree_fingerprint() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(cwd.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(cwd.path())
+            .output()
+            .expect("git config user.email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(cwd.path())
+            .output()
+            .expect("git config user.name");
+        std::fs::write(cwd.path().join("tracked.txt"), "base\n").expect("write base file");
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(cwd.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(cwd.path())
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z")
+            .output()
+            .expect("git commit");
+        std::fs::write(cwd.path().join("tracked.txt"), "base\nchange\n").expect("write dirty file");
+        let expected = get_worktree_diff_fingerprint(cwd.path())
+            .await
+            .expect("dirty worktree fingerprint");
+
+        let target = collect_auto_review_target(
+            codex_home.path(),
+            cwd.path(),
+            &ReviewTarget::CurrentTurnDiff {
+                fingerprint: "sha256:synthetic-turn-diff".to_string(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            target.worktree_diff_fingerprint.as_deref(),
+            Some(expected.as_str())
+        );
     }
 }

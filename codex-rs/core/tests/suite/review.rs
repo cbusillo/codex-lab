@@ -7,6 +7,7 @@ use codex_core::CodexThread;
 use codex_core::REVIEW_PROMPT;
 use codex_core::config::Config;
 use codex_core::review_format::render_review_output_text;
+use codex_git_utils::diff_fingerprint;
 use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -755,6 +756,10 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
     .to_string();
     let harness = TestCodexHarness::new().await?;
     init_git_repo(harness.cwd());
+    std::fs::write(
+        harness.cwd().join("pre_existing_dirty.txt"),
+        "do not review me\n",
+    )?;
     let codex_home = harness.test().codex_home_path().to_path_buf();
     let call_id = "auto-bg-apply-patch";
     let patch =
@@ -787,10 +792,7 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         None,
     )
     .await;
-    assert_eq!(
-        pending_status.review_target,
-        ReviewTarget::UncommittedChanges
-    );
+    assert_diff_review_target(&pending_status.review_target);
     assert_eq!(pending_status.error_summary, None);
     let running_status = wait_for_background_auto_review_status(
         harness.test().codex.as_ref(),
@@ -804,10 +806,7 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         Some(running_status.run_id.as_str()),
     )
     .await;
-    assert_eq!(
-        completed_status.review_target,
-        ReviewTarget::UncommittedChanges
-    );
+    assert_diff_review_target(&completed_status.review_target);
     assert_eq!(completed_status.error_summary, None);
     let run = load_single_auto_review_run(&codex_home)
         .unwrap_or_else(|err| panic!("load completed auto review run: {err}"));
@@ -815,12 +814,12 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
     assert_eq!(run.run_id, completed_status.run_id);
     assert_eq!(run.status, AutoReviewRunStatus::Completed);
     assert_eq!(run.source, AutoReviewRunSource::Background);
-    assert_eq!(run.review_target, ReviewTarget::UncommittedChanges);
+    assert_diff_review_target(&run.review_target);
     assert!(run.completed_at_unix_secs.is_some());
     assert_eq!(run.error_summary, None);
     assert!(
         run.target.worktree_diff_fingerprint.is_some(),
-        "expected background uncommitted review to record diff fingerprint"
+        "expected background turn-diff review to record diff fingerprint"
     );
 
     let file_contents = harness.read_file_text("auto_background_review.txt").await?;
@@ -837,8 +836,13 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         Some("review")
     );
     assert!(
-        review_request.body_contains_text("Review the current code changes"),
-        "background review request should use the uncommitted-changes review prompt"
+        review_request.body_contains_text("Review only the following unified diff"),
+        "background review request should use the turn-diff review prompt"
+    );
+    assert!(review_request.body_contains_text("auto_background_review.txt"));
+    assert!(
+        !review_request.body_contains_text("pre_existing_dirty.txt"),
+        "background review request should not include pre-existing dirty work"
     );
     harness.server().verify().await;
     Ok(())
@@ -1358,7 +1362,7 @@ async fn automatic_background_review_shutdown_persists_cancelled_run() -> anyhow
     .await;
     assert_eq!(running.run_id, running_status.run_id);
     assert_eq!(running.source, AutoReviewRunSource::Background);
-    assert_eq!(running.review_target, ReviewTarget::UncommittedChanges);
+    assert_diff_review_target(&running.review_target);
 
     test.codex.submit(Op::Shutdown {}).await?;
     let cancelled_status = wait_for_background_auto_review_status(
@@ -1367,10 +1371,7 @@ async fn automatic_background_review_shutdown_persists_cancelled_run() -> anyhow
         Some(running_status.run_id.as_str()),
     )
     .await;
-    assert_eq!(
-        cancelled_status.review_target,
-        ReviewTarget::UncommittedChanges
-    );
+    assert_diff_review_target(&cancelled_status.review_target);
     assert_eq!(
         cancelled_status.error_summary.as_deref(),
         Some("review was interrupted before producing structured output")
@@ -1449,10 +1450,7 @@ async fn automatic_background_review_shutdown_cancels_pending_debounce() -> anyh
         Some(pending_status.run_id.as_str()),
     )
     .await;
-    assert_eq!(
-        cancelled_status.review_target,
-        ReviewTarget::UncommittedChanges
-    );
+    assert_diff_review_target(&cancelled_status.review_target);
     assert_eq!(
         cancelled_status.error_summary.as_deref(),
         Some("review was interrupted before producing structured output")
@@ -1538,10 +1536,7 @@ async fn automatic_background_review_control_cancels_pending_run() -> anyhow::Re
         Some(pending_status.run_id.as_str()),
     )
     .await;
-    assert_eq!(
-        cancelled_status.review_target,
-        ReviewTarget::UncommittedChanges
-    );
+    assert_diff_review_target(&cancelled_status.review_target);
     assert_eq!(
         cancelled_status.error_summary.as_deref(),
         Some("background auto review was cancelled by request")
@@ -1711,10 +1706,7 @@ async fn automatic_background_review_skips_oversized_diff() -> anyhow::Result<()
         Some(pending_status.run_id.as_str()),
     )
     .await;
-    assert_eq!(
-        skipped_status.review_target,
-        ReviewTarget::UncommittedChanges
-    );
+    assert_diff_review_target(&skipped_status.review_target);
     assert!(
         skipped_status
             .error_summary
@@ -1857,6 +1849,11 @@ async fn automatic_background_review_reuses_completed_durable_duplicate() -> any
         "reuse durable review\n",
     )?;
     let fingerprint = expected_worktree_diff_fingerprint(test.cwd_path()).await;
+    let turn_diff = added_file_turn_diff(
+        "auto_background_review_duplicate.txt",
+        "reuse durable review\n",
+    );
+    let turn_diff_fingerprint = diff_fingerprint(&turn_diff).expect("turn diff fingerprint");
     std::fs::remove_file(test.cwd_path().join("auto_background_review_duplicate.txt"))?;
     let output = ReviewOutputEvent {
         findings: vec![ReviewFinding {
@@ -1873,7 +1870,7 @@ async fn automatic_background_review_reuses_completed_durable_duplicate() -> any
         overall_explanation: "summary".to_string(),
         overall_confidence_score: 0.8,
     };
-    let existing = compact_auto_review_run(
+    let mut existing = compact_auto_review_run(
         "existing_duplicate_review",
         AutoReviewRunStatus::Completed,
         codex_auto_review::AutoReviewRunTarget {
@@ -1888,6 +1885,9 @@ async fn automatic_background_review_reuses_completed_durable_duplicate() -> any
         },
         &output,
     );
+    existing.review_target = ReviewTarget::CurrentTurnDiff {
+        fingerprint: turn_diff_fingerprint,
+    };
     let store = AutoReviewStore::for_scope(codex_home.path(), test.cwd_path());
     store.save_run(&existing)?;
     store.save_output(&existing.run_id, &output)?;
@@ -1933,6 +1933,135 @@ async fn automatic_background_review_reuses_completed_durable_duplicate() -> any
         completed.target.worktree_diff_fingerprint.as_deref(),
         Some(fingerprint.as_str())
     );
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_does_not_reuse_different_turn_diff_duplicate()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let review_json = serde_json::json!({
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "scoped turn diff was reviewed",
+        "overall_confidence_score": 0.9
+    })
+    .to_string();
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_duplicate_scope.txt\n+review this turn\n*** End Patch";
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call("auto-bg-duplicate-scope", patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let background_review = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(assistant_message_sse(&review_json)),
+    }];
+    let (server, _completions) = start_streaming_sse_server(vec![
+        foreground_tool,
+        foreground_complete,
+        background_review,
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    std::fs::write(
+        test.cwd_path()
+            .join("auto_background_review_duplicate_scope.txt"),
+        "review this turn\n",
+    )?;
+    let fingerprint = expected_worktree_diff_fingerprint(test.cwd_path()).await;
+    std::fs::remove_file(
+        test.cwd_path()
+            .join("auto_background_review_duplicate_scope.txt"),
+    )?;
+    let output = ReviewOutputEvent {
+        findings: Vec::new(),
+        overall_correctness: "patch is correct".to_string(),
+        overall_explanation: "different scoped review".to_string(),
+        overall_confidence_score: 0.8,
+    };
+    let mut existing = compact_auto_review_run(
+        "existing_different_turn_diff_review",
+        AutoReviewRunStatus::Completed,
+        codex_auto_review::AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: current_git_head(test.cwd_path()),
+            base_sha: None,
+            worktree_path: Some(test.cwd_path().to_path_buf()),
+            snapshot_epoch: None,
+            snapshot_commit: None,
+            head_at_launch: None,
+            worktree_diff_fingerprint: Some(fingerprint.clone()),
+        },
+        &output,
+    );
+    existing.review_target = ReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:different-turn-diff".to_string(),
+    };
+    let store = AutoReviewStore::for_scope(codex_home.path(), test.cwd_path());
+    store.save_run(&existing)?;
+    store.save_output(&existing.run_id, &output)?;
+
+    test.submit_turn("create a file with a different scoped diff")
+        .await?;
+
+    let pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+    let running_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Running,
+        Some(pending_status.run_id.as_str()),
+    )
+    .await;
+    let completed_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Completed,
+        Some(running_status.run_id.as_str()),
+    )
+    .await;
+    let completed = wait_for_auto_review_run_status_by_run_id(
+        test.codex.as_ref(),
+        codex_home.path(),
+        &completed_status.run_id,
+        AutoReviewRunStatus::Completed,
+    )
+    .await;
+    assert_ne!(completed.run_id, "existing_different_turn_diff_review");
+    assert_eq!(completed.status, AutoReviewRunStatus::Completed);
+    assert_diff_review_target(&completed.review_target);
+    server.wait_for_request_count(3).await;
+
+    let runs = load_auto_review_runs(codex_home.path())?;
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().any(|run| {
+        run.run_id == "existing_different_turn_diff_review"
+            && run.status == AutoReviewRunStatus::Completed
+    }));
+    assert!(runs.iter().any(|run| run.run_id == completed.run_id));
 
     let _codex_home_guard = codex_home;
     server.shutdown().await;
@@ -2033,11 +2162,8 @@ async fn automatic_background_review_debounce_ignores_superseded_diff() -> anyho
     .await;
     assert_eq!(run.status, AutoReviewRunStatus::Completed);
     assert_eq!(run.source, AutoReviewRunSource::Background);
-    assert_eq!(run.review_target, ReviewTarget::UncommittedChanges);
-    assert_eq!(
-        run.target.worktree_diff_fingerprint,
-        Some(expected_worktree_diff_fingerprint(test.cwd_path()).await)
-    );
+    assert_diff_review_target(&run.review_target);
+    assert!(run.target.worktree_diff_fingerprint.is_some());
     let runs = load_auto_review_runs(codex_home.path())?;
     assert_eq!(runs.len(), 2, "expected cancelled and completed runs");
     let cancelled = runs
@@ -2046,7 +2172,7 @@ async fn automatic_background_review_debounce_ignores_superseded_diff() -> anyho
         .expect("expected first pending run to be persisted");
     assert_eq!(cancelled.status, AutoReviewRunStatus::Cancelled);
     assert_eq!(cancelled.source, AutoReviewRunSource::Background);
-    assert_eq!(cancelled.review_target, ReviewTarget::UncommittedChanges);
+    assert_diff_review_target(&cancelled.review_target);
     assert_eq!(
         cancelled.error_summary.as_deref(),
         Some("foreground work started before background auto review could continue")
@@ -2054,6 +2180,11 @@ async fn automatic_background_review_debounce_ignores_superseded_diff() -> anyho
     assert!(cancelled.completed_at_unix_secs.is_some());
     assert!(runs.iter().any(|candidate| candidate.run_id == run.run_id));
     server.wait_for_request_count(5).await;
+    let requests = server.requests().await;
+    let background_request = String::from_utf8(requests[4].clone())?;
+    assert!(background_request.contains("Review only the following unified diff"));
+    assert!(background_request.contains("auto_background_review_second.txt"));
+    assert!(!background_request.contains("auto_background_review_first.txt"));
     server
         .assert_request_count_stays(5, Duration::from_millis(500))
         .await;
@@ -2760,6 +2891,50 @@ fn compact_auto_review_run(
     }
 }
 
+fn assert_diff_review_target(target: &ReviewTarget) {
+    assert!(
+        matches!(target, ReviewTarget::CurrentTurnDiff { .. }),
+        "expected current-turn diff review target, got {target:?}"
+    );
+}
+
+fn added_file_turn_diff(path: &str, contents: &str) -> String {
+    let line = contents
+        .strip_suffix('\n')
+        .expect("test fixture should end with a newline");
+    assert!(
+        !line.contains('\n'),
+        "test helper only supports single-line added files"
+    );
+    let output = std::process::Command::new("git")
+        .arg("hash-object")
+        .arg("--stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin should be piped")
+                .write_all(contents.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("git hash-object should run");
+    assert!(
+        output.status.success(),
+        "git hash-object failed: {output:?}"
+    );
+    let blob_oid = String::from_utf8(output.stdout)
+        .expect("git hash-object output should be utf-8")
+        .trim()
+        .to_string();
+    format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..{blob_oid}\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{line}\n"
+    )
+}
+
 fn load_auto_review_locks(
     codex_home: &std::path::Path,
 ) -> anyhow::Result<Vec<codex_auto_review::ReviewLockInfo>> {
@@ -2914,6 +3089,43 @@ async fn wait_for_auto_review_run_status_by_source(
         );
         match tokio::time::timeout(Duration::from_millis(50), codex.next_event()).await {
             Ok(Ok(event)) => match event.msg {
+                EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {}
+                _ => {}
+            },
+            Ok(Err(err)) => {
+                panic!("stream ended while waiting for auto-review run status: {err}")
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+async fn wait_for_auto_review_run_status_by_run_id(
+    codex: &CodexThread,
+    codex_home: &std::path::Path,
+    expected_run_id: &str,
+    expected_status: AutoReviewRunStatus,
+) -> codex_auto_review::AutoReviewRun {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(runs) = load_auto_review_runs(codex_home)
+            && let Some(run) = runs.into_iter().find(|run| run.run_id == expected_run_id)
+            && run.status == expected_status
+        {
+            return run;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timeout waiting for auto-review run {expected_run_id} status {expected_status:?}; runs={:?}",
+            load_auto_review_runs(codex_home)
+        );
+        match tokio::time::timeout(Duration::from_millis(50), codex.next_event()).await {
+            Ok(Ok(event)) => match event.msg {
+                EventMsg::BackgroundAutoReviewStatus(status_event)
+                    if status_event.run_id == expected_run_id =>
+                {
+                    // Keep draining intermediate Pending/Running updates for this run.
+                }
                 EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {}
                 _ => {}
             },

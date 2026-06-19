@@ -2257,6 +2257,15 @@ async fn try_run_sampling_request(
             tracker.get_unified_diff()
         };
         if let Some(unified_diff) = unified_diff {
+            let active_turn_state = {
+                let active_turn = sess.active_turn.lock().await;
+                active_turn
+                    .as_ref()
+                    .map(|active_turn| Arc::clone(&active_turn.turn_state))
+            };
+            if let Some(turn_state) = active_turn_state {
+                turn_state.lock().await.completed_turn_diff = Some(unified_diff.clone());
+            }
             let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
             sess.clone().send_event(&turn_context, msg).await;
         }

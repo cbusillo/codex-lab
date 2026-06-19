@@ -230,6 +230,8 @@ fn review_target_matches(stored: &ReviewTarget, active: &ReviewTarget) -> bool {
                 sha: active_sha, ..
             },
         ) => stored_sha == active_sha,
+        (ReviewTarget::CurrentTurnDiff { .. }, ReviewTarget::UncommittedChanges)
+        | (ReviewTarget::UncommittedChanges, ReviewTarget::CurrentTurnDiff { .. }) => true,
         _ => stored == active,
     }
 }

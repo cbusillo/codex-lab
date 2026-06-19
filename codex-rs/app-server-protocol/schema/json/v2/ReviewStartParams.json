@@ -8,7 +8,7 @@
       ],
       "type": "string"
     },
-    "ReviewTarget": {
+    "ReviewStartTarget": {
       "oneOf": [
         {
           "description": "Review the working tree: staged, unstaged, and untracked files.",
@@ -17,14 +17,14 @@
               "enum": [
                 "uncommittedChanges"
               ],
-              "title": "UncommittedChangesReviewTargetType",
+              "title": "UncommittedChangesReviewStartTargetType",
               "type": "string"
             }
           },
           "required": [
             "type"
           ],
-          "title": "UncommittedChangesReviewTarget",
+          "title": "UncommittedChangesReviewStartTarget",
           "type": "object"
         },
         {
@@ -37,7 +37,7 @@
               "enum": [
                 "baseBranch"
               ],
-              "title": "BaseBranchReviewTargetType",
+              "title": "BaseBranchReviewStartTargetType",
               "type": "string"
             }
           },
@@ -45,7 +45,7 @@
             "branch",
             "type"
           ],
-          "title": "BaseBranchReviewTarget",
+          "title": "BaseBranchReviewStartTarget",
           "type": "object"
         },
         {
@@ -65,7 +65,7 @@
               "enum": [
                 "commit"
               ],
-              "title": "CommitReviewTargetType",
+              "title": "CommitReviewStartTargetType",
               "type": "string"
             }
           },
@@ -73,7 +73,7 @@
             "sha",
             "type"
           ],
-          "title": "CommitReviewTarget",
+          "title": "CommitReviewStartTarget",
           "type": "object"
         },
         {
@@ -86,7 +86,7 @@
               "enum": [
                 "custom"
               ],
-              "title": "CustomReviewTargetType",
+              "title": "CustomReviewStartTargetType",
               "type": "string"
             }
           },
@@ -94,7 +94,7 @@
             "instructions",
             "type"
           ],
-          "title": "CustomReviewTarget",
+          "title": "CustomReviewStartTarget",
           "type": "object"
         }
       ]
@@ -114,7 +114,7 @@
       "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`)."
     },
     "target": {
-      "$ref": "#/definitions/ReviewTarget"
+      "$ref": "#/definitions/ReviewStartTarget"
     },
     "threadId": {
       "type": "string"

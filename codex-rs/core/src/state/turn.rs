@@ -96,6 +96,7 @@ pub(crate) struct TurnState {
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
+    pub(crate) completed_turn_diff: Option<String>,
 }
 
 pub(crate) struct PendingRequestPermissions {

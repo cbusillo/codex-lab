@@ -41,6 +41,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
+use codex_app_server_protocol::ReviewStartTarget;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
@@ -1011,6 +1012,7 @@ impl AppServerSession {
         target: ReviewTarget,
     ) -> Result<ReviewStartResponse> {
         let request_id = self.next_request_id();
+        let target = review_target_to_start_target(target)?;
         self.client
             .request_typed(ClientRequest::ReviewStart {
                 request_id,
@@ -1145,6 +1147,18 @@ impl AppServerSession {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
         RequestId::Integer(request_id)
+    }
+}
+
+fn review_target_to_start_target(target: ReviewTarget) -> Result<ReviewStartTarget> {
+    match target {
+        ReviewTarget::UncommittedChanges => Ok(ReviewStartTarget::UncommittedChanges),
+        ReviewTarget::CurrentTurnDiff { .. } => Err(color_eyre::eyre::eyre!(
+            "current-turn diff reviews are background status targets only"
+        )),
+        ReviewTarget::BaseBranch { branch } => Ok(ReviewStartTarget::BaseBranch { branch }),
+        ReviewTarget::Commit { sha, title } => Ok(ReviewStartTarget::Commit { sha, title }),
+        ReviewTarget::Custom { instructions } => Ok(ReviewStartTarget::Custom { instructions }),
     }
 }
 

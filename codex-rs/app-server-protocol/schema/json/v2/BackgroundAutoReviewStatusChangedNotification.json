@@ -32,6 +32,27 @@
           "type": "object"
         },
         {
+          "description": "Review the changes made by a completed turn.",
+          "properties": {
+            "fingerprint": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "currentTurnDiff"
+              ],
+              "title": "CurrentTurnDiffReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "fingerprint",
+            "type"
+          ],
+          "title": "CurrentTurnDiffReviewTarget",
+          "type": "object"
+        },
+        {
           "description": "Review changes between the current branch and the given base branch.",
           "properties": {
             "branch": {
