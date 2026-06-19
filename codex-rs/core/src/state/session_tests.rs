@@ -19,7 +19,7 @@ fn background_auto_review_schedules_only_changed_dirty_fingerprint() {
     let schedule = schedule.expect("changed dirty fingerprint should schedule review");
     assert_eq!(schedule.generation, 1);
     assert_eq!(schedule.fingerprint, "sha256:new");
-    assert!(state.is_current_schedule(1, "sha256:new"));
+    assert!(state.is_current_schedule(1));
 }
 
 #[test]
@@ -90,12 +90,12 @@ fn background_auto_review_cancel_invalidates_pending_schedule() {
         .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
         .expect("changed dirty fingerprint should schedule review");
 
-    assert!(state.is_current_schedule(schedule.generation, &schedule.fingerprint));
+    assert!(state.is_current_schedule(schedule.generation));
     let cancellation = state.cancel_pending_and_take_reviews();
     assert!(cancellation.pending_review.is_none());
     assert!(cancellation.running_review.is_none());
 
-    assert!(!state.is_current_schedule(schedule.generation, &schedule.fingerprint));
+    assert!(!state.is_current_schedule(schedule.generation));
     assert_eq!(
         state.complete_regular_turn("turn-pending", Some("sha256:late".to_string())),
         None
@@ -120,7 +120,7 @@ fn background_auto_review_control_takes_pending_by_run_id() {
         controlled_run,
         BackgroundAutoReviewControlledRun::Pending(_)
     ));
-    assert!(!state.is_current_schedule(schedule.generation, &schedule.fingerprint));
+    assert!(!state.is_current_schedule(schedule.generation));
     assert_eq!(
         state.complete_regular_turn("turn-pending", Some("sha256:late".to_string())),
         None
@@ -138,7 +138,7 @@ fn background_auto_review_control_ignores_unknown_run_id() {
     assert!(state.record_pending(schedule.generation, &schedule.fingerprint, persistence));
 
     assert!(state.take_review_by_run_id("missing-control").is_none());
-    assert!(state.is_current_schedule(schedule.generation, &schedule.fingerprint));
+    assert!(state.is_current_schedule(schedule.generation));
     assert!(
         state
             .record_started(
@@ -175,6 +175,53 @@ fn background_auto_review_control_takes_running_by_run_id() {
     assert_eq!(
         state.complete_regular_turn("stale-turn", Some("sha256:stale".to_string())),
         None
+    );
+}
+
+#[test]
+fn background_auto_review_start_displaces_running_review() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
+    let first_schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:first".to_string()))
+        .expect("changed dirty fingerprint should schedule first review");
+    let (first_persistence, _first_cwd) = test_background_review_persistence("first-running");
+    let first_start = state
+        .record_started(
+            first_schedule.generation,
+            &first_schedule.fingerprint,
+            first_persistence,
+        )
+        .expect("current first schedule should start");
+
+    state.begin_regular_turn("turn-2".to_string(), Some("sha256:old".to_string()));
+    let second_schedule = state
+        .complete_regular_turn("turn-2", Some("sha256:second".to_string()))
+        .expect("changed dirty fingerprint should schedule second review");
+    let (second_persistence, _second_cwd) = test_background_review_persistence("second-running");
+    let second_start = state
+        .record_started(
+            second_schedule.generation,
+            &second_schedule.fingerprint,
+            second_persistence,
+        )
+        .expect("current second schedule should start");
+
+    let displaced = second_start
+        .displaced_running_review
+        .expect("second start should displace first running review");
+    assert_eq!(displaced.persistence.run_id(), "first-running");
+    assert!(first_start.running_review.cancellation_token.is_cancelled());
+    assert!(displaced.cancellation_token.is_cancelled());
+    assert_eq!(
+        second_start.running_review.persistence.run_id(),
+        "second-running"
+    );
+    assert!(
+        !second_start
+            .running_review
+            .cancellation_token
+            .is_cancelled()
     );
 }
 
@@ -257,7 +304,7 @@ fn background_auto_review_skips_pending_duplicate_fingerprint() {
 }
 
 #[test]
-fn background_auto_review_skips_duplicate_fingerprint() {
+fn background_auto_review_reschedules_started_worktree_fingerprint() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
     state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
     let schedule = state
@@ -271,9 +318,20 @@ fn background_auto_review_skips_duplicate_fingerprint() {
     );
     state.begin_regular_turn("turn-2".to_string(), Some("sha256:old".to_string()));
 
-    let schedule = state.complete_regular_turn("turn-2", Some("sha256:new".to_string()));
+    let schedule = state
+        .complete_regular_turn("turn-2", Some("sha256:new".to_string()))
+        .expect("started worktree fingerprint should reschedule a future generation");
+    let (pending_persistence, _pending_cwd) =
+        test_background_review_persistence("duplicate-pending");
 
-    assert_eq!(schedule, None);
+    assert!(
+        state.record_pending(
+            schedule.generation,
+            &schedule.fingerprint,
+            pending_persistence,
+        ),
+        "target-aware durable duplicate detection must decide whether a started worktree fingerprint is reusable"
+    );
 }
 
 fn test_background_review_persistence(

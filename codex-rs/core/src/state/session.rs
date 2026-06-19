@@ -38,7 +38,7 @@ pub(crate) struct BackgroundAutoReviewSchedule {
 pub(crate) struct BackgroundAutoReviewSchedulerState {
     active_regular_turns: HashMap<String, BackgroundAutoReviewRegularTurnStart>,
     generation: u64,
-    last_started_fingerprint: Option<String>,
+    last_started_generation: Option<u64>,
     pending_review: Option<BackgroundAutoReviewPending>,
     running_review: Option<BackgroundAutoReviewRunning>,
 }
@@ -198,7 +198,7 @@ impl BackgroundAutoReviewSchedulerState {
         };
         if start_fingerprint.as_deref() == Some(after_fingerprint.as_str())
             || start.generation != self.generation
-            || self.has_pending_or_started_fingerprint(&after_fingerprint)
+            || self.has_pending_fingerprint(&after_fingerprint)
         {
             return None;
         }
@@ -210,16 +210,14 @@ impl BackgroundAutoReviewSchedulerState {
         })
     }
 
-    fn has_pending_or_started_fingerprint(&self, fingerprint: &str) -> bool {
+    fn has_pending_fingerprint(&self, fingerprint: &str) -> bool {
         self.pending_review
             .as_ref()
             .is_some_and(|pending_review| pending_review.fingerprint == fingerprint)
-            || self.last_started_fingerprint.as_deref() == Some(fingerprint)
     }
 
-    pub(crate) fn is_current_schedule(&self, generation: u64, fingerprint: &str) -> bool {
-        self.generation == generation
-            && self.last_started_fingerprint.as_deref() != Some(fingerprint)
+    pub(crate) fn is_current_schedule(&self, generation: u64) -> bool {
+        self.generation == generation && self.last_started_generation != Some(generation)
     }
 
     pub(crate) fn record_pending(
@@ -228,7 +226,7 @@ impl BackgroundAutoReviewSchedulerState {
         fingerprint: &str,
         persistence: ReviewPersistenceContext,
     ) -> bool {
-        if !self.is_current_schedule(generation, fingerprint) {
+        if !self.is_current_schedule(generation) {
             return false;
         }
         self.pending_review = Some(BackgroundAutoReviewPending {
@@ -245,7 +243,7 @@ impl BackgroundAutoReviewSchedulerState {
         fingerprint: &str,
         persistence: ReviewPersistenceContext,
     ) -> Option<BackgroundAutoReviewStart> {
-        if !self.is_current_schedule(generation, fingerprint) {
+        if !self.is_current_schedule(generation) {
             return None;
         }
         if self.pending_review.as_ref().is_some_and(|pending| {
@@ -259,7 +257,7 @@ impl BackgroundAutoReviewSchedulerState {
         }
         let cancellation_token = CancellationToken::new();
         let completion = Arc::new(BackgroundAutoReviewCompletion::new());
-        self.last_started_fingerprint = Some(fingerprint.to_string());
+        self.last_started_generation = Some(generation);
         self.running_review = Some(BackgroundAutoReviewRunning {
             generation,
             cancellation_token: cancellation_token.clone(),
