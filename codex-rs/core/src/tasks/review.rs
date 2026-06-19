@@ -50,6 +50,10 @@ impl ReviewTask {
         }
     }
 
+    pub(crate) fn without_persistence(self) -> Self {
+        Self { persistence: None }
+    }
+
     pub(crate) fn persistence_context(&self) -> Option<ReviewPersistenceContext> {
         self.persistence.clone()
     }

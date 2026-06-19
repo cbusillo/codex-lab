@@ -1,3 +1,4 @@
+use codex_auto_review::ReviewCoordination;
 use codex_auto_review::ReviewLockGuard;
 use codex_core_skills::HostLoadedSkills;
 use codex_protocol::openai_models::ToolMode;
@@ -23,6 +24,11 @@ impl PreparedReviewThread {
         self.task = ReviewTask::with_persistence(persistence);
         self
     }
+
+    fn without_persistence(mut self) -> Self {
+        self.task = self.task.without_persistence();
+        self
+    }
 }
 
 pub(super) enum ReviewPersistenceSpec {
@@ -39,7 +45,7 @@ pub(super) async fn spawn_review_thread(
     resolved: crate::review_prompts::ResolvedReviewRequest,
     persistence: Option<ReviewPersistence>,
 ) {
-    let prepared = prepare_review_thread(
+    let mut prepared = prepare_review_thread(
         Arc::clone(&sess),
         config,
         parent_turn_context,
@@ -52,7 +58,17 @@ pub(super) async fn spawn_review_thread(
     let manual_review_request = prepared.manual_review_request.clone();
     if let Some(review_request) = manual_review_request {
         sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+        sess.cancel_background_auto_review_for_foreground_work()
+            .await;
         sess.clear_connector_selection().await;
+        if let Some(persistence) = prepared.task.persistence_context()
+            && persistence.is_manual()
+        {
+            prepared = match record_started_manual_auto_review(&sess, persistence).await {
+                Some(persistence) => prepared.with_persistence(persistence),
+                None => prepared.without_persistence(),
+            };
+        }
         sess.send_event(
             prepared.turn_context.as_ref(),
             EventMsg::EnteredReviewMode(review_request),
@@ -68,6 +84,33 @@ pub(super) async fn spawn_review_thread(
         )
         .await;
     }
+}
+
+async fn record_started_manual_auto_review(
+    sess: &Arc<Session>,
+    persistence: ReviewPersistenceContext,
+) -> Option<ReviewPersistenceContext> {
+    let codex_home = sess.codex_home().await;
+    let coordination = ReviewCoordination::for_scope(&codex_home, persistence.store_scope());
+    let persistence = match coordination.bump_snapshot_epoch() {
+        Ok(snapshot_epoch) => persistence.with_snapshot_epoch(snapshot_epoch),
+        Err(err) => {
+            tracing::warn!(
+                run_id = %persistence.run_id(),
+                error = %err,
+                "failed to bump manual auto review snapshot epoch"
+            );
+            return None;
+        }
+    };
+    if !persistence.save_pending(&codex_home) {
+        tracing::warn!(
+            run_id = %persistence.run_id(),
+            "failed to persist pending manual auto review run"
+        );
+        return None;
+    }
+    Some(persistence)
 }
 
 pub(super) async fn prepare_review_thread(
