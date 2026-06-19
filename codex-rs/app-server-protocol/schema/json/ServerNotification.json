@@ -549,6 +549,7 @@
         "completed",
         "failed",
         "cancelled",
+        "superseded",
         "skipped"
       ],
       "type": "string"

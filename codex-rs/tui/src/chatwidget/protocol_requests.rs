@@ -213,6 +213,7 @@ fn background_auto_review_status_needs_history(
     match notification.status {
         codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
         | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
         | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => notification
             .error_summary
             .as_deref()

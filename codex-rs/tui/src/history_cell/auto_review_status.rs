@@ -19,6 +19,7 @@ pub(crate) fn new_auto_review_status_cell(
         BackgroundAutoReviewStatus::Completed => ("✔ ".green(), "completed".bold()),
         BackgroundAutoReviewStatus::Failed => ("✗ ".red(), "failed".bold()),
         BackgroundAutoReviewStatus::Cancelled => ("✗ ".yellow(), "cancelled".bold()),
+        BackgroundAutoReviewStatus::Superseded => ("○ ".yellow(), "superseded".bold()),
         BackgroundAutoReviewStatus::Skipped => ("○ ".dim(), "skipped".bold()),
     };
     let mut spans = vec![
@@ -75,6 +76,7 @@ fn push_current_summary_lines(lines: &mut Vec<Line<'static>>, summary: &AutoRevi
         ),
         BackgroundAutoReviewStatus::Failed => ("✗ ".red(), "failed".to_string()),
         BackgroundAutoReviewStatus::Cancelled => ("✗ ".yellow(), "cancelled".to_string()),
+        BackgroundAutoReviewStatus::Superseded => ("○ ".yellow(), "superseded".to_string()),
         BackgroundAutoReviewStatus::Skipped => ("○ ".dim(), "skipped".to_string()),
         BackgroundAutoReviewStatus::Pending => ("○ ".cyan(), "queued".to_string()),
         BackgroundAutoReviewStatus::Running => ("○ ".cyan(), "running".to_string()),
@@ -236,6 +238,7 @@ fn status_label(status: BackgroundAutoReviewStatus) -> &'static str {
         BackgroundAutoReviewStatus::Completed => "completed",
         BackgroundAutoReviewStatus::Failed => "failed",
         BackgroundAutoReviewStatus::Cancelled => "cancelled",
+        BackgroundAutoReviewStatus::Superseded => "superseded",
         BackgroundAutoReviewStatus::Skipped => "skipped",
     }
 }

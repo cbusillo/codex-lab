@@ -150,6 +150,23 @@ impl ReviewPersistenceContext {
         )
     }
 
+    pub(crate) fn save_superseded_with_summary(
+        &self,
+        codex_home: impl AsRef<Path>,
+        error_summary: String,
+        superseded_by: Option<String>,
+    ) -> bool {
+        self.save_run_with_metadata(
+            codex_home,
+            AutoReviewRunStatus::Superseded,
+            /*output*/ None,
+            Some(error_summary),
+            AutoReviewRunFreshness::Superseded,
+            superseded_by,
+            None,
+        )
+    }
+
     pub(crate) fn save_failed(&self, codex_home: impl AsRef<Path>, error_summary: String) -> bool {
         self.save_run(
             codex_home,
@@ -416,6 +433,41 @@ mod tests {
         assert_eq!(
             run.error_summary.as_deref(),
             Some("background auto review was cancelled by request")
+        );
+    }
+
+    #[tokio::test]
+    async fn save_superseded_with_summary_records_supersede_metadata() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "custom-superseded".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+        )
+        .await;
+
+        persistence.save_superseded_with_summary(
+            codex_home.path(),
+            "background auto review was superseded by run replacement-run".to_string(),
+            Some("replacement-run".to_string()),
+        );
+        persistence.save_running(codex_home.path());
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let run = store
+            .load_run("custom-superseded")
+            .expect("load persisted review run");
+        assert_eq!(run.status, AutoReviewRunStatus::Superseded);
+        assert_eq!(run.freshness, AutoReviewRunFreshness::Superseded);
+        assert_eq!(run.superseded_by.as_deref(), Some("replacement-run"));
+        assert!(run.completed_at_unix_secs.is_some());
+        assert_eq!(
+            run.error_summary.as_deref(),
+            Some("background auto review was superseded by run replacement-run")
         );
     }
 

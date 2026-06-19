@@ -1,3 +1,4 @@
+use codex_auto_review::AutoReviewRunFreshness;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewStore;
@@ -1696,6 +1697,200 @@ async fn automatic_background_review_control_cancels_running_run() -> anyhow::Re
     assert_eq!(
         run.error_summary.as_deref(),
         Some("background auto review was cancelled by request")
+    );
+
+    test.codex.submit(Op::Shutdown {}).await?;
+    let _shutdown =
+        wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_control_supersedes_pending_run() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let replacement_run_id = "replacement-pending-run";
+    let call_id = "auto-bg-supersede-pending";
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_supersede_pending.txt\n+pending supersede\n*** End Patch";
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call(call_id, patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let background_review = vec![StreamingSseChunk {
+        gate: None,
+        body: streaming_sse_event(responses::ev_completed("resp-3")),
+    }];
+    let (server, _completions) = start_streaming_sse_server(vec![
+        foreground_tool,
+        foreground_complete,
+        background_review,
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file to review").await?;
+    server.wait_for_request_count(2).await;
+
+    let pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+
+    test.codex
+        .submit(Op::BackgroundAutoReviewControl {
+            run_id: pending_status.run_id.clone(),
+            action: BackgroundAutoReviewControlAction::Supersede,
+            reason: BackgroundAutoReviewControlReason::SupersededByRun {
+                run_id: replacement_run_id.to_string(),
+            },
+        })
+        .await?;
+    let superseded_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Superseded,
+        Some(pending_status.run_id.as_str()),
+    )
+    .await;
+    assert_diff_review_target(&superseded_status.review_target);
+    assert_eq!(
+        superseded_status.error_summary.as_deref(),
+        Some("background auto review was superseded by run replacement-pending-run")
+    );
+    server
+        .assert_request_count_stays(2, Duration::from_millis(2500))
+        .await;
+    let run = load_single_auto_review_run(codex_home.path())?;
+    assert_eq!(run.run_id, pending_status.run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Superseded);
+    assert_eq!(run.freshness, AutoReviewRunFreshness::Superseded);
+    assert_eq!(run.superseded_by.as_deref(), Some(replacement_run_id));
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert!(run.completed_at_unix_secs.is_some());
+    assert_eq!(
+        run.error_summary.as_deref(),
+        Some("background auto review was superseded by run replacement-pending-run")
+    );
+
+    test.codex.submit(Op::Shutdown {}).await?;
+    let _shutdown =
+        wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_control_supersedes_running_run() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let replacement_run_id = "replacement-running-run";
+    let call_id = "auto-bg-supersede-running";
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_supersede_running.txt\n+running supersede\n*** End Patch";
+    let (gate_background_completed_tx, gate_background_completed_rx) = oneshot::channel();
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call(call_id, patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let background_review = vec![
+        StreamingSseChunk {
+            gate: None,
+            body: streaming_sse_event(responses::ev_response_created("resp-3")),
+        },
+        StreamingSseChunk {
+            gate: Some(gate_background_completed_rx),
+            body: streaming_sse_event(responses::ev_completed("resp-3")),
+        },
+    ];
+    let (server, _completions) = start_streaming_sse_server(vec![
+        foreground_tool,
+        foreground_complete,
+        background_review,
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file to review").await?;
+    server.wait_for_request_count(3).await;
+    let pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+    let running_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Running,
+        Some(pending_status.run_id.as_str()),
+    )
+    .await;
+
+    test.codex
+        .submit(Op::BackgroundAutoReviewControl {
+            run_id: running_status.run_id.clone(),
+            action: BackgroundAutoReviewControlAction::Supersede,
+            reason: BackgroundAutoReviewControlReason::SupersededByRun {
+                run_id: replacement_run_id.to_string(),
+            },
+        })
+        .await?;
+    let superseded_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Superseded,
+        Some(running_status.run_id.as_str()),
+    )
+    .await;
+    assert_eq!(
+        superseded_status.error_summary.as_deref(),
+        Some("background auto review was superseded by run replacement-running-run")
+    );
+
+    drop(gate_background_completed_tx);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let run = load_single_auto_review_run(codex_home.path())?;
+    assert_eq!(run.run_id, running_status.run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Superseded);
+    assert_eq!(run.freshness, AutoReviewRunFreshness::Superseded);
+    assert_eq!(run.superseded_by.as_deref(), Some(replacement_run_id));
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert_eq!(
+        run.error_summary.as_deref(),
+        Some("background auto review was superseded by run replacement-running-run")
     );
 
     test.codex.submit(Op::Shutdown {}).await?;

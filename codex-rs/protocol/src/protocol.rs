@@ -3089,6 +3089,7 @@ pub enum BackgroundAutoReviewStatus {
     Completed,
     Failed,
     Cancelled,
+    Superseded,
     Skipped,
 }
 

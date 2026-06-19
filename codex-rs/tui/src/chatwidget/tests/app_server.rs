@@ -348,6 +348,7 @@ async fn live_app_server_background_auto_review_terminal_status_without_reason_s
     for status in [
         BackgroundAutoReviewStatus::Failed,
         BackgroundAutoReviewStatus::Cancelled,
+        BackgroundAutoReviewStatus::Superseded,
         BackgroundAutoReviewStatus::Skipped,
     ] {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -372,6 +373,7 @@ async fn live_app_server_background_auto_review_terminal_status_without_reason_s
 async fn live_app_server_background_auto_review_cancelled_and_skipped_render_error_summary() {
     for (status, expected_status) in [
         (BackgroundAutoReviewStatus::Cancelled, "cancelled"),
+        (BackgroundAutoReviewStatus::Superseded, "superseded"),
         (BackgroundAutoReviewStatus::Skipped, "skipped"),
     ] {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
