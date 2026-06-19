@@ -28,30 +28,48 @@ use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
+use codex_auto_review::ReviewLockGuard;
 use codex_features::Feature;
 use codex_protocol::user_input::UserInput;
 
 use super::SessionTask;
 use super::SessionTaskContext;
 
-#[derive(Clone)]
 pub(crate) struct ReviewTask {
     persistence: Option<ReviewPersistenceContext>,
+    review_lock_guard: Option<ReviewLockGuard>,
 }
 
 impl ReviewTask {
     pub(crate) fn new() -> Self {
-        Self { persistence: None }
+        Self {
+            persistence: None,
+            review_lock_guard: None,
+        }
     }
 
     pub(crate) fn with_persistence(persistence: ReviewPersistenceContext) -> Self {
         Self {
             persistence: Some(persistence),
+            review_lock_guard: None,
         }
     }
 
     pub(crate) fn without_persistence(self) -> Self {
-        Self { persistence: None }
+        Self {
+            persistence: None,
+            review_lock_guard: self.review_lock_guard,
+        }
+    }
+
+    pub(crate) fn replace_persistence(mut self, persistence: ReviewPersistenceContext) -> Self {
+        self.persistence = Some(persistence);
+        self
+    }
+
+    pub(crate) fn with_review_lock(mut self, review_lock_guard: ReviewLockGuard) -> Self {
+        self.review_lock_guard = Some(review_lock_guard);
+        self
     }
 
     pub(crate) fn persistence_context(&self) -> Option<ReviewPersistenceContext> {

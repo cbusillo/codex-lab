@@ -156,34 +156,6 @@ impl AutoReviewStore {
         I: IntoIterator,
         I::Item: AsRef<str>,
     {
-        self.reconcile_orphaned_in_flight_matching(live_run_ids, now_unix_secs, |_| true)
-    }
-
-    pub fn reconcile_orphaned_background_in_flight<I>(
-        &self,
-        live_run_ids: I,
-        now_unix_secs: i64,
-    ) -> Result<usize>
-    where
-        I: IntoIterator,
-        I::Item: AsRef<str>,
-    {
-        self.reconcile_orphaned_in_flight_matching(live_run_ids, now_unix_secs, |run| {
-            run.source == AutoReviewRunSource::Background
-        })
-    }
-
-    fn reconcile_orphaned_in_flight_matching<I, F>(
-        &self,
-        live_run_ids: I,
-        now_unix_secs: i64,
-        should_reconcile: F,
-    ) -> Result<usize>
-    where
-        I: IntoIterator,
-        I::Item: AsRef<str>,
-        F: Fn(&AutoReviewRun) -> bool,
-    {
         let live_run_ids = live_run_ids
             .into_iter()
             .map(|run_id| run_id.as_ref().to_string())
@@ -192,9 +164,6 @@ impl AutoReviewStore {
         let mut changed = Vec::new();
         for run in &mut index.runs {
             if !run.status.is_in_flight() {
-                continue;
-            }
-            if !should_reconcile(run) {
                 continue;
             }
             if live_run_ids.contains(&run.run_id) {
