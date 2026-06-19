@@ -431,6 +431,53 @@ async fn review_op_with_persistence_writes_failed_run_without_review_output() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_op_with_persistence_aborts_when_manual_review_lock_is_held() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let cwd = Arc::new(TempDir::new()?);
+    let cwd_path = AbsolutePathBuf::try_from(cwd.path().to_path_buf())?;
+    init_git_repo(cwd.path());
+    let _review_lock_guard = ReviewCoordination::for_scope(codex_home.path(), cwd.path())
+        .try_acquire_lock("manual_auto_review:already_running")?
+        .expect("manual review lock should be available");
+
+    let cwd_path_for_config = cwd_path.clone();
+    let codex = new_conversation_for_server(&server, codex_home.clone(), move |config| {
+        config.cwd = cwd_path_for_config;
+    })
+    .await;
+
+    codex
+        .submit(Op::Review {
+            review_request: ReviewRequest {
+                target: ReviewTarget::Custom {
+                    instructions: "should not run without the manual review lock".to_string(),
+                },
+                user_facing_hint: None,
+            },
+            persistence: Some(ReviewPersistence::ManualAutoReview),
+        })
+        .await?;
+
+    let error = wait_for_event(&codex, |ev| matches!(ev, EventMsg::Error(_))).await;
+    match error {
+        EventMsg::Error(error) => {
+            assert_eq!(error.message, "failed to start persisted manual review");
+        }
+        other => panic!("expected Error(..), got {other:?}"),
+    }
+    drain_pending_events_without_review_mode(&codex).await;
+    assert!(load_auto_review_runs(codex_home.path())?.is_empty());
+    server.verify().await;
+
+    let _codex_home_guard = codex_home;
+    let _cwd_guard = cwd;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_op_with_persistence_writes_cancelled_run_when_interrupted() {
     skip_if_no_network!();
 
