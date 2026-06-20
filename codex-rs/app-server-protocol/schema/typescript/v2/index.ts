@@ -36,6 +36,7 @@ export type { AskForApproval } from "./AskForApproval";
 export type { AttestationGenerateParams } from "./AttestationGenerateParams";
 export type { AttestationGenerateResponse } from "./AttestationGenerateResponse";
 export type { AutoReviewDecisionSource } from "./AutoReviewDecisionSource";
+export type { AutoReviewDetailKind } from "./AutoReviewDetailKind";
 export type { AutoReviewDiagnosticsSummary } from "./AutoReviewDiagnosticsSummary";
 export type { AutoReviewFindingDetailReadParams } from "./AutoReviewFindingDetailReadParams";
 export type { AutoReviewFindingDetailReadResponse } from "./AutoReviewFindingDetailReadResponse";

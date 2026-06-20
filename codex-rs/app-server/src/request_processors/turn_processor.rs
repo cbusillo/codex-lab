@@ -1487,10 +1487,16 @@ impl TurnRequestProcessor {
         if run_id.is_empty() {
             return Err(invalid_request("runId must not be empty"));
         }
-        let finding_id = finding_id.trim().to_string();
-        if finding_id.is_empty() {
-            return Err(invalid_request("findingId must not be empty"));
-        }
+        let finding_id = match finding_id {
+            Some(finding_id) => {
+                let finding_id = finding_id.trim().to_string();
+                if finding_id.is_empty() {
+                    return Err(invalid_request("findingId must not be empty when provided"));
+                }
+                Some(finding_id)
+            }
+            None => None,
+        };
         let max_bytes = max_bytes.unwrap_or(AUTO_REVIEW_DETAIL_MAX_BYTES);
         if max_bytes == 0 {
             return Err(invalid_request("maxBytes must be positive"));
@@ -1507,21 +1513,33 @@ impl TurnRequestProcessor {
         let run = store
             .load_run(&run_id)
             .map_err(|_| invalid_request("auto review run not found"))?;
-        if !run.can_read_finding_detail(&finding_id, &active_target, &active_review_target) {
-            return Err(invalid_request("auto review finding not found"));
+        let can_read = match finding_id.as_deref() {
+            Some(finding_id) => {
+                run.can_read_finding_detail(finding_id, &active_target, &active_review_target)
+            }
+            None => run.can_read_detail(&active_target, &active_review_target),
+        };
+        if !can_read {
+            return Err(invalid_request("auto review detail not found"));
         }
         let detail = store
-            .finding_detail(&run_id, &finding_id, max_bytes)
+            .detail(&run_id, finding_id.as_deref(), max_bytes)
             .map_err(|err| {
                 invalid_request(format!(
-                    "failed to read auto review finding detail: {}",
+                    "failed to read auto review detail: {}",
                     Self::auto_review_detail_error_message(&err.to_string())
                 ))
             })?;
 
         Ok(AutoReviewFindingDetailReadResponse {
             run_id,
+            detail_kind: match detail.kind {
+                codex_auto_review::AutoReviewDetailKind::Run => AutoReviewDetailKind::Run,
+                codex_auto_review::AutoReviewDetailKind::Finding => AutoReviewDetailKind::Finding,
+            },
             finding_id: detail.finding_id,
+            finding_count: detail.finding_count,
+            omitted_findings: detail.omitted_findings,
             bytes: detail.bytes,
             original_bytes: detail.original_bytes,
             max_bytes: detail.max_bytes,

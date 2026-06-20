@@ -153,7 +153,11 @@
     "AutoReviewFindingDetailReadParams": {
       "properties": {
         "findingId": {
-          "type": "string"
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "maxBytes": {
           "default": null,
@@ -172,7 +176,6 @@
         }
       },
       "required": [
-        "findingId",
         "runId",
         "threadId"
       ],
