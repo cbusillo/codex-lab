@@ -631,6 +631,39 @@ async fn replay_thread_snapshot_replay_only_does_not_fetch_auto_review_summary()
 }
 
 #[tokio::test]
+async fn replay_thread_snapshot_running_auto_review_does_not_fetch_summary() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+
+    app.replay_thread_snapshot(
+        ThreadEventSnapshot {
+            session: Some(test_thread_session(
+                thread_id,
+                test_path_buf("/tmp/project"),
+            )),
+            turns: Vec::new(),
+            events: vec![ThreadBufferedEvent::Notification(
+                auto_review_status_notification(
+                    thread_id,
+                    "run-background-running",
+                    BackgroundAutoReviewStatus::Running,
+                ),
+            )],
+            input_state: None,
+        },
+        /*resume_restored_queue*/ true,
+    );
+
+    for event in drain_app_events(&mut app_event_rx) {
+        assert!(
+            !matches!(event, AppEvent::FetchAutoReviewSummary { .. }),
+            "incomplete auto-review status should not fetch a summary"
+        );
+    }
+}
+
+#[tokio::test]
 async fn replay_thread_snapshot_does_not_refetch_buffered_auto_review_summary() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     while app_event_rx.try_recv().is_ok() {}
