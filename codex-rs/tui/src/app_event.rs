@@ -176,6 +176,13 @@ pub(crate) enum AppEvent {
         result: Result<AutoReviewSummaryReadResponse, String>,
     },
 
+    /// Fetch a native Auto Review summary for a completed review status that was replayed from a
+    /// thread snapshot before the fetched summary was buffered.
+    FetchAutoReviewSummary {
+        thread_id: ThreadId,
+        run_id: String,
+    },
+
     /// Persist a submitted prompt in the cross-session message history.
     AppendMessageHistoryEntry {
         thread_id: ThreadId,

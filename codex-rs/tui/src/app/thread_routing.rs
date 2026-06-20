@@ -1345,11 +1345,23 @@ impl App {
             self.chat_widget
                 .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshot);
         }
+        let replayed_auto_review_summaries = snapshot
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, .. } => Some(run_id.clone()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         for event in snapshot.events {
             if suppress_replay_notices && replay_filter::event_is_notice(&event) {
                 continue;
             }
-            self.handle_thread_event_replay(event);
+            self.handle_thread_event_replay(
+                event,
+                &replayed_auto_review_summaries,
+                /*fetch_missing_auto_review_summaries*/ resume_restored_queue,
+            );
         }
         if should_buffer_replay {
             self.app_event_tx
@@ -1477,11 +1489,23 @@ impl App {
         }
     }
 
-    pub(super) fn handle_thread_event_replay(&mut self, event: ThreadBufferedEvent) {
+    pub(super) fn handle_thread_event_replay(
+        &mut self,
+        event: ThreadBufferedEvent,
+        replayed_auto_review_summaries: &HashSet<String>,
+        fetch_missing_auto_review_summaries: bool,
+    ) {
         match event {
-            ThreadBufferedEvent::Notification(notification) => self
-                .chat_widget
-                .handle_server_notification(notification, Some(ReplayKind::ThreadSnapshot)),
+            ThreadBufferedEvent::Notification(notification) => {
+                if fetch_missing_auto_review_summaries {
+                    self.maybe_fetch_replayed_auto_review_summary(
+                        &notification,
+                        replayed_auto_review_summaries,
+                    );
+                }
+                self.chat_widget
+                    .handle_server_notification(notification, Some(ReplayKind::ThreadSnapshot));
+            }
             ThreadBufferedEvent::Request(request) => self
                 .chat_widget
                 .handle_server_request(request, Some(ReplayKind::ThreadSnapshot)),
@@ -1495,6 +1519,32 @@ impl App {
                 self.handle_feedback_thread_event(event);
             }
         }
+    }
+
+    fn maybe_fetch_replayed_auto_review_summary(
+        &mut self,
+        notification: &ServerNotification,
+        replayed_auto_review_summaries: &HashSet<String>,
+    ) {
+        let ServerNotification::BackgroundAutoReviewStatusChanged(notification) = notification
+        else {
+            return;
+        };
+        if notification.status != BackgroundAutoReviewStatus::Completed
+            || replayed_auto_review_summaries.contains(&notification.run_id)
+        {
+            return;
+        }
+        let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
+            return;
+        };
+        if !self.try_claim_auto_review_summary_fetch(thread_id, &notification.run_id) {
+            return;
+        }
+        self.app_event_tx.send(AppEvent::FetchAutoReviewSummary {
+            thread_id,
+            run_id: notification.run_id.clone(),
+        });
     }
 
     /// Handles an event emitted by the currently active thread.

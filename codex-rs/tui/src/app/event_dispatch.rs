@@ -373,6 +373,8 @@ impl App {
                 run_id,
                 result,
             } => {
+                self.pending_auto_review_summary_fetches
+                    .remove(&(thread_id, run_id.clone()));
                 if self.primary_thread_id.is_none() || self.primary_thread_id == Some(thread_id) {
                     self.enqueue_primary_thread_auto_review_summary(thread_id, run_id, result)
                         .await?;
@@ -380,6 +382,9 @@ impl App {
                     self.enqueue_thread_auto_review_summary(thread_id, run_id, result)
                         .await?;
                 }
+            }
+            AppEvent::FetchAutoReviewSummary { thread_id, run_id } => {
+                self.spawn_auto_review_summary_fetch(app_server, thread_id, run_id);
             }
             AppEvent::DiffResult(text) => {
                 // Clear the in-progress state in the bottom pane
