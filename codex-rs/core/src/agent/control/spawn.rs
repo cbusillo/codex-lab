@@ -1,5 +1,4 @@
 use super::*;
-use crate::config::AgentRoleBackendConfig;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
@@ -14,6 +13,35 @@ fn default_agent_nickname_list() -> Vec<&'static str> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+fn external_command_backend_from_spec(
+    spec: &codex_config::agent_defaults::AgentModelSpec,
+) -> crate::config::ExternalCommandAgentBackendConfig {
+    let defaults = codex_config::agent_defaults::agent_config_from_spec(spec);
+    crate::config::ExternalCommandAgentBackendConfig {
+        command: defaults.command,
+        protocol: crate::config::ExternalCommandProtocol::RawCli,
+        args: defaults.args,
+        args_read_only: mode_args_with_model_args(defaults.args_read_only, spec.model_args),
+        args_write: mode_args_with_model_args(defaults.args_write, spec.model_args),
+        env: defaults.env.unwrap_or_default(),
+        timeout_ms: 30_000,
+    }
+}
+
+fn mode_args_with_model_args(mode_args: Option<Vec<String>>, model_args: &[&str]) -> Vec<String> {
+    let mut args = mode_args.unwrap_or_default();
+    args.extend(model_args.iter().map(|arg| (*arg).to_string()));
+    args
+}
+
+fn active_permission_profile_is_read_only(
+    profile: codex_protocol::models::ActivePermissionProfile,
+) -> bool {
+    profile.id == codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY
+        || profile.extends.as_deref()
+            == Some(codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY)
 }
 
 pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>) -> Vec<String> {
@@ -233,11 +261,23 @@ impl AgentControl {
         };
         let notification_source = session_source.clone();
 
-        if let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = agent_metadata
-            .agent_role
-            .as_deref()
-            .and_then(|role| resolve_role_config(&config, role))
-            .and_then(|role| role.backend.clone())
+        let role_name = agent_metadata.agent_role.as_deref();
+        let role_config =
+            role_name.and_then(|role| crate::agent::role::resolve_role_config(&config, role));
+        let mut resolved_backend = role_config.and_then(|r| r.backend.clone());
+
+        if resolved_backend.is_none()
+            && let Some(name) = role_name
+            && let Some(spec) = codex_config::agent_defaults::agent_model_spec(name)
+        {
+            let backend = external_command_backend_from_spec(spec);
+            resolved_backend = Some(crate::config::AgentRoleBackendConfig::ExternalCommand(
+                backend,
+            ));
+        }
+
+        if let Some(crate::config::AgentRoleBackendConfig::ExternalCommand(backend)) =
+            resolved_backend
         {
             if options.fork_mode.is_some() {
                 return Err(CodexErr::UnsupportedOperation(
@@ -278,6 +318,11 @@ impl AgentControl {
             reservation.commit(agent_metadata.clone());
             self.persist_thread_spawn_edge(parent_thread_id, thread_id)
                 .await;
+            let is_read_only = config
+                .permissions
+                .active_permission_profile()
+                .is_some_and(active_permission_profile_is_read_only);
+
             let launch = ExternalAgentLaunch {
                 thread_id,
                 parent_thread_id,
@@ -292,6 +337,7 @@ impl AgentControl {
                 backend,
                 cwd: config.cwd.to_path_buf(),
                 cancellation_token,
+                is_read_only,
             };
             self.spawn_external_agent_task(launch);
             return Ok(LiveAgent {
@@ -756,5 +802,50 @@ fn external_command_task_message(initial_operation: &Op) -> String {
             .filter(|content| !content.is_empty())
             .unwrap_or_else(|| communication.content.clone()),
         _ => render_input_preview(initial_operation),
+    }
+}
+
+#[cfg(test)]
+mod external_command_backend_tests {
+    use super::*;
+    use codex_protocol::models::ActivePermissionProfile;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn built_in_external_backend_includes_selector_model_args() {
+        let spec = codex_config::agent_defaults::agent_model_spec("code-gpt-5.5")
+            .expect("built-in selector should exist");
+        let backend = external_command_backend_from_spec(spec);
+
+        assert_eq!(backend.command, "coder");
+        assert_eq!(
+            backend.protocol,
+            crate::config::ExternalCommandProtocol::RawCli
+        );
+        assert!(
+            backend
+                .args_read_only
+                .ends_with(&["--model".to_string(), "gpt-5.5".to_string(),])
+        );
+        assert!(
+            backend
+                .args_write
+                .ends_with(&["--model".to_string(), "gpt-5.5".to_string(),])
+        );
+    }
+
+    #[test]
+    fn active_permission_profile_treats_read_only_extension_as_read_only() {
+        assert!(active_permission_profile_is_read_only(
+            ActivePermissionProfile::read_only()
+        ));
+        assert!(active_permission_profile_is_read_only(
+            ActivePermissionProfile {
+                id: "locked-down".to_string(),
+                extends: Some(
+                    codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
+                ),
+            }
+        ));
     }
 }
