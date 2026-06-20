@@ -156,6 +156,19 @@ impl From<SessionProvenanceParams> for CoreSessionProvenance {
     }
 }
 
+impl From<CoreSessionProvenance> for SessionProvenanceParams {
+    fn from(value: CoreSessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
 impl From<SessionProvenance> for SessionProvenanceParams {
     fn from(value: SessionProvenance) -> Self {
         Self {
