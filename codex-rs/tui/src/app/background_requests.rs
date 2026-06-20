@@ -93,7 +93,28 @@ impl App {
         });
     }
 
+    pub(super) fn try_claim_auto_review_summary_fetch(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: &str,
+    ) -> bool {
+        self.pending_auto_review_summary_fetches
+            .insert((thread_id, run_id.to_string()))
+    }
+
     pub(super) fn fetch_auto_review_summary(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        run_id: String,
+    ) {
+        if !self.try_claim_auto_review_summary_fetch(thread_id, &run_id) {
+            return;
+        }
+        self.spawn_auto_review_summary_fetch(app_server, thread_id, run_id);
+    }
+
+    pub(super) fn spawn_auto_review_summary_fetch(
         &mut self,
         app_server: &AppServerSession,
         thread_id: ThreadId,

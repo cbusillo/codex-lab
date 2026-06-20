@@ -35,6 +35,8 @@ use codex_app_server_protocol::AdditionalNetworkPermissions;
 use codex_app_server_protocol::AdditionalPermissionProfile;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::BackgroundAutoReviewStatus;
+use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::FileChangeRequestApprovalParams;
@@ -53,6 +55,7 @@ use codex_app_server_protocol::NonSteerableTurnKind as AppServerNonSteerableTurn
 use codex_app_server_protocol::PatchChangeKind;
 use codex_app_server_protocol::PermissionsRequestApprovalParams;
 use codex_app_server_protocol::RequestId as AppServerRequestId;
+use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SessionSource;
@@ -111,6 +114,14 @@ macro_rules! assert_app_snapshot {
 
 fn test_absolute_path(path: &str) -> AbsolutePathBuf {
     AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
+}
+
+fn drain_app_events(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) -> Vec<AppEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
 }
 
 async fn next_thread_settings_updated(
@@ -544,6 +555,179 @@ async fn replay_thread_snapshot_restores_draft_and_queued_input() {
         assert!(
             !matches!(op, Op::UserTurn { .. }),
             "draft-only replay should not auto-submit queued input"
+        );
+    }
+}
+
+#[tokio::test]
+async fn replay_thread_snapshot_fetches_missing_completed_auto_review_summary() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+
+    app.replay_thread_snapshot(
+        ThreadEventSnapshot {
+            session: Some(test_thread_session(
+                thread_id,
+                test_path_buf("/tmp/project"),
+            )),
+            turns: Vec::new(),
+            events: vec![ThreadBufferedEvent::Notification(
+                auto_review_status_notification(
+                    thread_id,
+                    "run-background-completed",
+                    BackgroundAutoReviewStatus::Completed,
+                ),
+            )],
+            input_state: None,
+        },
+        /*resume_restored_queue*/ true,
+    );
+
+    let emitted_events = drain_app_events(&mut app_event_rx);
+    assert!(
+        emitted_events.iter().any(|event| matches!(
+            event,
+            AppEvent::FetchAutoReviewSummary {
+                thread_id: fetched_thread_id,
+                run_id,
+            } if *fetched_thread_id == thread_id && run_id == "run-background-completed"
+        )),
+        "expected replay to fetch the completed auto-review summary, got {emitted_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn replay_thread_snapshot_replay_only_does_not_fetch_auto_review_summary() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+
+    app.replay_thread_snapshot(
+        ThreadEventSnapshot {
+            session: Some(test_thread_session(
+                thread_id,
+                test_path_buf("/tmp/project"),
+            )),
+            turns: Vec::new(),
+            events: vec![ThreadBufferedEvent::Notification(
+                auto_review_status_notification(
+                    thread_id,
+                    "run-background-completed",
+                    BackgroundAutoReviewStatus::Completed,
+                ),
+            )],
+            input_state: None,
+        },
+        /*resume_restored_queue*/ false,
+    );
+
+    for event in drain_app_events(&mut app_event_rx) {
+        assert!(
+            !matches!(event, AppEvent::FetchAutoReviewSummary { .. }),
+            "replay-only transcript should not fetch auto-review summaries"
+        );
+    }
+}
+
+#[tokio::test]
+async fn replay_thread_snapshot_does_not_refetch_buffered_auto_review_summary() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+
+    app.replay_thread_snapshot(
+        ThreadEventSnapshot {
+            session: Some(test_thread_session(
+                thread_id,
+                test_path_buf("/tmp/project"),
+            )),
+            turns: Vec::new(),
+            events: vec![
+                ThreadBufferedEvent::Notification(auto_review_status_notification(
+                    thread_id,
+                    "run-background-completed",
+                    BackgroundAutoReviewStatus::Completed,
+                )),
+                ThreadBufferedEvent::AutoReviewSummaryLoaded {
+                    run_id: "run-background-completed".to_string(),
+                    result: Err("summary unavailable".to_string()),
+                },
+            ],
+            input_state: None,
+        },
+        /*resume_restored_queue*/ true,
+    );
+
+    for event in drain_app_events(&mut app_event_rx) {
+        assert!(
+            !matches!(event, AppEvent::FetchAutoReviewSummary { .. }),
+            "summary was already buffered; replay should not refetch it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn replay_thread_snapshot_dedupes_pending_auto_review_summary_fetch() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+    let snapshot = ThreadEventSnapshot {
+        session: Some(test_thread_session(
+            thread_id,
+            test_path_buf("/tmp/project"),
+        )),
+        turns: Vec::new(),
+        events: vec![ThreadBufferedEvent::Notification(
+            auto_review_status_notification(
+                thread_id,
+                "run-background-completed",
+                BackgroundAutoReviewStatus::Completed,
+            ),
+        )],
+        input_state: None,
+    };
+
+    app.replay_thread_snapshot(snapshot.clone(), /*resume_restored_queue*/ true);
+    app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ true);
+
+    let fetch_events = drain_app_events(&mut app_event_rx)
+        .into_iter()
+        .filter(|event| matches!(event, AppEvent::FetchAutoReviewSummary { .. }))
+        .count();
+    assert_eq!(fetch_events, 1);
+}
+
+#[tokio::test]
+async fn replay_thread_snapshot_dedupes_live_pending_auto_review_summary_fetch() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+    assert!(app.try_claim_auto_review_summary_fetch(thread_id, "run-background-completed"));
+
+    app.replay_thread_snapshot(
+        ThreadEventSnapshot {
+            session: Some(test_thread_session(
+                thread_id,
+                test_path_buf("/tmp/project"),
+            )),
+            turns: Vec::new(),
+            events: vec![ThreadBufferedEvent::Notification(
+                auto_review_status_notification(
+                    thread_id,
+                    "run-background-completed",
+                    BackgroundAutoReviewStatus::Completed,
+                ),
+            )],
+            input_state: None,
+        },
+        /*resume_restored_queue*/ true,
+    );
+
+    for event in drain_app_events(&mut app_event_rx) {
+        assert!(
+            !matches!(event, AppEvent::FetchAutoReviewSummary { .. }),
+            "live pending summary fetch should suppress replay refetch"
         );
     }
 }
@@ -3815,6 +3999,7 @@ async fn make_test_app() -> App {
         primary_session_configured: None,
         pending_primary_events: VecDeque::new(),
         pending_app_server_requests: PendingAppServerRequests::default(),
+        pending_auto_review_summary_fetches: HashSet::new(),
         pending_startup_thread_start: false,
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
@@ -3883,6 +4068,7 @@ async fn make_test_app_with_channels() -> (
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
+            pending_auto_review_summary_fetches: HashSet::new(),
             pending_startup_thread_start: false,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
@@ -4149,6 +4335,22 @@ fn turn_completed_notification(
             ..test_turn(turn_id, status, Vec::new())
         },
     })
+}
+
+fn auto_review_status_notification(
+    thread_id: ThreadId,
+    run_id: &str,
+    status: BackgroundAutoReviewStatus,
+) -> ServerNotification {
+    ServerNotification::BackgroundAutoReviewStatusChanged(
+        BackgroundAutoReviewStatusChangedNotification {
+            thread_id: thread_id.to_string(),
+            run_id: run_id.to_string(),
+            status,
+            review_target: ReviewTarget::UncommittedChanges,
+            error_summary: None,
+        },
+    )
 }
 
 fn thread_closed_notification(thread_id: ThreadId) -> ServerNotification {
