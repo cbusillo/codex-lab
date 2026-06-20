@@ -14,6 +14,7 @@ use codex_app_server_protocol::GitInfo as ApiGitInfo;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SessionProvenance;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadListCwdFilter;
@@ -33,6 +34,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::GitInfo as CoreGitInfo;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SessionProvenance as CoreSessionProvenance;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use core_test_support::responses;
@@ -170,6 +172,26 @@ fn set_rollout_cwd(path: &Path, cwd: &Path) -> Result<()> {
         ));
     };
     session_meta_line.meta.cwd = cwd.to_path_buf();
+    rollout_line.item = RolloutItem::SessionMeta(session_meta_line);
+    *first_line = serde_json::to_string(&rollout_line)?;
+    fs::write(path, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
+fn set_rollout_session_provenance(path: &Path, provenance: &CoreSessionProvenance) -> Result<()> {
+    let content = fs::read_to_string(path)?;
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let first_line = lines
+        .first_mut()
+        .ok_or_else(|| anyhow::anyhow!("rollout at {} is empty", path.display()))?;
+    let mut rollout_line: RolloutLine = serde_json::from_str(first_line)?;
+    let RolloutItem::SessionMeta(mut session_meta_line) = rollout_line.item else {
+        return Err(anyhow::anyhow!(
+            "rollout at {} does not start with session metadata",
+            path.display()
+        ));
+    };
+    session_meta_line.meta.session_provenance = Some(provenance.clone());
     rollout_line.item = RolloutItem::SessionMeta(session_meta_line);
     *first_line = serde_json::to_string(&rollout_line)?;
     fs::write(path, lines.join("\n") + "\n")?;
@@ -938,6 +960,110 @@ sqlite = true
     .await??;
     let scanned_response = to_response::<ThreadListResponse>(resp)?;
     assert_eq!(scanned_response.data.len(), 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_state_db_only_preserves_session_provenance() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model = "mock-model"
+approval_policy = "never"
+suppress_unstable_features_warning = true
+
+[features]
+sqlite = true
+"#,
+    )?;
+
+    let filename_ts = "2025-01-02T10-00-00";
+    let thread_id = create_fake_rollout(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-02T10:00:00Z",
+        "state db only should preserve provenance",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let core_provenance = CoreSessionProvenance {
+        request_id: Some("req-state-list".to_string()),
+        repository: Some("cbusillo/codex-lab".to_string()),
+        issue_number: Some(126),
+        issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
+        source: Some("github-plan".to_string()),
+        origin: Some("launchplane".to_string()),
+    };
+    set_rollout_session_provenance(
+        rollout_path(codex_home.path(), filename_ts, &thread_id).as_path(),
+        &core_provenance,
+    )?;
+
+    let state_db =
+        codex_state::StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into())
+            .await?;
+    state_db
+        .mark_backfill_complete(/*last_watermark*/ None)
+        .await?;
+    let mut mcp = init_mcp(codex_home.path()).await?;
+
+    let request_id = mcp
+        .send_thread_list_request(codex_app_server_protocol::ThreadListParams {
+            cursor: None,
+            limit: Some(10),
+            sort_key: None,
+            sort_direction: None,
+            model_providers: Some(vec!["mock_provider".to_string()]),
+            source_kinds: None,
+            archived: None,
+            cwd: None,
+            use_state_db_only: false,
+            search_term: None,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let repaired_response = to_response::<ThreadListResponse>(resp)?;
+    assert_eq!(repaired_response.data.len(), 1);
+    assert_eq!(repaired_response.data[0].id, thread_id);
+    assert_eq!(
+        repaired_response.data[0].session_provenance,
+        Some(SessionProvenance::from(core_provenance.clone()))
+    );
+
+    let request_id = mcp
+        .send_thread_list_request(codex_app_server_protocol::ThreadListParams {
+            cursor: None,
+            limit: Some(10),
+            sort_key: None,
+            sort_direction: None,
+            model_providers: Some(vec!["mock_provider".to_string()]),
+            source_kinds: None,
+            archived: None,
+            cwd: None,
+            use_state_db_only: true,
+            search_term: None,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let state_db_only_response = to_response::<ThreadListResponse>(resp)?;
+
+    assert_eq!(state_db_only_response.data.len(), 1);
+    let thread = &state_db_only_response.data[0];
+    assert_eq!(thread.id, thread_id);
+    assert_eq!(
+        thread.session_provenance,
+        Some(SessionProvenance::from(core_provenance))
+    );
 
     Ok(())
 }

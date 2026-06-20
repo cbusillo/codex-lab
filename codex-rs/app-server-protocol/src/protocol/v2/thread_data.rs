@@ -79,22 +79,40 @@ pub enum ThreadSource {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct SessionProvenance {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub issue_number: Option<u64>,
+    #[serde(default)]
+    pub issue_url: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+/// Client-supplied provenance for a thread started by an external orchestrator.
+///
+/// This request shape intentionally keeps nested fields optional so clients can
+/// submit partial descriptive metadata without sending explicit nulls.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SessionProvenanceParams {
     #[ts(optional = nullable)]
     pub request_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub repository: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
+    #[ts(type = "number | null")]
     pub issue_number: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub issue_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub origin: Option<String>,
 }
@@ -114,6 +132,58 @@ impl From<CoreSessionProvenance> for SessionProvenance {
 
 impl From<SessionProvenance> for CoreSessionProvenance {
     fn from(value: SessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<SessionProvenanceParams> for CoreSessionProvenance {
+    fn from(value: SessionProvenanceParams) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<CoreSessionProvenance> for SessionProvenanceParams {
+    fn from(value: CoreSessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<SessionProvenance> for SessionProvenanceParams {
+    fn from(value: SessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<SessionProvenanceParams> for SessionProvenance {
+    fn from(value: SessionProvenanceParams) -> Self {
         Self {
             request_id: value.request_id,
             repository: value.repository,
@@ -191,8 +261,7 @@ pub struct Thread {
     pub thread_source: Option<ThreadSource>,
     /// Optional structured launch provenance supplied by an external agent
     /// orchestrator.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional = nullable)]
+    #[serde(default)]
     pub session_provenance: Option<SessionProvenance>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     pub agent_nickname: Option<String>,

@@ -78,6 +78,7 @@ use codex_login::auth::ExternalAuthRefreshContext;
 use codex_login::auth::ExternalAuthRefreshReason;
 use codex_login::auth::ExternalAuthTokens;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::StateDbHandle;
@@ -270,6 +271,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) state_db: Option<StateDbHandle>,
     pub(crate) config_warnings: Vec<ConfigWarningNotification>,
     pub(crate) session_source: SessionSource,
+    pub(crate) session_provenance: Option<SessionProvenance>,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) installation_id: String,
     pub(crate) rpc_transport: AppServerRpcTransport,
@@ -293,6 +295,7 @@ impl MessageProcessor {
             state_db,
             config_warnings,
             session_source,
+            session_provenance,
             auth_manager,
             installation_id,
             rpc_transport,
@@ -310,10 +313,11 @@ impl MessageProcessor {
         let environment_manager_for_requests = Arc::clone(&environment_manager);
         let goal_service = Arc::new(GoalService::new());
         let thread_manager = Arc::new_cyclic(|thread_manager| {
-            ThreadManager::new(
+            ThreadManager::new_with_session_provenance(
                 config.as_ref(),
                 auth_manager.clone(),
                 session_source,
+                session_provenance,
                 environment_manager,
                 thread_extensions(
                     guardian_agent_spawner(thread_manager.clone()),

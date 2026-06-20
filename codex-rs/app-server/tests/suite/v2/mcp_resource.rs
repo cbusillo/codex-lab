@@ -209,6 +209,7 @@ async fn mcp_resource_read_returns_error_for_unknown_thread() -> Result<()> {
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {

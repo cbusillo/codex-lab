@@ -70,7 +70,7 @@ threadSource: ThreadSource | null,
  * Optional structured launch provenance supplied by an external agent
  * orchestrator.
  */
-sessionProvenance?: SessionProvenance | null,
+sessionProvenance: SessionProvenance | null,
 /**
  * Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
  */

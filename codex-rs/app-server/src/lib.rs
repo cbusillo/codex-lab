@@ -811,6 +811,7 @@ pub async fn run_main_with_transport_options(
             state_db: state_db.clone(),
             config_warnings,
             session_source,
+            session_provenance: None,
             auth_manager,
             installation_id,
             rpc_transport: analytics_rpc_transport(&transport),

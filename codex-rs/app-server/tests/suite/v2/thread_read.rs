@@ -14,6 +14,7 @@ use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SessionProvenance;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
@@ -130,6 +131,57 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
     assert_eq!(thread.git_info, None);
     assert_eq!(thread.turns.len(), 0);
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_read_preserves_session_provenance() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let filename_ts = "2025-01-05T12-00-00";
+    let conversation_id = create_fake_rollout_with_text_elements(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Vec::new(),
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let provenance = SessionProvenance {
+        request_id: Some("req-thread-read".to_string()),
+        repository: Some("cbusillo/codex-lab".to_string()),
+        issue_number: Some(126),
+        issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
+        source: Some("github-plan".to_string()),
+        origin: Some("launchplane".to_string()),
+    };
+    set_session_provenance_on_fake_rollout(
+        rollout_path(codex_home.path(), filename_ts, &conversation_id).as_path(),
+        &provenance,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: conversation_id.clone(),
+            include_turns: false,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread, .. } = to_response::<ThreadReadResponse>(read_resp)?;
+
+    assert_eq!(thread.id, conversation_id);
+    assert_eq!(thread.session_provenance, Some(provenance));
 
     Ok(())
 }
@@ -384,6 +436,7 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {
@@ -450,6 +503,7 @@ async fn thread_read_loaded_include_turns_reads_store_history_without_rollout_pa
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {
@@ -536,6 +590,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {
@@ -1251,6 +1306,29 @@ fn append_user_message(path: &Path, timestamp: &str, text: &str) -> std::io::Res
             }
         })
     )
+}
+
+fn set_session_provenance_on_fake_rollout(
+    path: &Path,
+    provenance: &SessionProvenance,
+) -> Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let mut lines = content.lines();
+    let first_line = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("rollout at {} is empty", path.display()))?;
+    let mut session_meta: Value = serde_json::from_str(first_line)?;
+    session_meta["payload"]["session_provenance"] = serde_json::to_value(provenance)?;
+    let remaining = lines.collect::<Vec<_>>().join("\n");
+
+    let mut updated = serde_json::to_string(&session_meta)?;
+    updated.push('\n');
+    if !remaining.is_empty() {
+        updated.push_str(&remaining);
+        updated.push('\n');
+    }
+    std::fs::write(path, updated)?;
+    Ok(())
 }
 
 fn append_agent_message(path: &Path, timestamp: &str, text: &str) -> anyhow::Result<()> {

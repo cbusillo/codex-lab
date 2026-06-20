@@ -3231,6 +3231,7 @@
       "description": "Structured provenance for a thread started by an external orchestrator.\n\nThese fields are descriptive metadata only. Runtime authorization and product filtering must continue to use server-side policy and `source`.",
       "properties": {
         "issueNumber": {
+          "default": null,
           "format": "uint64",
           "minimum": 0.0,
           "type": [
@@ -3239,30 +3240,35 @@
           ]
         },
         "issueUrl": {
+          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "origin": {
+          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "repository": {
+          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "requestId": {
+          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "source": {
+          "default": null,
           "type": [
             "string",
             "null"
@@ -3630,6 +3636,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "Optional structured launch provenance supplied by an external agent orchestrator."
         },
         "source": {
