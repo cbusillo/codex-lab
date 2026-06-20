@@ -6,7 +6,7 @@ import type { JsonValue } from "../serde_json/JsonValue";
 import type { ApprovalsReviewer } from "./ApprovalsReviewer";
 import type { AskForApproval } from "./AskForApproval";
 import type { SandboxMode } from "./SandboxMode";
-import type { SessionProvenance } from "./SessionProvenance";
+import type { SessionProvenanceParams } from "./SessionProvenanceParams";
 import type { ThreadSource } from "./ThreadSource";
 import type { ThreadStartSource } from "./ThreadStartSource";
 
@@ -21,4 +21,4 @@ threadSource?: ThreadSource | null, /**
  * Optional client-supplied launch provenance for externally orchestrated
  * sessions. This is descriptive metadata only.
  */
-sessionProvenance?: SessionProvenance | null};
+sessionProvenance?: SessionProvenanceParams | null};

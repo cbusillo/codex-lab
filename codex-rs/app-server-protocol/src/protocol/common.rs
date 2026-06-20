@@ -2530,6 +2530,7 @@ mod tests {
                         "cliVersion": "0.0.0",
                         "source": "exec",
                         "threadSource": null,
+                        "sessionProvenance": null,
                         "agentNickname": null,
                         "agentRole": null,
                         "gitInfo": null,

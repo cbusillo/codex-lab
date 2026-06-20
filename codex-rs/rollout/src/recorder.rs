@@ -1748,7 +1748,7 @@ fn thread_item_from_state_metadata(item: codex_state::ThreadMetadata) -> ThreadI
                 .or_else(|_| serde_json::from_value(Value::String(item.source)))
                 .unwrap_or(SessionSource::Unknown),
         ),
-        session_provenance: None,
+        session_provenance: item.session_provenance,
         parent_thread_id: None,
         agent_nickname: item.agent_nickname,
         agent_role: item.agent_role,

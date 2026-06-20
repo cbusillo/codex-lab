@@ -15,6 +15,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SessionProvenance;
+use codex_app_server_protocol::SessionProvenanceParams;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -206,7 +207,7 @@ async fn thread_start_preserves_session_provenance() -> Result<()> {
     let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
-    let provenance = SessionProvenance {
+    let provenance = SessionProvenanceParams {
         request_id: Some("agent-session-123".to_string()),
         repository: Some("cbusillo/codex-lab".to_string()),
         issue_number: Some(48),
@@ -228,7 +229,10 @@ async fn thread_start_preserves_session_provenance() -> Result<()> {
     .await??;
     let resp_result = resp.result.clone();
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(resp)?;
-    assert_eq!(thread.session_provenance, Some(provenance.clone()));
+    assert_eq!(
+        thread.session_provenance,
+        Some(SessionProvenance::from(provenance.clone()))
+    );
     assert_eq!(
         resp_result
             .get("thread")
@@ -251,7 +255,10 @@ async fn thread_start_preserves_session_provenance() -> Result<()> {
             )?;
         }
     };
-    assert_eq!(started.thread.session_provenance, Some(provenance));
+    assert_eq!(
+        started.thread.session_provenance,
+        Some(SessionProvenance::from(provenance))
+    );
 
     Ok(())
 }

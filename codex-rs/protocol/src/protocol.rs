@@ -2486,6 +2486,29 @@ impl InitialHistory {
             .and_then(|meta| meta.thread_source)
     }
 
+    pub fn get_resumed_session_provenance(&self) -> Option<SessionProvenance> {
+        self.get_resumed_session_meta()
+            .and_then(|meta| meta.session_provenance.clone())
+    }
+
+    pub fn get_initial_session_provenance(&self) -> Option<SessionProvenance> {
+        match self {
+            InitialHistory::New | InitialHistory::Cleared => None,
+            InitialHistory::Resumed(resumed) => {
+                resumed.history.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta_line) => {
+                        meta_line.meta.session_provenance.clone()
+                    }
+                    _ => None,
+                })
+            }
+            InitialHistory::Forked(items) => items.iter().find_map(|item| match item {
+                RolloutItem::SessionMeta(meta_line) => meta_line.meta.session_provenance.clone(),
+                _ => None,
+            }),
+        }
+    }
+
     pub fn get_resumed_parent_thread_id(&self) -> Option<ThreadId> {
         self.get_resumed_session_meta()
             .and_then(|meta| meta.parent_thread_id)

@@ -256,6 +256,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {

@@ -212,6 +212,7 @@ pub(crate) struct ThreadManagerState {
     thread_store: Arc<dyn ThreadStore>,
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     session_source: SessionSource,
+    session_provenance: Option<SessionProvenance>,
     installation_id: String,
     analytics_events_client: Option<AnalyticsEventsClient>,
     state_db: Option<StateDbHandle>,
@@ -265,6 +266,35 @@ impl ThreadManager {
         installation_id: String,
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
     ) -> Self {
+        Self::new_with_session_provenance(
+            config,
+            auth_manager,
+            session_source,
+            /*session_provenance*/ None,
+            environment_manager,
+            extensions,
+            analytics_events_client,
+            thread_store,
+            state_db,
+            installation_id,
+            attestation_provider,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_session_provenance(
+        config: &Config,
+        auth_manager: Arc<AuthManager>,
+        session_source: SessionSource,
+        session_provenance: Option<SessionProvenance>,
+        environment_manager: Arc<EnvironmentManager>,
+        extensions: Arc<ExtensionRegistry<Config>>,
+        analytics_events_client: Option<AnalyticsEventsClient>,
+        thread_store: Arc<dyn ThreadStore>,
+        state_db: Option<StateDbHandle>,
+        installation_id: String,
+        attestation_provider: Option<Arc<dyn AttestationProvider>>,
+    ) -> Self {
         let codex_home = config.codex_home.clone();
         let restriction_product = session_source.restriction_product();
         let (thread_created_tx, _) = broadcast::channel(THREAD_CREATED_CHANNEL_CAPACITY);
@@ -292,6 +322,7 @@ impl ThreadManager {
                 attestation_provider,
                 auth_manager,
                 session_source,
+                session_provenance,
                 installation_id,
                 analytics_events_client,
                 state_db,
@@ -393,6 +424,7 @@ impl ThreadManager {
                 attestation_provider: None,
                 auth_manager,
                 session_source: SessionSource::Exec,
+                session_provenance: None,
                 installation_id,
                 analytics_events_client: None,
                 state_db,
@@ -601,7 +633,10 @@ impl ThreadManager {
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         let session_source = options.session_source.unwrap_or(resumed_session_source);
-        let session_provenance = options.session_provenance;
+        let session_provenance = options
+            .session_provenance
+            .or_else(|| options.initial_history.get_initial_session_provenance())
+            .or_else(|| self.state.session_provenance.clone());
         let thread_source = options.thread_source.or(resumed_thread_source);
         Box::pin(self.state.spawn_thread_with_source(
             options.config,
@@ -692,13 +727,14 @@ impl ThreadManager {
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        let session_provenance = initial_history.get_resumed_session_provenance();
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
             auth_manager,
             self.agent_control(),
             session_source,
-            /*session_provenance*/ None,
+            session_provenance,
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
             thread_source,
@@ -754,13 +790,14 @@ impl ThreadManager {
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        let session_provenance = initial_history.get_resumed_session_provenance();
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
             auth_manager,
             self.agent_control(),
             session_source,
-            /*session_provenance*/ None,
+            session_provenance,
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
             thread_source,
@@ -1100,7 +1137,7 @@ impl ThreadManagerState {
             config,
             agent_control,
             self.session_source.clone(),
-            /*session_provenance*/ None,
+            self.session_provenance.clone(),
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
             /*thread_source*/ None,
@@ -1167,13 +1204,14 @@ impl ThreadManagerState {
         let environments =
             default_thread_environment_selections(self.environment_manager.as_ref(), &config.cwd);
         let thread_source = initial_history.get_resumed_thread_source();
+        let session_provenance = initial_history.get_resumed_session_provenance();
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
             Arc::clone(&self.auth_manager),
             agent_control,
             session_source,
-            /*session_provenance*/ None,
+            session_provenance,
             parent_thread_id,
             /*forked_from_thread_id*/ None,
             thread_source,
@@ -1205,13 +1243,14 @@ impl ThreadManagerState {
         let environments = environments.unwrap_or_else(|| {
             default_thread_environment_selections(self.environment_manager.as_ref(), &config.cwd)
         });
+        let session_provenance = initial_history.get_initial_session_provenance();
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
             Arc::clone(&self.auth_manager),
             agent_control,
             session_source,
-            /*session_provenance*/ None,
+            session_provenance,
             parent_thread_id,
             forked_from_thread_id,
             thread_source,
@@ -1243,13 +1282,16 @@ impl ThreadManagerState {
         environments: Vec<TurnEnvironmentSelection>,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        let session_provenance = initial_history
+            .get_initial_session_provenance()
+            .or_else(|| self.session_provenance.clone());
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
             auth_manager,
             agent_control,
             self.session_source.clone(),
-            /*session_provenance*/ None,
+            session_provenance,
             parent_thread_id,
             forked_from_thread_id,
             thread_source,

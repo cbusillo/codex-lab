@@ -8,4 +8,4 @@
  * These fields are descriptive metadata only. Runtime authorization and
  * product filtering must continue to use server-side policy and `source`.
  */
-export type SessionProvenance = { requestId?: string | null, repository?: string | null, issueNumber?: bigint | null, issueUrl?: string | null, source?: string | null, origin?: string | null, };
+export type SessionProvenance = { requestId: string | null, repository: string | null, issueNumber: number | null, issueUrl: string | null, source: string | null, origin: string | null, };

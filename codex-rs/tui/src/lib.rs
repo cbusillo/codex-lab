@@ -623,6 +623,7 @@ where
         environment_manager,
         config_warnings,
         session_source: agent_session_env::startup_session_source(),
+        session_provenance: agent_session_env::session_provenance_from_agent_env(),
         enable_codex_api_key_env: false,
         client_name: "codex-tui".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -2106,6 +2107,7 @@ mod tests {
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_config::config_toml::ProjectConfig;
     use codex_protocol::protocol::Product;
+    use codex_protocol::protocol::SessionProvenance;
     use codex_protocol::protocol::SessionSource;
     use pretty_assertions::assert_eq;
     use serial_test::serial;
@@ -2971,6 +2973,68 @@ mod tests {
                 assert_eq!(
                     args.session_source,
                     codex_protocol::protocol::SessionSource::Custom("launchplane".to_string())
+                );
+                async { Err(std::io::Error::other("stop after inspecting startup args")) }
+            },
+        )
+        .await;
+
+        assert!(
+            saw_start_args.load(Ordering::SeqCst),
+            "embedded app-server start args should be constructed"
+        );
+        match result {
+            Ok(_) => panic!("startup should stop after inspecting args"),
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn embedded_app_server_startup_passes_agent_session_provenance() -> color_eyre::Result<()>
+    {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let saw_start_args = Arc::new(AtomicBool::new(false));
+        let saw_start_args_for_closure = Arc::clone(&saw_start_args);
+        let guard = AgentSessionEnvGuard::clear();
+        unsafe {
+            std::env::set_var("AGENT_SESSION_ORIGIN", "launchplane");
+            std::env::set_var("AGENT_SESSION_REQUEST_ID", "every-code-request-123");
+            std::env::set_var("AGENT_SESSION_REPOSITORY", "cbusillo/codex-lab");
+            std::env::set_var("AGENT_SESSION_ISSUE_NUMBER", "126");
+            std::env::set_var(
+                "AGENT_SESSION_ISSUE_URL",
+                "https://github.com/cbusillo/codex-lab/issues/126",
+            );
+        }
+        let result = start_embedded_app_server_with(
+            Arg0DispatchPaths::default(),
+            config,
+            Vec::new(),
+            LoaderOverrides::default(),
+            /*strict_config*/ false,
+            CloudConfigBundleLoader::default(),
+            codex_feedback::CodexFeedback::new(),
+            /*log_db*/ None,
+            /*state_db*/ None,
+            Arc::new(EnvironmentManager::default_for_tests()),
+            move |args| {
+                let _guard = guard;
+                saw_start_args_for_closure.store(true, Ordering::SeqCst);
+                assert_eq!(
+                    args.session_provenance,
+                    Some(SessionProvenance {
+                        request_id: Some("every-code-request-123".to_string()),
+                        repository: Some("cbusillo/codex-lab".to_string()),
+                        issue_number: Some(126),
+                        issue_url: Some(
+                            "https://github.com/cbusillo/codex-lab/issues/126".to_string(),
+                        ),
+                        source: None,
+                        origin: Some("launchplane".to_string()),
+                    })
                 );
                 async { Err(std::io::Error::other("stop after inspecting startup args")) }
             },

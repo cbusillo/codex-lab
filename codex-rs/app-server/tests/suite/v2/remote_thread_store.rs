@@ -84,6 +84,7 @@ async fn thread_start_with_non_local_thread_store_does_not_create_local_persiste
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {

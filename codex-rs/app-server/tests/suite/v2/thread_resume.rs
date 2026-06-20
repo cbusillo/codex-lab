@@ -28,6 +28,7 @@ use codex_app_server_protocol::PatchChangeKind;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::SessionProvenance;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::ThreadGoalClearResponse;
 use codex_app_server_protocol::ThreadGoalSetResponse;
@@ -540,6 +541,32 @@ fn set_thread_source_on_fake_rollout(
     Ok(())
 }
 
+fn set_session_provenance_on_fake_rollout(
+    codex_home: &std::path::Path,
+    filename_ts: &str,
+    thread_id: &str,
+) -> Result<SessionProvenance> {
+    let provenance = SessionProvenance {
+        request_id: Some("agent-session-resume-123".to_string()),
+        repository: Some("cbusillo/codex-lab".to_string()),
+        issue_number: Some(126),
+        issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
+        source: Some("agent-session".to_string()),
+        origin: Some("launchplane".to_string()),
+    };
+    let path = rollout_path(codex_home, filename_ts, thread_id);
+    let contents = std::fs::read_to_string(&path)?;
+    let mut lines = contents.lines();
+    let session_meta = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("fake rollout missing session meta"))?;
+    let mut session_meta: serde_json::Value = serde_json::from_str(session_meta)?;
+    session_meta["payload"]["session_provenance"] = serde_json::to_value(&provenance)?;
+    let remaining = lines.collect::<Vec<_>>().join("\n");
+    std::fs::write(&path, format!("{session_meta}\n{remaining}\n"))?;
+    Ok(provenance)
+}
+
 #[tokio::test]
 async fn thread_resume_returns_rollout_history() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
@@ -562,6 +589,11 @@ async fn thread_resume_returns_rollout_history() -> Result<()> {
             .collect(),
         Some("mock_provider"),
         /*git_info*/ None,
+    )?;
+    let provenance = set_session_provenance_on_fake_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        &conversation_id,
     )?;
 
     let mut mcp = TestAppServer::new(codex_home.path()).await?;
@@ -587,6 +619,7 @@ async fn thread_resume_returns_rollout_history() -> Result<()> {
     assert_eq!(thread.cwd, test_absolute_path("/"));
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
+    assert_eq!(thread.session_provenance, Some(provenance));
     assert_eq!(thread.git_info, None);
     assert_eq!(thread.status, ThreadStatus::Idle);
 
