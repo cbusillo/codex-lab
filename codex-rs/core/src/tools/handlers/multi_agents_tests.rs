@@ -3457,6 +3457,7 @@ printf '%s\n' '{"status":"completed","final_message":"external done"}'
                     command: helper_path.display().to_string(),
                     args: Vec::new(),
                     timeout_ms: 5_000,
+                    ..Default::default()
                 },
             )),
         },
@@ -3631,6 +3632,7 @@ async fn multi_agent_v2_external_command_persists_spawn_graph_edge() {
                     command: helper_path.display().to_string(),
                     args: Vec::new(),
                     timeout_ms: 60_000,
+                    ..Default::default()
                 },
             )),
         },
@@ -3754,6 +3756,7 @@ async fn multi_agent_v2_external_command_shutdown_keeps_spawn_edge_open() {
                     command: helper_path.display().to_string(),
                     args: Vec::new(),
                     timeout_ms: 60_000,
+                    ..Default::default()
                 },
             )),
         },
@@ -3864,6 +3867,7 @@ async fn multi_agent_v2_external_command_close_wakes_parent_wait() {
                     command: helper_path.display().to_string(),
                     args: Vec::new(),
                     timeout_ms: 60_000,
+                    ..Default::default()
                 },
             )),
         },

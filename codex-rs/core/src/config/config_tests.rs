@@ -15,6 +15,7 @@ use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ExperimentalRequestUserInput;
 use codex_config::config_toml::ExternalCommandAgentBackendToml;
+use codex_config::config_toml::ExternalCommandProtocolToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeConfig;
 use codex_config::config_toml::RealtimeToml;
@@ -7052,7 +7053,18 @@ async fn agent_role_external_command_backend_loads_from_config_toml() -> std::io
                     backend: Some(AgentRoleBackendToml::ExternalCommand(
                         ExternalCommandAgentBackendToml {
                             command: "/bin/echo".to_string(),
+                            protocol: ExternalCommandProtocolToml::RawCli,
                             args: Some(vec!["ok".to_string()]),
+                            args_read_only: Some(vec!["--read-only".to_string()]),
+                            args_write: Some(vec!["--write".to_string()]),
+                            env: Some(
+                                BTreeMap::from([(
+                                    "EXTERNAL_AGENT_ENV".to_string(),
+                                    "enabled".to_string(),
+                                )])
+                                .into_iter()
+                                .collect(),
+                            ),
                             timeout_ms: Some(1234),
                         },
                     )),
@@ -7078,7 +7090,11 @@ async fn agent_role_external_command_backend_loads_from_config_toml() -> std::io
         Some(AgentRoleBackendConfig::ExternalCommand(
             ExternalCommandAgentBackendConfig {
                 command: "/bin/echo".to_string(),
+                protocol: crate::config::ExternalCommandProtocol::RawCli,
                 args: vec!["ok".to_string()],
+                args_read_only: vec!["--read-only".to_string()],
+                args_write: vec!["--write".to_string()],
+                env: HashMap::from([("EXTERNAL_AGENT_ENV".to_string(), "enabled".to_string(),)]),
                 timeout_ms: 1234,
             },
         ))
@@ -7105,7 +7121,11 @@ async fn agent_role_external_command_backend_defaults_optional_fields() -> std::
                     backend: Some(AgentRoleBackendToml::ExternalCommand(
                         ExternalCommandAgentBackendToml {
                             command: "/bin/echo".to_string(),
+                            protocol: ExternalCommandProtocolToml::default(),
                             args: None,
+                            args_read_only: None,
+                            args_write: None,
+                            env: None,
                             timeout_ms: None,
                         },
                     )),
@@ -7130,8 +7150,7 @@ async fn agent_role_external_command_backend_defaults_optional_fields() -> std::
         Some(AgentRoleBackendConfig::ExternalCommand(
             ExternalCommandAgentBackendConfig {
                 command: "/bin/echo".to_string(),
-                args: Vec::new(),
-                timeout_ms: 30_000,
+                ..Default::default()
             },
         ))
     );
@@ -7174,7 +7193,11 @@ async fn agent_role_external_command_backend_rejects_invalid_values() -> std::io
                         backend: Some(AgentRoleBackendToml::ExternalCommand(
                             ExternalCommandAgentBackendToml {
                                 command: command.to_string(),
+                                protocol: ExternalCommandProtocolToml::default(),
                                 args: None,
+                                args_read_only: None,
+                                args_write: None,
+                                env: None,
                                 timeout_ms,
                             },
                         )),
@@ -7220,7 +7243,11 @@ developer_instructions = "External command role"
 [backend]
 type = "external_command"
 command = "/bin/echo"
+protocol = "raw_cli"
 args = ["ok"]
+args_read_only = ["--read-only"]
+args_write = ["--write"]
+env = { EXTERNAL_AGENT_ENV = "enabled" }
 timeout_ms = 4321
 "#,
     )
@@ -7255,7 +7282,11 @@ config_file = "./agents/external.toml"
         Some(AgentRoleBackendConfig::ExternalCommand(
             ExternalCommandAgentBackendConfig {
                 command: "/bin/echo".to_string(),
+                protocol: crate::config::ExternalCommandProtocol::RawCli,
                 args: vec!["ok".to_string()],
+                args_read_only: vec!["--read-only".to_string()],
+                args_write: vec!["--write".to_string()],
+                env: HashMap::from([("EXTERNAL_AGENT_ENV".to_string(), "enabled".to_string(),)]),
                 timeout_ms: 4321,
             },
         ))

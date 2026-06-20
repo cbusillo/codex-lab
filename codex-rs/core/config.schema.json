@@ -18,10 +18,40 @@
               },
               "type": "array"
             },
+            "args_read_only": {
+              "description": "Arguments appended when the agent is running in read-only mode.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "args_write": {
+              "description": "Arguments appended when the agent is running in workspace-write mode.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "command": {
               "description": "Command to execute for each spawned external agent.",
               "minLength": 1,
               "type": "string"
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Environment variables to set for the spawned agent.",
+              "type": "object"
+            },
+            "protocol": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ExternalCommandProtocolToml"
+                }
+              ],
+              "default": "json",
+              "description": "Protocol to communicate with the external agent."
             },
             "timeout_ms": {
               "description": "Maximum process runtime in milliseconds.",
@@ -854,6 +884,13 @@
         }
       },
       "type": "object"
+    },
+    "ExternalCommandProtocolToml": {
+      "enum": [
+        "json",
+        "raw_cli"
+      ],
+      "type": "string"
     },
     "ExternalConfigMigrationPrompts": {
       "additionalProperties": false,
