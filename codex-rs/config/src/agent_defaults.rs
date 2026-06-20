@@ -330,7 +330,11 @@ pub fn agent_config_from_spec(spec: &AgentModelSpec) -> AgentConfigDefaults {
     AgentConfigDefaults {
         name: spec.slug.to_string(),
         command: spec.cli.to_string(),
-        args: Vec::new(),
+        args: spec
+            .model_args
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect(),
         read_only: false,
         enabled: spec.is_enabled(),
         description: None,
@@ -352,8 +356,9 @@ fn some_args(args: &[&str]) -> Option<Vec<String>> {
 pub fn default_params_for(name: &str, read_only: bool) -> Vec<String> {
     agent_model_spec(name)
         .map(|spec| {
-            spec.default_args(read_only)
+            spec.model_args
                 .iter()
+                .chain(spec.default_args(read_only).iter())
                 .map(|arg| (*arg).to_string())
                 .collect()
         })
@@ -422,7 +427,9 @@ pub fn model_guide_markdown_with_custom(
 
         saw_custom = true;
         let line = custom_model_guide_line(slug, trimmed);
-        let key = slug.to_ascii_lowercase();
+        let key = agent_model_spec(slug)
+            .map(|spec| spec.slug.to_ascii_lowercase())
+            .unwrap_or_else(|| slug.to_ascii_lowercase());
         if let Some(idx) = positions.get(&key).copied() {
             lines[idx] = line;
         } else {

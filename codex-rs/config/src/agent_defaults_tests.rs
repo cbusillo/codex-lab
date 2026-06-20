@@ -3,8 +3,39 @@ use pretty_assertions::assert_eq;
 
 #[test]
 fn cloud_defaults_are_empty_both_modes() {
-    assert!(default_params_for("cloud", /*read_only*/ true).is_empty());
-    assert!(default_params_for("cloud", /*read_only*/ false).is_empty());
+    assert_eq!(
+        default_params_for("cloud", /*read_only*/ true),
+        vec!["--model", "gpt-5.1-codex-max"]
+    );
+    assert_eq!(
+        default_params_for("cloud", /*read_only*/ false),
+        vec!["--model", "gpt-5.1-codex-max"]
+    );
+}
+
+#[test]
+fn default_params_include_model_selection_for_builtin_agents() {
+    assert_eq!(
+        default_params_for("claude-opus-4.8", /*read_only*/ true),
+        vec![
+            "--model",
+            "claude-opus-4-8",
+            "--allowedTools",
+            CLAUDE_ALLOWED_TOOLS,
+        ]
+    );
+    assert_eq!(
+        default_params_for("claude-opus-4.8", /*read_only*/ false),
+        vec![
+            "--model",
+            "claude-opus-4-8",
+            "--dangerously-skip-permissions",
+        ]
+    );
+    assert_eq!(
+        default_params_for("qwen3-coder-plus", /*read_only*/ false),
+        vec!["-m", "qwen3-coder-plus", "-y"]
+    );
 }
 
 #[test]
@@ -82,6 +113,20 @@ fn default_configs_use_canonical_selector_commands() {
         .find(|config| config.name == "github-copilot")
         .expect("github-copilot should be enabled by default");
     assert_eq!(copilot.command, "copilot");
+    assert_eq!(
+        copilot.args,
+        Vec::<String>::new(),
+        "copilot keeps its model choice in the CLI default rather than args"
+    );
+
+    let opus = configs
+        .iter()
+        .find(|config| config.name == "claude-opus-4.8")
+        .expect("claude-opus-4.8 should be enabled by default");
+    assert_eq!(
+        opus.args,
+        vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+    );
 }
 
 #[test]
@@ -113,7 +158,7 @@ fn disabled_cloud_selector_is_present_but_not_enabled_by_default() {
 fn custom_model_guide_lines_override_and_extend_builtins() {
     let markdown = model_guide_markdown_with_custom(&[
         AgentConfigDefaults {
-            name: "antigravity".to_string(),
+            name: "google".to_string(),
             command: "agy".to_string(),
             args: Vec::new(),
             read_only: false,
@@ -139,6 +184,7 @@ fn custom_model_guide_lines_override_and_extend_builtins() {
     ])
     .expect("custom descriptions should produce a guide");
 
-    assert!(markdown.contains("- `antigravity`: Custom Google lane."));
+    assert!(markdown.contains("- `google`: Custom Google lane."));
     assert!(markdown.contains("- `local-specialist`: Private local agent."));
+    assert!(!markdown.contains("- `antigravity`: Google/Gemini-family agent via Antigravity CLI; use for Google perspective after consumer Gemini CLI retirement. AGY uses its configured model, not per-run Gemini Pro/Flash flags."));
 }

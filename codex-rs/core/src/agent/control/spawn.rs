@@ -23,17 +23,11 @@ fn external_command_backend_from_spec(
         command: defaults.command,
         protocol: crate::config::ExternalCommandProtocol::RawCli,
         args: defaults.args,
-        args_read_only: mode_args_with_model_args(defaults.args_read_only, spec.model_args),
-        args_write: mode_args_with_model_args(defaults.args_write, spec.model_args),
+        args_read_only: defaults.args_read_only.unwrap_or_default(),
+        args_write: defaults.args_write.unwrap_or_default(),
         env: defaults.env.unwrap_or_default(),
         timeout_ms: 30_000,
     }
-}
-
-fn mode_args_with_model_args(mode_args: Option<Vec<String>>, model_args: &[&str]) -> Vec<String> {
-    let mut args = mode_args.unwrap_or_default();
-    args.extend(model_args.iter().map(|arg| (*arg).to_string()));
-    args
 }
 
 fn active_permission_profile_is_read_only(
@@ -822,15 +816,19 @@ mod external_command_backend_tests {
             backend.protocol,
             crate::config::ExternalCommandProtocol::RawCli
         );
+        assert_eq!(
+            backend.args,
+            vec!["--model".to_string(), "gpt-5.5".to_string()]
+        );
         assert!(
             backend
                 .args_read_only
-                .ends_with(&["--model".to_string(), "gpt-5.5".to_string(),])
+                .ends_with(&["exec".to_string(), "--skip-git-repo-check".to_string(),])
         );
         assert!(
             backend
                 .args_write
-                .ends_with(&["--model".to_string(), "gpt-5.5".to_string(),])
+                .ends_with(&["exec".to_string(), "--skip-git-repo-check".to_string(),])
         );
     }
 
