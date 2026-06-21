@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod auth_account_import;
 pub mod auth_accounts;
 pub mod auth_env_telemetry;
 pub mod auth_profiles;
@@ -47,6 +48,12 @@ pub use auth::logout_with_revoke;
 pub use auth::read_codex_access_token_from_env;
 pub use auth::read_openai_api_key_from_env;
 pub use auth::save_auth;
+pub use auth_account_import::AuthAccountImportReport;
+pub use auth_account_import::AuthAccountImportSkipReason;
+pub use auth_account_import::AuthAccountImportSource;
+pub use auth_account_import::ImportedAuthAccount;
+pub use auth_account_import::SkippedAuthAccountImport;
+pub use auth_account_import::import_auth_accounts_from_auth_homes;
 pub use auth_accounts::StoredAccount;
 pub use auth_accounts::find_account;
 pub use auth_accounts::get_active_account_id;
