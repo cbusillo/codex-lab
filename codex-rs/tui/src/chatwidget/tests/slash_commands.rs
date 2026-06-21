@@ -228,7 +228,7 @@ async fn login_slash_command_lists_selectable_stored_accounts() {
     chat.dispatch_command(SlashCommand::Login);
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
-    assert!(popup.contains("stored@example.com"));
+    assert!(popup.contains("ChatGPT (stored@example.com)"));
     assert!(popup.contains("Active stored account - ChatGPT - account-stored"));
     assert!(popup.contains("Automation key"));
     assert!(popup.contains("Stored account - API key - press Enter to use"));
