@@ -6,6 +6,7 @@ use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthDotJson;
+use codex_login::StoredAccount;
 use codex_login::save_auth;
 use codex_login::token_data::TokenData;
 use pretty_assertions::assert_eq;
@@ -308,6 +309,72 @@ async fn login_slash_command_stored_account_selectable_from_auth_profile() {
             selection,
         }) if selection.account_id == account.id && selection.label == "Automation key"
     );
+}
+
+#[tokio::test]
+async fn login_slash_command_search_excludes_active_stored_account() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-test-secret-value".to_string(),
+        Some("Automation key".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("insert api key account");
+    codex_login::set_active_account_id(&chat.config.codex_home, Some(account.id))
+        .expect("set active account");
+
+    chat.dispatch_command(SlashCommand::Login);
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Automation key"));
+    assert!(popup.contains("Active stored account - API key"));
+
+    for c in "automation".chars() {
+        chat.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!popup.contains("Automation key"));
+    assert!(!popup.contains("Active stored account - API key"));
+}
+
+#[tokio::test]
+async fn login_slash_command_search_excludes_unsupported_stored_account() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let path = chat.config.codex_home.join("auth_accounts.json");
+    let account = StoredAccount {
+        id: "unsupported-agent".to_string(),
+        mode: AuthMode::AgentIdentity,
+        label: Some("Agent identity".to_string()),
+        openai_api_key: None,
+        tokens: None,
+        last_refresh: None,
+        created_at: None,
+        last_used_at: None,
+    };
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&json!({
+            "version": 1,
+            "active_account_id": null,
+            "accounts": [account],
+        }))
+        .expect("serialize accounts file"),
+    )
+    .expect("write accounts file");
+
+    chat.dispatch_command(SlashCommand::Login);
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Agent identity"));
+    assert!(popup.contains("activation unavailable"));
+
+    for c in "agent".chars() {
+        chat.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!popup.contains("Agent identity"));
+    assert!(!popup.contains("activation unavailable"));
 }
 
 #[tokio::test]
