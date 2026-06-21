@@ -227,11 +227,6 @@ pub(crate) enum AppEvent {
         text: String,
     },
 
-    /// Replace the composer contents without submitting.
-    SetComposerText {
-        text: String,
-    },
-
     /// Open the resume picker inside the running TUI session.
     OpenResumePicker,
 

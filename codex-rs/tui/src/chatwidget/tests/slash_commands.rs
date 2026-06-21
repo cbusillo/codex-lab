@@ -196,7 +196,48 @@ async fn login_slash_command_opens_profile_picker() {
     assert!(popup.contains("work"));
     assert!(popup.contains("me@example.com"));
     assert!(popup.contains("Add login..."));
-    assert!(popup.contains("Create a named login profile"));
+    assert!(popup.contains("Open ChatGPT sign-in for a new login"));
+}
+
+#[tokio::test]
+async fn login_slash_command_add_selection_starts_profile_login() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.dispatch_command(SlashCommand::Login);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAuthProfile {
+            selection: AuthProfileSelection::Named {
+                profile_name,
+                login_after_switch,
+            },
+        }) if profile_name == "account" && login_after_switch
+    );
+}
+
+#[tokio::test]
+async fn login_slash_command_add_selection_avoids_existing_profile_name() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    codex_login::record_auth_profile_login(&chat.config.codex_home, "account", None, None)
+        .expect("record profile login");
+
+    chat.dispatch_command(SlashCommand::Login);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAuthProfile {
+            selection: AuthProfileSelection::Named {
+                profile_name,
+                login_after_switch,
+            },
+        }) if profile_name == "account-2" && login_after_switch
+    );
 }
 
 #[tokio::test]

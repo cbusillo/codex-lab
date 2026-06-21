@@ -61,10 +61,6 @@ impl App {
                 )
                 .await;
             }
-            AppEvent::SetComposerText { text } => {
-                self.chat_widget
-                    .set_composer_text(text, Vec::new(), Vec::new());
-            }
             AppEvent::OpenResumePicker => {
                 let picker_app_server = match crate::start_app_server_for_picker(
                     &self.config,
