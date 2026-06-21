@@ -1087,19 +1087,41 @@ impl App {
         for pending_event in pending {
             match pending_event {
                 ThreadBufferedEvent::Notification(notification) => {
-                    self.enqueue_thread_notification(thread_id, notification)
-                        .await?;
+                    if let Err(err) = self
+                        .enqueue_thread_notification(thread_id, notification)
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to replay pending notification for primary thread {thread_id}: {err}"
+                        );
+                    }
                 }
                 ThreadBufferedEvent::Request(request) => {
-                    self.enqueue_thread_request(thread_id, request).await?;
+                    if let Err(err) = self.enqueue_thread_request(thread_id, request).await {
+                        tracing::warn!(
+                            "failed to replay pending request for primary thread {thread_id}: {err}"
+                        );
+                    }
                 }
                 ThreadBufferedEvent::HistoryEntryResponse(event) => {
-                    self.enqueue_thread_history_entry_response(thread_id, event)
-                        .await?;
+                    if let Err(err) = self
+                        .enqueue_thread_history_entry_response(thread_id, event)
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to replay pending history entry for primary thread {thread_id}: {err}"
+                        );
+                    }
                 }
                 ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => {
-                    self.enqueue_thread_auto_review_summary(thread_id, run_id, result)
-                        .await?;
+                    if let Err(err) = self
+                        .enqueue_thread_auto_review_summary(thread_id, run_id, result)
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to replay pending auto-review summary for primary thread {thread_id}: {err}"
+                        );
+                    }
                 }
                 ThreadBufferedEvent::FeedbackSubmission(event) => {
                     self.enqueue_thread_feedback_event(thread_id, event).await;

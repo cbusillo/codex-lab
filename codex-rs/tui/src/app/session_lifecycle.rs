@@ -43,8 +43,9 @@ impl AuthSwitchRollback {
     }
 
     fn restore_now(&mut self) -> std::io::Result<()> {
+        self.restore_auth()?;
         self.armed = false;
-        self.restore_auth()
+        Ok(())
     }
 
     fn restore_auth(&self) -> std::io::Result<()> {
