@@ -1,4 +1,6 @@
 use super::*;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemSandboxKind;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
@@ -30,12 +32,15 @@ fn external_command_backend_from_spec(
     }
 }
 
-fn active_permission_profile_is_read_only(
-    profile: codex_protocol::models::ActivePermissionProfile,
-) -> bool {
-    profile.id == codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY
-        || profile.extends.as_deref()
-            == Some(codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY)
+fn permission_profile_is_read_only(profile: &PermissionProfile) -> bool {
+    let file_system = profile.file_system_sandbox_policy();
+    match file_system.kind {
+        FileSystemSandboxKind::Restricted => file_system
+            .entries
+            .iter()
+            .all(|entry| !entry.access.can_write()),
+        FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => false,
+    }
 }
 
 pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>) -> Vec<String> {
@@ -312,10 +317,8 @@ impl AgentControl {
             reservation.commit(agent_metadata.clone());
             self.persist_thread_spawn_edge(parent_thread_id, thread_id)
                 .await;
-            let is_read_only = config
-                .permissions
-                .active_permission_profile()
-                .is_some_and(active_permission_profile_is_read_only);
+            let is_read_only =
+                permission_profile_is_read_only(&config.permissions.effective_permission_profile());
 
             let launch = ExternalAgentLaunch {
                 thread_id,
@@ -802,7 +805,9 @@ fn external_command_task_message(initial_operation: &Op) -> String {
 #[cfg(test)]
 mod external_command_backend_tests {
     use super::*;
+    use crate::config::PermissionProfileSnapshot;
     use codex_protocol::models::ActivePermissionProfile;
+    use codex_protocol::protocol::AskForApproval;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -833,17 +838,42 @@ mod external_command_backend_tests {
     }
 
     #[test]
-    fn active_permission_profile_treats_read_only_extension_as_read_only() {
-        assert!(active_permission_profile_is_read_only(
-            ActivePermissionProfile::read_only()
+    fn permission_profile_mode_uses_effective_read_only_filesystem_policy() {
+        assert!(permission_profile_is_read_only(
+            &PermissionProfile::read_only()
         ));
-        assert!(active_permission_profile_is_read_only(
-            ActivePermissionProfile {
-                id: "locked-down".to_string(),
-                extends: Some(
-                    codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
+        assert!(!permission_profile_is_read_only(
+            &PermissionProfile::workspace_write()
+        ));
+        assert!(!permission_profile_is_read_only(
+            &PermissionProfile::Disabled
+        ));
+    }
+
+    #[test]
+    fn external_mode_uses_effective_permissions_over_active_profile_metadata() {
+        let mut permissions = crate::config::Permissions::from_approval_and_profile(
+            codex_config::Constrained::allow_any(AskForApproval::Never),
+            codex_config::Constrained::allow_any(PermissionProfile::workspace_write()),
+        )
+        .expect("permissions should be valid");
+        permissions
+            .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::active(
+                PermissionProfile::read_only(),
+                ActivePermissionProfile::new(
+                    codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE,
                 ),
-            }
+            ))
+            .expect("read-only snapshot should satisfy permissive constraint");
+
+        assert_eq!(
+            permissions.active_permission_profile(),
+            Some(ActivePermissionProfile::new(
+                codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE,
+            ))
+        );
+        assert!(permission_profile_is_read_only(
+            &permissions.effective_permission_profile()
         ));
     }
 }
