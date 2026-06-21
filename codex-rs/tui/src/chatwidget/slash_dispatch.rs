@@ -51,12 +51,16 @@ impl ChatWidget {
 
         let current_auth_home = self.config.auth_home.to_path_buf();
         let default_auth_home = self.config.codex_home.to_path_buf();
-        let codex_home = self.config.codex_home.to_path_buf();
         let default_description = default_login_profile_description(
             &default_auth_home,
             self.config.cli_auth_credentials_store_mode,
         );
-        let add_command = "/login add ".to_string();
+        let existing_profile_names = profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .chain(std::iter::once("default"))
+            .collect::<Vec<_>>();
+        let new_profile_name = next_login_profile_name(&existing_profile_names);
         let mut items = Vec::with_capacity(profiles.len() + 2);
         items.push(SelectionItem {
             name: "default".to_string(),
@@ -94,16 +98,22 @@ impl ChatWidget {
 
         items.push(SelectionItem {
             name: "Add login...".to_string(),
-            description: Some("Create a named login profile in this session".to_string()),
-            actions: vec![Box::new(move |tx| {
-                tx.send(AppEvent::SetComposerText {
-                    text: add_command.clone(),
-                });
+            description: Some("Open ChatGPT sign-in for a new login".to_string()),
+            actions: vec![Box::new({
+                let new_profile_name = new_profile_name.clone();
+                move |tx| {
+                    let profile_name = new_profile_name.clone();
+                    tx.send(AppEvent::SwitchAuthProfile {
+                        selection: AuthProfileSelection::Named {
+                            profile_name,
+                            login_after_switch: true,
+                        },
+                    });
+                }
             })],
             dismiss_on_select: true,
             selected_description: Some(format!(
-                "Type a profile name. Profiles are stored under {}",
-                codex_home.display()
+                "Starts browser login for new auth profile `{new_profile_name}`."
             )),
             ..Default::default()
         });
@@ -1236,6 +1246,21 @@ fn login_profile_description(profile: &codex_login::AuthProfileEntry) -> String 
     } else {
         details.join(" - ")
     }
+}
+
+fn next_login_profile_name(existing: &[&str]) -> String {
+    const PREFIX: &str = "account";
+    if !existing.iter().any(|name| *name == PREFIX) {
+        return PREFIX.to_string();
+    }
+
+    for suffix in 2.. {
+        let candidate = format!("{PREFIX}-{suffix}");
+        if !existing.iter().any(|name| *name == candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search should always return")
 }
 
 fn default_login_profile_description(
