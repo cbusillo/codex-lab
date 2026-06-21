@@ -15,7 +15,9 @@ use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
+use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_login::StoredAccount;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -61,7 +63,15 @@ impl ChatWidget {
             .chain(std::iter::once("default"))
             .collect::<Vec<_>>();
         let new_profile_name = next_login_profile_name(&existing_profile_names);
-        let mut items = Vec::with_capacity(profiles.len() + 2);
+        let account_items = match login_account_items(&self.config.codex_home) {
+            Ok(items) => items,
+            Err(err) => {
+                self.add_error_message(format!("Failed to list stored accounts: {err}"));
+                Vec::new()
+            }
+        };
+
+        let mut items = Vec::with_capacity(profiles.len() + account_items.len() + 2);
         items.push(SelectionItem {
             name: "default".to_string(),
             description: Some(default_description),
@@ -95,6 +105,8 @@ impl ChatWidget {
                 ..Default::default()
             });
         }
+
+        items.extend(account_items);
 
         items.push(SelectionItem {
             name: "Add login...".to_string(),
@@ -1245,6 +1257,108 @@ fn login_profile_description(profile: &codex_login::AuthProfileEntry) -> String 
         "Use this saved auth profile".to_string()
     } else {
         details.join(" - ")
+    }
+}
+
+fn login_account_items(codex_home: &std::path::Path) -> std::io::Result<Vec<SelectionItem>> {
+    let active_account_id = codex_login::get_active_account_id(codex_home)?;
+    let mut accounts = codex_login::list_accounts(codex_home)?;
+    accounts.sort_by(|left, right| {
+        let left_key = login_account_sort_key(left);
+        let right_key = login_account_sort_key(right);
+        left_key
+            .cmp(&right_key)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(accounts
+        .into_iter()
+        .map(|account| login_account_item(account, active_account_id.as_deref()))
+        .collect())
+}
+
+fn login_account_item(account: StoredAccount, active_account_id: Option<&str>) -> SelectionItem {
+    let is_current = active_account_id == Some(account.id.as_str());
+    let (name, mut description) = login_account_display(account);
+    if is_current {
+        description = active_login_account_description(&description);
+    }
+    let search_value = format!("{name} {description} stored account account-store");
+    SelectionItem {
+        name,
+        description: Some(description),
+        is_disabled: true,
+        search_value: Some(search_value),
+        ..Default::default()
+    }
+}
+
+fn active_login_account_description(description: &str) -> String {
+    if let Some(rest) = description.strip_prefix("Stored account") {
+        format!("Active stored account{rest}")
+    } else {
+        format!("Active {description}")
+    }
+}
+
+fn login_account_sort_key(account: &StoredAccount) -> (u8, String) {
+    let mode_order = match account.mode {
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => 0,
+        AuthMode::ApiKey => 1,
+        AuthMode::AgentIdentity => 2,
+        AuthMode::PersonalAccessToken => 3,
+    };
+    let label = account
+        .label
+        .as_deref()
+        .or_else(|| {
+            account
+                .tokens
+                .as_ref()
+                .and_then(|tokens| tokens.id_token.email.as_deref())
+        })
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    (mode_order, label)
+}
+
+fn login_account_display(account: StoredAccount) -> (String, String) {
+    match account.mode {
+        AuthMode::ApiKey => {
+            let name = account
+                .label
+                .unwrap_or_else(|| "API key account".to_string());
+            (name, "Stored account - API key".to_string())
+        }
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
+            let tokens = account.tokens.as_ref();
+            let name = account
+                .label
+                .or_else(|| tokens.and_then(|tokens| tokens.id_token.email.clone()))
+                .unwrap_or_else(|| "ChatGPT account".to_string());
+            let mut details = vec!["Stored account".to_string(), "ChatGPT".to_string()];
+            if let Some(account_id) = tokens.and_then(|tokens| {
+                tokens
+                    .account_id
+                    .as_deref()
+                    .or(tokens.id_token.chatgpt_account_id.as_deref())
+            }) {
+                details.push(account_id.to_string());
+            }
+            (name, details.join(" - "))
+        }
+        AuthMode::AgentIdentity => (
+            account
+                .label
+                .unwrap_or_else(|| "Agent identity account".to_string()),
+            "Stored account - agent identity".to_string(),
+        ),
+        AuthMode::PersonalAccessToken => (
+            account
+                .label
+                .unwrap_or_else(|| "Personal access token account".to_string()),
+            "Stored account - personal access token".to_string(),
+        ),
     }
 }
 

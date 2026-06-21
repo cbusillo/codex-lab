@@ -69,19 +69,23 @@ fn fake_jwt(email: &str, account_id: &str) -> String {
     format!("{header_b64}.{payload_b64}.{signature_b64}")
 }
 
-fn write_chatgpt_auth(codex_home: &std::path::Path, email: &str, account_id: &str) {
+fn make_chatgpt_tokens(account_id: &str, email: &str) -> TokenData {
     let id_token = fake_jwt(email, account_id);
     let access_token = fake_jwt(email, account_id);
+    TokenData {
+        id_token: codex_login::token_data::parse_chatgpt_jwt_claims(&id_token)
+            .expect("id token should parse"),
+        access_token,
+        refresh_token: "refresh-token".to_string(),
+        account_id: Some(account_id.to_string()),
+    }
+}
+
+fn write_chatgpt_auth(codex_home: &std::path::Path, email: &str, account_id: &str) {
     let auth = AuthDotJson {
         auth_mode: Some(AuthMode::Chatgpt),
         openai_api_key: None,
-        tokens: Some(TokenData {
-            id_token: codex_login::token_data::parse_chatgpt_jwt_claims(&id_token)
-                .expect("id token should parse"),
-            access_token,
-            refresh_token: "refresh-token".to_string(),
-            account_id: Some(account_id.to_string()),
-        }),
+        tokens: Some(make_chatgpt_tokens(account_id, email)),
         last_refresh: Some(Utc::now()),
         agent_identity: None,
         personal_access_token: None,
@@ -200,8 +204,67 @@ async fn login_slash_command_opens_profile_picker() {
 }
 
 #[tokio::test]
+async fn login_slash_command_lists_stored_accounts_read_only() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let chatgpt = codex_login::upsert_chatgpt_account(
+        &chat.config.codex_home,
+        make_chatgpt_tokens("account-stored", "stored@example.com"),
+        Utc::now(),
+        Some("stored@example.com".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("insert chatgpt account");
+    codex_login::set_active_account_id(&chat.config.codex_home, Some(chatgpt.id))
+        .expect("set active account");
+    codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-test-secret-value".to_string(),
+        Some("Automation key".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("insert api key account");
+
+    chat.dispatch_command(SlashCommand::Login);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("stored@example.com"));
+    assert!(popup.contains("Active stored account - ChatGPT - account-stored"));
+    assert!(popup.contains("Automation key"));
+    assert!(popup.contains("Stored account - API key"));
+    assert!(!popup.contains("sk-test-secret-value"));
+    assert!(popup.contains("Add login..."));
+    assert_chatwidget_snapshot!("login_picker_stored_accounts_read_only", popup);
+}
+
+#[tokio::test]
 async fn login_slash_command_add_selection_starts_profile_login() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.dispatch_command(SlashCommand::Login);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAuthProfile {
+            selection: AuthProfileSelection::Named {
+                profile_name,
+                login_after_switch,
+            },
+        }) if profile_name == "account" && login_after_switch
+    );
+}
+
+#[tokio::test]
+async fn login_slash_command_account_rows_do_not_shift_add_selection() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-test-secret-value".to_string(),
+        Some("Automation key".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("insert api key account");
 
     chat.dispatch_command(SlashCommand::Login);
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
