@@ -343,6 +343,15 @@ fn upsert_account(
     (data, new_account)
 }
 
+fn select_fallback_active_account(data: &mut AccountsFile) {
+    if let Some(account) = data.accounts.first_mut() {
+        data.active_account_id = Some(account.id.clone());
+        touch_account(account, true);
+    } else {
+        data.active_account_id = None;
+    }
+}
+
 pub fn list_accounts(codex_home: &Path) -> io::Result<Vec<StoredAccount>> {
     let path = accounts_file_path(codex_home);
     let data = read_accounts_file(&path)?;
@@ -414,7 +423,7 @@ pub fn remove_account(codex_home: &Path, account_id: &str) -> io::Result<Option<
         .as_ref()
         .is_some_and(|active| active == account_id)
     {
-        data.active_account_id = None;
+        select_fallback_active_account(&mut data);
     }
 
     write_accounts_file(&path, &data)?;
@@ -451,7 +460,7 @@ pub fn remove_account_matching_credentials(
             .as_ref()
             .is_some_and(|active| active == &removed.id)
     {
-        data.active_account_id = None;
+        select_fallback_active_account(&mut data);
     }
 
     write_accounts_file(&path, &data)?;
