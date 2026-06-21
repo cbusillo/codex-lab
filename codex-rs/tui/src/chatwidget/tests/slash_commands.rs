@@ -204,7 +204,7 @@ async fn login_slash_command_opens_profile_picker() {
 }
 
 #[tokio::test]
-async fn login_slash_command_lists_stored_accounts_read_only() {
+async fn login_slash_command_lists_selectable_stored_accounts() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let chatgpt = codex_login::upsert_chatgpt_account(
         &chat.config.codex_home,
@@ -230,10 +230,10 @@ async fn login_slash_command_lists_stored_accounts_read_only() {
     assert!(popup.contains("stored@example.com"));
     assert!(popup.contains("Active stored account - ChatGPT - account-stored"));
     assert!(popup.contains("Automation key"));
-    assert!(popup.contains("Stored account - API key"));
+    assert!(popup.contains("Stored account - API key - press Enter to use"));
     assert!(!popup.contains("sk-test-secret-value"));
     assert!(popup.contains("Add login..."));
-    assert_chatwidget_snapshot!("login_picker_stored_accounts_read_only", popup);
+    assert_chatwidget_snapshot!("login_picker_stored_accounts_selectable", popup);
 }
 
 #[tokio::test]
@@ -256,7 +256,62 @@ async fn login_slash_command_add_selection_starts_profile_login() {
 }
 
 #[tokio::test]
-async fn login_slash_command_account_rows_do_not_shift_add_selection() {
+async fn login_slash_command_stored_account_selection_switches_account() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-test-secret-value".to_string(),
+        Some("Automation key".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("insert api key account");
+
+    chat.dispatch_command(SlashCommand::Login);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAuthAccount {
+            selection,
+        }) if selection.account_id == account.id && selection.label == "Automation key"
+    );
+}
+
+#[tokio::test]
+async fn login_slash_command_stored_account_selectable_from_auth_profile() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-test-secret-value".to_string(),
+        Some("Automation key".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("insert api key account");
+    let profile_home =
+        codex_login::profile_home(&chat.config.codex_home, "work").expect("profile home path");
+    std::fs::create_dir_all(&profile_home).expect("create profile home");
+    chat.config.auth_home =
+        AbsolutePathBuf::from_absolute_path(profile_home).expect("profile home is absolute");
+
+    chat.dispatch_command(SlashCommand::Login);
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Automation key"));
+    assert!(popup.contains("Stored account - API key - press Enter to use"));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAuthAccount {
+            selection,
+        }) if selection.account_id == account.id && selection.label == "Automation key"
+    );
+}
+
+#[tokio::test]
+async fn login_slash_command_add_selection_moves_after_account_rows() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     codex_login::upsert_api_key_account(
         &chat.config.codex_home,
@@ -267,6 +322,7 @@ async fn login_slash_command_account_rows_do_not_shift_add_selection() {
     .expect("insert api key account");
 
     chat.dispatch_command(SlashCommand::Login);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 

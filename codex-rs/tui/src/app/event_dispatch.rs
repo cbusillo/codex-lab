@@ -324,6 +324,9 @@ impl App {
             AppEvent::SwitchAuthProfile { selection } => {
                 self.switch_auth_profile(tui, app_server, selection).await;
             }
+            AppEvent::SwitchAuthAccount { selection } => {
+                self.switch_auth_account(tui, app_server, selection).await;
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
