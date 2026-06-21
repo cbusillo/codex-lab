@@ -6,9 +6,9 @@ expression: popup
   Start a fresh session with the selected account.
 
   Search logins
-› default (current)   Use the default Codex Lab login
-  stored@example.com  Active stored account - ChatGPT - account-stored
-  Automation key      Stored account - API key - press Enter to use
-  Add login...        Open ChatGPT sign-in for a new login
+› default (current)             Use the default Codex Lab login
+  ChatGPT (stored@example.com)  Active stored account - ChatGPT - account-stored
+  Automation key                Stored account - API key - press Enter to use
+  Add login...                  Open ChatGPT sign-in for a new login
 
   Press enter to confirm or esc to go back

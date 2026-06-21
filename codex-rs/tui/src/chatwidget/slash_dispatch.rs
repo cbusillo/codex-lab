@@ -7,6 +7,8 @@
 
 use super::goal_validation::GoalObjectiveValidationSource;
 use super::*;
+use crate::account_label::account_display_label;
+use crate::account_label::account_mode_priority;
 use crate::app_event::AuthAccountSelection;
 use crate::app_event::AuthProfileSelection;
 use crate::app_event::ThreadGoalSetMode;
@@ -1344,40 +1346,18 @@ fn active_login_account_description(description: &str) -> String {
 }
 
 fn login_account_sort_key(account: &StoredAccount) -> (u8, String) {
-    let mode_order = match account.mode {
-        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => 0,
-        AuthMode::ApiKey => 1,
-        AuthMode::AgentIdentity => 2,
-        AuthMode::PersonalAccessToken => 3,
-    };
-    let label = account
-        .label
-        .as_deref()
-        .or_else(|| {
-            account
-                .tokens
-                .as_ref()
-                .and_then(|tokens| tokens.id_token.email.as_deref())
-        })
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    (mode_order, label)
+    (
+        account_mode_priority(account.mode),
+        account_display_label(account).to_ascii_lowercase(),
+    )
 }
 
 fn login_account_display(account: StoredAccount) -> (String, String) {
+    let name = account_display_label(&account);
     match account.mode {
-        AuthMode::ApiKey => {
-            let name = account
-                .label
-                .unwrap_or_else(|| "API key account".to_string());
-            (name, "Stored account - API key".to_string())
-        }
+        AuthMode::ApiKey => (name, "Stored account - API key".to_string()),
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
             let tokens = account.tokens.as_ref();
-            let name = account
-                .label
-                .or_else(|| tokens.and_then(|tokens| tokens.id_token.email.clone()))
-                .unwrap_or_else(|| "ChatGPT account".to_string());
             let mut details = vec!["Stored account".to_string(), "ChatGPT".to_string()];
             if let Some(account_id) = tokens.and_then(|tokens| {
                 tokens
@@ -1389,18 +1369,10 @@ fn login_account_display(account: StoredAccount) -> (String, String) {
             }
             (name, details.join(" - "))
         }
-        AuthMode::AgentIdentity => (
-            account
-                .label
-                .unwrap_or_else(|| "Agent identity account".to_string()),
-            "Stored account - agent identity".to_string(),
-        ),
-        AuthMode::PersonalAccessToken => (
-            account
-                .label
-                .unwrap_or_else(|| "Personal access token account".to_string()),
-            "Stored account - personal access token".to_string(),
-        ),
+        AuthMode::AgentIdentity => (name, "Stored account - agent identity".to_string()),
+        AuthMode::PersonalAccessToken => {
+            (name, "Stored account - personal access token".to_string())
+        }
     }
 }
 
