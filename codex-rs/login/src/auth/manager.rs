@@ -583,6 +583,17 @@ pub fn logout(
     Ok(removed)
 }
 
+/// Delete persisted auth without mirroring the removal into the stored-account
+/// catalog. Rollback paths use this to restore a prior "no active auth" state
+/// without treating the operation as a user-initiated logout.
+pub fn delete_auth(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<bool> {
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    storage.delete()
+}
+
 pub async fn logout_with_revoke(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,

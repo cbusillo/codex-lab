@@ -299,6 +299,131 @@ fn activate_api_key_account_writes_auth_and_marks_active() {
 }
 
 #[test]
+fn auth_for_account_returns_auth_without_persisting_activation() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = upsert_api_key_account(
+        temp.path(),
+        "sk-test".to_string(),
+        Some("Work".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("upsert api key");
+
+    let (account, auth) = auth_for_account(temp.path(), &stored.id).expect("account auth");
+
+    assert_eq!(stored, account);
+    assert_eq!(
+        crate::AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: Some("sk-test".to_string()),
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+        },
+        auth
+    );
+    assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
+    assert_eq!(
+        None,
+        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+            .expect("read auth json")
+    );
+}
+
+#[test]
+fn commit_active_account_rolls_back_auth_and_active_id_when_account_is_missing() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = upsert_api_key_account(
+        temp.path(),
+        "sk-previous".to_string(),
+        Some("Previous".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("upsert previous api key");
+    let previous_auth = crate::AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-previous".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    crate::save_auth(temp.path(), &previous_auth, AuthCredentialsStoreMode::File)
+        .expect("save previous auth");
+    let new_auth = crate::AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-new".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    };
+
+    let err = commit_active_account(
+        temp.path(),
+        "missing",
+        &new_auth,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect_err("missing account should fail");
+
+    assert_eq!(io::ErrorKind::Other, err.kind());
+    assert_eq!(
+        Some(stored.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+    assert_eq!(
+        previous_auth,
+        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+            .expect("read auth json")
+            .expect("auth json should exist")
+    );
+}
+
+#[test]
+fn commit_active_account_rollback_without_previous_auth_preserves_stored_accounts() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = upsert_api_key_account(
+        temp.path(),
+        "sk-new".to_string(),
+        Some("New".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("upsert api key");
+    let auth = crate::AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-new".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    };
+
+    let err = commit_active_account(
+        temp.path(),
+        "missing",
+        &auth,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect_err("missing account should fail");
+
+    assert_eq!(io::ErrorKind::Other, err.kind());
+    assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
+    assert_eq!(
+        None,
+        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+            .expect("read auth json")
+    );
+    assert_eq!(
+        vec![stored],
+        list_accounts(temp.path()).expect("list accounts")
+    );
+}
+
+#[test]
 fn activate_chatgpt_account_writes_auth_and_marks_active() {
     let temp = TempDir::new().expect("tempdir");
     let last_refresh = Utc::now();

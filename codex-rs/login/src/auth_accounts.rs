@@ -374,6 +374,50 @@ pub fn find_account(codex_home: &Path, account_id: &str) -> io::Result<Option<St
     Ok(data.accounts.into_iter().find(|acc| acc.id == account_id))
 }
 
+pub fn auth_for_account(
+    codex_home: &Path,
+    account_id: &str,
+) -> io::Result<(StoredAccount, AuthDotJson)> {
+    let account = find_account(codex_home, account_id)?
+        .ok_or_else(|| io::Error::other(format!("account with id {account_id} was not found")))?;
+
+    let auth =
+        match account.mode {
+            AuthMode::ApiKey => AuthDotJson {
+                auth_mode: Some(AuthMode::ApiKey),
+                openai_api_key: Some(account.openai_api_key.clone().ok_or_else(|| {
+                    io::Error::other("stored API key account is missing the key value")
+                })?),
+                tokens: None,
+                last_refresh: None,
+                agent_identity: None,
+                personal_access_token: None,
+            },
+            AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => AuthDotJson {
+                auth_mode: Some(account.mode),
+                openai_api_key: None,
+                tokens: Some(account.tokens.clone().ok_or_else(|| {
+                    io::Error::other("stored ChatGPT account is missing token data")
+                })?),
+                last_refresh: account.last_refresh,
+                agent_identity: None,
+                personal_access_token: None,
+            },
+            AuthMode::AgentIdentity => {
+                return Err(io::Error::other(
+                    "stored agent identity account activation is not supported",
+                ));
+            }
+            AuthMode::PersonalAccessToken => {
+                return Err(io::Error::other(
+                    "stored personal access token account activation is not supported",
+                ));
+            }
+        };
+
+    Ok((account, auth))
+}
+
 pub fn update_account_last_refresh(
     codex_home: &Path,
     account_id: &str,
@@ -419,49 +463,78 @@ pub fn activate_account(
     account_id: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<StoredAccount> {
-    let account = find_account(codex_home, account_id)?
-        .ok_or_else(|| io::Error::other(format!("account with id {account_id} was not found")))?;
+    let (_account, auth) = auth_for_account(codex_home, account_id)?;
+    commit_active_account(codex_home, account_id, &auth, auth_credentials_store_mode)
+}
 
-    let auth =
-        match account.mode {
-            AuthMode::ApiKey => AuthDotJson {
-                auth_mode: Some(AuthMode::ApiKey),
-                openai_api_key: Some(account.openai_api_key.clone().ok_or_else(|| {
-                    io::Error::other("stored API key account is missing the key value")
-                })?),
-                tokens: None,
-                last_refresh: None,
-                agent_identity: None,
-                personal_access_token: None,
-            },
-            AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => AuthDotJson {
-                auth_mode: Some(account.mode),
-                openai_api_key: None,
-                tokens: Some(account.tokens.clone().ok_or_else(|| {
-                    io::Error::other("stored ChatGPT account is missing token data")
-                })?),
-                last_refresh: account.last_refresh,
-                agent_identity: None,
-                personal_access_token: None,
-            },
-            AuthMode::AgentIdentity => {
-                return Err(io::Error::other(
-                    "stored agent identity account activation is not supported",
-                ));
-            }
-            AuthMode::PersonalAccessToken => {
-                return Err(io::Error::other(
-                    "stored personal access token account activation is not supported",
-                ));
-            }
-        };
+fn restore_previous_auth(
+    codex_home: &Path,
+    previous_auth: Option<AuthDotJson>,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<()> {
+    if let Some(previous_auth) = previous_auth {
+        save_auth(codex_home, &previous_auth, auth_credentials_store_mode)
+    } else {
+        crate::delete_auth(codex_home, auth_credentials_store_mode).map(|_| ())
+    }
+}
 
-    save_auth(codex_home, &auth, auth_credentials_store_mode)?;
-    set_active_account_id(codex_home, Some(account.id))?.ok_or_else(|| {
-        io::Error::other(format!(
-            "account with id {account_id} disappeared before activation"
-        ))
-    })
+fn restore_previous_activation(
+    codex_home: &Path,
+    previous_auth: Option<AuthDotJson>,
+    previous_active_account_id: Option<String>,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<()> {
+    let auth_result = restore_previous_auth(codex_home, previous_auth, auth_credentials_store_mode);
+    let active_account_result = set_active_account_id(codex_home, previous_active_account_id);
+
+    auth_result?;
+    active_account_result?;
+    Ok(())
+}
+
+pub fn commit_active_account(
+    codex_home: &Path,
+    account_id: &str,
+    auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<StoredAccount> {
+    let previous_auth = crate::load_auth_dot_json(codex_home, auth_credentials_store_mode)?;
+    let previous_active_account_id = get_active_account_id(codex_home)?;
+
+    save_auth(codex_home, auth, auth_credentials_store_mode)?;
+    match set_active_account_id(codex_home, Some(account_id.to_string())) {
+        Ok(Some(activated)) => Ok(activated),
+        Ok(None) => {
+            let rollback_result = restore_previous_activation(
+                codex_home,
+                previous_auth,
+                previous_active_account_id,
+                auth_credentials_store_mode,
+            );
+            if let Err(rollback_err) = rollback_result {
+                tracing::warn!(
+                    "failed to roll back missing stored account activation: {rollback_err}"
+                );
+            }
+            Err(io::Error::other(format!(
+                "account with id {account_id} disappeared before activation"
+            )))
+        }
+        Err(err) => {
+            if let Err(rollback_err) = restore_previous_activation(
+                codex_home,
+                previous_auth,
+                previous_active_account_id,
+                auth_credentials_store_mode,
+            ) {
+                tracing::warn!(
+                    "failed to roll back stored account activation error: {rollback_err}"
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 pub fn remove_account(codex_home: &Path, account_id: &str) -> io::Result<Option<StoredAccount>> {
