@@ -2,6 +2,7 @@ use crate::token_data::TokenData;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
+use codex_config::types::AuthCredentialsStoreMode;
 use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
@@ -13,6 +14,9 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+
+use crate::auth::AuthDotJson;
+use crate::auth::save_auth;
 
 const ACCOUNTS_FILE_NAME: &str = "auth_accounts.json";
 
@@ -406,6 +410,58 @@ pub fn set_active_account_id(
     }
     write_accounts_file(&path, &data)?;
     Ok(updated)
+}
+
+/// Activate a stored account by writing its credentials to `auth.json` and
+/// marking it active in the account store.
+pub fn activate_account(
+    codex_home: &Path,
+    account_id: &str,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<StoredAccount> {
+    let account = find_account(codex_home, account_id)?
+        .ok_or_else(|| io::Error::other(format!("account with id {account_id} was not found")))?;
+
+    let auth =
+        match account.mode {
+            AuthMode::ApiKey => AuthDotJson {
+                auth_mode: Some(AuthMode::ApiKey),
+                openai_api_key: Some(account.openai_api_key.clone().ok_or_else(|| {
+                    io::Error::other("stored API key account is missing the key value")
+                })?),
+                tokens: None,
+                last_refresh: None,
+                agent_identity: None,
+                personal_access_token: None,
+            },
+            AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => AuthDotJson {
+                auth_mode: Some(account.mode),
+                openai_api_key: None,
+                tokens: Some(account.tokens.clone().ok_or_else(|| {
+                    io::Error::other("stored ChatGPT account is missing token data")
+                })?),
+                last_refresh: account.last_refresh,
+                agent_identity: None,
+                personal_access_token: None,
+            },
+            AuthMode::AgentIdentity => {
+                return Err(io::Error::other(
+                    "stored agent identity account activation is not supported",
+                ));
+            }
+            AuthMode::PersonalAccessToken => {
+                return Err(io::Error::other(
+                    "stored personal access token account activation is not supported",
+                ));
+            }
+        };
+
+    save_auth(codex_home, &auth, auth_credentials_store_mode)?;
+    set_active_account_id(codex_home, Some(account.id))?.ok_or_else(|| {
+        io::Error::other(format!(
+            "account with id {account_id} disappeared before activation"
+        ))
+    })
 }
 
 pub fn remove_account(codex_home: &Path, account_id: &str) -> io::Result<Option<StoredAccount>> {

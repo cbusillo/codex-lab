@@ -7,6 +7,7 @@
 
 use super::goal_validation::GoalObjectiveValidationSource;
 use super::*;
+use crate::app_event::AuthAccountSelection;
 use crate::app_event::AuthProfileSelection;
 use crate::app_event::ThreadGoalSetMode;
 use crate::bottom_pane::prompt_args::parse_slash_name;
@@ -63,7 +64,10 @@ impl ChatWidget {
             .chain(std::iter::once("default"))
             .collect::<Vec<_>>();
         let new_profile_name = next_login_profile_name(&existing_profile_names);
-        let account_items = match login_account_items(&self.config.codex_home) {
+        let account_items = match login_account_items(
+            &self.config.codex_home,
+            current_auth_home == default_auth_home,
+        ) {
             Ok(items) => items,
             Err(err) => {
                 self.add_error_message(format!("Failed to list stored accounts: {err}"));
@@ -1260,7 +1264,10 @@ fn login_profile_description(profile: &codex_login::AuthProfileEntry) -> String 
     }
 }
 
-fn login_account_items(codex_home: &std::path::Path) -> std::io::Result<Vec<SelectionItem>> {
+fn login_account_items(
+    codex_home: &std::path::Path,
+    default_auth_home_is_current: bool,
+) -> std::io::Result<Vec<SelectionItem>> {
     let active_account_id = codex_login::get_active_account_id(codex_home)?;
     let mut accounts = codex_login::list_accounts(codex_home)?;
     accounts.sort_by(|left, right| {
@@ -1273,24 +1280,58 @@ fn login_account_items(codex_home: &std::path::Path) -> std::io::Result<Vec<Sele
 
     Ok(accounts
         .into_iter()
-        .map(|account| login_account_item(account, active_account_id.as_deref()))
+        .map(|account| {
+            login_account_item(
+                account,
+                default_auth_home_is_current
+                    .then_some(active_account_id.as_deref())
+                    .flatten(),
+            )
+        })
         .collect())
 }
 
 fn login_account_item(account: StoredAccount, active_account_id: Option<&str>) -> SelectionItem {
     let is_current = active_account_id == Some(account.id.as_str());
+    let is_supported = login_account_activation_supported(account.mode);
+    let account_id = account.id.clone();
     let (name, mut description) = login_account_display(account);
     if is_current {
         description = active_login_account_description(&description);
+    } else if is_supported {
+        description = format!("{description} - press Enter to use");
+    } else {
+        description = format!("{description} - activation unavailable");
     }
     let search_value = format!("{name} {description} stored account account-store");
-    SelectionItem {
+    let mut item = SelectionItem {
         name,
         description: Some(description),
-        is_disabled: true,
         search_value: Some(search_value),
         ..Default::default()
+    };
+    if is_current || !is_supported {
+        item.is_disabled = true;
+    } else {
+        let label = item.name.clone();
+        item.actions.push(Box::new(move |tx| {
+            tx.send(AppEvent::SwitchAuthAccount {
+                selection: AuthAccountSelection {
+                    account_id: account_id.clone(),
+                    label: label.clone(),
+                },
+            });
+        }));
+        item.dismiss_on_select = true;
     }
+    item
+}
+
+fn login_account_activation_supported(mode: AuthMode) -> bool {
+    matches!(
+        mode,
+        AuthMode::ApiKey | AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens
+    )
 }
 
 fn active_login_account_description(description: &str) -> String {
@@ -1364,7 +1405,7 @@ fn login_account_display(account: StoredAccount) -> (String, String) {
 
 fn next_login_profile_name(existing: &[&str]) -> String {
     const PREFIX: &str = "account";
-    if !existing.iter().any(|name| *name == PREFIX) {
+    if !existing.contains(&PREFIX) {
         return PREFIX.to_string();
     }
 

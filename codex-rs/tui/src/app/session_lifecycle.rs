@@ -5,6 +5,7 @@
 //! cache used for multi-agent navigation.
 
 use super::*;
+use crate::app_event::AuthAccountSelection;
 use crate::app_event::AuthProfileSelection;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
@@ -916,6 +917,147 @@ impl App {
             if login_after_switch {
                 self.start_auth_profile_login(app_server, profile_name.as_deref(), &profile_label)
                     .await;
+            }
+        }
+    }
+
+    pub(super) async fn switch_auth_account(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        selection: AuthAccountSelection,
+    ) {
+        self.pending_auth_profile_login = None;
+
+        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            self.chat_widget.add_error_message(
+                "/login account switching requires an embedded Codex Lab app server.".to_string(),
+            );
+            self.chat_widget.add_info_message(
+                "Use an embedded Codex Lab app server to activate stored accounts from /login."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
+        if let Err(err) = codex_login::activate_account(
+            &self.config.codex_home,
+            &selection.account_id,
+            self.config.cli_auth_credentials_store_mode,
+        ) {
+            self.chat_widget.add_error_message(format!(
+                "Failed to activate stored account {}: {err}",
+                selection.label
+            ));
+            return;
+        }
+
+        let default_auth_home = self.config.codex_home.clone();
+        let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            self.config.codex_home.to_path_buf(),
+            default_auth_home.to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.chatgpt_base_url.clone(),
+        )
+        .await;
+        let config = match self
+            .config_for_auth_profile_switch(
+                default_auth_home,
+                replacement_cloud_config_bundle.clone(),
+            )
+            .await
+        {
+            Ok(config) => config,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to load config for stored account {}: {err}",
+                    selection.label
+                ));
+                return;
+            }
+        };
+
+        let replacement_client = match crate::start_embedded_app_server(
+            self.arg0_paths.clone(),
+            config.clone(),
+            self.cli_kv_overrides.clone(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            replacement_cloud_config_bundle.clone(),
+            self.feedback.clone(),
+            /*log_db*/ None,
+            self.state_db.clone(),
+            self.environment_manager.clone(),
+        )
+        .await
+        {
+            Ok(client) => AppServerClient::InProcess(client),
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to start app server for stored account {}: {err}",
+                    selection.label
+                ));
+                return;
+            }
+        };
+
+        let mut replacement_session =
+            AppServerSession::new(replacement_client, app_server.thread_params_mode())
+                .with_remote_cwd_override(app_server.remote_cwd_override().map(PathBuf::from));
+        let started = match replacement_session
+            .start_thread_with_session_start_source(&config, Some(ThreadStartSource::Clear))
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to start stored account session for {}: {err}",
+                    selection.label
+                ));
+                if let Err(shutdown_err) = replacement_session.shutdown().await {
+                    tracing::warn!(
+                        "failed to shut down replacement app server after account start failure: {shutdown_err}"
+                    );
+                }
+                return;
+            }
+        };
+
+        self.shutdown_current_thread(app_server).await;
+        let tracked_thread_ids: Vec<ThreadId> =
+            self.thread_event_channels.keys().copied().collect();
+        for thread_id in tracked_thread_ids {
+            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
+                tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
+            }
+        }
+
+        let old_client = app_server.swap_client(replacement_session.into_client());
+        self.config = config;
+        self.cloud_config_bundle = replacement_cloud_config_bundle;
+        if let Err(err) = old_client.shutdown().await {
+            tracing::warn!("failed to shut down previous app server after account switch: {err}");
+        }
+
+        match self
+            .replace_chat_widget_with_app_server_thread(
+                tui, app_server, started, /*initial_user_message*/ None,
+            )
+            .await
+        {
+            Ok(()) => {
+                tui.frame_requester().schedule_frame();
+                self.chat_widget.add_info_message(
+                    format!("Using stored account {} for this session.", selection.label),
+                    Some("The previous session remains resumable.".to_string()),
+                );
+            }
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to attach to stored account session: {err}"
+                ));
             }
         }
     }

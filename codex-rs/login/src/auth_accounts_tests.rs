@@ -262,6 +262,105 @@ fn set_active_account_id_does_not_persist_missing_id() {
 }
 
 #[test]
+fn activate_api_key_account_writes_auth_and_marks_active() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = upsert_api_key_account(
+        temp.path(),
+        "sk-test".to_string(),
+        Some("Work".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("upsert api key");
+
+    let activated = activate_account(temp.path(), &stored.id, AuthCredentialsStoreMode::File)
+        .expect("activate account");
+
+    assert_eq!(stored.id, activated.id);
+    assert!(activated.last_used_at.is_some());
+    assert_eq!(
+        Some(stored.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+    assert_eq!(
+        crate::AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: Some("sk-test".to_string()),
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+        },
+        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+            .expect("read auth json")
+            .expect("auth json should exist")
+    );
+}
+
+#[test]
+fn activate_chatgpt_account_writes_auth_and_marks_active() {
+    let temp = TempDir::new().expect("tempdir");
+    let last_refresh = Utc::now();
+    let tokens = make_chatgpt_tokens(Some("acct-activate"), Some("user@example.com"));
+    let stored = upsert_chatgpt_account(
+        temp.path(),
+        tokens.clone(),
+        last_refresh,
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("upsert chatgpt");
+
+    let activated = activate_account(temp.path(), &stored.id, AuthCredentialsStoreMode::File)
+        .expect("activate account");
+
+    assert_eq!(stored.id, activated.id);
+    assert_eq!(
+        Some(stored.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+    assert_eq!(
+        crate::AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(tokens),
+            last_refresh: Some(last_refresh),
+            agent_identity: None,
+            personal_access_token: None,
+        },
+        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+            .expect("read auth json")
+            .expect("auth json should exist")
+    );
+}
+
+#[test]
+fn activate_missing_account_leaves_active_account_unchanged() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = upsert_api_key_account(
+        temp.path(),
+        "sk-test".to_string(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("upsert api key");
+
+    let err = activate_account(temp.path(), "missing", AuthCredentialsStoreMode::File)
+        .expect_err("missing account should fail");
+
+    assert_eq!(io::ErrorKind::Other, err.kind());
+    assert_eq!(
+        Some(stored.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+}
+
+#[test]
 fn remove_account_clears_active() {
     let temp = TempDir::new().expect("tempdir");
     let stored = upsert_chatgpt_account(
