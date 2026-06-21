@@ -9,10 +9,12 @@ use codex_login::AuthDotJson;
 use codex_login::AuthManager;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_login::RefreshTokenError;
+use codex_login::list_accounts;
 use codex_login::load_auth_dot_json;
 use codex_login::save_auth;
 use codex_login::token_data::IdTokenInfo;
 use codex_login::token_data::TokenData;
+use codex_login::upsert_chatgpt_account;
 use codex_protocol::auth::RefreshTokenFailedReason;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
@@ -58,6 +60,13 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
         personal_access_token: None,
     };
     ctx.write_auth(&initial_auth).await?;
+    upsert_chatgpt_account(
+        ctx.codex_home.path(),
+        initial_tokens.clone(),
+        initial_last_refresh,
+        /*label*/ None,
+        /*make_active*/ true,
+    )?;
 
     ctx.auth_manager
         .refresh_token_from_authority()
@@ -90,6 +99,15 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
         .get_token_data()
         .context("token data should be cached")?;
     assert_eq!(cached, refreshed_tokens);
+
+    let accounts = list_accounts(ctx.codex_home.path())?;
+    assert_eq!(accounts.len(), 1);
+    let account = &accounts[0];
+    assert_eq!(
+        account.tokens.as_ref().context("account tokens")?,
+        &refreshed_tokens
+    );
+    assert_eq!(account.last_refresh, stored.last_refresh);
 
     server.verify().await;
     Ok(())

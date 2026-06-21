@@ -26,9 +26,12 @@ use std::time::Duration;
 
 use crate::auth::AuthDotJson;
 use crate::auth::load_auth_dot_json;
+use crate::auth::login_account_matches_auth;
+use crate::auth::remove_login_account_best_effort;
 use crate::auth::revoke_auth_tokens;
 use crate::auth::save_auth;
 use crate::auth::should_revoke_auth_tokens;
+use crate::auth::upsert_login_account_best_effort;
 use crate::default_client::originator;
 use crate::pkce::PkceCodes;
 use crate::pkce::generate_pkce;
@@ -796,14 +799,16 @@ pub(crate) async fn persist_tokens_async(
 ) -> io::Result<()> {
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
+    let persist_codex_home = codex_home.clone();
     let (previous_auth, auth) = tokio::task::spawn_blocking(move || {
-        let previous_auth = match load_auth_dot_json(&codex_home, auth_credentials_store_mode) {
-            Ok(auth) => auth,
-            Err(err) => {
-                warn!("failed to load previous auth before saving new login: {err}");
-                None
-            }
-        };
+        let previous_auth =
+            match load_auth_dot_json(&persist_codex_home, auth_credentials_store_mode) {
+                Ok(auth) => auth,
+                Err(err) => {
+                    warn!("failed to load previous auth before saving new login: {err}");
+                    None
+                }
+            };
         let mut tokens = TokenData {
             id_token: parse_chatgpt_jwt_claims(&id_token).map_err(io::Error::other)?,
             access_token,
@@ -824,16 +829,25 @@ pub(crate) async fn persist_tokens_async(
             agent_identity: None,
             personal_access_token: None,
         };
-        save_auth(&codex_home, &auth, auth_credentials_store_mode)?;
+        save_auth(&persist_codex_home, &auth, auth_credentials_store_mode)?;
+        upsert_login_account_best_effort(&persist_codex_home, &auth, auth_credentials_store_mode);
         Ok::<_, io::Error>((previous_auth, auth))
     })
     .await
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))??;
 
-    if should_revoke_auth_tokens(previous_auth.as_ref(), &auth)
-        && let Err(err) = revoke_auth_tokens(previous_auth.as_ref()).await
-    {
-        warn!("failed to revoke superseded auth tokens after login: {err}");
+    if should_revoke_auth_tokens(previous_auth.as_ref(), &auth) {
+        let revoke_result = revoke_auth_tokens(previous_auth.as_ref()).await;
+        if !login_account_matches_auth(previous_auth.as_ref(), &auth) {
+            remove_login_account_best_effort(
+                &codex_home,
+                previous_auth.as_ref(),
+                auth_credentials_store_mode,
+            );
+        }
+        if let Err(err) = revoke_result {
+            warn!("failed to revoke superseded auth tokens after login: {err}");
+        }
     }
 
     Ok(())
@@ -1189,6 +1203,8 @@ mod tests {
     use crate::auth::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
     use crate::auth::load_auth_dot_json;
     use crate::auth::save_auth;
+    use crate::auth_accounts::list_accounts;
+    use crate::auth_accounts::upsert_chatgpt_account;
     use crate::token_data::TokenData;
     use crate::token_data::parse_chatgpt_jwt_claims;
     use core_test_support::skip_if_no_network;
@@ -1234,6 +1250,19 @@ mod tests {
             &chatgpt_auth("old-access", "old-refresh", "old-account"),
             AuthCredentialsStoreMode::File,
         )?;
+        let old_auth = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+            .context("old auth should exist")?;
+        let old_tokens = old_auth
+            .tokens
+            .as_ref()
+            .context("old tokens should exist")?;
+        upsert_chatgpt_account(
+            codex_home.path(),
+            old_tokens.clone(),
+            chrono::Utc::now(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )?;
 
         persist_tokens_async(
             codex_home.path(),
@@ -1273,6 +1302,65 @@ mod tests {
                 "client_id": crate::auth::CLIENT_ID,
             })
         );
+        let accounts = list_accounts(codex_home.path())?;
+        assert_eq!(accounts.len(), 1);
+        let account = &accounts[0];
+        let tokens = account.tokens.as_ref().context("new account tokens")?;
+        assert_eq!(tokens.account_id.as_deref(), Some("new-account"));
+        assert_eq!(tokens.access_token, "new-access");
+        server.verify().await;
+        Ok(())
+    }
+
+    #[serial_test::serial(logout_revoke)]
+    #[tokio::test]
+    async fn persist_tokens_async_removes_revoked_previous_account() -> anyhow::Result<()> {
+        skip_if_no_network!(Ok(()));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env_guard = EnvGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            format!("{}/oauth/revoke", server.uri()),
+        );
+
+        let codex_home = tempdir()?;
+        let old_auth = chatgpt_auth("old-access", "old-refresh", "old-account");
+        save_auth(codex_home.path(), &old_auth, AuthCredentialsStoreMode::File)?;
+        let old_tokens = old_auth
+            .tokens
+            .as_ref()
+            .context("old tokens should exist")?;
+        upsert_chatgpt_account(
+            codex_home.path(),
+            old_tokens.clone(),
+            chrono::Utc::now(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )?;
+
+        persist_tokens_async(
+            codex_home.path(),
+            /*api_key*/ None,
+            jwt_for_account("new-account"),
+            "new-access".to_string(),
+            "new-refresh".to_string(),
+            AuthCredentialsStoreMode::File,
+        )
+        .await?;
+
+        let accounts = list_accounts(codex_home.path())?;
+        assert_eq!(accounts.len(), 1);
+        let account = &accounts[0];
+        let tokens = account.tokens.as_ref().context("new account tokens")?;
+        assert_eq!(tokens.account_id.as_deref(), Some("new-account"));
+        assert_eq!(tokens.access_token, "new-access");
+
         server.verify().await;
         Ok(())
     }

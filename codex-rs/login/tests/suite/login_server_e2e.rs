@@ -10,6 +10,8 @@ use anyhow::Result;
 use base64::Engine;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::ServerOptions;
+use codex_login::get_active_account_id;
+use codex_login::list_accounts;
 use codex_login::run_login_server;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
@@ -160,6 +162,19 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     assert_eq!(json["tokens"]["access_token"], "access-123");
     assert_eq!(json["tokens"]["refresh_token"], "refresh-123");
     assert_eq!(json["tokens"]["account_id"], chatgpt_account_id);
+
+    let accounts = list_accounts(&codex_home)?;
+    assert_eq!(accounts.len(), 1);
+    let account = &accounts[0];
+    assert_eq!(account.mode, codex_app_server_protocol::AuthMode::Chatgpt);
+    assert_eq!(account.openai_api_key, None);
+    let tokens = account.tokens.as_ref().expect("account tokens");
+    assert_eq!(tokens.account_id.as_deref(), Some(chatgpt_account_id));
+    assert_eq!(tokens.access_token, "access-123");
+    assert_eq!(
+        get_active_account_id(&codex_home)?,
+        Some(account.id.clone())
+    );
 
     // Stop mock issuer
     drop(issuer_handle);

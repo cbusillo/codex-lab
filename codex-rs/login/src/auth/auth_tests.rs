@@ -1,6 +1,8 @@
 use super::*;
 use crate::auth::storage::FileAuthStorage;
 use crate::auth::storage::get_auth_file;
+use crate::auth_accounts::get_active_account_id;
+use crate::auth_accounts::list_accounts;
 use crate::token_data::IdTokenInfo;
 use codex_app_server_protocol::AuthMode;
 use codex_protocol::account::PlanType as AccountPlanType;
@@ -86,6 +88,118 @@ fn login_with_api_key_overwrites_existing_auth_json() {
         .expect("auth.json should parse");
     assert_eq!(auth.openai_api_key.as_deref(), Some("sk-new"));
     assert!(auth.tokens.is_none(), "tokens should be cleared");
+}
+
+#[test]
+fn login_with_api_key_upserts_active_auth_account() {
+    let dir = tempdir().unwrap();
+
+    super::login_with_api_key(dir.path(), "sk-new", AuthCredentialsStoreMode::File)
+        .expect("login_with_api_key should succeed");
+
+    let accounts = list_accounts(dir.path()).expect("list accounts");
+    assert_eq!(accounts.len(), 1);
+    let account = &accounts[0];
+    assert_eq!(account.mode, AuthMode::ApiKey);
+    assert_eq!(account.openai_api_key.as_deref(), Some("sk-new"));
+    assert_eq!(account.tokens, None);
+    assert_eq!(
+        get_active_account_id(dir.path()).expect("active account id"),
+        Some(account.id.clone())
+    );
+}
+
+#[test]
+fn login_with_api_key_succeeds_when_auth_account_upsert_fails() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("auth_accounts.json"), "{not valid json").unwrap();
+
+    super::login_with_api_key(dir.path(), "sk-new", AuthCredentialsStoreMode::File)
+        .expect("login_with_api_key should still succeed");
+
+    let storage = FileAuthStorage::new(dir.path().to_path_buf());
+    let auth = storage
+        .try_read_auth_json(&dir.path().join("auth.json"))
+        .expect("auth.json should parse");
+    assert_eq!(auth.openai_api_key.as_deref(), Some("sk-new"));
+    assert!(auth.tokens.is_none(), "tokens should be cleared");
+}
+
+#[test]
+fn ephemeral_login_with_api_key_skips_auth_account_upsert() {
+    let dir = tempdir().unwrap();
+
+    super::login_with_api_key(dir.path(), "sk-new", AuthCredentialsStoreMode::Ephemeral)
+        .expect("login_with_api_key should succeed");
+
+    assert_eq!(
+        list_accounts(dir.path()).expect("list accounts"),
+        Vec::new()
+    );
+    assert_eq!(
+        get_active_account_id(dir.path()).expect("active account id"),
+        None
+    );
+}
+
+#[test]
+fn non_file_modes_skip_plaintext_auth_account_upsert() {
+    let dir = tempdir().unwrap();
+    let auth = AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-new".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    };
+
+    for auth_credentials_store_mode in [
+        AuthCredentialsStoreMode::Keyring,
+        AuthCredentialsStoreMode::Auto,
+    ] {
+        super::upsert_login_account(dir.path(), &auth, auth_credentials_store_mode)
+            .expect("upsert should be skipped");
+    }
+
+    assert_eq!(
+        list_accounts(dir.path()).expect("list accounts"),
+        Vec::new()
+    );
+    assert_eq!(
+        get_active_account_id(dir.path()).expect("active account id"),
+        None
+    );
+}
+
+#[test]
+fn auto_mode_can_remove_matching_plaintext_auth_account_record() {
+    let dir = tempdir().unwrap();
+    let auth = AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-new".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    super::upsert_login_account(dir.path(), &auth, AuthCredentialsStoreMode::File)
+        .expect("file upsert should succeed");
+
+    super::remove_login_account_best_effort(
+        dir.path(),
+        Some(&auth),
+        AuthCredentialsStoreMode::Auto,
+    );
+
+    assert_eq!(
+        list_accounts(dir.path()).expect("list accounts"),
+        Vec::new()
+    );
+    assert_eq!(
+        get_active_account_id(dir.path()).expect("active account id"),
+        None
+    );
 }
 
 #[tokio::test]
@@ -360,19 +474,16 @@ async fn loads_api_key_from_auth_json() {
 #[test]
 fn logout_removes_auth_file() -> Result<(), std::io::Error> {
     let dir = tempdir()?;
-    let auth_dot_json = AuthDotJson {
-        auth_mode: Some(ApiAuthMode::ApiKey),
-        openai_api_key: Some("sk-test-key".to_string()),
-        tokens: None,
-        last_refresh: None,
-        agent_identity: None,
-        personal_access_token: None,
-    };
-    super::save_auth(dir.path(), &auth_dot_json, AuthCredentialsStoreMode::File)?;
+    super::login_with_api_key(dir.path(), "sk-test-key", AuthCredentialsStoreMode::File)?;
     let auth_file = get_auth_file(dir.path());
     assert!(auth_file.exists());
+    assert_eq!(list_accounts(dir.path())?.len(), 1);
+
     assert!(logout(dir.path(), AuthCredentialsStoreMode::File)?);
+
     assert!(!auth_file.exists());
+    assert_eq!(list_accounts(dir.path())?, Vec::new());
+    assert_eq!(get_active_account_id(dir.path())?, None);
     Ok(())
 }
 
