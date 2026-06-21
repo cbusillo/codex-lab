@@ -1303,11 +1303,12 @@ fn login_account_item(account: StoredAccount, active_account_id: Option<&str>) -
     } else {
         description = format!("{description} - activation unavailable");
     }
-    let search_value = format!("{name} {description} stored account account-store");
+    let search_value = (!is_current && is_supported)
+        .then(|| format!("{name} {description} stored account account-store"));
     let mut item = SelectionItem {
         name,
         description: Some(description),
-        search_value: Some(search_value),
+        search_value,
         ..Default::default()
     };
     if is_current || !is_supported {
