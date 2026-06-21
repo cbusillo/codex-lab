@@ -501,6 +501,38 @@ pub fn upsert_api_key_account(
     Ok(stored)
 }
 
+pub(crate) fn insert_api_key_account_if_missing(
+    codex_home: &Path,
+    api_key: String,
+    label: Option<String>,
+) -> io::Result<Option<StoredAccount>> {
+    let path = accounts_file_path(codex_home);
+    let mut data = read_accounts_file(&path)?;
+
+    if data
+        .accounts
+        .iter()
+        .any(|account| match_api_key_account(account, &api_key))
+    {
+        return Ok(None);
+    }
+
+    let mut account = StoredAccount {
+        id: next_id(),
+        mode: AuthMode::ApiKey,
+        label,
+        openai_api_key: Some(api_key),
+        tokens: None,
+        last_refresh: None,
+        created_at: None,
+        last_used_at: None,
+    };
+    touch_account(&mut account, false);
+    data.accounts.push(account.clone());
+    write_accounts_file(&path, &data)?;
+    Ok(Some(account))
+}
+
 pub fn upsert_chatgpt_account(
     codex_home: &Path,
     tokens: TokenData,
@@ -534,6 +566,39 @@ pub fn upsert_chatgpt_account(
 
     write_accounts_file(&path, &data)?;
     Ok(stored)
+}
+
+pub(crate) fn insert_chatgpt_account_if_missing(
+    codex_home: &Path,
+    tokens: TokenData,
+    last_refresh: DateTime<Utc>,
+    label: Option<String>,
+) -> io::Result<Option<StoredAccount>> {
+    let path = accounts_file_path(codex_home);
+    let mut data = read_accounts_file(&path)?;
+
+    if data
+        .accounts
+        .iter()
+        .any(|account| match_chatgpt_account(account, &tokens))
+    {
+        return Ok(None);
+    }
+
+    let mut account = StoredAccount {
+        id: next_id(),
+        mode: AuthMode::Chatgpt,
+        label,
+        openai_api_key: None,
+        tokens: Some(tokens),
+        last_refresh: Some(last_refresh),
+        created_at: None,
+        last_used_at: None,
+    };
+    touch_account(&mut account, false);
+    data.accounts.push(account.clone());
+    write_accounts_file(&path, &data)?;
+    Ok(Some(account))
 }
 
 #[cfg(test)]
