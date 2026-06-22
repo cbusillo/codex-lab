@@ -117,6 +117,9 @@ if ! command -v cargo >/dev/null 2>&1 && [ -f "\$HOME/.cargo/env" ]; then
   . "\$HOME/.cargo/env"
 fi
 
+cargo_env="\$("\$REPO_ROOT/scripts/local/cargo-build-env.sh")"
+eval "\$cargo_env"
+unset cargo_env
 cargo build -p codex-cli --bin codex-lab ${cargo_profile_args[*]-} --manifest-path "\$REPO_ROOT/codex-rs/Cargo.toml" >/dev/null
 TARGET_ROOT="\${CARGO_TARGET_DIR:-\$REPO_ROOT/codex-rs/target}"
 exec "\$TARGET_ROOT/\$TARGET_SUBDIR/codex-lab" "\$@"
