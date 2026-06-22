@@ -55,6 +55,10 @@ exec-harness-test:
 local-cleanup-space *args:
     {{ justfile_directory() }}/scripts/local/cleanup-space.sh {args}
 
+[no-cd]
+local-cargo-env:
+    {{ justfile_directory() }}/scripts/local/cargo-build-env.sh
+
 # Format the justfile, Rust, Python SDK code, and Python scripts.
 fmt:
     {{ python }} ../scripts/format.py
