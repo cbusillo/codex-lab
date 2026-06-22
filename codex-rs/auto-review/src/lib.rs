@@ -24,6 +24,7 @@ pub const DETAIL_MAX_BYTES: usize = 16384;
 pub const DETAIL_MAX_FINDINGS: usize = 10;
 pub const SCHEMA_VERSION: u32 = 1;
 
+const DEFAULT_MAX_RUNS: usize = 500;
 const STORE_DIR: &str = "auto-review";
 const STATE_DIR: &str = "state";
 const REVIEW_DIR: &str = "review";
@@ -148,7 +149,21 @@ impl AutoReviewStore {
         validate_run(run)?;
         let mut index = self.load_index_for_read()?;
         index.upsert(run.clone());
+        self.save_index_with_preferred_run(index, run.run_id.as_str())
+    }
+
+    fn save_index_with_preferred_run(
+        &self,
+        index: AutoReviewRunsIndex,
+        preferred_run_id: &str,
+    ) -> Result<PathBuf> {
+        let mut index = index;
         let runs_path = self.runs_path();
+        if runs_path.exists() {
+            let latest = load_runs_index_file(&runs_path)?;
+            index.merge_latest_from_disk(latest, preferred_run_id);
+        }
+        index.compact_to_preserving(DEFAULT_MAX_RUNS, preferred_run_id);
         let json = serde_json::to_string_pretty(&index)?;
         write_atomically(&runs_path, &format!("{json}\n")).with_context(|| {
             format!(
@@ -430,6 +445,77 @@ impl AutoReviewRunsIndex {
             .collect::<BTreeMap<_, _>>();
         by_id.insert(run.run_id.clone(), run);
         self.runs = by_id.into_values().collect();
+    }
+
+    fn merge_latest_from_disk(&mut self, latest: AutoReviewRunsIndex, preferred_run_id: &str) {
+        let mut by_id = self
+            .runs
+            .drain(..)
+            .map(|run| (run.run_id.clone(), run))
+            .collect::<BTreeMap<_, _>>();
+        for run in latest.runs {
+            by_id
+                .entry(run.run_id.clone())
+                .and_modify(|existing| {
+                    let is_preferred = preferred_run_id == existing.run_id.as_str();
+                    if !is_preferred || run_is_newer(&run, existing) {
+                        *existing = run.clone();
+                    }
+                })
+                .or_insert(run);
+        }
+        self.runs = by_id.into_values().collect();
+    }
+
+    fn compact_to_preserving(&mut self, max_runs: usize, preferred_run_id: &str) {
+        if self.runs.len() <= max_runs {
+            return;
+        }
+        let preferred_run = self
+            .runs
+            .iter()
+            .find(|run| run.run_id == preferred_run_id)
+            .cloned();
+        self.runs.sort_by(|left, right| {
+            auto_review_run_sort_key(right).cmp(&auto_review_run_sort_key(left))
+        });
+        self.runs.truncate(max_runs);
+        if let Some(preferred_run) = preferred_run
+            && !self.runs.iter().any(|run| run.run_id == preferred_run_id)
+        {
+            let _evicted = self.runs.pop();
+            self.runs.push(preferred_run);
+        }
+        self.runs
+            .sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    }
+}
+
+fn run_is_newer(candidate: &AutoReviewRun, existing: &AutoReviewRun) -> bool {
+    if existing.status.is_terminal() != candidate.status.is_terminal() {
+        return candidate.status.is_terminal();
+    }
+    let candidate_key = auto_review_run_sort_key(candidate);
+    let existing_key = auto_review_run_sort_key(existing);
+    if candidate_key != existing_key {
+        return candidate_key > existing_key;
+    }
+    status_progress_rank(&candidate.status) > status_progress_rank(&existing.status)
+}
+
+fn status_progress_rank(status: &AutoReviewRunStatus) -> u8 {
+    match status {
+        AutoReviewRunStatus::Pending => 0,
+        AutoReviewRunStatus::Snapshotting => 1,
+        AutoReviewRunStatus::Running => 2,
+        AutoReviewRunStatus::Reviewing => 3,
+        AutoReviewRunStatus::Resolving => 4,
+        AutoReviewRunStatus::Completed
+        | AutoReviewRunStatus::Failed
+        | AutoReviewRunStatus::Cancelled
+        | AutoReviewRunStatus::Superseded
+        | AutoReviewRunStatus::Skipped
+        | AutoReviewRunStatus::Lost => 5,
     }
 }
 
