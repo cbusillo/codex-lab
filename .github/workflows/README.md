@@ -41,6 +41,26 @@ The current local runner is `chris-mac-codex-release-1`. It must have Rust,
 Python 3, Xcode command line tools, and macOS `ditto` available. The generated
 Codex Lab app artifact is currently unsigned.
 
+### Developer Artifacts Volume
+
+High-churn runner data should live under `/Volumes/Developer-Artifacts` when
+that volume is mounted. Keep the layout stable and purpose-based so future
+builds, local automation, and cleanup scripts can share the volume without
+guessing what owns each path:
+
+- `/Volumes/Developer-Artifacts/github-actions/runners/` for self-hosted runner
+  installations.
+- `/Volumes/Developer-Artifacts/github-actions/cache/` for reusable caches that
+  should survive checkout cleanup.
+- `/Volumes/Developer-Artifacts/github-actions/tmp/` for disposable workflow
+  scratch data that can be removed without losing build acceleration.
+
+Workflow-specific caches should add owner/repo and workflow leaves under
+`github-actions/cache/`. For example, `codex-lab-app.yml` uses
+`/Volumes/Developer-Artifacts/github-actions/cache/<owner>/<repo>/codex-lab-app/`
+as its Cargo target cache root on self-hosted runners, falling back to Cargo's
+default target directory when the artifact volume is unavailable.
+
 ## Codex Lab Distribution Contract
 
 `codex-lab-app.yml` uploads these files in one artifact:
