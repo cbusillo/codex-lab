@@ -5,11 +5,10 @@ on:
   push: { branches: [main] }
 
 jobs:
-  build-test:
+  python-checks:
+    name: Python and repository checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -52,6 +51,25 @@ jobs:
             "${output_dir}/Codex Lab.app" \
             --shim-path "${output_dir}/bin/codex-lab"
 
+      - name: Ensure root README.md contains only ASCII and certain Unicode code points
+        run: ./scripts/asciicheck.py README.md
+
+      - name: Check root README ToC
+        run: python3 scripts/readme_toc.py README.md
+
+  node-and-format:
+    name: Node package and formatting checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
         with:
@@ -75,6 +93,9 @@ jobs:
           # cross-platform native payload required by the npm package layout.
           # Passing the workflow URL directly avoids relying on old rust-v*
           # branches remaining discoverable via `gh run list --branch ...`.
+          # If this upstream Actions artifact expires, every PR will fail here;
+          # refresh the URL to a newer successful release run or replace it
+          # with a durable release asset.
           CODEX_VERSION=0.133.0-alpha.4
           WORKFLOW_URL="https://github.com/openai/codex/actions/runs/26201494185"
           OUTPUT_DIR="${RUNNER_TEMP}"
@@ -92,11 +113,6 @@ jobs:
           name: codex-npm-staging
           path: ${{ steps.stage_npm_package.outputs.pack_output }}
 
-      - name: Ensure root README.md contains only ASCII and certain Unicode code points
-        run: ./scripts/asciicheck.py README.md
-      - name: Check root README ToC
-        run: python3 scripts/readme_toc.py README.md
-
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: just@1.51.0
@@ -109,3 +125,24 @@ jobs:
 
       - name: Prettier (run `pnpm run format:fix` to fix)
         run: pnpm run format
+
+  build-test:
+    name: build-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - python-checks
+      - node-and-format
+    if: ${{ always() }}
+    steps:
+      - name: Check split CI jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_checks="${{ needs.python-checks.result }}"
+          node_and_format="${{ needs.node-and-format.result }}"
+          echo "python-checks: $python_checks"
+          echo "node-and-format: $node_and_format"
+          if [[ "$python_checks" != "success" || "$node_and_format" != "success" ]]; then
+            exit 1
+          fi

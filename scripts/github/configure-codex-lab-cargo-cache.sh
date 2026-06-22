@@ -31,10 +31,7 @@ else
 	echo "Using default Cargo target directory"
 fi
 
-case "$target_dir" in
-/*) bin_path="$target_dir/release/$bin_name" ;;
-*) bin_path="$target_dir/release/$bin_name" ;;
-esac
+bin_path="$target_dir/release/$bin_name"
 
 {
 	echo "CARGO_TARGET_DIR=$target_dir"
