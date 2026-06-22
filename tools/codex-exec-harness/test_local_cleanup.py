@@ -237,10 +237,36 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 HOME=str(workspace / "home"),
             )
 
-            self.assertEqual(
-                f"export CARGO_TARGET_DIR={workspace / 'home' / '.codex-lab' / 'working' / '_target-cache' / 'codex-lab' / 'exec-harness'}\n",
+            self.assertTrue(
+                env.stdout.startswith(
+                    f"export CARGO_TARGET_DIR={workspace / 'home' / '.codex-lab' / 'working' / '_target-cache'}/"
+                ),
                 env.stdout,
             )
+            self.assertIn("/exec-harness\n", env.stdout)
+
+    def test_exec_harness_env_uses_unique_name_without_git_metadata(self) -> None:
+        with copied_cleanup_workspace() as workspace_one:
+            with copied_cleanup_workspace() as workspace_two:
+                artifact_root = workspace_one / "artifact-root"
+                artifact_root.mkdir()
+
+                env_one = run_exec_harness_env(
+                    workspace_one,
+                    CODEX_EXEC_HARNESS_NO_MKDIR="1",
+                    CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+                )
+                env_two = run_exec_harness_env(
+                    workspace_two,
+                    CODEX_EXEC_HARNESS_NO_MKDIR="1",
+                    CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+                )
+
+                self.assertEqual(0, env_one.returncode, env_one.stderr)
+                self.assertEqual(0, env_two.returncode, env_two.stderr)
+                self.assertNotEqual(env_one.stdout, env_two.stdout)
+                self.assertNotIn("/local/codex-lab/", env_one.stdout)
+                self.assertNotIn("/local/codex-lab/", env_two.stdout)
 
     def test_speed_status_reports_unconfigured_artifact_root(self) -> None:
         with copied_cleanup_workspace() as workspace:

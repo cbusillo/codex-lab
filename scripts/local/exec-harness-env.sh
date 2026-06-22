@@ -4,7 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 repo_name="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null | sed -E 's#/*$##; s#\.git$##; s#^.*/##; s#^.*:##' || true)"
 if [[ -z "$repo_name" ]]; then
-	repo_name="codex-lab"
+	repo_leaf="$(basename "$repo_root")"
+	repo_slug="$(printf '%s' "$repo_leaf" | tr -c '[:alnum:]._+-' '-')"
+	repo_hash="$(printf '%s' "$repo_root" | shasum -a 256 | awk '{ print substr($1, 1, 12) }')"
+	repo_name="${repo_slug:-workspace}-$repo_hash"
 fi
 artifact_root="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}"
 derived_cache_home=""

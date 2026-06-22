@@ -15,9 +15,11 @@ class ConfigureCodexLabCargoCacheTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "github-env"
             existing_target = Path(tmp) / "existing-target"
+            bin_dir = write_fake_rustc(Path(tmp), "aarch64-apple-darwin")
 
             completed = run_helper(
                 env_file,
+                PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                 CARGO_TARGET_DIR=str(existing_target),
                 CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(Path(tmp) / "artifact-root"),
             )
@@ -28,21 +30,28 @@ class ConfigureCodexLabCargoCacheTest(unittest.TestCase):
             )
             self.assertEqual(
                 f"CARGO_TARGET_DIR={existing_target}\n"
-                f"CODEX_LAB_BIN={existing_target / 'release' / 'codex-lab'}\n",
+                f"CODEX_LAB_BIN={existing_target / 'release' / 'codex-lab'}\n"
+                "CODEX_LAB_CARGO_HOST=aarch64-apple-darwin\n"
+                "CODEX_LAB_CARGO_PROFILE=release\n"
+                "CODEX_LAB_CARGO_CACHE_MODE=preconfigured\n",
                 env_file.read_text(),
             )
 
     def test_uses_configured_artifact_root_on_self_hosted_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "github-env"
+            summary_file = Path(tmp) / "summary"
+            bin_dir = write_fake_rustc(Path(tmp), "x86_64-unknown-linux-gnu")
             artifact_root = Path(tmp) / "artifact-root"
             artifact_root.mkdir()
 
             completed = run_helper(
                 env_file,
+                PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                 RUNNER_ENVIRONMENT="self-hosted",
                 CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
                 GITHUB_REPOSITORY="owner/repo",
+                GITHUB_STEP_SUMMARY=str(summary_file),
             )
 
             target_dir = (
@@ -51,16 +60,22 @@ class ConfigureCodexLabCargoCacheTest(unittest.TestCase):
                 / "cache"
                 / "owner/repo"
                 / "codex-lab-app"
-                / "cargo-target-aarch64-apple-darwin-release"
+                / "cargo-target-x86_64-unknown-linux-gnu-release"
             )
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertIn("Using configured persistent target cache", completed.stdout)
             self.assertTrue(target_dir.exists())
             self.assertEqual(
                 f"CARGO_TARGET_DIR={target_dir}\n"
-                f"CODEX_LAB_BIN={target_dir / 'release' / 'codex-lab'}\n",
+                f"CODEX_LAB_BIN={target_dir / 'release' / 'codex-lab'}\n"
+                "CODEX_LAB_CARGO_HOST=x86_64-unknown-linux-gnu\n"
+                "CODEX_LAB_CARGO_PROFILE=release\n"
+                "CODEX_LAB_CARGO_CACHE_MODE=persistent\n",
                 env_file.read_text(),
             )
+            self.assertIn("x86_64-unknown-linux-gnu", summary_file.read_text())
+            self.assertNotIn(str(artifact_root), completed.stdout)
+            self.assertNotIn(str(artifact_root), summary_file.read_text())
 
     def test_falls_back_to_default_target_dir_without_artifact_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,7 +88,10 @@ class ConfigureCodexLabCargoCacheTest(unittest.TestCase):
             self.assertIn("Using default Cargo target directory", completed.stdout)
             self.assertEqual(
                 f"CARGO_TARGET_DIR={target_dir}\n"
-                f"CODEX_LAB_BIN={target_dir / 'release' / 'codex-lab'}\n",
+                f"CODEX_LAB_BIN={target_dir / 'release' / 'codex-lab'}\n"
+                f"CODEX_LAB_CARGO_HOST={rustc_host()}\n"
+                "CODEX_LAB_CARGO_PROFILE=release\n"
+                "CODEX_LAB_CARGO_CACHE_MODE=default\n",
                 env_file.read_text(),
             )
 
@@ -84,6 +102,7 @@ def run_helper(
     env = os.environ.copy()
     env.pop("CARGO_TARGET_DIR", None)
     env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
+    env.pop("RUNNER_ENVIRONMENT", None)
     env.update(
         {
             "GITHUB_ENV": str(env_file),
@@ -100,6 +119,35 @@ def run_helper(
         stdout=subprocess.PIPE,
         text=True,
     )
+
+
+def write_fake_rustc(root: Path, host: str) -> Path:
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    rustc = bin_dir / "rustc"
+    rustc.write_text(
+        "#!/usr/bin/env bash\n"
+        "cat <<'EOF'\n"
+        "rustc 1.95.0 (fake)\n"
+        f"host: {host}\n"
+        "release: 1.95.0\n"
+        "EOF\n"
+    )
+    rustc.chmod(0o755)
+    return bin_dir
+
+
+def rustc_host() -> str:
+    completed = subprocess.run(
+        ["rustc", "-vV"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    for line in completed.stdout.splitlines():
+        if line.startswith("host: "):
+            return line.split(maxsplit=1)[1]
+    return "unknown-host"
 
 
 if __name__ == "__main__":
