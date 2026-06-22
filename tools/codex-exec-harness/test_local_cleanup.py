@@ -165,6 +165,83 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             )
             self.assertNotIn(f"/local/{workspace.name}/", env.stdout)
 
+    def test_exec_harness_env_prefers_explicit_target(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            env = run_exec_harness_env(
+                workspace,
+                CODEX_EXEC_HARNESS_CARGO_TARGET_DIR=str(workspace / "explicit-target"),
+            )
+
+            self.assertEqual(
+                f"export CARGO_TARGET_DIR={workspace / 'explicit-target'}\n",
+                env.stdout,
+            )
+            self.assertTrue((workspace / "explicit-target").exists())
+
+    def test_exec_harness_env_respects_existing_cargo_target_dir(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_exec_harness_env(
+                workspace,
+                CARGO_TARGET_DIR=str(workspace / "existing-target"),
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(
+                f"export CARGO_TARGET_DIR={workspace / 'existing-target'}\n",
+                env.stdout,
+            )
+            self.assertTrue((workspace / "existing-target").exists())
+            self.assertFalse((artifact_root / "local").exists())
+
+    def test_exec_harness_env_uses_artifact_root_when_configured(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            subprocess.run(
+                ["git", "init", "--quiet"],
+                check=True,
+                cwd=workspace,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "remote.origin.url",
+                    "git@github.com:cbusillo/codex-lab.git",
+                ],
+                check=True,
+                cwd=workspace,
+            )
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_exec_harness_env(
+                workspace,
+                CODEX_EXEC_HARNESS_NO_MKDIR="1",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, env.returncode, env.stderr)
+            self.assertIn(
+                f"export CARGO_TARGET_DIR={artifact_root / 'local' / 'codex-lab' / 'exec-harness' / 'cargo-target'}/",
+                env.stdout,
+            )
+            self.assertNotIn(f"/local/{workspace.name}/", env.stdout)
+
+    def test_exec_harness_env_without_artifact_root_uses_home_fallback(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            env = run_exec_harness_env(
+                workspace,
+                CODEX_EXEC_HARNESS_NO_MKDIR="1",
+                HOME=str(workspace / "home"),
+            )
+
+            self.assertEqual(
+                f"export CARGO_TARGET_DIR={workspace / 'home' / '.codex-lab' / 'working' / '_target-cache' / 'codex-lab' / 'exec-harness'}\n",
+                env.stdout,
+            )
+
     def test_speed_status_reports_unconfigured_artifact_root(self) -> None:
         with copied_cleanup_workspace() as workspace:
             env = os.environ.copy()
@@ -220,6 +297,25 @@ def run_cargo_build_env(
     env.update(env_overrides)
     return subprocess.run(
         [str(workspace / "scripts" / "local" / "cargo-build-env.sh")],
+        check=False,
+        env=env,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+
+def run_exec_harness_env(
+    workspace: Path, **env_overrides: str
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.pop("CARGO_TARGET_DIR", None)
+    env.pop("CODEX_EXEC_HARNESS_CARGO_TARGET_DIR", None)
+    env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
+    env.pop("CODEX_LAB_HOME", None)
+    env.update(env_overrides)
+    return subprocess.run(
+        [str(workspace / "scripts" / "local" / "exec-harness-env.sh")],
         check=False,
         env=env,
         stderr=subprocess.PIPE,
