@@ -10,6 +10,8 @@ artifact_root="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-/Volumes/Developer-Artifact
 
 if [[ -n "${CODEX_LAB_CARGO_TARGET_DIR:-}" ]]; then
 	target_dir="$CODEX_LAB_CARGO_TARGET_DIR"
+elif [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+	target_dir="$CARGO_TARGET_DIR"
 elif [[ -d "$artifact_root" && -w "$artifact_root" ]]; then
 	if command -v rustc >/dev/null 2>&1; then
 		rustc_version="$(rustc -vV)"
@@ -21,8 +23,6 @@ elif [[ -d "$artifact_root" && -w "$artifact_root" ]]; then
 		host="unknown-host"
 	fi
 	target_dir="${artifact_root%/}/local/$repo_name/cargo-target/$host"
-elif [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
-	target_dir="$CARGO_TARGET_DIR"
 else
 	target_dir="$repo_root/codex-rs/target"
 fi
