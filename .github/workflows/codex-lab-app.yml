@@ -36,6 +36,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
+      - name: Use persistent artifact-volume build cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_ENVIRONMENT:-}" = "self-hosted" ] && [ -d /Volumes/Developer-Artifacts ]; then
+            cache_root="/Volumes/Developer-Artifacts/github-actions/cache/${GITHUB_REPOSITORY}/codex-lab-app"
+            target_dir="${cache_root}/cargo-target-aarch64-apple-darwin-release"
+            mkdir -p "$target_dir"
+            echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
+            echo "CODEX_LAB_BIN=$target_dir/release/codex-lab" >> "$GITHUB_ENV"
+            echo "Using persistent artifact-volume target cache: $target_dir"
+          else
+            echo "CODEX_LAB_BIN=codex-rs/target/release/codex-lab" >> "$GITHUB_ENV"
+            echo "Using default Cargo target directory"
+          fi
+
       - name: Build Codex Lab CLI
         working-directory: codex-rs
         shell: bash
@@ -52,7 +68,7 @@ jobs:
           lab_version="$(PYTHONPATH=scripts python3 -c 'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
           mkdir -p "$output_root"
           python3 scripts/build_codex_lab_app.py \
-            --codex-bin codex-rs/target/release/codex-lab \
+            --codex-bin "$CODEX_LAB_BIN" \
             --app-dir "$app_dir" \
             --shim-dir "$shim_dir" \
             --short-version "$lab_version" \
