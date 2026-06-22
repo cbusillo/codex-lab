@@ -1186,7 +1186,7 @@ mod tests {
 
         hello.metadata.provenance = Some(ProvenanceMetadata {
             repository_url: None,
-            issue_or_pr_url: Some("file:///Users/cbusillo/private".to_string()),
+            issue_or_pr_url: Some("file:///Users/example/private".to_string()),
             request_id: None,
             trace_id: None,
             environment_label: None,

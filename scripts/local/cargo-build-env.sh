@@ -2,7 +2,10 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-repo_name="$(basename "$repo_root")"
+repo_name="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null | sed -E 's#/*$##; s#\.git$##; s#^.*/##; s#^.*:##' || true)"
+if [[ -z "$repo_name" ]]; then
+	repo_name="codex-lab"
+fi
 artifact_root="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-/Volumes/Developer-Artifacts}"
 
 if [[ -n "${CODEX_LAB_CARGO_TARGET_DIR:-}" ]]; then
