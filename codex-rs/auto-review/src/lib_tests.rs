@@ -16,7 +16,9 @@ use super::AutoReviewRunFreshness;
 use super::AutoReviewRunSource;
 use super::AutoReviewRunStatus;
 use super::AutoReviewRunTarget;
+use super::AutoReviewRunsIndex;
 use super::AutoReviewStore;
+use super::DEFAULT_MAX_RUNS;
 use super::DETAIL_MAX_BYTES;
 use super::SCHEMA_VERSION;
 use super::finding_digests;
@@ -75,6 +77,159 @@ fn list_runs_returns_valid_json_runs_in_id_order() -> anyhow::Result<()> {
         run_ids(store.list_runs()?),
         vec!["run_a".to_string(), "run_b".to_string()]
     );
+    Ok(())
+}
+
+#[test]
+fn merge_latest_from_disk_preserves_runs_from_other_writers() {
+    let output = sample_output(Vec::new());
+    let mut stale_writer = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![sample_run("run_stale_writer", &output)],
+    };
+    let latest_disk = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![sample_run("run_disk", &output)],
+    };
+
+    stale_writer.merge_latest_from_disk(latest_disk, "run_stale_writer");
+
+    assert_eq!(
+        run_ids(stale_writer.runs),
+        vec!["run_disk".to_string(), "run_stale_writer".to_string(),]
+    );
+}
+
+#[test]
+fn merge_latest_from_disk_keeps_terminal_disk_status_over_stale_same_run_update() {
+    let output = sample_output(Vec::new());
+    let completed = sample_run("run_1", &output);
+    let stale_running = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("run_1", &output)
+    };
+    let mut stale_writer = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![stale_running],
+    };
+    let latest_disk = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![completed],
+    };
+
+    stale_writer.merge_latest_from_disk(latest_disk, "run_1");
+
+    assert_eq!(stale_writer.runs[0].status, AutoReviewRunStatus::Completed);
+}
+
+#[test]
+fn merge_latest_from_disk_keeps_terminal_memory_status_over_stale_disk_update() {
+    let output = sample_output(Vec::new());
+    let completed = sample_run("run_1", &output);
+    let stale_running = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("run_1", &output)
+    };
+    let mut writer = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![completed],
+    };
+    let latest_disk = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![stale_running],
+    };
+
+    writer.merge_latest_from_disk(latest_disk, "run_1");
+
+    assert_eq!(writer.runs[0].status, AutoReviewRunStatus::Completed);
+}
+
+#[test]
+fn merge_latest_from_disk_does_not_rewind_unrelated_disk_progress() {
+    let output = sample_output(Vec::new());
+    let run_1_running = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("run_1", &output)
+    };
+    let run_1_reviewing = AutoReviewRun {
+        status: AutoReviewRunStatus::Reviewing,
+        completed_at_unix_secs: None,
+        ..sample_run("run_1", &output)
+    };
+    let mut stale_writer = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![run_1_running, sample_run("run_2", &output)],
+    };
+    let latest_disk = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![run_1_reviewing],
+    };
+
+    stale_writer.merge_latest_from_disk(latest_disk, "run_2");
+
+    assert_eq!(
+        stale_writer
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run_1")
+            .expect("run_1")
+            .status,
+        AutoReviewRunStatus::Reviewing
+    );
+    assert_eq!(
+        run_ids(stale_writer.runs),
+        vec!["run_1".to_string(), "run_2".to_string()]
+    );
+}
+
+#[test]
+fn compact_preserves_preferred_run_when_concurrent_writes_exceed_limit() {
+    let output = sample_output(Vec::new());
+    let mut index = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: (0..(DEFAULT_MAX_RUNS + 1))
+            .map(|index| AutoReviewRun {
+                run_id: format!("run_{index:03}"),
+                started_at_unix_secs: index as i64,
+                completed_at_unix_secs: Some(index as i64),
+                ..sample_run("unused", &output)
+            })
+            .collect(),
+    };
+
+    index.compact_to_preserving(DEFAULT_MAX_RUNS, "run_000");
+
+    let run_ids = run_ids(index.runs);
+    assert_eq!(run_ids.len(), DEFAULT_MAX_RUNS);
+    assert!(run_ids.contains(&"run_000".to_string()));
+    assert!(!run_ids.contains(&"run_001".to_string()));
+    assert!(run_ids.contains(&format!("run_{DEFAULT_MAX_RUNS:03}")));
+}
+
+#[test]
+fn save_run_compacts_index_to_most_recent_runs() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let output = sample_output(Vec::new());
+    for index in 0..(DEFAULT_MAX_RUNS + 5) {
+        store.save_run(&AutoReviewRun {
+            run_id: format!("run_{index:03}"),
+            started_at_unix_secs: index as i64,
+            completed_at_unix_secs: Some(index as i64),
+            ..sample_run("unused", &output)
+        })?;
+    }
+
+    let run_ids = run_ids(store.list_runs()?);
+    assert_eq!(run_ids.len(), DEFAULT_MAX_RUNS);
+    assert!(!run_ids.contains(&"run_000".to_string()));
+    assert!(!run_ids.contains(&"run_004".to_string()));
+    assert!(run_ids.contains(&"run_005".to_string()));
+    assert!(run_ids.contains(&format!("run_{:03}", DEFAULT_MAX_RUNS + 4)));
     Ok(())
 }
 
