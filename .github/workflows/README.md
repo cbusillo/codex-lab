@@ -38,29 +38,36 @@ has matching runner capacity, secrets, and branch-protection expectations.
 - `ARM64`
 - `codex-lab-app`
 
-The current local runner is `chris-mac-codex-lab-release-1`. It must have
-Rust, Python 3, Xcode command line tools, and macOS `ditto` available. The
-generated Codex Lab app artifact is currently unsigned.
+The runner must have Rust, Python 3, Xcode command line tools, and macOS
+`ditto` available. The generated Codex Lab app artifact is currently unsigned.
+
+`exec-harness.yml` expects a self-hosted Linux x64 runner with these labels:
+
+- `self-hosted`
+- `Linux`
+- `X64`
+- `codex-lab-linux`
 
 ### Developer Artifacts Volume
 
-High-churn runner data should live under `/Volumes/Developer-Artifacts` when
-that volume is mounted. Keep the layout stable and purpose-based so future
-builds, local automation, and cleanup scripts can share the volume without
-guessing what owns each path:
+High-churn runner data can live under a host-managed artifact root when one is
+configured. Keep the layout stable and purpose-based so future builds, local
+automation, and cleanup scripts can share the volume without guessing what owns
+each path. Configure the root through `CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT` in
+the local shell or GitHub repository/environment variables.
 
-- `/Volumes/Developer-Artifacts/github-actions/runners/` for self-hosted runner
-  installations.
-- `/Volumes/Developer-Artifacts/github-actions/cache/` for reusable caches that
-  should survive checkout cleanup.
-- `/Volumes/Developer-Artifacts/github-actions/tmp/` for disposable workflow
-  scratch data that can be removed without losing build acceleration.
+- `$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT/github-actions/runners/` for
+  self-hosted runner installations.
+- `$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT/github-actions/cache/` for reusable
+  caches that should survive checkout cleanup.
+- `$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT/github-actions/tmp/` for disposable
+  workflow scratch data that can be removed without losing build acceleration.
 
 Workflow-specific caches should add owner/repo and workflow leaves under
 `github-actions/cache/`. For example, `codex-lab-app.yml` uses
-`/Volumes/Developer-Artifacts/github-actions/cache/<owner>/<repo>/codex-lab-app/`
+`$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT/github-actions/cache/<owner>/<repo>/codex-lab-app/`
 as its Cargo target cache root on self-hosted runners, falling back to Cargo's
-default target directory when the artifact volume is unavailable.
+default target directory when no artifact root is configured or available.
 
 ## Codex Lab Distribution Contract
 

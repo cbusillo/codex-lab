@@ -120,6 +120,18 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 env.stdout,
             )
 
+    def test_cargo_build_env_without_artifact_root_uses_worktree_target(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            env = run_cargo_build_env(
+                workspace,
+                CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+            )
+
+            self.assertEqual(
+                f"export CARGO_TARGET_DIR={workspace / 'codex-rs' / 'target'}\n",
+                env.stdout,
+            )
+
     def test_cargo_build_env_uses_canonical_repo_cache_name(self) -> None:
         with copied_cleanup_workspace() as workspace:
             subprocess.run(
@@ -152,6 +164,27 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 env.stdout,
             )
             self.assertNotIn(f"/local/{workspace.name}/", env.stdout)
+
+    def test_speed_status_reports_unconfigured_artifact_root(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            env = os.environ.copy()
+            env.pop("CARGO_TARGET_DIR", None)
+            env.pop("CODEX_LAB_CARGO_TARGET_DIR", None)
+            env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
+            env.pop("CODEX_LAB_REMOTE_COMPILE_HOST", None)
+
+            completed = subprocess.run(
+                [str(workspace / "scripts" / "local" / "speed-status.sh")],
+                check=False,
+                env=env,
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("Artifact Root\nroot=not configured", completed.stdout)
+            self.assertIn("Remote Compile Host\nhost=not configured", completed.stdout)
 
 
 def run_local_cleanup(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -205,6 +238,7 @@ class copied_cleanup_workspace:
         copy_file("scripts/local/cleanup-space.sh", workspace)
         copy_file("scripts/local/cargo-build-env.sh", workspace)
         copy_file("scripts/local/exec-harness-env.sh", workspace)
+        copy_file("scripts/local/speed-status.sh", workspace)
 
         make_probe_dir(workspace / "codex-rs" / "target")
         make_probe_dir(workspace / ".tmp" / "codex-exec-harness")

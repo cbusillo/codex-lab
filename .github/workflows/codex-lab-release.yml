@@ -65,6 +65,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
+      - name: Configure build cache
+        shell: bash
+        env:
+          CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT: ${{ vars.CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT }}
+        run: scripts/github/configure-codex-lab-cargo-cache.sh codex-lab-release
+
       - name: Build Codex Lab CLI
         working-directory: codex-rs
         shell: bash
@@ -81,7 +87,7 @@ jobs:
           lab_version="$(PYTHONPATH=scripts python3 -c 'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
           mkdir -p "$output_root"
           python3 scripts/build_codex_lab_app.py \
-            --codex-bin codex-rs/target/release/codex-lab \
+            --codex-bin "$CODEX_LAB_BIN" \
             --app-dir "$app_dir" \
             --shim-dir "$shim_dir" \
             --short-version "$lab_version" \
