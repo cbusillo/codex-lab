@@ -76,6 +76,37 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             )
             self.assertTrue((workspace / "explicit-target").exists())
 
+    def test_cargo_build_env_respects_existing_cargo_target_dir(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_cargo_build_env(
+                workspace,
+                CARGO_TARGET_DIR=str(workspace / "existing-target"),
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(
+                f"export CARGO_TARGET_DIR={workspace / 'existing-target'}\n",
+                env.stdout,
+            )
+            self.assertTrue((workspace / "existing-target").exists())
+            self.assertFalse((artifact_root / "local").exists())
+
+    def test_cargo_build_env_resolves_relative_cargo_target_dir(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            env = run_cargo_build_env(
+                workspace,
+                CARGO_TARGET_DIR="relative-target",
+                CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+            )
+
+            self.assertEqual(
+                f"export CARGO_TARGET_DIR={workspace / 'relative-target'}\n",
+                env.stdout,
+            )
+
     def test_cargo_build_env_falls_back_to_worktree_target(self) -> None:
         with copied_cleanup_workspace() as workspace:
             env = run_cargo_build_env(
