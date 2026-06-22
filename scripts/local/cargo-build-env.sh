@@ -6,13 +6,13 @@ repo_name="$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null | se
 if [[ -z "$repo_name" ]]; then
 	repo_name="codex-lab"
 fi
-artifact_root="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-/Volumes/Developer-Artifacts}"
+artifact_root="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}"
 
 if [[ -n "${CODEX_LAB_CARGO_TARGET_DIR:-}" ]]; then
 	target_dir="$CODEX_LAB_CARGO_TARGET_DIR"
 elif [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
 	target_dir="$CARGO_TARGET_DIR"
-elif [[ -d "$artifact_root" && -w "$artifact_root" ]]; then
+elif [[ -n "$artifact_root" && -d "$artifact_root" && -w "$artifact_root" ]]; then
 	if command -v rustc >/dev/null 2>&1; then
 		rustc_version="$(rustc -vV)"
 		host="$(awk '/^host:/ { print $2; exit }' <<<"$rustc_version")"

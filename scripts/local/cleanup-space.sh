@@ -91,15 +91,17 @@ remove_path "$repo_root/.tmp/codex-exec-harness" "exec harness run artifacts"
 remove_path "$repo_root/.tmp/codex-exec-harness-ci" "exec harness CI artifacts"
 
 if [[ "$keep_exec_harness_cache" -eq 0 ]]; then
-	exec_harness_env="$(CODEX_EXEC_HARNESS_NO_MKDIR=1 "$repo_root/scripts/local/exec-harness-env.sh")"
+	exec_harness_env="$(env -u CARGO_TARGET_DIR CODEX_EXEC_HARNESS_NO_MKDIR=1 "$repo_root/scripts/local/exec-harness-env.sh")"
 	eval "$exec_harness_env"
 	remove_path "$CARGO_TARGET_DIR" "shared exec harness target cache"
+	unset CARGO_TARGET_DIR
 fi
 
 if [[ "$keep_local_cargo_cache" -eq 0 ]]; then
-	local_cargo_env="$(CODEX_LAB_CARGO_TARGET_NO_MKDIR=1 "$repo_root/scripts/local/cargo-build-env.sh")"
+	local_cargo_env="$(env -u CARGO_TARGET_DIR CODEX_LAB_CARGO_TARGET_NO_MKDIR=1 "$repo_root/scripts/local/cargo-build-env.sh")"
 	eval "$local_cargo_env"
 	remove_path "$CARGO_TARGET_DIR" "artifact-volume local Cargo target cache"
+	unset CARGO_TARGET_DIR
 fi
 
 echo

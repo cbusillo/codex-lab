@@ -35,6 +35,9 @@ jobs:
       - name: Test local developer scripts
         run: python3 -m unittest discover -s scripts/local -p 'test_*.py'
 
+      - name: Test GitHub workflow helper scripts
+        run: python3 -m unittest discover -s scripts/github -p 'test_*.py'
+
       - name: Smoke test Codex Lab app package layout
         shell: bash
         run: |

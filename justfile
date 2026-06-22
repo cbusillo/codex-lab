@@ -59,6 +59,10 @@ local-cleanup-space *args:
 local-cargo-env:
     {{ justfile_directory() }}/scripts/local/cargo-build-env.sh
 
+[no-cd]
+local-speed-status:
+    {{ justfile_directory() }}/scripts/local/speed-status.sh
+
 # Format the justfile, Rust, Python SDK code, and Python scripts.
 fmt:
     {{ python }} ../scripts/format.py
