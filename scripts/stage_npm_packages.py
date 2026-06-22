@@ -28,6 +28,7 @@ BINARY_TARGETS = (
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
 )
+ARTIFACT_CACHE_MARKER = ".stage-npm-artifact.json"
 
 _SPEC = importlib.util.spec_from_file_location("codex_build_npm_package", BUILD_SCRIPT)
 if _SPEC is None or _SPEC.loader is None:
@@ -106,6 +107,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Directory where npm tarballs should be written (default: dist/npm).",
+    )
+    parser.add_argument(
+        "--artifacts-cache-dir",
+        type=Path,
+        default=None,
+        help="Directory used to cache downloaded native artifacts.",
     )
     parser.add_argument(
         "--keep-staging-dirs",
@@ -276,13 +283,15 @@ def download_artifacts(
     )
     for artifact in artifacts:
         artifact_dir = dest_dir / artifact.name
-        if artifact_dir.is_dir() and any(artifact_dir.iterdir()):
+        if artifact_cache_is_complete(artifact_dir, workflow_id, artifact):
             print(
                 f"  using cached {artifact.name} ({format_bytes(artifact.size_in_bytes)})",
                 flush=True,
             )
             continue
 
+        if artifact_dir.exists():
+            shutil.rmtree(artifact_dir)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         print(
             f"  downloading {artifact.name} ({format_bytes(artifact.size_in_bytes)})",
@@ -302,6 +311,49 @@ def download_artifacts(
                 workflow_id,
             ]
         )
+        write_artifact_cache_marker(artifact_dir, workflow_id, artifact)
+
+
+def artifact_cache_is_complete(
+    artifact_dir: Path,
+    workflow_id: str,
+    artifact: WorkflowArtifact,
+) -> bool:
+    marker_path = artifact_dir / ARTIFACT_CACHE_MARKER
+    if not artifact_dir.is_dir() or not marker_path.is_file():
+        return False
+
+    try:
+        marker = json.loads(marker_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if marker != artifact_cache_marker(workflow_id, artifact):
+        return False
+
+    return any(path.name != ARTIFACT_CACHE_MARKER for path in artifact_dir.iterdir())
+
+
+def write_artifact_cache_marker(
+    artifact_dir: Path,
+    workflow_id: str,
+    artifact: WorkflowArtifact,
+) -> None:
+    marker_path = artifact_dir / ARTIFACT_CACHE_MARKER
+    marker_path.write_text(
+        json.dumps(artifact_cache_marker(workflow_id, artifact), sort_keys=True) + "\n"
+    )
+
+
+def artifact_cache_marker(
+    workflow_id: str,
+    artifact: WorkflowArtifact,
+) -> dict[str, int | str]:
+    return {
+        "name": artifact.name,
+        "size_in_bytes": artifact.size_in_bytes,
+        "workflow_id": workflow_id,
+    }
 
 
 def install_codex_package_archives(
@@ -495,7 +547,8 @@ def main() -> int:
 
     vendor_temp_roots: list[Path] = []
     vendor_src_by_components: dict[tuple[str, ...], Path] = {}
-    artifacts_temp_root: Path | None = None
+    artifacts_root: Path | None = None
+    cleanup_artifacts_root = False
     resolved_head_sha: str | None = None
 
     final_messages = []
@@ -506,10 +559,15 @@ def main() -> int:
                 args.release_version, args.workflow_url
             )
             print(f"Using native artifacts from {workflow_url}", flush=True)
-            artifacts_temp_root = Path(
-                tempfile.mkdtemp(prefix="npm-native-artifacts-", dir=runner_temp)
-            )
-            print(f"Caching downloaded artifacts in {artifacts_temp_root}", flush=True)
+            if args.artifacts_cache_dir is not None:
+                artifacts_root = args.artifacts_cache_dir
+                artifacts_root.mkdir(parents=True, exist_ok=True)
+            else:
+                artifacts_root = Path(
+                    tempfile.mkdtemp(prefix="npm-native-artifacts-", dir=runner_temp)
+                )
+                cleanup_artifacts_root = True
+            print(f"Caching downloaded artifacts in {artifacts_root}", flush=True)
             for components in native_component_sets:
                 vendor_temp_root = Path(
                     tempfile.mkdtemp(prefix="npm-native-", dir=runner_temp)
@@ -525,7 +583,7 @@ def main() -> int:
                     workflow_url,
                     set(components),
                     vendor_temp_root,
-                    artifacts_temp_root,
+                    artifacts_root,
                 )
                 vendor_src_by_components[components] = vendor_temp_root / "vendor"
 
@@ -570,8 +628,8 @@ def main() -> int:
         if not args.keep_staging_dirs:
             for vendor_temp_root in vendor_temp_roots:
                 shutil.rmtree(vendor_temp_root, ignore_errors=True)
-        if artifacts_temp_root is not None:
-            shutil.rmtree(artifacts_temp_root, ignore_errors=True)
+        if cleanup_artifacts_root and artifacts_root is not None:
+            shutil.rmtree(artifacts_root, ignore_errors=True)
 
     for msg in final_messages:
         print(msg, flush=True)

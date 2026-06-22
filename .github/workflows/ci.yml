@@ -37,6 +37,9 @@ jobs:
       - name: Test GitHub workflow helper scripts
         run: python3 -m unittest discover -s scripts/github -p 'test_*.py'
 
+      - name: Test npm staging helper
+        run: python3 -m unittest discover -s scripts -p 'test_stage_npm_packages.py'
+
       - name: Smoke test Codex Lab app package layout
         shell: bash
         run: |
@@ -57,8 +60,77 @@ jobs:
       - name: Check root README ToC
         run: python3 scripts/readme_toc.py README.md
 
-  node-and-format:
-    name: Node package and formatting checks
+  npm-package:
+    name: Stage npm package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CODEX_VERSION: 0.133.0-alpha.4
+      NODE_OPTIONS: --max-old-space-size=4096
+      STAGE_NPM_ARTIFACTS_CACHE_DIR: .cache/codex-npm-artifacts
+      WORKFLOW_REPO: openai/codex
+      WORKFLOW_REPO_CACHE_KEY: openai-codex
+      WORKFLOW_RUN_ID: 26201494185
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Restore native npm artifacts cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.STAGE_NPM_ARTIFACTS_CACHE_DIR }}
+          key: codex-npm-artifacts-${{ runner.os }}-${{ env.CODEX_VERSION }}-${{ env.WORKFLOW_REPO_CACHE_KEY }}-${{ env.WORKFLOW_RUN_ID }}-${{ hashFiles('scripts/stage_npm_packages.py', 'codex-cli/scripts/build_npm_package.py') }}
+
+      - name: Stage npm package
+        id: stage_npm_package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Use a recent successful rust-release run that published the full
+          # cross-platform native payload required by the npm package layout.
+          # Passing the workflow URL directly avoids relying on old rust-v*
+          # branches remaining discoverable via `gh run list --branch ...`.
+          # If this upstream Actions artifact expires, every PR will fail here;
+          # refresh the URL to a newer successful release run or replace it
+          # with a durable release asset.
+          WORKFLOW_URL="https://github.com/${WORKFLOW_REPO}/actions/runs/${WORKFLOW_RUN_ID}"
+          OUTPUT_DIR="${RUNNER_TEMP}"
+          python3 ./scripts/stage_npm_packages.py \
+            --release-version "$CODEX_VERSION" \
+            --workflow-url "$WORKFLOW_URL" \
+            --package codex \
+            --artifacts-cache-dir "$STAGE_NPM_ARTIFACTS_CACHE_DIR" \
+            --output-dir "$OUTPUT_DIR"
+          PACK_OUTPUT="${OUTPUT_DIR}/codex-npm-${CODEX_VERSION}.tgz"
+          echo "pack_output=$PACK_OUTPUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload staged npm package artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-npm-staging
+          path: ${{ steps.stage_npm_package.outputs.pack_output }}
+
+  format-checks:
+    name: Formatting checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -79,39 +151,11 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Stage npm package
-        id: stage_npm_package
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Use a recent successful rust-release run that published the full
-          # cross-platform native payload required by the npm package layout.
-          # Passing the workflow URL directly avoids relying on old rust-v*
-          # branches remaining discoverable via `gh run list --branch ...`.
-          # If this upstream Actions artifact expires, every PR will fail here;
-          # refresh the URL to a newer successful release run or replace it
-          # with a durable release asset.
-          CODEX_VERSION=0.133.0-alpha.4
-          WORKFLOW_URL="https://github.com/openai/codex/actions/runs/26201494185"
-          OUTPUT_DIR="${RUNNER_TEMP}"
-          python3 ./scripts/stage_npm_packages.py \
-            --release-version "$CODEX_VERSION" \
-            --workflow-url "$WORKFLOW_URL" \
-            --package codex \
-            --output-dir "$OUTPUT_DIR"
-          PACK_OUTPUT="${OUTPUT_DIR}/codex-npm-${CODEX_VERSION}.tgz"
-          echo "pack_output=$PACK_OUTPUT" >> "$GITHUB_OUTPUT"
-
-      - name: Upload staged npm package artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: codex-npm-staging
-          path: ${{ steps.stage_npm_package.outputs.pack_output }}
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
@@ -132,7 +176,8 @@ jobs:
     timeout-minutes: 5
     needs:
       - python-checks
-      - node-and-format
+      - npm-package
+      - format-checks
     if: ${{ always() }}
     steps:
       - name: Check split CI jobs
@@ -140,9 +185,11 @@ jobs:
         run: |
           set -euo pipefail
           python_checks="${{ needs.python-checks.result }}"
-          node_and_format="${{ needs.node-and-format.result }}"
+          npm_package="${{ needs.npm-package.result }}"
+          format_checks="${{ needs.format-checks.result }}"
           echo "python-checks: $python_checks"
-          echo "node-and-format: $node_and_format"
-          if [[ "$python_checks" != "success" || "$node_and_format" != "success" ]]; then
+          echo "npm-package: $npm_package"
+          echo "format-checks: $format_checks"
+          if [[ "$python_checks" != "success" || "$npm_package" != "success" || "$format_checks" != "success" ]]; then
             exit 1
           fi
