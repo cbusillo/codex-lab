@@ -1,0 +1,5 @@
+---
+source: tui/src/app/tests.rs
+expression: rendered
+---
+■ Cannot switch stored accounts while the primary thread is still attaching.
