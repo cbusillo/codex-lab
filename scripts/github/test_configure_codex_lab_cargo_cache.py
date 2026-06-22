@@ -66,18 +66,21 @@ class ConfigureCodexLabCargoCacheTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "github-env"
 
-            completed = run_helper(env_file)
+            completed = run_helper(env_file, cwd=Path(tmp))
+            target_dir = REPO_ROOT / "codex-rs" / "target"
 
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertIn("Using default Cargo target directory", completed.stdout)
             self.assertEqual(
-                "CARGO_TARGET_DIR=codex-rs/target\n"
-                "CODEX_LAB_BIN=codex-rs/target/release/codex-lab\n",
+                f"CARGO_TARGET_DIR={target_dir}\n"
+                f"CODEX_LAB_BIN={target_dir / 'release' / 'codex-lab'}\n",
                 env_file.read_text(),
             )
 
 
-def run_helper(env_file: Path, **overrides: str) -> subprocess.CompletedProcess[str]:
+def run_helper(
+    env_file: Path, cwd: Path | None = None, **overrides: str
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("CARGO_TARGET_DIR", None)
     env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
@@ -91,6 +94,7 @@ def run_helper(env_file: Path, **overrides: str) -> subprocess.CompletedProcess[
     return subprocess.run(
         [str(SCRIPT), "codex-lab-app"],
         check=False,
+        cwd=cwd,
         env=env,
         stderr=subprocess.PIPE,
         stdout=subprocess.PIPE,

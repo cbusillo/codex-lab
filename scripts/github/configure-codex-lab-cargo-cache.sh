@@ -3,6 +3,7 @@ set -euo pipefail
 
 workflow_leaf="${1:?usage: configure-codex-lab-cargo-cache.sh <workflow-cache-leaf>}"
 bin_name="${2:-codex-lab}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
 	target_dir="$CARGO_TARGET_DIR"
@@ -13,7 +14,7 @@ elif [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" && -n "${CODEX_LAB_DEVELOPER_
 	mkdir -p "$target_dir"
 	echo "Using configured persistent target cache: $target_dir"
 else
-	target_dir="codex-rs/target"
+	target_dir="$repo_root/codex-rs/target"
 	echo "Using default Cargo target directory"
 fi
 
