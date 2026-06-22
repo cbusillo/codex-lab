@@ -20,6 +20,7 @@ runner groups, secrets, and release infrastructure that this fork does not own.
 The inherited heavyweight workflows are `workflow_dispatch` only in this fork:
 
 - `bazel.yml`
+- `rust-ci-full.yml`
 - `rust-ci.yml`
 - `sdk.yml`
 - `v8-canary.yml`
