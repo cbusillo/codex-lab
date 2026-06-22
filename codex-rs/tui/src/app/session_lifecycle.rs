@@ -545,9 +545,11 @@ impl App {
             .set_queue_submissions_until_session_configured(/*queue*/ false);
         match result {
             Ok(started) => {
-                self.enqueue_primary_thread_session(started.session, started.turns)
-                    .await?;
+                let replay_result = self
+                    .enqueue_primary_thread_session(started.session, started.turns)
+                    .await;
                 self.chat_widget.maybe_send_next_queued_input();
+                replay_result?;
             }
             Err(err) => {
                 return Err(color_eyre::eyre::eyre!(
@@ -1005,6 +1007,14 @@ impl App {
             return;
         }
 
+        if !self.pending_primary_events.is_empty() {
+            self.chat_widget.add_error_message(
+                "Cannot switch stored accounts while the primary thread is still attaching."
+                    .to_string(),
+            );
+            return;
+        }
+
         let (_account, selected_auth) =
             match codex_login::auth_for_account(&self.config.codex_home, &selection.account_id) {
                 Ok(auth) => auth,
@@ -1057,6 +1067,37 @@ impl App {
             previous_active_account_id,
             self.config.cli_auth_credentials_store_mode,
         );
+
+        match codex_login::set_active_account_id(
+            &self.config.codex_home,
+            Some(selection.account_id.clone()),
+        ) {
+            Ok(Some(_activated)) => {}
+            Ok(None) => {
+                if let Err(rollback_err) = rollback.restore_now() {
+                    tracing::warn!(
+                        "failed to restore auth after missing stored account activation: {rollback_err}"
+                    );
+                }
+                self.chat_widget.add_error_message(format!(
+                    "Failed to activate stored account {}: account disappeared before activation",
+                    selection.label
+                ));
+                return;
+            }
+            Err(err) => {
+                if let Err(rollback_err) = rollback.restore_now() {
+                    tracing::warn!(
+                        "failed to restore auth after stored account activation error: {rollback_err}"
+                    );
+                }
+                self.chat_widget.add_error_message(format!(
+                    "Failed to activate stored account {}: {err}",
+                    selection.label
+                ));
+                return;
+            }
+        }
 
         let default_auth_home = self.config.codex_home.clone();
         let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
@@ -1130,46 +1171,7 @@ impl App {
             }
         };
 
-        match codex_login::set_active_account_id(
-            &self.config.codex_home,
-            Some(selection.account_id.clone()),
-        ) {
-            Ok(Some(_activated)) => rollback.disarm(),
-            Ok(None) => {
-                if let Err(rollback_err) = rollback.restore_now() {
-                    tracing::warn!(
-                        "failed to restore auth after missing stored account activation: {rollback_err}"
-                    );
-                }
-                self.chat_widget.add_error_message(format!(
-                    "Failed to activate stored account {}: account disappeared before activation",
-                    selection.label
-                ));
-                if let Err(shutdown_err) = replacement_session.shutdown().await {
-                    tracing::warn!(
-                        "failed to shut down replacement app server after account activation failure: {shutdown_err}"
-                    );
-                }
-                return;
-            }
-            Err(err) => {
-                if let Err(rollback_err) = rollback.restore_now() {
-                    tracing::warn!(
-                        "failed to restore auth after stored account activation error: {rollback_err}"
-                    );
-                }
-                self.chat_widget.add_error_message(format!(
-                    "Failed to activate stored account {}: {err}",
-                    selection.label
-                ));
-                if let Err(shutdown_err) = replacement_session.shutdown().await {
-                    tracing::warn!(
-                        "failed to shut down replacement app server after account activation failure: {shutdown_err}"
-                    );
-                }
-                return;
-            }
-        }
+        rollback.disarm();
 
         self.shutdown_current_thread(app_server).await;
         let tracked_thread_ids: Vec<ThreadId> =

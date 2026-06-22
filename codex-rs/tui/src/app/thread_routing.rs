@@ -1083,49 +1083,42 @@ impl App {
             self.app_event_tx
                 .send(AppEvent::EndInitialHistoryReplayBuffer);
         }
-        let pending = std::mem::take(&mut self.pending_primary_events);
-        for pending_event in pending {
-            match pending_event {
+        let mut pending = std::mem::take(&mut self.pending_primary_events);
+        while let Some(pending_event) = pending.pop_front() {
+            let result = match &pending_event {
                 ThreadBufferedEvent::Notification(notification) => {
-                    if let Err(err) = self
-                        .enqueue_thread_notification(thread_id, notification)
+                    self.enqueue_thread_notification(thread_id, notification.clone())
                         .await
-                    {
-                        tracing::warn!(
-                            "failed to replay pending notification for primary thread {thread_id}: {err}"
-                        );
-                    }
                 }
                 ThreadBufferedEvent::Request(request) => {
-                    if let Err(err) = self.enqueue_thread_request(thread_id, request).await {
-                        tracing::warn!(
-                            "failed to replay pending request for primary thread {thread_id}: {err}"
-                        );
-                    }
+                    self.enqueue_thread_request(thread_id, request.clone())
+                        .await
                 }
                 ThreadBufferedEvent::HistoryEntryResponse(event) => {
-                    if let Err(err) = self
-                        .enqueue_thread_history_entry_response(thread_id, event)
+                    self.enqueue_thread_history_entry_response(thread_id, event.clone())
                         .await
-                    {
-                        tracing::warn!(
-                            "failed to replay pending history entry for primary thread {thread_id}: {err}"
-                        );
-                    }
                 }
                 ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => {
-                    if let Err(err) = self
-                        .enqueue_thread_auto_review_summary(thread_id, run_id, result)
-                        .await
-                    {
-                        tracing::warn!(
-                            "failed to replay pending auto-review summary for primary thread {thread_id}: {err}"
-                        );
-                    }
+                    self.enqueue_thread_auto_review_summary(
+                        thread_id,
+                        run_id.clone(),
+                        result.clone(),
+                    )
+                    .await
                 }
                 ThreadBufferedEvent::FeedbackSubmission(event) => {
-                    self.enqueue_thread_feedback_event(thread_id, event).await;
+                    self.enqueue_thread_feedback_event(thread_id, event.clone())
+                        .await;
+                    Ok(())
                 }
+            };
+            if let Err(err) = result {
+                self.chat_widget
+                    .set_initial_user_message_submit_suppressed(/*suppressed*/ false);
+                self.chat_widget.submit_initial_user_message_if_pending();
+                self.pending_primary_events.push_back(pending_event);
+                self.pending_primary_events.append(&mut pending);
+                return Err(err);
             }
         }
         self.chat_widget
