@@ -37,6 +37,7 @@ use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
@@ -383,8 +384,11 @@ async fn review_op_with_persistence_writes_auto_review_run() {
 async fn review_op_with_persistence_writes_failed_run_without_review_output() {
     skip_if_no_network!();
 
-    let (server, _request_log) =
-        start_responses_server_with_sse(completed_sse(), /*expected_requests*/ 1).await;
+    let (server, _request_log) = start_responses_server_with_sse(
+        vec![ev_completed_with_tokens("resp-1", 25_915)],
+        /*expected_requests*/ 1,
+    )
+    .await;
     let codex_home = Arc::new(TempDir::new().unwrap());
     let codex = new_conversation_for_server(&server, codex_home.clone(), |_| {}).await;
 
@@ -420,6 +424,7 @@ async fn review_op_with_persistence_writes_failed_run_without_review_output() {
     assert_eq!(run.source, AutoReviewRunSource::Manual);
     assert_eq!(run.review_target, review_target);
     assert!(run.completed_at_unix_secs.is_some());
+    assert_eq!(run.token_count, Some(25_915));
     assert_eq!(
         run.error_summary.as_deref(),
         Some("review ended without producing review output")
@@ -822,9 +827,12 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
             ]),
             sse(vec![
                 ev_assistant_message("msg-1", "patch applied"),
-                ev_completed("resp-2"),
+                ev_completed_with_tokens("resp-2", 111),
             ]),
-            responses::sse(assistant_message_sse(&review_json)),
+            responses::sse(vec![
+                ev_assistant_message("msg-3", &review_json),
+                ev_completed_with_tokens("resp-3", 25_915),
+            ]),
         ],
     )
     .await;
@@ -864,6 +872,11 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
     assert_eq!(run.source, AutoReviewRunSource::Background);
     assert_diff_review_target(&run.review_target);
     assert!(run.completed_at_unix_secs.is_some());
+    assert!(
+        run.prompt_token_estimate
+            .is_some_and(|estimate| estimate > 0)
+    );
+    assert_eq!(run.token_count, Some(25_915));
     assert_eq!(run.error_summary, None);
     assert!(
         run.target.worktree_diff_fingerprint.is_some(),
@@ -1018,6 +1031,10 @@ async fn session_startup_marks_orphaned_background_review_lost() -> anyhow::Resu
         started_at_unix_secs: 1,
         completed_at_unix_secs: None,
         model: Some("gpt-test".to_string()),
+        reasoning_effort: None,
+        prompt_token_estimate: None,
+        token_count: None,
+        saved_token_estimate: None,
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,
@@ -1085,6 +1102,10 @@ async fn session_startup_marks_orphaned_manual_review_lost() -> anyhow::Result<(
         started_at_unix_secs: 1,
         completed_at_unix_secs: None,
         model: Some("gpt-test".to_string()),
+        reasoning_effort: None,
+        prompt_token_estimate: None,
+        token_count: None,
+        saved_token_estimate: None,
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,
@@ -1156,6 +1177,10 @@ async fn session_startup_preserves_locked_manual_review() -> anyhow::Result<()> 
         started_at_unix_secs: 1,
         completed_at_unix_secs: None,
         model: Some("gpt-test".to_string()),
+        reasoning_effort: None,
+        prompt_token_estimate: None,
+        token_count: None,
+        saved_token_estimate: None,
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,
@@ -1230,6 +1255,10 @@ async fn session_startup_reconciles_unlocked_runs_while_preserving_locked_manual
             started_at_unix_secs: 1,
             completed_at_unix_secs: None,
             model: Some("gpt-test".to_string()),
+            reasoning_effort: None,
+            prompt_token_estimate: None,
+            token_count: None,
+            saved_token_estimate: None,
             superseded_by: None,
             cancel_reason: None,
             error_summary: None,
@@ -3218,7 +3247,7 @@ fn load_auto_review_finding_detail(
         let store_root = entry.path().join("auto-review");
         let store = AutoReviewStore::from_store_root(store_root);
         if store.load_run(run_id).is_ok() {
-            return Ok(store.finding_detail(run_id, finding_id, 4096)?);
+            return store.finding_detail(run_id, finding_id, 4096);
         }
     }
     anyhow::bail!("auto review run {run_id} not found")
@@ -3245,7 +3274,7 @@ async fn submit_user_input_without_waiting(
             },
         })
         .await
-        .expect("submit user input");
+        .unwrap_or_else(|err| panic!("submit user input: {err}"));
 }
 
 fn compact_auto_review_run(
@@ -3266,6 +3295,10 @@ fn compact_auto_review_run(
         started_at_unix_secs: 1,
         completed_at_unix_secs: status.is_terminal().then_some(2),
         model: Some("gpt-test".to_string()),
+        reasoning_effort: None,
+        prompt_token_estimate: None,
+        token_count: None,
+        saved_token_estimate: None,
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,
@@ -3285,7 +3318,7 @@ fn assert_diff_review_target(target: &ReviewTarget) {
 fn added_file_turn_diff(path: &str, contents: &str) -> String {
     let line = contents
         .strip_suffix('\n')
-        .expect("test fixture should end with a newline");
+        .unwrap_or_else(|| panic!("test fixture should end with a newline"));
     assert!(
         !line.contains('\n'),
         "test helper only supports single-line added files"
@@ -3301,17 +3334,17 @@ fn added_file_turn_diff(path: &str, contents: &str) -> String {
             child
                 .stdin
                 .as_mut()
-                .expect("stdin should be piped")
+                .unwrap_or_else(|| panic!("stdin should be piped"))
                 .write_all(contents.as_bytes())?;
             child.wait_with_output()
         })
-        .expect("git hash-object should run");
+        .unwrap_or_else(|err| panic!("git hash-object should run: {err}"));
     assert!(
         output.status.success(),
         "git hash-object failed: {output:?}"
     );
     let blob_oid = String::from_utf8(output.stdout)
-        .expect("git hash-object output should be utf-8")
+        .unwrap_or_else(|err| panic!("git hash-object output should be utf-8: {err}"))
         .trim()
         .to_string();
     format!(
@@ -3379,7 +3412,7 @@ async fn wait_for_auto_review_lock_absent(codex_home: &std::path::Path) {
 async fn expected_worktree_diff_fingerprint(cwd: &Path) -> String {
     get_worktree_diff_fingerprint(cwd)
         .await
-        .expect("expected dirty worktree fingerprint")
+        .unwrap_or_else(|| panic!("expected dirty worktree fingerprint"))
 }
 
 async fn wait_for_background_auto_review_run_without_review_mode_events(
@@ -3585,7 +3618,8 @@ fn init_git_repo(repo_path: &std::path::Path) {
     run_git(repo_path, &["init", "-b", "main"]);
     run_git(repo_path, &["config", "user.email", "test@example.com"]);
     run_git(repo_path, &["config", "user.name", "Test User"]);
-    std::fs::write(repo_path.join("README.md"), "initial\n").expect("write initial file");
+    std::fs::write(repo_path.join("README.md"), "initial\n")
+        .unwrap_or_else(|err| panic!("write initial file: {err}"));
     run_git(repo_path, &["add", "."]);
     run_git(repo_path, &["commit", "-m", "initial"]);
 }
@@ -3596,7 +3630,7 @@ fn run_git(repo_path: &std::path::Path, args: &[&str]) {
         .arg(repo_path)
         .args(args)
         .output()
-        .expect("spawn git");
+        .unwrap_or_else(|err| panic!("spawn git: {err}"));
     assert!(
         output.status.success(),
         "git {:?} failed: stdout={:?} stderr={:?}",
@@ -3612,7 +3646,7 @@ fn current_git_head(repo_path: &std::path::Path) -> Option<String> {
         .arg(repo_path)
         .args(["rev-parse", "HEAD"])
         .output()
-        .expect("spawn git rev-parse HEAD");
+        .ok()?;
     assert!(
         output.status.success(),
         "git rev-parse HEAD failed: stdout={:?} stderr={:?}",

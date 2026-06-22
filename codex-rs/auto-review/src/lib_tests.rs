@@ -141,9 +141,105 @@ fn merge_latest_from_disk_keeps_terminal_memory_status_over_stale_disk_update() 
         runs: vec![stale_running],
     };
 
+    writer.merge_latest_from_disk(latest_disk, "other_run");
+
+    assert_eq!(writer.runs[0].status, AutoReviewRunStatus::Completed);
+}
+
+#[test]
+fn merge_latest_from_disk_prefers_higher_ranked_terminal_status_for_same_run() {
+    let output = sample_output(Vec::new());
+    let stale_skipped = AutoReviewRun {
+        status: AutoReviewRunStatus::Skipped,
+        completed_at_unix_secs: Some(2),
+        ..sample_run("run_1", &output)
+    };
+    let completed = AutoReviewRun {
+        status: AutoReviewRunStatus::Completed,
+        completed_at_unix_secs: Some(2),
+        token_count: Some(25_915),
+        ..sample_run("run_1", &output)
+    };
+    let mut writer = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![stale_skipped],
+    };
+    let latest_disk = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![completed],
+    };
+
+    writer.merge_latest_from_disk(latest_disk, "other_run");
+
+    assert_eq!(writer.runs[0].status, AutoReviewRunStatus::Completed);
+    assert_eq!(writer.runs[0].token_count, Some(25_915));
+}
+
+#[test]
+fn merge_latest_from_disk_does_not_replace_preferred_terminal_with_same_timestamp_status() {
+    let output = sample_output(Vec::new());
+    let completed = AutoReviewRun {
+        status: AutoReviewRunStatus::Completed,
+        completed_at_unix_secs: Some(2),
+        token_count: Some(25_915),
+        ..sample_run("run_1", &output)
+    };
+    let stale_skipped = AutoReviewRun {
+        status: AutoReviewRunStatus::Skipped,
+        completed_at_unix_secs: Some(2),
+        ..sample_run("run_1", &output)
+    };
+    let mut writer = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![completed],
+    };
+    let latest_disk = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![stale_skipped],
+    };
+
     writer.merge_latest_from_disk(latest_disk, "run_1");
 
     assert_eq!(writer.runs[0].status, AutoReviewRunStatus::Completed);
+    assert_eq!(writer.runs[0].token_count, Some(25_915));
+}
+
+#[test]
+fn merge_latest_from_disk_preserves_unrelated_lifecycle_update() {
+    let output = sample_output(Vec::new());
+    let completed = AutoReviewRun {
+        status: AutoReviewRunStatus::Completed,
+        completed_at_unix_secs: Some(2),
+        token_count: Some(25_915),
+        ..sample_run("run_1", &output)
+    };
+    let superseded = AutoReviewRun {
+        status: AutoReviewRunStatus::Superseded,
+        freshness: AutoReviewRunFreshness::Superseded,
+        completed_at_unix_secs: Some(2),
+        token_count: Some(25_915),
+        superseded_by: Some("run_2".to_string()),
+        ..sample_run("run_1", &output)
+    };
+    let mut stale_writer = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![completed, sample_run("run_2", &output)],
+    };
+    let latest_disk = AutoReviewRunsIndex {
+        schema_version: SCHEMA_VERSION,
+        runs: vec![superseded],
+    };
+
+    stale_writer.merge_latest_from_disk(latest_disk, "run_2");
+
+    let run_1 = stale_writer
+        .runs
+        .iter()
+        .find(|run| run.run_id == "run_1")
+        .expect("run_1 preserved");
+    assert_eq!(run_1.status, AutoReviewRunStatus::Superseded);
+    assert_eq!(run_1.superseded_by.as_deref(), Some("run_2"));
+    assert_eq!(run_1.token_count, Some(25_915));
 }
 
 #[test]
@@ -520,6 +616,43 @@ fn diagnostics_counts_terminal_skipped_duplicates_and_stale_suppression() {
 }
 
 #[test]
+fn diagnostics_include_token_and_elapsed_signals() {
+    let active_target = sample_target("main", "head-2", "/repo");
+    let high_token_run = AutoReviewRun {
+        run_id: "high_token".to_string(),
+        reasoning_effort: Some("medium".to_string()),
+        prompt_token_estimate: Some(12_000),
+        token_count: Some(25_915),
+        completed_at_unix_secs: Some(45),
+        ..sample_run("unused", &sample_output(Vec::new()))
+    };
+    let long_prompt_run = AutoReviewRun {
+        run_id: "long_prompt".to_string(),
+        prompt_token_estimate: Some(42_000),
+        completed_at_unix_secs: Some(301),
+        ..sample_run("unused", &sample_output(Vec::new()))
+    };
+
+    let diagnostics = AutoReviewDiagnostics::from_runs(
+        [&high_token_run, &long_prompt_run],
+        Some(&active_target),
+        Some(&ReviewTarget::UncommittedChanges),
+    )
+    .expect("diagnostics");
+
+    assert_eq!(diagnostics.token_count, 25_915);
+    assert_eq!(diagnostics.token_runs, 1);
+    assert_eq!(diagnostics.prompt_token_estimate, 54_000);
+    assert_eq!(diagnostics.prompt_runs, 2);
+    assert_eq!(diagnostics.high_burn_runs, 2);
+    assert_eq!(diagnostics.longest_elapsed_bucket, Some("lt15m"));
+    assert_eq!(
+        diagnostics.compact_line(),
+        "recent_runs=2 in_flight=0 terminal=2 tokens=25915t token_runs=1 prompt_estimate=54000t prompt_runs=2 high_burn=2 longest_elapsed=lt15m"
+    );
+}
+
+#[test]
 fn diagnostics_do_not_count_off_target_current_runs_as_stale_suppression() {
     let active_target = sample_target("main", "head-2", "/repo");
     let current_commit_finding = AutoReviewRun {
@@ -813,6 +946,8 @@ fn duplicate_lookup_uses_finding_count_for_completed_priority() -> anyhow::Resul
 
     assert_eq!(duplicate.run_id, "finding");
     assert_eq!(duplicate.finding_count, 1);
+    assert_eq!(duplicate.token_count, None);
+    assert_eq!(duplicate.prompt_token_estimate, None);
     assert_eq!(
         duplicate.disposition,
         AutoReviewDuplicateDisposition::ReuseTerminal
@@ -1074,6 +1209,10 @@ fn sample_run(run_id: &str, output: &ReviewOutputEvent) -> AutoReviewRun {
         started_at_unix_secs: 1,
         completed_at_unix_secs: Some(2),
         model: Some("gpt-test".to_string()),
+        reasoning_effort: None,
+        prompt_token_estimate: None,
+        token_count: None,
+        saved_token_estimate: None,
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,

@@ -19,6 +19,7 @@ use codex_git_utils::merge_base_with_head;
 use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewTarget;
+use codex_protocol::protocol::TokenUsage;
 
 use crate::turn_timing::now_unix_timestamp_ms;
 
@@ -36,6 +37,8 @@ pub(crate) struct ReviewPersistenceContext {
     review_target: ReviewTarget,
     started_at_unix_secs: i64,
     model: Option<String>,
+    reasoning_effort: Option<String>,
+    prompt_token_estimate: Option<u64>,
 }
 
 impl ReviewPersistenceContext {
@@ -46,6 +49,8 @@ impl ReviewPersistenceContext {
         codex_home: &Path,
         cwd: &Path,
         model: Option<String>,
+        reasoning_effort: Option<String>,
+        prompt_token_estimate: Option<u64>,
     ) -> Self {
         let target = collect_auto_review_target(codex_home, cwd, &review_target).await;
         let store_scope = target
@@ -63,6 +68,8 @@ impl ReviewPersistenceContext {
             review_target,
             started_at_unix_secs: now_unix_secs(),
             model,
+            reasoning_effort,
+            prompt_token_estimate,
         }
     }
 
@@ -80,6 +87,13 @@ impl ReviewPersistenceContext {
 
     pub(crate) fn store_scope(&self) -> &Path {
         &self.store_scope
+    }
+
+    pub(crate) fn with_prompt_token_estimate(mut self, prompt_token_estimate: Option<u64>) -> Self {
+        if self.prompt_token_estimate.is_none() {
+            self.prompt_token_estimate = prompt_token_estimate;
+        }
+        self
     }
 
     pub(crate) fn target(&self) -> &AutoReviewRunTarget {
@@ -104,6 +118,7 @@ impl ReviewPersistenceContext {
             codex_home,
             AutoReviewRunStatus::Running,
             /*output*/ None,
+            /*token_usage*/ None,
             /*error_summary*/ None,
         )
     }
@@ -113,6 +128,7 @@ impl ReviewPersistenceContext {
             codex_home,
             AutoReviewRunStatus::Pending,
             /*output*/ None,
+            /*token_usage*/ None,
             /*error_summary*/ None,
         )
     }
@@ -121,12 +137,14 @@ impl ReviewPersistenceContext {
         &self,
         codex_home: impl AsRef<Path>,
         output: &ReviewOutputEvent,
+        token_usage: Option<&TokenUsage>,
     ) -> bool {
         self.save_run(
             codex_home,
             AutoReviewRunStatus::Completed,
             Some(output),
-            None,
+            token_usage,
+            /*error_summary*/ None,
         )
     }
 
@@ -146,6 +164,7 @@ impl ReviewPersistenceContext {
             codex_home,
             AutoReviewRunStatus::Cancelled,
             /*output*/ None,
+            /*token_usage*/ None,
             Some(error_summary),
         )
     }
@@ -160,18 +179,26 @@ impl ReviewPersistenceContext {
             codex_home,
             AutoReviewRunStatus::Superseded,
             /*output*/ None,
+            /*token_usage*/ None,
             Some(error_summary),
             AutoReviewRunFreshness::Superseded,
             superseded_by,
             None,
+            /*saved_token_estimate*/ None,
         )
     }
 
-    pub(crate) fn save_failed(&self, codex_home: impl AsRef<Path>, error_summary: String) -> bool {
+    pub(crate) fn save_failed(
+        &self,
+        codex_home: impl AsRef<Path>,
+        error_summary: String,
+        token_usage: Option<&TokenUsage>,
+    ) -> bool {
         self.save_run(
             codex_home,
             AutoReviewRunStatus::Failed,
             /*output*/ None,
+            token_usage,
             Some(error_summary),
         )
     }
@@ -181,6 +208,7 @@ impl ReviewPersistenceContext {
             codex_home,
             AutoReviewRunStatus::Skipped,
             /*output*/ None,
+            /*token_usage*/ None,
             Some(error_summary),
         )
     }
@@ -198,10 +226,12 @@ impl ReviewPersistenceContext {
             codex_home,
             AutoReviewRunStatus::Skipped,
             /*output*/ None,
+            /*token_usage*/ None,
             Some(error_summary),
             AutoReviewRunFreshness::Superseded,
             Some(duplicate.run_id.clone()),
             Some("duplicate_auto_review_scope".to_string()),
+            duplicate_saved_token_estimate(duplicate),
         )
     }
 
@@ -210,16 +240,19 @@ impl ReviewPersistenceContext {
         codex_home: impl AsRef<Path>,
         status: AutoReviewRunStatus,
         output: Option<&ReviewOutputEvent>,
+        token_usage: Option<&TokenUsage>,
         error_summary: Option<String>,
     ) -> bool {
         self.save_run_with_metadata(
             codex_home,
             status,
             output,
+            token_usage,
             error_summary,
             AutoReviewRunFreshness::Current,
             None,
             None,
+            /*saved_token_estimate*/ None,
         )
     }
 
@@ -228,10 +261,12 @@ impl ReviewPersistenceContext {
         codex_home: impl AsRef<Path>,
         status: AutoReviewRunStatus,
         output: Option<&ReviewOutputEvent>,
+        token_usage: Option<&TokenUsage>,
         error_summary: Option<String>,
         freshness: AutoReviewRunFreshness,
         superseded_by: Option<String>,
         cancel_reason: Option<String>,
+        saved_token_estimate: Option<u64>,
     ) -> bool {
         let codex_home = codex_home.as_ref();
         let completed_at_unix_secs = if is_terminal_status(&status) {
@@ -279,6 +314,7 @@ impl ReviewPersistenceContext {
             .unwrap_or_default();
         let finding_digests = output.map(finding_digests).unwrap_or_default();
         let omitted_finding_digest_count = finding_count.saturating_sub(finding_digests.len());
+        let token_count = token_usage.and_then(token_count_u64);
         let run = AutoReviewRun {
             schema_version: SCHEMA_VERSION,
             run_id: self.run_id.clone(),
@@ -290,6 +326,10 @@ impl ReviewPersistenceContext {
             started_at_unix_secs: self.started_at_unix_secs,
             completed_at_unix_secs,
             model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            prompt_token_estimate: self.prompt_token_estimate,
+            token_count,
+            saved_token_estimate,
             superseded_by,
             cancel_reason,
             error_summary,
@@ -311,6 +351,16 @@ impl ReviewPersistenceContext {
 
 fn is_terminal_status(status: &AutoReviewRunStatus) -> bool {
     status.is_terminal()
+}
+
+fn token_count_u64(token_usage: &TokenUsage) -> Option<u64> {
+    u64::try_from(token_usage.total_tokens)
+        .ok()
+        .filter(|token_count| *token_count > 0)
+}
+
+fn duplicate_saved_token_estimate(duplicate: &AutoReviewDuplicateMatch) -> Option<u64> {
+    duplicate.token_count.or(duplicate.prompt_token_estimate)
 }
 
 pub(crate) async fn collect_auto_review_target(
@@ -380,6 +430,7 @@ fn now_unix_secs() -> i64 {
 mod tests {
     use super::*;
     use codex_protocol::protocol::ReviewPersistence;
+    use codex_protocol::protocol::TokenUsage;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -393,6 +444,8 @@ mod tests {
             codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
         )
         .await;
 
@@ -417,6 +470,8 @@ mod tests {
             codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
         )
         .await;
 
@@ -447,6 +502,8 @@ mod tests {
             codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
         )
         .await;
 
@@ -482,6 +539,8 @@ mod tests {
             codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
         )
         .await;
 
@@ -507,6 +566,8 @@ mod tests {
             codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
         )
         .await;
 
@@ -532,6 +593,8 @@ mod tests {
             codex_home.path(),
             cwd.path(),
             Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
         )
         .await;
         let duplicate = AutoReviewDuplicateMatch {
@@ -540,6 +603,8 @@ mod tests {
             disposition: codex_auto_review::AutoReviewDuplicateDisposition::ReuseTerminal,
             finding_count: 1,
             model: Some("test-model".to_string()),
+            token_count: Some(25_915),
+            prompt_token_estimate: Some(42_000),
         };
 
         persistence.save_skipped_duplicate(codex_home.path(), &duplicate);
@@ -559,6 +624,41 @@ mod tests {
             run.error_summary.as_deref(),
             Some("equivalent background auto review already exists: existing-run")
         );
+        assert_eq!(run.saved_token_estimate, Some(25_915));
+    }
+
+    #[tokio::test]
+    async fn save_completed_records_model_reasoning_and_token_diagnostics() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "completed-metadata".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+            Some("medium".to_string()),
+            Some(42_000),
+        )
+        .await;
+        let output = ReviewOutputEvent::default();
+        let token_usage = TokenUsage {
+            total_tokens: 25_915,
+            ..TokenUsage::default()
+        };
+
+        persistence.save_completed(codex_home.path(), &output, Some(&token_usage));
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let run = store
+            .load_run("completed-metadata")
+            .expect("load persisted review run");
+        assert_eq!(run.model.as_deref(), Some("test-model"));
+        assert_eq!(run.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(run.prompt_token_estimate, Some(42_000));
+        assert_eq!(run.token_count, Some(25_915));
+        assert_eq!(run.saved_token_estimate, None);
     }
 
     #[tokio::test]

@@ -24,6 +24,7 @@ use crate::review_format::format_review_findings_block;
 use crate::review_format::render_review_output_text;
 use crate::review_persistence::AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY;
 use crate::review_persistence::ReviewPersistenceContext;
+use crate::session::Codex;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -154,7 +155,7 @@ async fn run_review_task(
     }
 
     // Start sub-codex conversation and get the receiver for events.
-    let output = match start_review_conversation(
+    let (output, token_usage) = match start_review_conversation(
         session.clone(),
         ctx.clone(),
         user_input,
@@ -162,8 +163,12 @@ async fn run_review_task(
     )
     .await
     {
-        Some(receiver) => process_review_events(session.clone(), ctx.clone(), receiver).await,
-        None => None,
+        Some(review_codex) => {
+            let output = process_review_events(session.clone(), ctx.clone(), &review_codex).await;
+            let token_usage = review_codex.session.token_usage_info().await;
+            (output, token_usage.map(|info| info.total_token_usage))
+        }
+        None => (None, None),
     };
     let cancelled = cancellation_token.is_cancelled();
     let should_exit_review_mode = persistence
@@ -185,7 +190,7 @@ async fn run_review_task(
                 .await;
             }
         } else if let Some(output) = output.as_ref() {
-            if persistence.save_completed(codex_home, output) {
+            if persistence.save_completed(codex_home, output, token_usage.as_ref()) {
                 send_background_auto_review_status(
                     session.clone_session(),
                     &persistence,
@@ -196,7 +201,7 @@ async fn run_review_task(
             }
         } else {
             let error_summary = "review ended without producing review output".to_string();
-            if persistence.save_failed(codex_home, error_summary.clone()) {
+            if persistence.save_failed(codex_home, error_summary.clone(), token_usage.as_ref()) {
                 send_background_auto_review_status(
                     session.clone_session(),
                     &persistence,
@@ -237,7 +242,7 @@ async fn start_review_conversation(
     ctx: Arc<TurnContext>,
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
-) -> Option<async_channel::Receiver<Event>> {
+) -> Option<Codex> {
     let config = ctx.config.clone();
     let mut sub_agent_config = config.as_ref().clone();
     // Carry over review-only feature restrictions so the delegate cannot
@@ -275,16 +280,15 @@ async fn start_review_conversation(
     )
     .await)
         .ok()
-        .map(|io| io.rx_event)
 }
 
 async fn process_review_events(
     session: Arc<SessionTaskContext>,
     ctx: Arc<TurnContext>,
-    receiver: async_channel::Receiver<Event>,
+    review_codex: &Codex,
 ) -> Option<ReviewOutputEvent> {
     let mut prev_agent_message: Option<Event> = None;
-    while let Ok(event) = receiver.recv().await {
+    while let Ok(event) = review_codex.next_event().await {
         match event.clone().msg {
             EventMsg::AgentMessage(_) => {
                 if let Some(prev) = prev_agent_message.take() {
