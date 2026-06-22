@@ -38,9 +38,9 @@ has matching runner capacity, secrets, and branch-protection expectations.
 - `ARM64`
 - `codex-lab-app`
 
-The current local runner is `chris-mac-codex-release-1`. It must have Rust,
-Python 3, Xcode command line tools, and macOS `ditto` available. The generated
-Codex Lab app artifact is currently unsigned.
+The current local runner is `chris-mac-codex-lab-release-1`. It must have
+Rust, Python 3, Xcode command line tools, and macOS `ditto` available. The
+generated Codex Lab app artifact is currently unsigned.
 
 ### Developer Artifacts Volume
 

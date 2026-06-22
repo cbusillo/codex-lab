@@ -89,6 +89,39 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 env.stdout,
             )
 
+    def test_cargo_build_env_uses_canonical_repo_cache_name(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            subprocess.run(
+                ["git", "init", "--quiet"],
+                check=True,
+                cwd=workspace,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "remote.origin.url",
+                    "git@github.com:cbusillo/codex-lab.git",
+                ],
+                check=True,
+                cwd=workspace,
+            )
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_cargo_build_env(
+                workspace,
+                CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, env.returncode, env.stderr)
+            self.assertIn(
+                f"export CARGO_TARGET_DIR={artifact_root / 'local' / 'codex-lab' / 'cargo-target'}/",
+                env.stdout,
+            )
+            self.assertNotIn(f"/local/{workspace.name}/", env.stdout)
+
 
 def run_local_cleanup(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
