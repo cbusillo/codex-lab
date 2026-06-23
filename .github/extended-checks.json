@@ -1,0 +1,42 @@
+{
+  "checks": {
+    "codex-lab-app": {
+      "description": "Build and smoke-test the macOS ARM64 Codex Lab app artifact.",
+      "workflow": ".github/workflows/codex-lab-app.yml",
+      "same_repo_only": true,
+      "patterns": [
+        ".github/extended-checks.json",
+        ".github/workflows/ci.yml",
+        ".github/workflows/codex-lab-app.yml",
+        ".github/workflows/codex-lab-release.yml",
+        "scripts/github/decide_extended_checks.py",
+        "scripts/github/test_decide_extended_checks.py",
+        "scripts/github/configure-codex-lab-cargo-cache.sh",
+        "scripts/github/test_configure_codex_lab_cargo_cache.py",
+        "scripts/build_codex_lab_app.py",
+        "scripts/build_codex_lab_distribution_manifest.py",
+        "scripts/codex_lab_package/**",
+        "scripts/codex_package/**",
+        "codex-rs/**"
+      ]
+    },
+    "exec-harness": {
+      "description": "Run Codex exec-harness scenarios on the self-hosted Linux runner.",
+      "workflow": ".github/workflows/exec-harness.yml",
+      "same_repo_only": true,
+      "patterns": [
+        ".github/extended-checks.json",
+        ".github/workflows/ci.yml",
+        ".github/workflows/exec-harness.yml",
+        "scripts/github/decide_extended_checks.py",
+        "scripts/github/test_decide_extended_checks.py",
+        "justfile",
+        "scripts/just-shell.py",
+        "scripts/local/cleanup-space.sh",
+        "scripts/local/exec-harness-env.sh",
+        "tools/codex-exec-harness/**",
+        "codex-rs/**"
+      ]
+    }
+  }
+}

@@ -5,6 +5,34 @@ on:
   push: { branches: [main] }
 
 jobs:
+  extended-checks-decision:
+    name: Extended checks decision
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide extended checks
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          PR_HEAD_REPO: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/github/decide_extended_checks.py --validate-config
+          python3 scripts/github/decide_extended_checks.py \
+            --event-name "$EVENT_NAME" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
+
   python-checks:
     name: Python and repository checks
     runs-on: ubuntu-latest
@@ -164,6 +192,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - extended-checks-decision
       - python-checks
       - npm-package
       - format-checks
@@ -173,12 +202,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          extended_checks_decision="${{ needs.extended-checks-decision.result }}"
           python_checks="${{ needs.python-checks.result }}"
           npm_package="${{ needs.npm-package.result }}"
           format_checks="${{ needs.format-checks.result }}"
+          echo "extended-checks-decision: $extended_checks_decision"
           echo "python-checks: $python_checks"
           echo "npm-package: $npm_package"
           echo "format-checks: $format_checks"
-          if [[ "$python_checks" != "success" || "$npm_package" != "success" || "$format_checks" != "success" ]]; then
+          if [[ "$extended_checks_decision" != "success" || "$python_checks" != "success" || "$npm_package" != "success" || "$format_checks" != "success" ]]; then
             exit 1
           fi

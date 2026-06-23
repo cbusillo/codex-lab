@@ -8,12 +8,29 @@ runner groups, secrets, and release infrastructure that this fork does not own.
 
 - `ci.yml` runs cheap repository sanity checks plus Codex Lab package-builder
   unit and smoke tests.
+- `ci.yml` also runs an always-present extended-checks decision job. This job
+  does not run expensive checks itself; it reports whether `codex-lab-app` and
+  `exec-harness` are required for the changed paths and explains the matched
+  files in the job summary.
 - `codex-lab-app.yml` builds the macOS ARM64 `Codex Lab.app` artifact on the
   self-hosted macOS runner when packaging files, Rust CLI code, or the workflow
   change. The self-hosted job is guarded so it runs automatically only for
   branches in this repository or manual dispatches.
+- `exec-harness.yml` runs Codex exec-harness scenarios on the self-hosted Linux
+  runner when harness files, local harness helpers, Rust code, or the workflow
+  change. The self-hosted job is guarded so it runs automatically only for
+  branches in this repository or manual dispatches.
 - `codespell.yml` and `cargo-deny.yml` are retained as lightweight inherited
   checks while they remain fork-safe.
+
+The extended-checks routing map lives in `.github/extended-checks.json` and is
+evaluated by `scripts/github/decide_extended_checks.py`. Keep this map
+conservative: broad `codex-rs/**` routing is intentional until measured evidence
+shows it is safe to narrow. When a workflow starts calling a new script or a
+checked area moves, update the routing map in the same change. The fast CI
+decision job validates that workflow-invoked scripts remain covered and that the
+checked-in routing map matches the long workflows' `pull_request.paths` filters,
+so stale routing fails visibly instead of silently skipping extended validation.
 
 ## Manual Upstream Parity Checks
 
