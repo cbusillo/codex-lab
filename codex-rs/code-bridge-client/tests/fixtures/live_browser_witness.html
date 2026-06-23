@@ -214,11 +214,13 @@
       async function handleControlRequest(config, body) {
         let status = "ok";
         let summary = "";
+        let result = null;
         let error = null;
         if (body.command.kind === "executeJavascript") {
           const code = body.command.body.code;
           if (code === "window.location.href") {
             summary = window.location.href;
+            result = window.location.href;
           } else {
             status = "denied";
             summary = "denied";
@@ -245,6 +247,7 @@
             respondingClientId: clientId,
             status,
             summary,
+            result,
             error,
           },
         });

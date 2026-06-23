@@ -182,8 +182,10 @@ async fn live_browser_witness_round_trips_events_screenshot_and_control() {
     let control_response = next_message(&mut events, "control response").await;
     assert!(matches!(
         control_response.envelope.payload,
-        BridgePayload::ControlResponse(ControlResponseMessage { request_id, summary, .. })
-            if request_id == "live-browser-js-1" && summary.starts_with(&fixture.url())
+        BridgePayload::ControlResponse(ControlResponseMessage { request_id, summary, result, .. })
+            if request_id == "live-browser-js-1"
+                && summary.starts_with(&fixture.url())
+                && result == Some(serde_json::json!(summary))
     ));
 
     service.shutdown().await;
