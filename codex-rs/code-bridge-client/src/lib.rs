@@ -359,6 +359,25 @@ impl CodeBridgeClient {
         session: &CodeBridgeSession,
         response: ControlResponse,
     ) -> Result<BridgePayload, CodeBridgeClientError> {
+        self.respond_control_payload(session, response, None).await
+    }
+
+    pub async fn respond_control_with_result(
+        &self,
+        session: &CodeBridgeSession,
+        response: ControlResponse,
+        result: serde_json::Value,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
+        self.respond_control_payload(session, response, Some(result))
+            .await
+    }
+
+    async fn respond_control_payload(
+        &self,
+        session: &CodeBridgeSession,
+        response: ControlResponse,
+        result: Option<serde_json::Value>,
+    ) -> Result<BridgePayload, CodeBridgeClientError> {
         let message_id = format!("control-response-{}", response.request_id);
         self.post(
             session,
@@ -369,6 +388,7 @@ impl CodeBridgeClient {
                     responding_client_id: session.client_id.clone(),
                     status: response.status,
                     summary: response.summary,
+                    result,
                     error: response.error,
                 }),
             ),
@@ -675,7 +695,7 @@ mod tests {
                 if request_id == "js-1"
         ));
         client
-            .respond_control(
+            .respond_control_with_result(
                 &producer,
                 ControlResponse {
                     request_id: "js-1".to_string(),
@@ -683,14 +703,16 @@ mod tests {
                     summary: "https://example.test/page".to_string(),
                     error: None,
                 },
+                serde_json::json!("https://example.test/page"),
             )
             .await
             .expect("control response");
         let message = next_test_message(&mut subscriber_events, "control response message").await;
         assert!(matches!(
             message.envelope.payload,
-            BridgePayload::ControlResponse(ControlResponseMessage { request_id, .. })
+            BridgePayload::ControlResponse(ControlResponseMessage { request_id, result, .. })
                 if request_id == "js-1"
+                    && result == Some(serde_json::json!("https://example.test/page"))
         ));
 
         service.shutdown().await;
@@ -818,6 +840,7 @@ mod tests {
                     request_id: "js-1".to_string(),
                     status: ControlStatus::Failed,
                     summary: "failed".to_string(),
+                    result: None,
                 },
             )
             .await
@@ -859,9 +882,12 @@ mod tests {
                 .envelope
                 .payload,
             BridgePayload::Event(EventPublishMessage {
-                event: BridgeEvent::ControlResult(ControlResultEvent { request_id, status, summary }),
+                event: BridgeEvent::ControlResult(ControlResultEvent { request_id, status, summary, result }),
                 ..
-            }) if request_id == "js-1" && status == ControlStatus::Failed && summary == "failed"
+            }) if request_id == "js-1"
+                && status == ControlStatus::Failed
+                && summary == "failed"
+                && result.is_none()
         ));
 
         service.shutdown().await;
@@ -1095,7 +1121,7 @@ mod tests {
                     && matches!(&command, ControlCommand::ExecuteJavascript { code } if code == "window.location.href")
         ));
         client
-            .respond_control(
+            .respond_control_with_result(
                 &browser,
                 ControlResponse {
                     request_id: "browser-js-1".to_string(),
@@ -1103,6 +1129,7 @@ mod tests {
                     summary: "http://127.0.0.1/browser-fixture".to_string(),
                     error: None,
                 },
+                serde_json::json!("http://127.0.0.1/browser-fixture"),
             )
             .await
             .expect("respond control");
@@ -1111,9 +1138,10 @@ mod tests {
                 .await
                 .envelope
                 .payload,
-            BridgePayload::ControlResponse(ControlResponseMessage { request_id, summary, .. })
+            BridgePayload::ControlResponse(ControlResponseMessage { request_id, summary, result, .. })
                 if request_id == "browser-js-1"
                     && summary == "http://127.0.0.1/browser-fixture"
+                    && result == Some(serde_json::json!("http://127.0.0.1/browser-fixture"))
         ));
 
         service.shutdown().await;

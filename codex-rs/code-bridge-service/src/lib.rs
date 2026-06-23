@@ -969,6 +969,7 @@ impl PendingRequest {
                     responding_client_id: self.target_client_id.clone(),
                     status: codex_code_bridge_protocol::ControlStatus::TimedOut,
                     summary: String::new(),
+                    result: None,
                     error,
                 })
             }
@@ -2324,6 +2325,7 @@ mod tests {
                     responding_client_id: "producer-1".to_string(),
                     status: ControlStatus::Ok,
                     summary: "https://example.test/page".to_string(),
+                    result: Some(serde_json::json!("https://example.test/page")),
                     error: None,
                 }),
             ),
@@ -2335,8 +2337,10 @@ mod tests {
             BridgePayload::ControlResponse(ControlResponseMessage {
                 request_id,
                 status: ControlStatus::Ok,
+                result,
                 ..
             }) if request_id == "js-1"
+                && result == Some(serde_json::json!("https://example.test/page"))
         ));
         assert_no_sse_message(&mut producer_events).await;
 
@@ -3184,6 +3188,7 @@ mod tests {
                     responding_client_id: "producer-granted".to_string(),
                     status: ControlStatus::Ok,
                     summary: "https://example.test/page".to_string(),
+                    result: Some(serde_json::json!("https://example.test/page")),
                     error: None,
                 }),
             ),
@@ -3195,8 +3200,10 @@ mod tests {
             BridgePayload::ControlResponse(ControlResponseMessage {
                 request_id,
                 status: ControlStatus::Ok,
+                result,
                 ..
             }) if request_id == "js-1"
+                && result == Some(serde_json::json!("https://example.test/page"))
         ));
 
         service.handle.shutdown().await;

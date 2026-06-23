@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
@@ -189,6 +190,12 @@ pub struct ControlResultEvent {
     pub request_id: String,
     pub status: ControlStatus,
     pub summary: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_json_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,12 +205,22 @@ pub struct SubscribeMessage {
     pub filter: SubscriptionFilter,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionFilter {
     pub levels: Vec<ConsoleLevel>,
     pub event_kinds: Vec<EventKind>,
     pub client_ids: Vec<String>,
+}
+
+impl Default for SubscriptionFilter {
+    fn default() -> Self {
+        Self {
+            levels: vec![ConsoleLevel::Error],
+            event_kinds: vec![EventKind::Console, EventKind::Error],
+            client_ids: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -293,6 +310,12 @@ pub struct ControlResponseMessage {
     pub responding_client_id: String,
     pub status: ControlStatus,
     pub summary: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_json_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result: Option<Value>,
     pub error: Option<ErrorMessage>,
 }
 
@@ -303,6 +326,13 @@ pub enum ControlStatus {
     Failed,
     TimedOut,
     Denied,
+}
+
+fn deserialize_optional_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -546,7 +576,9 @@ pub fn validate_payload(payload: &BridgePayload) -> Result<(), ValidationError> 
             validate_timeout(message.timeout_ms)?;
             validate_control_command(&message.command)
         }
-        BridgePayload::ControlResponse(message) => validate_summary(&message.summary),
+        BridgePayload::ControlResponse(message) => {
+            validate_control_result(message.result.as_ref(), &message.summary)
+        }
         BridgePayload::Heartbeat(_)
         | BridgePayload::Subscribe(_)
         | BridgePayload::Ack(_)
@@ -626,7 +658,9 @@ fn validate_event(event: &BridgeEvent) -> Result<(), ValidationError> {
         BridgeEvent::Screenshot(event) => {
             validate_screenshot_bounds(event.width, event.height, event.bytes)
         }
-        BridgeEvent::ControlResult(event) => validate_summary(&event.summary),
+        BridgeEvent::ControlResult(event) => {
+            validate_control_result(event.result.as_ref(), &event.summary)
+        }
     }
 }
 
@@ -785,6 +819,22 @@ fn validate_summary(summary: &str) -> Result<(), ValidationError> {
     validate_text(summary, MAX_MODEL_VISIBLE_SUMMARY_BYTES)
 }
 
+fn validate_control_result(result: Option<&Value>, summary: &str) -> Result<(), ValidationError> {
+    validate_summary(summary)?;
+    if let Some(result) = result {
+        let actual = serde_json::to_vec(result)
+            .map(|bytes| bytes.len())
+            .unwrap_or(MAX_MODEL_VISIBLE_SUMMARY_BYTES + 1);
+        if actual > MAX_MODEL_VISIBLE_SUMMARY_BYTES {
+            return Err(ValidationError::PayloadTooLarge {
+                limit: MAX_MODEL_VISIBLE_SUMMARY_BYTES,
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_text(text: &str, limit: usize) -> Result<(), ValidationError> {
     let actual = text.len();
     if actual > limit {
@@ -860,6 +910,50 @@ mod tests {
         assert_eq!(message_family(&payload), "helloResponse");
         assert!(json.contains("helloResponse"));
         assert_eq!(validate_payload(&payload), Ok(()));
+    }
+
+    #[test]
+    fn control_result_json_null_round_trips_as_present_result() {
+        let payload = BridgePayload::ControlResponse(ControlResponseMessage {
+            request_id: "request-1".to_string(),
+            responding_client_id: "client-1".to_string(),
+            status: ControlStatus::Ok,
+            summary: "null".to_string(),
+            result: Some(Value::Null),
+            error: None,
+        });
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let decoded: BridgePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, payload);
+        assert!(json.contains("\"result\":null"));
+
+        let json = r#"{"family":"controlResponse","body":{"requestId":"request-1","respondingClientId":"client-1","status":"ok","summary":"null","result":null,"error":null}}"#;
+        let BridgePayload::ControlResponse(decoded) = serde_json::from_str(json).unwrap() else {
+            panic!("expected control response");
+        };
+        assert_eq!(decoded.result, Some(Value::Null));
+    }
+
+    #[test]
+    fn absent_control_result_json_remains_compatible() {
+        let json = r#"{"family":"controlResponse","body":{"requestId":"request-1","respondingClientId":"client-1","status":"ok","summary":"ok","error":null}}"#;
+        let BridgePayload::ControlResponse(decoded) = serde_json::from_str(json).unwrap() else {
+            panic!("expected control response");
+        };
+        assert_eq!(decoded.result, None);
+
+        let json = r#"{"kind":"controlResult","body":{"requestId":"request-1","status":"ok","summary":"ok"}}"#;
+        let decoded: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            decoded,
+            BridgeEvent::ControlResult(ControlResultEvent {
+                request_id: "request-1".to_string(),
+                status: ControlStatus::Ok,
+                summary: "ok".to_string(),
+                result: None,
+            })
+        );
     }
 
     #[test]
@@ -1300,6 +1394,7 @@ mod tests {
             responding_client_id: "client-1".to_string(),
             status: ControlStatus::Ok,
             summary: oversized_summary,
+            result: None,
             error: None,
         });
 
@@ -1310,6 +1405,44 @@ mod tests {
                 actual: MAX_MODEL_VISIBLE_SUMMARY_BYTES + 1,
             })
         );
+
+        let oversized_result = "x".repeat(MAX_MODEL_VISIBLE_SUMMARY_BYTES + 1);
+        let payload = BridgePayload::ControlResponse(ControlResponseMessage {
+            request_id: "request-1".to_string(),
+            responding_client_id: "client-1".to_string(),
+            status: ControlStatus::Ok,
+            summary: String::new(),
+            result: Some(serde_json::json!(oversized_result)),
+            error: None,
+        });
+
+        assert!(matches!(
+            validate_payload(&payload),
+            Err(ValidationError::PayloadTooLarge {
+                limit: MAX_MODEL_VISIBLE_SUMMARY_BYTES,
+                actual
+            }) if actual > MAX_MODEL_VISIBLE_SUMMARY_BYTES
+        ));
+
+        let oversized_result = "x".repeat(MAX_MODEL_VISIBLE_SUMMARY_BYTES + 1);
+        let payload = BridgePayload::Event(EventPublishMessage {
+            client_id: "client-1".to_string(),
+            event_id: "event-1".to_string(),
+            event: BridgeEvent::ControlResult(ControlResultEvent {
+                request_id: "request-1".to_string(),
+                status: ControlStatus::Ok,
+                summary: String::new(),
+                result: Some(serde_json::json!(oversized_result)),
+            }),
+        });
+
+        assert!(matches!(
+            validate_payload(&payload),
+            Err(ValidationError::PayloadTooLarge {
+                limit: MAX_MODEL_VISIBLE_SUMMARY_BYTES,
+                actual
+            }) if actual > MAX_MODEL_VISIBLE_SUMMARY_BYTES
+        ));
     }
 
     #[test]
