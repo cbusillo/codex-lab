@@ -264,7 +264,18 @@ Example with notification opt-out:
 - `remoteControl/enable` — experimental; enable remote control for the current app-server process and return the current remote-control status snapshot. The caller is responsible for persisting the desired setting outside app-server.
 - `remoteControl/disable` — experimental; disable remote control for the current app-server process and return the current remote-control status snapshot. This does not revoke already enrolled controller devices.
 - `remoteControl/status/read` — experimental; read the current remote-control status snapshot. `status` is one of `disabled`, `connecting`, `connected`, or `errored`; `serverName` is the local machine name used by this app-server process; `environmentId` is a string when the app-server has a current enrollment and `null` when that enrollment is cleared, invalidated, or remote control is disabled.
-- `codeBridge/status/read` — experimental; read whether a local Code Bridge service is discoverable and responsive. This method reads the existing local bridge descriptor and calls the bridge `/status` endpoint only; it does not start Code Bridge, subscribe to events, proxy telemetry, request screenshots, or change `remoteControl/*` behavior. When the service is absent or unreachable, the request succeeds with `status: "unavailable"` and an `unavailableReason`.
+- `codeBridge/status/read` — experimental; read whether a local Code Bridge
+  service is discoverable and responsive. This method first reads the Codex
+  Lab-home bridge descriptor and calls the bridge `/status` endpoint. If that
+  descriptor cannot produce an available service, it falls back to the workspace
+  `.code/code-bridge.json` metadata used by local WebSocket bridge hosts,
+  authenticating only to loopback WebSocket endpoints. Workspace metadata
+  availability returns `status: "available"` with `service: null` because the
+  legacy WebSocket contract does not expose HTTP service counters. The request
+  does not start Code Bridge, subscribe to events, proxy telemetry, request
+  screenshots, or change `remoteControl/*` behavior. When no bridge is
+  discoverable or the bridge is unreachable, the request succeeds with
+  `status: "unavailable"` and an `unavailableReason`.
 - `remoteControl/pairing/start` — experimental; start a short-lived remote-control pairing artifact for the current app-server process. Pass `manualCode: true` to also request a manual pairing code. Returns `pairingCode`, `manualPairingCode`, `environmentId`, and Unix-seconds `expiresAt`; app-server intentionally does not expose the backend `serverId`.
 - `remoteControl/pairing/status` — experimental; poll whether a remote-control `pairingCode` or `manualPairingCode` has been claimed. Pass exactly one of the two fields. Returns `claimed`.
 - `remoteControl/client/list` — experimental; list controller devices granted access to an environment. Pass `environmentId` and optional `cursor`, `limit`, and `order`; returns picker-oriented client metadata plus `nextCursor`. This signed-in account-management operation works while the local relay is disabled or unenrolled.
