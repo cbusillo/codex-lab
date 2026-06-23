@@ -56,6 +56,20 @@ class WorkflowArtifact:
     size_in_bytes: int
 
 
+@dataclass(frozen=True)
+class StagedPackage:
+    package: str
+    pack_output: Path
+    output: str
+
+
+class PackageStageError(RuntimeError):
+    def __init__(self, package: str, output: str):
+        super().__init__(f"Failed to stage npm package {package}")
+        self.package = package
+        self.output = output
+
+
 BINARY_COMPONENTS = {
     "codex-responses-api-proxy": BinaryComponent(
         artifact_prefix="codex-responses-api-proxy",
@@ -513,9 +527,24 @@ def format_bytes(size_in_bytes: int) -> str:
     return f"{value:.1f} GiB"
 
 
-def run_command(cmd: list[str]) -> None:
-    print("+", " ".join(cmd), flush=True)
-    subprocess.run(cmd, cwd=REPO_ROOT, check=True)
+def run_command(cmd: list[str]) -> str:
+    output = "+ " + " ".join(cmd) + "\n"
+    result = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output += result.stdout
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            cmd,
+            output=output,
+        )
+    return output
 
 
 def tarball_name_for_package(package: str, version: str) -> str:
@@ -523,6 +552,54 @@ def tarball_name_for_package(package: str, version: str) -> str:
         platform = package.removeprefix("codex-")
         return f"codex-npm-{platform}-{version}.tgz"
     return f"{package}-npm-{version}.tgz"
+
+
+def stage_single_package(
+    package: str,
+    release_version: str,
+    output_dir: Path,
+    runner_temp: Path,
+    vendor_src: Path | None,
+    keep_staging_dirs: bool,
+) -> StagedPackage:
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=f"npm-stage-{package}-", dir=runner_temp)
+    )
+    pack_output = output_dir / tarball_name_for_package(package, release_version)
+    lines = [f"Staging {package} in {staging_dir}"]
+
+    cmd = [
+        str(BUILD_SCRIPT),
+        "--package",
+        package,
+        "--release-version",
+        release_version,
+        "--staging-dir",
+        str(staging_dir),
+        "--pack-output",
+        str(pack_output),
+    ]
+
+    if vendor_src is not None:
+        cmd.extend(["--vendor-src", str(vendor_src)])
+
+    try:
+        lines.append(run_command(cmd).rstrip())
+    except subprocess.CalledProcessError as error:
+        output = error.output if isinstance(error.output, str) else str(error)
+        lines.append(output.rstrip())
+        raise PackageStageError(
+            package, "\n".join(line for line in lines if line)
+        ) from error
+    finally:
+        if not keep_staging_dirs:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    return StagedPackage(
+        package=package,
+        pack_output=pack_output,
+        output="\n".join(line for line in lines if line),
+    )
 
 
 def main() -> int:
@@ -590,40 +667,50 @@ def main() -> int:
         if resolved_head_sha:
             print(f"should `git checkout {resolved_head_sha}`", flush=True)
 
+        max_workers = min(len(packages), max(1, os.cpu_count() or 1))
+        staged_by_package: dict[str, StagedPackage] = {}
+        errors_by_package: dict[str, PackageStageError] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    stage_single_package,
+                    package,
+                    args.release_version,
+                    output_dir,
+                    runner_temp,
+                    vendor_src_by_components.get(
+                        native_components_for_package(package)
+                    ),
+                    args.keep_staging_dirs,
+                ): package
+                for package in packages
+            }
+            for future in as_completed(futures):
+                package = futures[future]
+                try:
+                    staged_by_package[package] = future.result()
+                except PackageStageError as error:
+                    errors_by_package[package] = error
+
         for package in packages:
-            staging_dir = Path(
-                tempfile.mkdtemp(prefix=f"npm-stage-{package}-", dir=runner_temp)
+            staged = staged_by_package.get(package)
+            output = (
+                staged.output
+                if staged is not None
+                else errors_by_package[package].output
             )
-            pack_output = output_dir / tarball_name_for_package(
-                package, args.release_version
+            with _gha_group(f"Stage {package}"):
+                print(output, flush=True)
+
+        if errors_by_package:
+            failed_packages = ", ".join(
+                package for package in packages if package in errors_by_package
             )
-            print(f"Staging {package} in {staging_dir}", flush=True)
+            raise RuntimeError(f"Failed to stage npm package(s): {failed_packages}")
 
-            cmd = [
-                str(BUILD_SCRIPT),
-                "--package",
-                package,
-                "--release-version",
-                args.release_version,
-                "--staging-dir",
-                str(staging_dir),
-                "--pack-output",
-                str(pack_output),
-            ]
-
-            vendor_src = vendor_src_by_components.get(
-                native_components_for_package(package)
-            )
-            if vendor_src is not None:
-                cmd.extend(["--vendor-src", str(vendor_src)])
-
-            try:
-                run_command(cmd)
-            finally:
-                if not args.keep_staging_dirs:
-                    shutil.rmtree(staging_dir, ignore_errors=True)
-
-            final_messages.append(f"Staged {package} at {pack_output}")
+        for package in packages:
+            staged = staged_by_package[package]
+            final_messages.append(f"Staged {package} at {staged.pack_output}")
     finally:
         if not args.keep_staging_dirs:
             for vendor_temp_root in vendor_temp_roots:
