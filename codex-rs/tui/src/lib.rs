@@ -2973,7 +2973,7 @@ mod tests {
                 saw_start_args_for_closure.store(true, Ordering::SeqCst);
                 assert_eq!(
                     args.session_source,
-                    codex_protocol::protocol::SessionSource::Custom("launchplane".to_string())
+                    codex_protocol::protocol::SessionSource::Custom("agent_session".to_string())
                 );
                 async { Err(std::io::Error::other("stop after inspecting startup args")) }
             },
@@ -3123,7 +3123,7 @@ mod tests {
             |session_source| {
                 assert_eq!(
                     *session_source,
-                    SessionSource::Custom("every_code".to_string())
+                    SessionSource::Custom("agent_session".to_string())
                 );
                 assert_eq!(session_source.restriction_product(), Some(Product::Codex));
                 assert!(session_source.matches_product_restriction(&[Product::Codex]));

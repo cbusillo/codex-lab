@@ -66,6 +66,40 @@ where
         .into_iter()
         .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
         .collect();
+
+    let has_generic_marker = has_any_env_value(
+        &vars,
+        &[
+            "AGENT_SESSION_ORIGIN",
+            "AGENT_SESSION_SOURCE",
+            "AGENT_SESSION_REQUEST_ID",
+        ],
+    );
+    let has_legacy_marker = has_any_env_value(
+        &vars,
+        &[
+            "EVERY_CODE_SESSION_ORIGIN",
+            "EVERY_CODE_ORIGIN",
+            "LAUNCHPLANE_EVERY_CODE_ORIGIN",
+            "EVERY_CODE_REQUEST_ID",
+        ],
+    );
+    if !has_generic_marker && !has_legacy_marker {
+        return None;
+    }
+
+    let origin = first_env_value(
+        &vars,
+        &[
+            "AGENT_SESSION_ORIGIN",
+            "EVERY_CODE_SESSION_ORIGIN",
+            "EVERY_CODE_ORIGIN",
+            "LAUNCHPLANE_EVERY_CODE_ORIGIN",
+        ],
+    )
+    .or_else(|| has_generic_marker.then_some("agent_session".to_string()))
+    .or_else(|| has_legacy_marker.then_some("every_code".to_string()));
+
     let provenance = SessionProvenance {
         request_id: first_env_value(
             &vars,
@@ -87,18 +121,10 @@ where
         .and_then(|value| parse_issue_number(&value)),
         issue_url: first_env_value(&vars, &["AGENT_SESSION_ISSUE_URL", "EVERY_CODE_ISSUE_URL"]),
         source: first_env_value(&vars, &["AGENT_SESSION_SOURCE"]),
-        origin: first_env_value(
-            &vars,
-            &[
-                "AGENT_SESSION_ORIGIN",
-                "EVERY_CODE_SESSION_ORIGIN",
-                "EVERY_CODE_ORIGIN",
-                "LAUNCHPLANE_EVERY_CODE_ORIGIN",
-            ],
-        ),
+        origin,
     };
 
-    (!provenance.is_empty()).then_some(provenance)
+    Some(provenance)
 }
 
 fn first_env_value(vars: &[(String, String)], keys: &[&str]) -> Option<String> {
@@ -312,7 +338,7 @@ mod tests {
     fn provenance_ignores_empty_values_and_bad_issue_number() {
         assert_eq!(
             provenance_from(&[
-                ("AGENT_SESSION_REQUEST_ID", "   "),
+                ("AGENT_SESSION_ORIGIN", "launchplane"),
                 ("AGENT_SESSION_REPOSITORY", "cbusillo/codex-lab"),
                 ("AGENT_SESSION_ISSUE_NUMBER", "not-a-number"),
             ]),
@@ -322,8 +348,65 @@ mod tests {
                 issue_number: None,
                 issue_url: None,
                 source: None,
-                origin: None,
+                origin: Some("launchplane".to_string()),
             })
+        );
+    }
+
+    #[test]
+    fn provenance_infers_origin_from_generic_request_id() {
+        assert_eq!(
+            provenance_from(&[("AGENT_SESSION_REQUEST_ID", "agent-session-123")]),
+            Some(SessionProvenance {
+                request_id: Some("agent-session-123".to_string()),
+                repository: None,
+                issue_number: None,
+                issue_url: None,
+                source: None,
+                origin: Some("agent_session".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn provenance_infers_origin_from_legacy_request_id() {
+        assert_eq!(
+            provenance_from(&[("EVERY_CODE_REQUEST_ID", "every-code-123")]),
+            Some(SessionProvenance {
+                request_id: Some("every-code-123".to_string()),
+                repository: None,
+                issue_number: None,
+                issue_url: None,
+                source: None,
+                origin: Some("every_code".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn provenance_ignores_metadata_without_session_marker() {
+        assert_eq!(
+            provenance_from(&[
+                ("AGENT_SESSION_REPOSITORY", "cbusillo/codex-lab"),
+                ("AGENT_SESSION_ISSUE_NUMBER", "126"),
+                (
+                    "AGENT_SESSION_ISSUE_URL",
+                    "https://github.com/cbusillo/codex-lab/issues/126"
+                ),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn provenance_ignores_metadata_with_empty_session_marker() {
+        assert_eq!(
+            provenance_from(&[
+                ("AGENT_SESSION_REQUEST_ID", "   "),
+                ("AGENT_SESSION_REPOSITORY", "cbusillo/codex-lab"),
+                ("AGENT_SESSION_ISSUE_NUMBER", "126"),
+            ]),
+            None
         );
     }
 
