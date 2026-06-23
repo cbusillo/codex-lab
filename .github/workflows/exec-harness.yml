@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - ".github/extended-checks.json"
+      - ".github/workflows/ci.yml"
       - ".github/workflows/exec-harness.yml"
+      - "scripts/github/decide_extended_checks.py"
+      - "scripts/github/test_decide_extended_checks.py"
       - "justfile"
       - "scripts/just-shell.py"
       - "scripts/local/cleanup-space.sh"
