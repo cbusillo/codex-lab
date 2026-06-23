@@ -19,8 +19,14 @@ section() {
 section "Local Cargo"
 local_cargo_env="$(env -u CARGO_TARGET_DIR CODEX_LAB_CARGO_TARGET_NO_MKDIR=1 "$repo_root/scripts/local/cargo-build-env.sh")"
 eval "$local_cargo_env"
+printf 'target_scope=%s\n' "${CODEX_LAB_CARGO_TARGET_SCOPE:-shared}"
 printf 'target_dir=%s\n' "$CARGO_TARGET_DIR"
 printf 'target_size=%s\n' "$(human_size "$CARGO_TARGET_DIR")"
+unset CARGO_TARGET_DIR
+worktree_cargo_env="$(env -u CARGO_TARGET_DIR -u CODEX_LAB_CARGO_TARGET_DIR CODEX_LAB_CARGO_TARGET_NO_MKDIR=1 CODEX_LAB_CARGO_TARGET_SCOPE=worktree "$repo_root/scripts/local/cargo-build-env.sh")"
+eval "$worktree_cargo_env"
+printf 'worktree_scoped_target_dir=%s\n' "$CARGO_TARGET_DIR"
+printf 'worktree_scoped_target_size=%s\n' "$(human_size "$CARGO_TARGET_DIR")"
 unset CARGO_TARGET_DIR
 printf 'worktree_target=%s\n' "$repo_root/codex-rs/target"
 printf 'worktree_target_size=%s\n' "$(human_size "$repo_root/codex-rs/target")"

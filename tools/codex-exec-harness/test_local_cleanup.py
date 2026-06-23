@@ -165,6 +165,135 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             )
             self.assertNotIn(f"/local/{workspace.name}/", env.stdout)
 
+    def test_cargo_build_env_worktree_scope_uses_worktree_namespace(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            subprocess.run(
+                ["git", "init", "--quiet"],
+                check=True,
+                cwd=workspace,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "remote.origin.url",
+                    "git@github.com:cbusillo/codex-lab.git",
+                ],
+                check=True,
+                cwd=workspace,
+            )
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_cargo_build_env(
+                workspace,
+                CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+                CODEX_LAB_CARGO_TARGET_SCOPE="worktree",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, env.returncode, env.stderr)
+            self.assertIn(
+                f"export CARGO_TARGET_DIR={artifact_root / 'local' / 'codex-lab' / 'worktrees'}/",
+                env.stdout,
+            )
+            self.assertIn("/cargo-target/", env.stdout)
+            self.assertNotIn("/local/codex-lab/cargo-target/", env.stdout)
+
+    def test_cargo_build_env_worktree_scope_is_unique_per_workspace(self) -> None:
+        with copied_cleanup_workspace() as workspace_one:
+            with copied_cleanup_workspace() as workspace_two:
+                artifact_root = workspace_one / "artifact-root"
+                artifact_root.mkdir()
+
+                env_one = run_cargo_build_env(
+                    workspace_one,
+                    CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+                    CODEX_LAB_CARGO_TARGET_SCOPE="worktree",
+                    CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+                )
+                env_two = run_cargo_build_env(
+                    workspace_two,
+                    CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+                    CODEX_LAB_CARGO_TARGET_SCOPE="worktree",
+                    CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+                )
+
+                self.assertEqual(0, env_one.returncode, env_one.stderr)
+                self.assertEqual(0, env_two.returncode, env_two.stderr)
+                self.assertNotEqual(env_one.stdout, env_two.stdout)
+
+    def test_cargo_build_env_worktree_scope_accepts_explicit_key(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_cargo_build_env(
+                workspace,
+                CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+                CODEX_LAB_CARGO_TARGET_KEY="agent/session one",
+                CODEX_LAB_CARGO_TARGET_SCOPE="agent",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, env.returncode, env.stderr)
+            self.assertIn("/worktrees/agent-session-one/cargo-target/", env.stdout)
+
+    def test_cargo_build_env_explicit_key_does_not_escape_worktree_namespace(
+        self,
+    ) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_cargo_build_env(
+                workspace,
+                CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+                CODEX_LAB_CARGO_TARGET_KEY="..",
+                CODEX_LAB_CARGO_TARGET_SCOPE="agent",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, env.returncode, env.stderr)
+            self.assertIn("/worktrees/workspace/cargo-target/", env.stdout)
+            self.assertNotIn("/worktrees/../cargo-target/", env.stdout)
+
+    def test_cargo_build_env_warns_when_scope_is_shadowed_by_cargo_target(
+        self,
+    ) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_cargo_build_env(
+                workspace,
+                CARGO_TARGET_DIR=str(workspace / "existing-target"),
+                CODEX_LAB_CARGO_TARGET_SCOPE="agent",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, env.returncode, env.stderr)
+            self.assertEqual(
+                f"export CARGO_TARGET_DIR={workspace / 'existing-target'}\n",
+                env.stdout,
+            )
+            self.assertIn("CARGO_TARGET_DIR is already set", env.stderr)
+
+    def test_cargo_build_env_rejects_unknown_scope(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            env = run_cargo_build_env(
+                workspace,
+                CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+                CODEX_LAB_CARGO_TARGET_SCOPE="surprise",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertNotEqual(0, env.returncode)
+            self.assertIn("unsupported CODEX_LAB_CARGO_TARGET_SCOPE", env.stderr)
+
     def test_exec_harness_env_prefers_explicit_target(self) -> None:
         with copied_cleanup_workspace() as workspace:
             env = run_exec_harness_env(
@@ -273,6 +402,8 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             env = os.environ.copy()
             env.pop("CARGO_TARGET_DIR", None)
             env.pop("CODEX_LAB_CARGO_TARGET_DIR", None)
+            env.pop("CODEX_LAB_CARGO_TARGET_KEY", None)
+            env.pop("CODEX_LAB_CARGO_TARGET_SCOPE", None)
             env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
             env.pop("CODEX_LAB_REMOTE_COMPILE_HOST", None)
 
@@ -324,6 +455,8 @@ def run_cargo_build_env(
     env = os.environ.copy()
     env.pop("CARGO_TARGET_DIR", None)
     env.pop("CODEX_LAB_CARGO_TARGET_DIR", None)
+    env.pop("CODEX_LAB_CARGO_TARGET_KEY", None)
+    env.pop("CODEX_LAB_CARGO_TARGET_SCOPE", None)
     env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
     env.update(env_overrides)
     return subprocess.run(
