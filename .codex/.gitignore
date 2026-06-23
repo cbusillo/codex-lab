@@ -6,18 +6,18 @@
 __pycache__/
 *.pyc
 
-# Runtime leaves must not live under repo .codex/.
-sessions/
-history*.jsonl
-log/
-logs/
-tmp/
+# Runtime leaves must not live at the repo .codex/ root.
+/sessions/
+/history*.jsonl
+/log/
+/logs/
+/tmp/
 
-# Secret-shaped files belong in ~/.codex-lab, never repo .codex/.
-auth.json
-.credentials.json
-credentials*/
-secrets/
-*.key
-*.pem
-*.token
+# Secret-shaped root files belong in ~/.codex-lab, never repo .codex/.
+/auth.json
+/.credentials.json
+/credentials*/
+/secrets/
+/*.key
+/*.pem
+/*.token
