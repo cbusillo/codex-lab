@@ -12,6 +12,8 @@ use crate::state::BackgroundAutoReviewRunningHandle;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
 
+const ESTIMATED_BYTES_PER_REVIEW_PROMPT_TOKEN: u64 = 4;
+
 pub(super) struct PreparedReviewThread {
     pub(super) turn_context: Arc<TurnContext>,
     pub(super) input: Vec<TurnInput>,
@@ -148,6 +150,7 @@ async fn record_started_manual_auto_review(
                 pending.save_failed(
                     &codex_home,
                     format!("failed to publish manual auto review snapshot epoch: {err}"),
+                    /*token_usage*/ None,
                 );
             }
             tracing::warn!(
@@ -314,6 +317,7 @@ pub(super) async fn prepare_review_thread(
     };
 
     // Seed the child task with the review prompt as the initial user message.
+    let prompt_token_estimate = estimate_review_prompt_tokens(&review_prompt);
     let input = vec![TurnInput::UserInput {
         content: vec![UserInput::Text {
             text: review_prompt,
@@ -358,11 +362,15 @@ pub(super) async fn prepare_review_thread(
                     tc.config.codex_home.as_ref(),
                     target_cwd,
                     Some(model),
+                    tc.effective_reasoning_effort()
+                        .map(|effort| effort.to_string()),
+                    /*prompt_token_estimate*/ None,
                 )
                 .await
             }
             ReviewPersistenceSpec::Context(persistence) => persistence,
-        };
+        }
+        .with_prompt_token_estimate(prompt_token_estimate);
         PreparedReviewThread {
             turn_context: tc,
             input,
@@ -377,6 +385,14 @@ pub(super) async fn prepare_review_thread(
             manual_review_request,
         }
     }
+}
+
+fn estimate_review_prompt_tokens(prompt: &str) -> Option<u64> {
+    let bytes = u64::try_from(prompt.len()).ok()?;
+    Some(
+        bytes.saturating_add(ESTIMATED_BYTES_PER_REVIEW_PROMPT_TOKEN - 1)
+            / ESTIMATED_BYTES_PER_REVIEW_PROMPT_TOKEN,
+    )
 }
 
 pub(super) fn spawn_detached_review_thread(

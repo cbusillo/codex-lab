@@ -350,6 +350,8 @@ fn test_background_review_persistence(
         codex_home.path(),
         cwd.path(),
         Some("test-model".to_string()),
+        /*reasoning_effort*/ None,
+        /*prompt_token_estimate*/ None,
     ));
     (persistence, cwd)
 }

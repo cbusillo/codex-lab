@@ -132,6 +132,10 @@ impl Session {
             codex_home.as_ref(),
             cwd.as_ref(),
             Some(model),
+            turn_context
+                .effective_reasoning_effort()
+                .map(|effort| effort.to_string()),
+            /*prompt_token_estimate*/ None,
         )
         .await;
         if let Some(duplicate) = self
@@ -505,11 +509,12 @@ impl Session {
         error_summary: String,
     ) {
         let codex_home = self.codex_home().await;
-        let mut state = self.state.lock().await;
-        state
-            .background_auto_review
-            .clear_pending_review(generation, fingerprint);
-        drop(state);
+        {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .clear_pending_review(generation, fingerprint);
+        }
         if persistence.save_skipped(codex_home, error_summary.clone()) {
             record_background_review_status(
                 Arc::clone(self),
@@ -533,11 +538,12 @@ impl Session {
             "equivalent background auto review already exists: {}",
             duplicate.run_id
         );
-        let mut state = self.state.lock().await;
-        state
-            .background_auto_review
-            .clear_pending_review(generation, fingerprint);
-        drop(state);
+        {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .clear_pending_review(generation, fingerprint);
+        }
         if persistence.save_skipped_duplicate(codex_home, duplicate) {
             record_background_review_status(
                 Arc::clone(self),
@@ -628,9 +634,11 @@ impl Session {
         if trigger_turn_mailbox.has_trigger_turn_items() {
             return Ok(None);
         }
-        let active_turn = self.active_turn.lock().await;
-        if active_turn.is_some() {
-            return Ok(None);
+        {
+            let active_turn = self.active_turn.lock().await;
+            if active_turn.is_some() {
+                return Ok(None);
+            }
         }
         let mut state = self.state.lock().await;
         if !state.background_auto_review.is_current_schedule(generation) {

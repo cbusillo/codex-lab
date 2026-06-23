@@ -25,6 +25,9 @@ pub const DETAIL_MAX_FINDINGS: usize = 10;
 pub const SCHEMA_VERSION: u32 = 1;
 
 const DEFAULT_MAX_RUNS: usize = 500;
+const LEDGER_HIGH_TOKEN_COUNT: u64 = 25_000;
+const LEDGER_HIGH_PROMPT_TOKEN_ESTIMATE: u64 = 32_000;
+const LEDGER_LONG_ELAPSED_SECS: i64 = 5 * 60;
 const STORE_DIR: &str = "auto-review";
 const STATE_DIR: &str = "state";
 const REVIEW_DIR: &str = "review";
@@ -46,6 +49,8 @@ pub struct AutoReviewDuplicateMatch {
     pub disposition: AutoReviewDuplicateDisposition,
     pub finding_count: usize,
     pub model: Option<String>,
+    pub token_count: Option<u64>,
+    pub prompt_token_estimate: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -60,6 +65,14 @@ pub struct AutoReviewDiagnostics {
     pub cancelled_runs: usize,
     pub lost_runs: usize,
     pub suppressed_stale_runs: usize,
+    pub token_count: u64,
+    pub token_runs: usize,
+    pub prompt_token_estimate: u64,
+    pub prompt_runs: usize,
+    pub saved_token_estimate: u64,
+    pub saved_runs: usize,
+    pub high_burn_runs: usize,
+    pub longest_elapsed_bucket: Option<&'static str>,
 }
 
 impl AutoReviewDiagnostics {
@@ -101,6 +114,44 @@ impl AutoReviewDiagnostics {
             {
                 diagnostics.suppressed_stale_runs += 1;
             }
+            if let Some(token_count) = run.token_count {
+                diagnostics.token_count = diagnostics.token_count.saturating_add(token_count);
+                diagnostics.token_runs += 1;
+            }
+            if let Some(prompt_token_estimate) = run.prompt_token_estimate {
+                diagnostics.prompt_token_estimate = diagnostics
+                    .prompt_token_estimate
+                    .saturating_add(prompt_token_estimate);
+                diagnostics.prompt_runs += 1;
+            }
+            if let Some(saved_token_estimate) = run.saved_token_estimate {
+                diagnostics.saved_token_estimate = diagnostics
+                    .saved_token_estimate
+                    .saturating_add(saved_token_estimate);
+                diagnostics.saved_runs += 1;
+            }
+            let elapsed_secs = run_elapsed_secs(run);
+            let high_burn = run_has_high_burn_signal(run, elapsed_secs);
+            if high_burn {
+                diagnostics.high_burn_runs += 1;
+            }
+            let has_cost_signal = run.token_count.is_some()
+                || run.prompt_token_estimate.is_some()
+                || run.saved_token_estimate.is_some();
+            if let Some(elapsed_secs) = elapsed_secs
+                && (has_cost_signal || high_burn)
+            {
+                let bucket = duration_bucket(elapsed_secs);
+                diagnostics.longest_elapsed_bucket =
+                    Some(match diagnostics.longest_elapsed_bucket {
+                        Some(existing)
+                            if duration_bucket_rank(existing) >= duration_bucket_rank(bucket) =>
+                        {
+                            existing
+                        }
+                        _ => bucket,
+                    });
+            }
         }
         (diagnostics.recent_runs > 0).then_some(diagnostics)
     }
@@ -118,6 +169,22 @@ impl AutoReviewDiagnostics {
         push_nonzero(&mut parts, "failed", self.failed_runs);
         push_nonzero(&mut parts, "cancelled", self.cancelled_runs);
         push_nonzero(&mut parts, "lost", self.lost_runs);
+        if self.token_runs > 0 {
+            parts.push(format!("tokens={}t", self.token_count));
+            parts.push(format!("token_runs={}", self.token_runs));
+        }
+        if self.prompt_runs > 0 {
+            parts.push(format!("prompt_estimate={}t", self.prompt_token_estimate));
+            parts.push(format!("prompt_runs={}", self.prompt_runs));
+        }
+        push_nonzero(&mut parts, "high_burn", self.high_burn_runs);
+        if self.saved_runs > 0 {
+            parts.push(format!("saved_estimate={}t", self.saved_token_estimate));
+            parts.push(format!("saved_runs={}", self.saved_runs));
+        }
+        if let Some(longest_elapsed_bucket) = self.longest_elapsed_bucket {
+            parts.push(format!("longest_elapsed={longest_elapsed_bucket}"));
+        }
         parts.join(" ")
     }
 }
@@ -302,6 +369,8 @@ impl AutoReviewStore {
                     disposition: duplicate_disposition(&run),
                     finding_count: run.finding_count,
                     model: run.model.clone(),
+                    token_count: run.token_count,
+                    prompt_token_estimate: run.prompt_token_estimate,
                 };
                 is_eligible(&duplicate).then_some((run, duplicate))
             })
@@ -458,7 +527,7 @@ impl AutoReviewRunsIndex {
                 .entry(run.run_id.clone())
                 .and_modify(|existing| {
                     let is_preferred = preferred_run_id == existing.run_id.as_str();
-                    if !is_preferred || run_is_newer(&run, existing) {
+                    if should_replace_merged_run(&run, existing, is_preferred) {
                         *existing = run.clone();
                     }
                 })
@@ -491,6 +560,20 @@ impl AutoReviewRunsIndex {
     }
 }
 
+fn should_replace_merged_run(
+    candidate: &AutoReviewRun,
+    existing: &AutoReviewRun,
+    is_preferred: bool,
+) -> bool {
+    if is_preferred && existing.is_explicit_lifecycle_update() {
+        return auto_review_run_sort_key(candidate) > auto_review_run_sort_key(existing);
+    }
+    if candidate.is_explicit_lifecycle_update() && !existing.is_explicit_lifecycle_update() {
+        return auto_review_run_sort_key(candidate) >= auto_review_run_sort_key(existing);
+    }
+    run_is_newer(candidate, existing)
+}
+
 fn run_is_newer(candidate: &AutoReviewRun, existing: &AutoReviewRun) -> bool {
     if existing.status.is_terminal() != candidate.status.is_terminal() {
         return candidate.status.is_terminal();
@@ -500,7 +583,29 @@ fn run_is_newer(candidate: &AutoReviewRun, existing: &AutoReviewRun) -> bool {
     if candidate_key != existing_key {
         return candidate_key > existing_key;
     }
+    if existing.status.is_terminal()
+        && candidate.status.is_terminal()
+        && existing.status != candidate.status
+    {
+        return terminal_status_rank(&candidate.status) > terminal_status_rank(&existing.status);
+    }
     status_progress_rank(&candidate.status) > status_progress_rank(&existing.status)
+}
+
+fn terminal_status_rank(status: &AutoReviewRunStatus) -> u8 {
+    match status {
+        AutoReviewRunStatus::Completed => 6,
+        AutoReviewRunStatus::Failed => 5,
+        AutoReviewRunStatus::Cancelled => 4,
+        AutoReviewRunStatus::Lost => 3,
+        AutoReviewRunStatus::Superseded => 2,
+        AutoReviewRunStatus::Skipped => 1,
+        AutoReviewRunStatus::Pending
+        | AutoReviewRunStatus::Snapshotting
+        | AutoReviewRunStatus::Running
+        | AutoReviewRunStatus::Reviewing
+        | AutoReviewRunStatus::Resolving => 0,
+    }
 }
 
 fn status_progress_rank(status: &AutoReviewRunStatus) -> u8 {
@@ -533,6 +638,14 @@ pub struct AutoReviewRun {
     pub started_at_unix_secs: i64,
     pub completed_at_unix_secs: Option<i64>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_token_estimate: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_token_estimate: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -601,6 +714,12 @@ impl AutoReviewRun {
             return AutoReviewFreshness::Stale;
         }
         self.target.freshness(active_target)
+    }
+
+    fn is_explicit_lifecycle_update(&self) -> bool {
+        self.status == AutoReviewRunStatus::Superseded
+            || self.superseded_by.is_some()
+            || self.cancel_reason.is_some()
     }
 
     fn is_current_for(
@@ -870,6 +989,41 @@ fn duplicate_target_is_reusable(
 fn non_empty_str(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
+}
+
+fn run_elapsed_secs(run: &AutoReviewRun) -> Option<i64> {
+    run.completed_at_unix_secs
+        .map(|completed_at| (completed_at - run.started_at_unix_secs).max(0))
+}
+
+fn run_has_high_burn_signal(run: &AutoReviewRun, elapsed_secs: Option<i64>) -> bool {
+    run.token_count
+        .is_some_and(|token_count| token_count >= LEDGER_HIGH_TOKEN_COUNT)
+        || run
+            .prompt_token_estimate
+            .is_some_and(|estimate| estimate >= LEDGER_HIGH_PROMPT_TOKEN_ESTIMATE)
+        || elapsed_secs.is_some_and(|elapsed| elapsed >= LEDGER_LONG_ELAPSED_SECS)
+}
+
+fn duration_bucket(seconds: i64) -> &'static str {
+    match seconds {
+        0..=59 => "lt1m",
+        60..=299 => "lt5m",
+        300..=899 => "lt15m",
+        900..=3599 => "lt1h",
+        _ => "gte1h",
+    }
+}
+
+fn duration_bucket_rank(bucket: &str) -> u8 {
+    match bucket {
+        "lt1m" => 0,
+        "lt5m" => 1,
+        "lt15m" => 2,
+        "lt1h" => 3,
+        "gte1h" => 4,
+        _ => 0,
+    }
 }
 
 fn auto_review_run_sort_key(run: &AutoReviewRun) -> (i64, &str) {
