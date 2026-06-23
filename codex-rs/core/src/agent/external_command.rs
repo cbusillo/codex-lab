@@ -16,8 +16,8 @@ use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::process::Child;
 use tokio::process::Command;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 const MAX_EXTERNAL_AGENT_STDOUT_BYTES: usize = 64 * 1024;
@@ -153,13 +153,16 @@ async fn run_external_agent_inner(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     command.envs(&launch.backend.env);
 
     if launch.cancellation_token.is_cancelled() {
         return Err(anyhow::anyhow!("external agent cancelled before launch"));
     }
 
-    let mut child = command.spawn()?;
+    let child = command.spawn()?;
+    let mut child = ExternalAgentChildGuard::new(child);
     let mut stdin = child.stdin.take();
     let stdout = child
         .stdout
@@ -186,6 +189,7 @@ async fn run_external_agent_inner(
             read_limited_output(stderr, MAX_EXTERNAL_AGENT_STDERR_BYTES, "stderr"),
             async { child.wait().await.map_err(anyhow::Error::from) },
         )?;
+        child.disarm();
 
         Ok::<ExternalAgentProcessOutput, anyhow::Error>(ExternalAgentProcessOutput {
             status,
@@ -198,7 +202,7 @@ async fn run_external_agent_inner(
         _ = launch.cancellation_token.cancelled() => {
             return Err(anyhow::anyhow!("external agent cancelled"));
         }
-        output = timeout(Duration::from_millis(launch.backend.timeout_ms), interaction) => {
+        output = tokio::time::timeout(Duration::from_millis(launch.backend.timeout_ms), interaction) => {
             output.map_err(|_| anyhow::anyhow!("external agent timed out"))??
         },
     };
@@ -219,6 +223,74 @@ async fn run_external_agent_inner(
             final_message: Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
         }),
     }
+}
+
+struct ExternalAgentChildGuard {
+    child: Child,
+    process_group_id: Option<u32>,
+    kill_on_drop: bool,
+}
+
+impl ExternalAgentChildGuard {
+    fn new(child: Child) -> Self {
+        let process_group_id = child.id();
+        Self {
+            child,
+            process_group_id,
+            kill_on_drop: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.kill_on_drop = false;
+    }
+}
+
+impl std::ops::Deref for ExternalAgentChildGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for ExternalAgentChildGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
+}
+
+impl Drop for ExternalAgentChildGuard {
+    fn drop(&mut self) {
+        if !self.kill_on_drop {
+            return;
+        }
+        if let Some(process_group_id) = self.process_group_id
+            && let Err(err) = codex_utils_pty::process_group::kill_process_group(process_group_id)
+        {
+            tracing::warn!("failed to kill external agent process group {process_group_id}: {err}");
+        }
+        if let Err(err) = self.child.start_kill()
+            && !child_is_already_gone(&err)
+        {
+            tracing::warn!("failed to kill external agent process: {err}");
+        }
+    }
+}
+
+fn child_is_already_gone(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::NotFound
+        || err.raw_os_error() == Some(child_already_gone_raw_os_error())
+}
+
+#[cfg(unix)]
+fn child_already_gone_raw_os_error() -> i32 {
+    libc::ESRCH
+}
+
+#[cfg(not(unix))]
+fn child_already_gone_raw_os_error() -> i32 {
+    0
 }
 
 #[derive(Debug)]
@@ -536,6 +608,72 @@ mod tests {
         assert_eq!(
             response.final_message.as_deref(),
             Some("--write-mode|inspect this repo|configured")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_external_agent_background_children() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let survived_path = temp_dir.path().join("background-child-survived");
+        let script = format!("(sleep 1; touch '{}') & wait", survived_path.display());
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                command: "/bin/sh".to_string(),
+                protocol: ExternalCommandProtocol::RawCli,
+                args: vec!["-c".to_string(), script],
+                timeout_ms: 100,
+                ..Default::default()
+            },
+            false,
+        );
+
+        let err = run_external_agent_inner(&launch)
+            .await
+            .expect_err("external agent wrapper should time out");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert!(
+            !survived_path.exists(),
+            "timeout should kill background descendants in the external agent process group"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_background_children_after_wrapper_exits() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let survived_path = temp_dir.path().join("background-child-survived");
+        let script = format!("(sleep 1; touch '{}') &", survived_path.display());
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                command: "/bin/sh".to_string(),
+                protocol: ExternalCommandProtocol::RawCli,
+                args: vec!["-c".to_string(), script],
+                timeout_ms: 100,
+                ..Default::default()
+            },
+            false,
+        );
+
+        let err = run_external_agent_inner(&launch)
+            .await
+            .expect_err("external agent descendant should hold stdout open until timeout");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert!(
+            !survived_path.exists(),
+            "timeout should kill background descendants after the wrapper exits"
         );
     }
 }
