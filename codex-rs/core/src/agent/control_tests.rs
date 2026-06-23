@@ -3054,6 +3054,143 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
         .expect("tree shutdown after subtree resume should succeed");
 }
 
+async fn harness_with_external_descendant()
+-> (AgentControlHarness, ThreadId, ThreadId, StateDbHandle) {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
+        .await
+        .expect("child spawn should succeed");
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    persist_thread_for_tree_resume(&child_thread, "child persisted").await;
+    wait_for_live_thread_spawn_children(&harness.control, parent_thread_id, &[child_thread_id])
+        .await;
+
+    let external_thread_id = ThreadId::new();
+    harness.control.state.register_external_agent(
+        external_thread_id,
+        child_thread_id,
+        AgentStatus::PendingInit,
+    );
+    harness
+        .control
+        .persist_thread_spawn_edge(child_thread_id, external_thread_id)
+        .await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available")
+        .clone();
+
+    (harness, child_thread_id, external_thread_id, state_db)
+}
+
+#[tokio::test]
+async fn close_agent_closes_completed_external_descendant_edges() {
+    let (harness, child_thread_id, external_thread_id, state_db) =
+        harness_with_external_descendant().await;
+    harness.control.update_external_agent_status(
+        external_thread_id,
+        AgentStatus::Completed(Some("external done".to_string())),
+    );
+
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("open external edge should load"),
+        vec![external_thread_id]
+    );
+
+    let _ = harness
+        .control
+        .close_agent(child_thread_id)
+        .await
+        .expect("child close should succeed");
+
+    assert_eq!(
+        harness.control.get_status(external_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("open external edge should load after close"),
+        Vec::<ThreadId>::new()
+    );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Closed,
+            )
+            .await
+            .expect("closed external edge should load after close"),
+        vec![external_thread_id]
+    );
+}
+
+#[tokio::test]
+async fn close_agent_closes_running_external_descendant_edges_without_releasing_runtime() {
+    let (harness, child_thread_id, external_thread_id, state_db) =
+        harness_with_external_descendant().await;
+
+    let _ = harness
+        .control
+        .close_agent(child_thread_id)
+        .await
+        .expect("child close should succeed");
+
+    assert_eq!(
+        harness.control.get_status(external_thread_id).await,
+        AgentStatus::PendingInit
+    );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("open external edge should load after close"),
+        Vec::<ThreadId>::new()
+    );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Closed,
+            )
+            .await
+            .expect("closed external edge should load after close"),
+        vec![external_thread_id]
+    );
+}
+
 #[tokio::test]
 async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() {
     let harness = AgentControlHarness::new().await;

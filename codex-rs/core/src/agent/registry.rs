@@ -240,6 +240,14 @@ impl AgentRegistry {
             .map(|runtime| runtime.status_tx.borrow().clone())
     }
 
+    pub(crate) fn has_registered_external_agents(&self) -> bool {
+        !self
+            .external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
     pub(crate) fn live_external_thread_spawn_edges(&self) -> Vec<(ThreadId, ThreadId)> {
         self.external_agents
             .lock()
@@ -250,6 +258,15 @@ impl AgentRegistry {
                 (!crate::agent::status::is_final(&status))
                     .then_some((runtime.parent_thread_id, *thread_id))
             })
+            .collect()
+    }
+
+    pub(crate) fn registered_external_thread_spawn_edges(&self) -> Vec<(ThreadId, ThreadId)> {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(thread_id, runtime)| (runtime.parent_thread_id, *thread_id))
             .collect()
     }
 

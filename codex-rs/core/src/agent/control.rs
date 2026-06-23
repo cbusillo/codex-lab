@@ -37,6 +37,7 @@ use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -727,6 +728,48 @@ impl AgentControl {
 
         while let Some(thread_id) = stack.pop() {
             descendants.push(thread_id);
+            if let Some(children) = children_by_parent.remove(&thread_id) {
+                for (child_thread_id, _) in children.into_iter().rev() {
+                    stack.push(child_thread_id);
+                }
+            }
+        }
+
+        Ok(descendants)
+    }
+
+    async fn registered_external_thread_spawn_descendants(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> CodexResult<Vec<ThreadId>> {
+        let mut children_by_parent = self.live_thread_spawn_children().await?;
+        let mut external_agent_ids = HashSet::new();
+        for (parent_thread_id, child_thread_id) in
+            self.state.registered_external_thread_spawn_edges()
+        {
+            let children = children_by_parent.entry(parent_thread_id).or_default();
+            if children
+                .iter()
+                .all(|(existing_child_thread_id, _)| *existing_child_thread_id != child_thread_id)
+            {
+                children.push((child_thread_id, AgentMetadata::default()));
+            }
+            external_agent_ids.insert(child_thread_id);
+        }
+
+        let mut descendants = Vec::new();
+        let mut stack = children_by_parent
+            .remove(&root_thread_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(child_thread_id, _)| child_thread_id)
+            .rev()
+            .collect::<Vec<_>>();
+
+        while let Some(thread_id) = stack.pop() {
+            if external_agent_ids.contains(&thread_id) {
+                descendants.push(thread_id);
+            }
             if let Some(children) = children_by_parent.remove(&thread_id) {
                 for (child_thread_id, _) in children.into_iter().rev() {
                     stack.push(child_thread_id);
