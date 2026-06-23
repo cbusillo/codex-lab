@@ -18,7 +18,6 @@ from typing import Sequence
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUILD_SCRIPT = REPO_ROOT / "codex-cli" / "scripts" / "build_npm_package.py"
-WORKFLOW_NAME = ".github/workflows/rust-release.yml"
 GITHUB_REPO = "openai/codex"
 BINARY_TARGETS = (
     "x86_64-unknown-linux-musl",
@@ -54,6 +53,26 @@ class BinaryComponent:
 class WorkflowArtifact:
     name: str
     size_in_bytes: int
+
+
+@dataclass(frozen=True)
+class ReleaseAsset:
+    name: str
+    size_in_bytes: int
+    asset_id: str = ""
+    digest: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class ReleaseArtifact:
+    name: str
+    size_in_bytes: int
+    assets: tuple[ReleaseAsset, ...]
+
+    @property
+    def asset_names(self) -> tuple[str, ...]:
+        return tuple(asset.name for asset in self.assets)
 
 
 @dataclass(frozen=True)
@@ -114,7 +133,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--workflow-url",
-        help="Optional workflow URL to reuse for native artifacts.",
+        help=(
+            "Optional workflow URL to reuse for native artifacts. When omitted, "
+            "native artifacts are downloaded from GitHub release assets."
+        ),
+    )
+    parser.add_argument(
+        "--release-tag",
+        help="GitHub release tag to use for native artifacts (default: rust-v<release-version>).",
     )
     parser.add_argument(
         "--output-dir",
@@ -162,42 +188,15 @@ def expand_packages(packages: list[str]) -> list[str]:
     return expanded
 
 
-def resolve_release_workflow(version: str) -> dict:
-    stdout = subprocess.check_output(
-        [
-            "gh",
-            "run",
-            "list",
-            "--branch",
-            f"rust-v{version}",
-            "--json",
-            "workflowName,url,headSha",
-            "--workflow",
-            WORKFLOW_NAME,
-            "--jq",
-            "first(.[])",
-        ],
-        cwd=REPO_ROOT,
-        text=True,
-    )
-    workflow = json.loads(stdout or "null")
-    if not workflow:
-        raise RuntimeError(
-            f"Unable to find rust-release workflow for version {version}."
-        )
-    return workflow
-
-
-def resolve_workflow_url(version: str, override: str | None) -> tuple[str, str | None]:
+def resolve_release_tag(version: str, override: str | None) -> str:
     if override:
-        return override, None
-
-    workflow = resolve_release_workflow(version)
-    return workflow["url"], workflow.get("headSha")
+        return override
+    return f"rust-v{version}"
 
 
 def install_native_components(
-    workflow_url: str,
+    release_tag: str,
+    workflow_url: str | None,
     components: set[str],
     vendor_root: Path,
     artifacts_dir: Path,
@@ -208,17 +207,220 @@ def install_native_components(
     vendor_dir = vendor_root / "vendor"
     vendor_dir.mkdir(parents=True, exist_ok=True)
 
-    workflow_id = workflow_url.rstrip("/").split("/")[-1]
-    print(f"Downloading native artifacts from workflow {workflow_id}...", flush=True)
-    with _gha_group(f"Download native artifacts from workflow {workflow_id}"):
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        install_from_workflow_artifacts(
-            workflow_id,
-            artifacts_dir,
-            sorted(components),
-            vendor_dir,
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    if workflow_url:
+        workflow_id = workflow_url.rstrip("/").split("/")[-1]
+        print(
+            f"Downloading native artifacts from workflow {workflow_id}...", flush=True
         )
+        with _gha_group(f"Download native artifacts from workflow {workflow_id}"):
+            install_from_workflow_artifacts(
+                workflow_id,
+                artifacts_dir,
+                sorted(components),
+                vendor_dir,
+            )
+    else:
+        print(f"Downloading native artifacts from release {release_tag}...", flush=True)
+        with _gha_group(f"Download native artifacts from release {release_tag}"):
+            install_from_release_assets(
+                release_tag,
+                artifacts_dir,
+                sorted(components),
+                vendor_dir,
+            )
     print(f"Installed native dependencies into {vendor_dir}", flush=True)
+
+
+def install_from_release_assets(
+    release_tag: str,
+    artifacts_dir: Path,
+    components: Sequence[str],
+    vendor_dir: Path,
+) -> None:
+    artifacts = select_release_artifacts(release_tag, components)
+    download_release_artifacts(release_tag, artifacts_dir, artifacts)
+    if CODEX_PACKAGE_COMPONENT in components:
+        install_codex_package_archives(artifacts_dir, vendor_dir, BINARY_TARGETS)
+    install_binary_components(
+        artifacts_dir,
+        vendor_dir,
+        [BINARY_COMPONENTS[name] for name in components if name in BINARY_COMPONENTS],
+    )
+
+
+def select_release_artifacts(
+    release_tag: str,
+    components: Sequence[str],
+) -> list[ReleaseArtifact]:
+    needs_target_artifacts = CODEX_PACKAGE_COMPONENT in components or any(
+        component in BINARY_COMPONENTS for component in components
+    )
+    if not needs_target_artifacts:
+        return []
+
+    assets_by_name = {asset.name: asset for asset in list_release_assets(release_tag)}
+    selected_artifacts: list[ReleaseArtifact] = []
+    for target in BINARY_TARGETS:
+        asset_names: list[str] = []
+        if CODEX_PACKAGE_COMPONENT in components:
+            asset_names.append(f"codex-package-{target}.tar.gz")
+        for component_name in components:
+            component = BINARY_COMPONENTS.get(component_name)
+            if component is not None:
+                asset_names.append(
+                    archive_name_for_target(component.artifact_prefix, target)
+                )
+
+        selected_assets: list[ReleaseAsset] = []
+        for asset_name in asset_names:
+            asset = assets_by_name.get(asset_name)
+            if asset is None:
+                raise FileNotFoundError(
+                    f"Expected release asset not found for {release_tag}: {asset_name}"
+                )
+            selected_assets.append(asset)
+
+        selected_artifacts.append(
+            ReleaseArtifact(
+                name=target,
+                size_in_bytes=sum(asset.size_in_bytes for asset in selected_assets),
+                assets=tuple(selected_assets),
+            )
+        )
+
+    return selected_artifacts
+
+
+def list_release_assets(release_tag: str) -> list[ReleaseAsset]:
+    stdout = subprocess.check_output(
+        [
+            "gh",
+            "release",
+            "view",
+            release_tag,
+            "--repo",
+            GITHUB_REPO,
+            "--json",
+            "assets",
+        ],
+        text=True,
+    )
+    payload = json.loads(stdout)
+    assets: list[ReleaseAsset] = []
+    for asset in payload.get("assets", []):
+        assets.append(
+            ReleaseAsset(
+                name=asset["name"],
+                size_in_bytes=int(asset["size"]),
+                asset_id=str(asset.get("id", "")),
+                digest=str(asset.get("digest", "")),
+                updated_at=str(asset.get("updatedAt", "")),
+            )
+        )
+    return assets
+
+
+def download_release_artifacts(
+    release_tag: str,
+    dest_dir: Path,
+    artifacts: Sequence[ReleaseArtifact],
+) -> None:
+    total_bytes = sum(artifact.size_in_bytes for artifact in artifacts)
+    print(
+        f"Downloading {len(artifacts)} release artifact sets ({format_bytes(total_bytes)})",
+        flush=True,
+    )
+    source_id = f"github-release:{GITHUB_REPO}:{release_tag}"
+    for artifact in artifacts:
+        artifact_dir = dest_dir / artifact.name
+        if release_artifact_cache_is_complete(artifact_dir, source_id, artifact):
+            print(
+                f"  using cached {artifact.name} ({format_bytes(artifact.size_in_bytes)})",
+                flush=True,
+            )
+            continue
+
+        if artifact_dir.exists():
+            shutil.rmtree(artifact_dir)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        print(
+            f"  downloading {artifact.name} ({format_bytes(artifact.size_in_bytes)})",
+            flush=True,
+        )
+        for asset_name in artifact.asset_names:
+            subprocess.check_call(
+                [
+                    "gh",
+                    "release",
+                    "download",
+                    release_tag,
+                    "--repo",
+                    GITHUB_REPO,
+                    "--pattern",
+                    asset_name,
+                    "--dir",
+                    str(artifact_dir),
+                    "--clobber",
+                ]
+            )
+        write_release_artifact_cache_marker(artifact_dir, source_id, artifact)
+
+
+def release_artifact_cache_is_complete(
+    artifact_dir: Path,
+    source_id: str,
+    artifact: ReleaseArtifact,
+) -> bool:
+    marker_path = artifact_dir / ARTIFACT_CACHE_MARKER
+    if not artifact_dir.is_dir() or not marker_path.is_file():
+        return False
+
+    try:
+        marker = json.loads(marker_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if marker != release_artifact_cache_marker(source_id, artifact):
+        return False
+
+    return all(
+        (artifact_dir / asset_name).is_file() for asset_name in artifact.asset_names
+    )
+
+
+def write_release_artifact_cache_marker(
+    artifact_dir: Path,
+    source_id: str,
+    artifact: ReleaseArtifact,
+) -> None:
+    marker_path = artifact_dir / ARTIFACT_CACHE_MARKER
+    marker_path.write_text(
+        json.dumps(release_artifact_cache_marker(source_id, artifact), sort_keys=True)
+        + "\n"
+    )
+
+
+def release_artifact_cache_marker(
+    source_id: str,
+    artifact: ReleaseArtifact,
+) -> dict[str, int | list[dict[str, int | str]] | str]:
+    return {
+        "assets": [release_asset_cache_marker(asset) for asset in artifact.assets],
+        "name": artifact.name,
+        "size_in_bytes": artifact.size_in_bytes,
+        "source_id": source_id,
+    }
+
+
+def release_asset_cache_marker(asset: ReleaseAsset) -> dict[str, int | str]:
+    return {
+        "digest": asset.digest,
+        "id": asset.asset_id,
+        "name": asset.name,
+        "size_in_bytes": asset.size_in_bytes,
+        "updated_at": asset.updated_at,
+    }
 
 
 def install_from_workflow_artifacts(
@@ -626,16 +828,18 @@ def main() -> int:
     vendor_src_by_components: dict[tuple[str, ...], Path] = {}
     artifacts_root: Path | None = None
     cleanup_artifacts_root = False
-    resolved_head_sha: str | None = None
 
     final_messages = []
 
     try:
         if native_component_sets:
-            workflow_url, resolved_head_sha = resolve_workflow_url(
-                args.release_version, args.workflow_url
-            )
-            print(f"Using native artifacts from {workflow_url}", flush=True)
+            workflow_url: str | None = None
+            release_tag = resolve_release_tag(args.release_version, args.release_tag)
+            if args.workflow_url:
+                workflow_url = args.workflow_url
+                print(f"Using native artifacts from {workflow_url}", flush=True)
+            else:
+                print(f"Using native artifacts from {release_tag}", flush=True)
             if args.artifacts_cache_dir is not None:
                 artifacts_root = args.artifacts_cache_dir
                 artifacts_root.mkdir(parents=True, exist_ok=True)
@@ -657,15 +861,13 @@ def main() -> int:
                     flush=True,
                 )
                 install_native_components(
+                    release_tag,
                     workflow_url,
                     set(components),
                     vendor_temp_root,
                     artifacts_root,
                 )
                 vendor_src_by_components[components] = vendor_temp_root / "vendor"
-
-        if resolved_head_sha:
-            print(f"should `git checkout {resolved_head_sha}`", flush=True)
 
         max_workers = min(len(packages), max(1, os.cpu_count() or 1))
         staged_by_package: dict[str, StagedPackage] = {}

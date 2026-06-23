@@ -9,7 +9,20 @@ from unittest import mock
 
 import stage_npm_packages
 
-WORKFLOW_ID = "26201494185"
+WORKFLOW_ID = "test-workflow-run"
+RELEASE_SOURCE_ID = "github-release:openai/codex:rust-v0.133.0-alpha.4"
+
+
+def release_asset(
+    name: str, size_in_bytes: int = 123
+) -> stage_npm_packages.ReleaseAsset:
+    return stage_npm_packages.ReleaseAsset(
+        name=name,
+        size_in_bytes=size_in_bytes,
+        asset_id=f"id-{name}",
+        digest=f"sha256:{name}",
+        updated_at="2026-05-21T02:26:46Z",
+    )
 
 
 class ArtifactCacheMarkerTests(unittest.TestCase):
@@ -55,6 +68,96 @@ class ArtifactCacheMarkerTests(unittest.TestCase):
                     artifact_dir,
                     WORKFLOW_ID,
                     artifact,
+                )
+            )
+
+    def test_release_cache_is_complete_with_matching_marker_and_assets(self) -> None:
+        artifact = stage_npm_packages.ReleaseArtifact(
+            name="x86_64-unknown-linux-musl",
+            size_in_bytes=123,
+            assets=(release_asset("codex-package-x86_64-unknown-linux-musl.tar.gz"),),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_dir = Path(temp_dir) / artifact.name
+            artifact_dir.mkdir()
+            (artifact_dir / artifact.asset_names[0]).touch()
+            stage_npm_packages.write_release_artifact_cache_marker(
+                artifact_dir,
+                RELEASE_SOURCE_ID,
+                artifact,
+            )
+
+            self.assertTrue(
+                stage_npm_packages.release_artifact_cache_is_complete(
+                    artifact_dir,
+                    RELEASE_SOURCE_ID,
+                    artifact,
+                )
+            )
+
+    def test_release_cache_is_incomplete_without_all_assets(self) -> None:
+        artifact = stage_npm_packages.ReleaseArtifact(
+            name="x86_64-unknown-linux-musl",
+            size_in_bytes=123,
+            assets=(
+                release_asset("codex-package-x86_64-unknown-linux-musl.tar.gz"),
+                release_asset(
+                    "codex-responses-api-proxy-x86_64-unknown-linux-musl.zst"
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_dir = Path(temp_dir) / artifact.name
+            artifact_dir.mkdir()
+            (artifact_dir / artifact.asset_names[0]).touch()
+            stage_npm_packages.write_release_artifact_cache_marker(
+                artifact_dir,
+                RELEASE_SOURCE_ID,
+                artifact,
+            )
+
+            self.assertFalse(
+                stage_npm_packages.release_artifact_cache_is_complete(
+                    artifact_dir,
+                    RELEASE_SOURCE_ID,
+                    artifact,
+                )
+            )
+
+    def test_release_cache_is_incomplete_when_asset_identity_changes(self) -> None:
+        artifact = stage_npm_packages.ReleaseArtifact(
+            name="x86_64-unknown-linux-musl",
+            size_in_bytes=123,
+            assets=(release_asset("codex-package-x86_64-unknown-linux-musl.tar.gz"),),
+        )
+        replaced_artifact = stage_npm_packages.ReleaseArtifact(
+            name=artifact.name,
+            size_in_bytes=artifact.size_in_bytes,
+            assets=(
+                stage_npm_packages.ReleaseAsset(
+                    name=artifact.asset_names[0],
+                    size_in_bytes=123,
+                    asset_id="new-asset-id",
+                    digest="sha256:new-digest",
+                    updated_at="2026-05-22T02:26:46Z",
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_dir = Path(temp_dir) / artifact.name
+            artifact_dir.mkdir()
+            (artifact_dir / artifact.asset_names[0]).touch()
+            stage_npm_packages.write_release_artifact_cache_marker(
+                artifact_dir,
+                RELEASE_SOURCE_ID,
+                artifact,
+            )
+
+            self.assertFalse(
+                stage_npm_packages.release_artifact_cache_is_complete(
+                    artifact_dir,
+                    RELEASE_SOURCE_ID,
+                    replaced_artifact,
                 )
             )
 
@@ -258,6 +361,104 @@ class StagePackageTests(unittest.TestCase):
                 stage_npm_packages.artifact_cache_is_complete(
                     artifact_dir,
                     WORKFLOW_ID,
+                    artifact,
+                )
+            )
+
+    def test_select_release_artifacts_requires_codex_package_assets(self) -> None:
+        assets = [
+            release_asset(f"codex-package-{target}.tar.gz", index + 1)
+            for index, target in enumerate(stage_npm_packages.BINARY_TARGETS)
+        ]
+
+        with mock.patch.object(
+            stage_npm_packages,
+            "list_release_assets",
+            return_value=assets,
+        ):
+            selected = stage_npm_packages.select_release_artifacts(
+                "rust-v0.133.0-alpha.4",
+                [stage_npm_packages.CODEX_PACKAGE_COMPONENT],
+            )
+
+        self.assertEqual(
+            selected,
+            [
+                stage_npm_packages.ReleaseArtifact(
+                    name=target,
+                    size_in_bytes=index + 1,
+                    assets=(
+                        release_asset(f"codex-package-{target}.tar.gz", index + 1),
+                    ),
+                )
+                for index, target in enumerate(stage_npm_packages.BINARY_TARGETS)
+            ],
+        )
+
+    def test_select_release_artifacts_reports_missing_asset(self) -> None:
+        with mock.patch.object(
+            stage_npm_packages,
+            "list_release_assets",
+            return_value=[],
+        ):
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "codex-package-x86_64-unknown-linux-musl.tar.gz",
+            ):
+                stage_npm_packages.select_release_artifacts(
+                    "rust-v0.133.0-alpha.4",
+                    [stage_npm_packages.CODEX_PACKAGE_COMPONENT],
+                )
+
+    def test_download_release_artifacts_downloads_assets_by_target(self) -> None:
+        artifact = stage_npm_packages.ReleaseArtifact(
+            name="x86_64-unknown-linux-musl",
+            size_in_bytes=123,
+            assets=(release_asset("codex-package-x86_64-unknown-linux-musl.tar.gz"),),
+        )
+        commands: list[list[str]] = []
+
+        def fake_check_call(cmd: list[str]) -> None:
+            commands.append(cmd)
+            artifact_dir = Path(cmd[cmd.index("--dir") + 1])
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / artifact.asset_names[0]).touch()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(
+                stage_npm_packages.subprocess,
+                "check_call",
+                side_effect=fake_check_call,
+            ):
+                stage_npm_packages.download_release_artifacts(
+                    "rust-v0.133.0-alpha.4",
+                    Path(temp_dir),
+                    [artifact],
+                )
+
+            artifact_dir = Path(temp_dir) / artifact.name
+            self.assertEqual(
+                commands,
+                [
+                    [
+                        "gh",
+                        "release",
+                        "download",
+                        "rust-v0.133.0-alpha.4",
+                        "--repo",
+                        stage_npm_packages.GITHUB_REPO,
+                        "--pattern",
+                        artifact.asset_names[0],
+                        "--dir",
+                        str(artifact_dir),
+                        "--clobber",
+                    ]
+                ],
+            )
+            self.assertTrue(
+                stage_npm_packages.release_artifact_cache_is_complete(
+                    artifact_dir,
+                    RELEASE_SOURCE_ID,
                     artifact,
                 )
             )
