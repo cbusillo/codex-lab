@@ -645,13 +645,12 @@ impl ServiceState {
             return validation_error_payload(error);
         }
 
-        let Some(target) = self.clients.get_mut(&message.target_client_id) else {
+        let Some(target) = self.clients.get(&message.target_client_id) else {
             return error_payload(
                 ErrorCode::InvalidPayload,
                 format!("unknown Code Bridge target {}", message.target_client_id),
             );
         };
-        target.last_seen = Instant::now();
         if !target_can_run_command(&target.capabilities, &message.command) {
             return validation_error_payload(ValidationError::CapabilityDenied);
         }
@@ -742,13 +741,12 @@ impl ServiceState {
             return Some(validation_error_payload(ValidationError::CapabilityDenied));
         }
 
-        let Some(target) = self.clients.get_mut(target_client_id) else {
+        let Some(target) = self.clients.get(target_client_id) else {
             return Some(error_payload(
                 ErrorCode::InvalidPayload,
                 format!("unknown Code Bridge target {target_client_id}"),
             ));
         };
-        target.last_seen = Instant::now();
         if !target_allows(&target.capabilities) {
             return Some(validation_error_payload(ValidationError::CapabilityDenied));
         }
@@ -3289,6 +3287,120 @@ mod tests {
         assert_eq!(status.connected_subscriber_count, 0);
 
         service.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn targeted_requests_do_not_refresh_target_liveness() {
+        let mut state = ServiceState {
+            started_at: Instant::now(),
+            clients: HashMap::new(),
+            retained_deliveries: VecDeque::new(),
+            retained_delivery_bytes: 0,
+            next_delivery_sequence: 1,
+            pending_requests: HashMap::new(),
+            stale_client_timeout: Duration::from_secs(30),
+            last_event_time_unix_ms: None,
+        };
+        let stale_instant = Instant::now() - Duration::from_secs(60);
+        state.clients.insert(
+            "requester-1".to_string(),
+            ClientState {
+                role: ClientRole::Subscriber,
+                capabilities: subscriber_capabilities(),
+                filter: SubscriptionFilter::default(),
+                session_token: "requester-token".to_string(),
+                last_seen: stale_instant,
+            },
+        );
+        let target_capabilities = CapabilitySet {
+            provide_screenshot: true,
+            provide_control: true,
+            provide_javascript_execution: true,
+            ..CapabilitySet::default()
+        };
+        state.clients.insert(
+            "producer-1".to_string(),
+            ClientState {
+                role: ClientRole::Producer,
+                capabilities: target_capabilities,
+                filter: SubscriptionFilter::default(),
+                session_token: "producer-token".to_string(),
+                last_seen: stale_instant,
+            },
+        );
+
+        let request = ScreenshotRequestMessage {
+            request_id: "shot-1".to_string(),
+            requester_client_id: "requester-1".to_string(),
+            target_client_id: "producer-1".to_string(),
+            timeout_ms: 1_000,
+        };
+        let mut outgoing = Vec::new();
+        let payload = state.handle_screenshot_request(
+            &envelope("shot-1", BridgePayload::ScreenshotRequest(request.clone())),
+            &request,
+            &mut outgoing,
+        );
+        assert!(matches!(payload, BridgePayload::Ack(_)));
+
+        assert!(
+            state
+                .clients
+                .get("requester-1")
+                .expect("requester remains registered")
+                .last_seen
+                > stale_instant
+        );
+        assert_eq!(
+            state
+                .clients
+                .get("producer-1")
+                .expect("producer remains registered")
+                .last_seen,
+            stale_instant
+        );
+
+        state
+            .clients
+            .get_mut("requester-1")
+            .expect("requester remains registered")
+            .last_seen = stale_instant;
+        let control = ControlRequestMessage {
+            request_id: "js-1".to_string(),
+            requester_client_id: "requester-1".to_string(),
+            target_client_id: "producer-1".to_string(),
+            command: ControlCommand::ExecuteJavascript {
+                code: "window.location.href".to_string(),
+            },
+            timeout_ms: 1_000,
+        };
+        let payload = state.handle_control_request(
+            &envelope("js-1", BridgePayload::ControlRequest(control.clone())),
+            &control,
+            &mut outgoing,
+        );
+        assert!(matches!(payload, BridgePayload::Ack(_)));
+
+        assert!(
+            state
+                .clients
+                .get("requester-1")
+                .expect("requester remains registered")
+                .last_seen
+                > stale_instant
+        );
+        assert_eq!(
+            state
+                .clients
+                .get("producer-1")
+                .expect("producer remains registered")
+                .last_seen,
+            stale_instant
+        );
+
+        state.expire_stale_clients();
+        assert!(state.clients.contains_key("requester-1"));
+        assert!(!state.clients.contains_key("producer-1"));
     }
 
     #[tokio::test]
