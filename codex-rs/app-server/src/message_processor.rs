@@ -420,8 +420,10 @@ impl MessageProcessor {
             workspace_settings_cache,
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
-        let code_bridge_processor =
-            CodeBridgeRequestProcessor::new(config.codex_home.to_path_buf());
+        let code_bridge_processor = CodeBridgeRequestProcessor::new(
+            config.codex_home.to_path_buf(),
+            config.cwd.to_path_buf(),
+        );
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
