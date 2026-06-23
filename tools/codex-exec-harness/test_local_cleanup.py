@@ -288,6 +288,10 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertIn("Artifact Root\nroot=not configured", completed.stdout)
             self.assertIn("Remote Compile Host\nhost=not configured", completed.stdout)
+            self.assertIn("Bazel\nuser_bazelrc=not configured", completed.stdout)
+            self.assertIn("Node\n", completed.stdout)
+            self.assertIn("Sccache\n", completed.stdout)
+            self.assertIn("Temp\nrepo_tmp=", completed.stdout)
 
 
 def run_local_cleanup(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -320,6 +324,7 @@ def run_cargo_build_env(
     env = os.environ.copy()
     env.pop("CARGO_TARGET_DIR", None)
     env.pop("CODEX_LAB_CARGO_TARGET_DIR", None)
+    env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
     env.update(env_overrides)
     return subprocess.run(
         [str(workspace / "scripts" / "local" / "cargo-build-env.sh")],

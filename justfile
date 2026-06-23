@@ -40,9 +40,15 @@ file-search *args:
     cargo run --bin codex-file-search -- {args}
 
 # Build the CLI and run the app-server test client
+[unix]
 app-server-test-client *args:
     cargo build -p codex-cli
-    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
+    codex_bin="${CARGO_TARGET_DIR:-./target}/debug/codex"; cargo run -p codex-app-server-test-client -- --codex-bin "$codex_bin" {args}
+
+[windows]
+app-server-test-client *args:
+    cargo build -p codex-cli
+    $codex_bin = Join-Path ($env:CARGO_TARGET_DIR ?? ".\\target") "debug\\codex.exe"; cargo run -p codex-app-server-test-client -- --codex-bin $codex_bin @($args | Select-Object -Skip 1)
 
 # Build the local Codex CLI and run every exec harness scenario.
 [no-cd]
