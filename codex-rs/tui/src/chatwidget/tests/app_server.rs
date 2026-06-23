@@ -488,6 +488,62 @@ async fn stale_auto_review_summary_error_is_ignored() {
 }
 
 #[tokio::test]
+async fn stale_terminal_auto_review_status_does_not_displace_current_run() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.handle_server_notification(
+        background_auto_review_status_notification(
+            "newer-run",
+            BackgroundAutoReviewStatus::Running,
+            None,
+        ),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        background_auto_review_status_notification(
+            "newer-run",
+            BackgroundAutoReviewStatus::Completed,
+            None,
+        ),
+        /*replay_kind*/ None,
+    );
+    let _ = drain_insert_history(&mut rx);
+
+    chat.handle_server_notification(
+        background_auto_review_status_notification(
+            "older-run",
+            BackgroundAutoReviewStatus::Superseded,
+            Some("superseded by newer-run"),
+        ),
+        /*replay_kind*/ None,
+    );
+
+    let snapshot = chat
+        .review
+        .current_background_review
+        .as_ref()
+        .expect("background review snapshot");
+    assert_eq!(snapshot.run_id, "newer-run");
+    let rendered_stale_status = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(rendered_stale_status.contains("superseded by newer-run"));
+
+    chat.handle_auto_review_summary_loaded(
+        "newer-run".to_string(),
+        Err("review/summary/read failed".to_string()),
+    );
+
+    let rendered_summary_error = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(rendered_summary_error.contains("review/summary/read failed"));
+}
+
+#[tokio::test]
 async fn live_app_server_turn_completed_clears_working_status_after_answer_item() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

@@ -58,12 +58,14 @@ impl ChatWidget {
         notification: codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
     ) {
         let should_render_status = background_auto_review_status_needs_history(&notification);
-        self.review.current_background_review = Some(BackgroundAutoReviewSnapshot {
-            run_id: notification.run_id.clone(),
-            status: notification.status,
-            review_target: notification.review_target.clone(),
-            error_summary: notification.error_summary.clone(),
-        });
+        if self.background_auto_review_status_updates_snapshot(&notification) {
+            self.review.current_background_review = Some(BackgroundAutoReviewSnapshot {
+                run_id: notification.run_id.clone(),
+                status: notification.status,
+                review_target: notification.review_target.clone(),
+                error_summary: notification.error_summary.clone(),
+            });
+        }
         if should_render_status {
             self.add_to_history(history_cell::new_auto_review_status_cell(&notification));
         }
@@ -183,6 +185,17 @@ impl ChatWidget {
 }
 
 impl ChatWidget {
+    fn background_auto_review_status_updates_snapshot(
+        &self,
+        notification: &codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
+    ) -> bool {
+        let Some(current) = &self.review.current_background_review else {
+            return true;
+        };
+        current.run_id == notification.run_id
+            || !background_auto_review_status_is_terminal(notification.status)
+    }
+
     fn current_background_review_matches_run(&self, run_id: &str) -> bool {
         self.review
             .current_background_review
@@ -221,5 +234,19 @@ fn background_auto_review_status_needs_history(
         codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
         | codex_app_server_protocol::BackgroundAutoReviewStatus::Running
         | codex_app_server_protocol::BackgroundAutoReviewStatus::Completed => false,
+    }
+}
+
+fn background_auto_review_status_is_terminal(
+    status: codex_app_server_protocol::BackgroundAutoReviewStatus,
+) -> bool {
+    match status {
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => true,
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Running => false,
     }
 }
