@@ -22,6 +22,8 @@ eval "$local_cargo_env"
 printf 'target_dir=%s\n' "$CARGO_TARGET_DIR"
 printf 'target_size=%s\n' "$(human_size "$CARGO_TARGET_DIR")"
 unset CARGO_TARGET_DIR
+printf 'worktree_target=%s\n' "$repo_root/codex-rs/target"
+printf 'worktree_target_size=%s\n' "$(human_size "$repo_root/codex-rs/target")"
 
 section "Exec Harness"
 exec_harness_env="$(env -u CARGO_TARGET_DIR CODEX_EXEC_HARNESS_NO_MKDIR=1 "$repo_root/scripts/local/exec-harness-env.sh")"
@@ -29,6 +31,9 @@ eval "$exec_harness_env"
 printf 'target_dir=%s\n' "$CARGO_TARGET_DIR"
 printf 'target_size=%s\n' "$(human_size "$CARGO_TARGET_DIR")"
 unset CARGO_TARGET_DIR
+exec_harness_output_root="${CODEX_EXEC_HARNESS_OUTPUT_ROOT:-$repo_root/.tmp/codex-exec-harness}"
+printf 'output_root=%s\n' "$exec_harness_output_root"
+printf 'output_size=%s\n' "$(human_size "$exec_harness_output_root")"
 
 section "Artifact Root"
 if [[ -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then
@@ -36,6 +41,66 @@ if [[ -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then
 	printf 'root_size=%s\n' "$(human_size "$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT")"
 else
 	printf 'root=not configured\n'
+fi
+
+section "Bazel"
+if [[ -f "$repo_root/user.bazelrc" ]]; then
+	while IFS= read -r line; do
+		case "$line" in
+		common\ --disk_cache=* | common\ --repo_contents_cache=* | common\ --repository_cache=* | common\ --output_base=* | common\ --output_user_root=*)
+			name="${line#common --}"
+			name="${name%%=*}"
+			path="${line#*=}"
+			printf '%s=%s\n' "$name" "$path"
+			printf '%s_size=%s\n' "$name" "$(human_size "$path")"
+			;;
+		esac
+	done <"$repo_root/user.bazelrc"
+else
+	printf 'user_bazelrc=not configured\n'
+fi
+
+section "Node"
+if command -v pnpm >/dev/null 2>&1; then
+	pnpm_store="$(pnpm store path 2>/dev/null || true)"
+	if [[ -n "$pnpm_store" ]]; then
+		printf 'pnpm_store=%s\n' "$pnpm_store"
+		printf 'pnpm_store_size=%s\n' "$(human_size "$pnpm_store")"
+	else
+		printf 'pnpm_store=unavailable\n'
+	fi
+else
+	printf 'pnpm_store=pnpm not found\n'
+fi
+if command -v npm >/dev/null 2>&1; then
+	npm_cache="$(npm config get cache 2>/dev/null || true)"
+	if [[ -n "$npm_cache" ]]; then
+		printf 'npm_cache=%s\n' "$npm_cache"
+		printf 'npm_cache_size=%s\n' "$(human_size "$npm_cache")"
+	else
+		printf 'npm_cache=unavailable\n'
+	fi
+else
+	printf 'npm_cache=npm not found\n'
+fi
+
+section "Sccache"
+if command -v sccache >/dev/null 2>&1; then
+	printf 'binary=%s\n' "$(command -v sccache)"
+	printf 'rustc_wrapper=%s\n' "${RUSTC_WRAPPER:-not configured}"
+	printf 'cache_dir=%s\n' "${SCCACHE_DIR:-not configured}"
+	if [[ -n "${SCCACHE_DIR:-}" ]]; then
+		printf 'cache_size=%s\n' "$(human_size "$SCCACHE_DIR")"
+	fi
+else
+	printf 'binary=not found\n'
+fi
+
+section "Temp"
+printf 'repo_tmp=%s\n' "$repo_root/.tmp"
+printf 'repo_tmp_size=%s\n' "$(human_size "$repo_root/.tmp")"
+if [[ -n "${TMPDIR:-}" ]]; then
+	printf 'tmpdir=%s\n' "$TMPDIR"
 fi
 
 section "GitHub Runners"
