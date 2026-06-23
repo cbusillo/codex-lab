@@ -75,12 +75,29 @@ impl AgentControl {
                 warn!("failed to inspect agent before close {agent_id}: {err}");
             }
         }
-        match Box::pin(self.shutdown_agent_tree(agent_id)).await {
+        let external_descendant_ids = if self.state.has_registered_external_agents() {
+            Box::pin(self.registered_external_thread_spawn_descendants(agent_id)).await?
+        } else {
+            Vec::new()
+        };
+        let result = match Box::pin(self.shutdown_agent_tree(agent_id)).await {
             Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) if known_agent => {
                 Ok(String::new())
             }
             result => result,
+        };
+        for external_descendant_id in external_descendant_ids {
+            if self
+                .state
+                .external_agent_status(external_descendant_id)
+                .is_some_and(|status| is_final(&status))
+            {
+                self.close_external_agent(external_descendant_id).await;
+            } else {
+                self.close_thread_spawn_edge(external_descendant_id).await;
+            }
         }
+        result
     }
 
     /// Shut down `agent_id` and any live descendants reachable from the in-memory spawn tree.
