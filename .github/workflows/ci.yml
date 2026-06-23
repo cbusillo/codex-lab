@@ -68,9 +68,7 @@ jobs:
       CODEX_VERSION: 0.133.0-alpha.4
       NODE_OPTIONS: --max-old-space-size=4096
       STAGE_NPM_ARTIFACTS_CACHE_DIR: .cache/codex-npm-artifacts
-      WORKFLOW_REPO: openai/codex
-      WORKFLOW_REPO_CACHE_KEY: openai-codex
-      WORKFLOW_RUN_ID: 26201494185
+      ARTIFACT_REPO_CACHE_KEY: openai-codex
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -97,7 +95,7 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.STAGE_NPM_ARTIFACTS_CACHE_DIR }}
-          key: codex-npm-artifacts-${{ runner.os }}-${{ env.CODEX_VERSION }}-${{ env.WORKFLOW_REPO_CACHE_KEY }}-${{ env.WORKFLOW_RUN_ID }}-${{ hashFiles('scripts/stage_npm_packages.py', 'codex-cli/scripts/build_npm_package.py') }}
+          key: codex-npm-artifacts-${{ runner.os }}-${{ env.CODEX_VERSION }}-${{ env.ARTIFACT_REPO_CACHE_KEY }}-${{ hashFiles('scripts/stage_npm_packages.py', 'codex-cli/scripts/build_npm_package.py') }}
 
       - name: Stage npm package
         id: stage_npm_package
@@ -105,18 +103,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Use a recent successful rust-release run that published the full
-          # cross-platform native payload required by the npm package layout.
-          # Passing the workflow URL directly avoids relying on old rust-v*
-          # branches remaining discoverable via `gh run list --branch ...`.
-          # If this upstream Actions artifact expires, every PR will fail here;
-          # refresh the URL to a newer successful release run or replace it
-          # with a durable release asset.
-          WORKFLOW_URL="https://github.com/${WORKFLOW_REPO}/actions/runs/${WORKFLOW_RUN_ID}"
           OUTPUT_DIR="${RUNNER_TEMP}"
           python3 ./scripts/stage_npm_packages.py \
             --release-version "$CODEX_VERSION" \
-            --workflow-url "$WORKFLOW_URL" \
             --package codex \
             --artifacts-cache-dir "$STAGE_NPM_ARTIFACTS_CACHE_DIR" \
             --output-dir "$OUTPUT_DIR"
