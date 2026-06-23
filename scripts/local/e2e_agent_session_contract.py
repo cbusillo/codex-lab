@@ -28,6 +28,20 @@ EXPECTED_ENV = {
     "AGENT_SESSION_ISSUE_URL": "https://github.com/cbusillo/code/issues/123",
 }
 
+CONTRACT_TEST_MARKER = "CODEX_LAB_AGENT_SESSION_CONTRACT_TEST"
+AGENT_SESSION_ENV_PREFIXES = ("AGENT_SESSION_", "EVERY_CODE_")
+AGENT_SESSION_ENV_KEYS = {"LAUNCHPLANE_EVERY_CODE_ORIGIN", CONTRACT_TEST_MARKER}
+
+
+def rust_test_env(env: dict[str, str]) -> dict[str, str]:
+    base_env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(AGENT_SESSION_ENV_PREFIXES)
+        and key not in AGENT_SESSION_ENV_KEYS
+    }
+    return {**base_env, **env, CONTRACT_TEST_MARKER: "1"}
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -204,22 +218,38 @@ def run_rust_tests(codex_lab: Path, env: dict[str, str]) -> None:
         "test",
         "-p",
         "codex-tui",
-        "embedded_app_server_startup_accepts_launchplane_agent_session_contract",
+        "tests::embedded_app_server_startup_accepts_launchplane_contract_from_process_env",
         "--no-fail-fast",
+        "--",
+        "--ignored",
+        "--exact",
     ]
     subprocess.run(
-        generic_cmd, cwd=codex_lab / "codex-rs", env={**os.environ, **env}, check=True
+        generic_cmd,
+        cwd=codex_lab / "codex-rs",
+        env=rust_test_env(env),
+        check=True,
     )
+
+    legacy_env = {
+        key: value for key, value in env.items() if key.startswith("EVERY_CODE_")
+    }
     legacy_cmd = [
         "cargo",
         "test",
         "-p",
         "codex-tui",
-        "embedded_app_server_startup_keeps_legacy_every_code_contract",
+        "tests::embedded_app_server_startup_accepts_legacy_every_code_contract_from_process_env",
         "--no-fail-fast",
+        "--",
+        "--ignored",
+        "--exact",
     ]
     subprocess.run(
-        legacy_cmd, cwd=codex_lab / "codex-rs", env={**os.environ, **env}, check=True
+        legacy_cmd,
+        cwd=codex_lab / "codex-rs",
+        env=rust_test_env(legacy_env),
+        check=True,
     )
 
 
