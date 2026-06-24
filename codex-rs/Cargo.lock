@@ -2666,6 +2666,7 @@ dependencies = [
  "dirs",
  "dunce",
  "eventsource-stream",
+ "fs2",
  "futures",
  "http 1.4.0",
  "iana-time-zone",
