@@ -9,6 +9,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::process::Stdio;
@@ -22,6 +23,11 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_EXTERNAL_AGENT_STDOUT_BYTES: usize = 64 * 1024;
 const MAX_EXTERNAL_AGENT_STDERR_BYTES: usize = 8 * 1024;
+const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
+const CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_DIR";
+const CODEX_LAB_CARGO_TARGET_SCOPE_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_SCOPE";
+const CODEX_LAB_CARGO_TARGET_KEY_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_KEY";
+const EXTERNAL_AGENT_CARGO_TARGET_SCOPE_VALUE: &str = "agent";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExternalAgentLaunch {
@@ -155,7 +161,9 @@ async fn run_external_agent_inner(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    command.envs(&launch.backend.env);
+    command.envs(external_agent_process_env(launch));
+    command.env_remove(CARGO_TARGET_DIR_ENV_VAR);
+    command.env_remove(CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR);
 
     if launch.cancellation_token.is_cancelled() {
         return Err(anyhow::anyhow!("external agent cancelled before launch"));
@@ -223,6 +231,24 @@ async fn run_external_agent_inner(
             final_message: Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
         }),
     }
+}
+
+fn external_agent_process_env(launch: &ExternalAgentLaunch) -> HashMap<String, String> {
+    let mut env = launch.backend.env.clone();
+    env.remove(CARGO_TARGET_DIR_ENV_VAR);
+    env.remove(CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR);
+    // Always enforce per-agent target isolation for external agents. Backend config cannot
+    // override these two routing keys because cargo-build-env.sh gives target-dir overrides
+    // precedence over scope/key selection.
+    env.insert(
+        CODEX_LAB_CARGO_TARGET_SCOPE_ENV_VAR.to_string(),
+        EXTERNAL_AGENT_CARGO_TARGET_SCOPE_VALUE.to_string(),
+    );
+    env.insert(
+        CODEX_LAB_CARGO_TARGET_KEY_ENV_VAR.to_string(),
+        launch.thread_id.to_string(),
+    );
+    env
 }
 
 struct ExternalAgentChildGuard {
@@ -609,6 +635,86 @@ mod tests {
             response.final_message.as_deref(),
             Some("--write-mode|inspect this repo|configured")
         );
+    }
+
+    #[test]
+    fn external_agent_process_env_sets_artifact_target_scope() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                env: HashMap::from([
+                    ("EXTERNAL_AGENT_ENV".to_string(), "configured".to_string()),
+                    (
+                        CARGO_TARGET_DIR_ENV_VAR.to_string(),
+                        "/tmp/shared-target".to_string(),
+                    ),
+                    (
+                        CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR.to_string(),
+                        "/tmp/explicit-target".to_string(),
+                    ),
+                    (
+                        CODEX_LAB_CARGO_TARGET_SCOPE_ENV_VAR.to_string(),
+                        "shared".to_string(),
+                    ),
+                    (
+                        CODEX_LAB_CARGO_TARGET_KEY_ENV_VAR.to_string(),
+                        "configured-key".to_string(),
+                    ),
+                ]),
+                ..Default::default()
+            },
+            false,
+        );
+
+        let env = external_agent_process_env(&launch);
+
+        assert_eq!(
+            env.get("EXTERNAL_AGENT_ENV"),
+            Some(&"configured".to_string())
+        );
+        assert_eq!(
+            env.get(CODEX_LAB_CARGO_TARGET_SCOPE_ENV_VAR),
+            Some(&EXTERNAL_AGENT_CARGO_TARGET_SCOPE_VALUE.to_string())
+        );
+        assert_eq!(
+            env.get(CODEX_LAB_CARGO_TARGET_KEY_ENV_VAR),
+            Some(&launch.thread_id.to_string())
+        );
+        assert_eq!(env.get(CARGO_TARGET_DIR_ENV_VAR), None);
+        assert_eq!(env.get(CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn raw_cli_receives_artifact_target_scope_env() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                command: "/bin/sh".to_string(),
+                protocol: ExternalCommandProtocol::RawCli,
+                args: vec![
+                    "-c".to_string(),
+                    format!(
+                        "printf '%s|%s' \"${}\" \"${}\"",
+                        CODEX_LAB_CARGO_TARGET_SCOPE_ENV_VAR, CODEX_LAB_CARGO_TARGET_KEY_ENV_VAR,
+                    ),
+                ],
+                timeout_ms: 5_000,
+                ..Default::default()
+            },
+            false,
+        );
+        let expected_thread_id = launch.thread_id.to_string();
+
+        let response = run_external_agent_inner(&launch)
+            .await
+            .expect("raw cli helper should complete");
+        let expected = format!("{EXTERNAL_AGENT_CARGO_TARGET_SCOPE_VALUE}|{expected_thread_id}");
+
+        assert_eq!(response.status, ExternalAgentResponseStatus::Completed);
+        assert_eq!(response.final_message.as_deref(), Some(expected.as_str()));
     }
 
     #[cfg(unix)]
