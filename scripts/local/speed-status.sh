@@ -69,6 +69,38 @@ else
 fi
 
 section "Node"
+if [[ -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then
+	if artifact_env="$("$repo_root/scripts/local/artifact-env.sh" --no-mkdir 2>/dev/null)"; then
+		artifact_pnpm_store="$(
+			eval "$artifact_env"
+			printf '%s' "$pnpm_config_store_dir"
+		)"
+		artifact_npm_cache="$(
+			eval "$artifact_env"
+			printf '%s' "$NPM_CONFIG_CACHE"
+		)"
+		artifact_tmpdir="$(
+			eval "$artifact_env"
+			printf '%s' "$TMPDIR"
+		)"
+		artifact_sccache_dir="$(
+			eval "$artifact_env"
+			printf '%s' "$SCCACHE_DIR"
+		)"
+		printf 'artifact_pnpm_store=%s\n' "$artifact_pnpm_store"
+		printf 'artifact_pnpm_store_size=%s\n' "$(human_size "$artifact_pnpm_store")"
+		printf 'artifact_npm_cache=%s\n' "$artifact_npm_cache"
+		printf 'artifact_npm_cache_size=%s\n' "$(human_size "$artifact_npm_cache")"
+	else
+		printf 'artifact_node_cache=artifact root unavailable\n'
+		artifact_tmpdir=""
+		artifact_sccache_dir=""
+	fi
+else
+	printf 'artifact_node_cache=artifact root not configured\n'
+	artifact_tmpdir=""
+	artifact_sccache_dir=""
+fi
 if command -v pnpm >/dev/null 2>&1; then
 	pnpm_store="$(pnpm store path 2>/dev/null || true)"
 	if [[ -n "$pnpm_store" ]]; then
@@ -97,16 +129,28 @@ if command -v sccache >/dev/null 2>&1; then
 	printf 'binary=%s\n' "$(command -v sccache)"
 	printf 'rustc_wrapper=%s\n' "${RUSTC_WRAPPER:-not configured}"
 	printf 'cache_dir=%s\n' "${SCCACHE_DIR:-not configured}"
+	if [[ -n "$artifact_sccache_dir" ]]; then
+		printf 'artifact_cache_dir=%s\n' "$artifact_sccache_dir"
+		printf 'artifact_cache_size=%s\n' "$(human_size "$artifact_sccache_dir")"
+	fi
 	if [[ -n "${SCCACHE_DIR:-}" ]]; then
 		printf 'cache_size=%s\n' "$(human_size "$SCCACHE_DIR")"
 	fi
 else
 	printf 'binary=not found\n'
+	if [[ -n "$artifact_sccache_dir" ]]; then
+		printf 'artifact_cache_dir=%s\n' "$artifact_sccache_dir"
+		printf 'artifact_cache_size=%s\n' "$(human_size "$artifact_sccache_dir")"
+	fi
 fi
 
 section "Temp"
 printf 'repo_tmp=%s\n' "$repo_root/.tmp"
 printf 'repo_tmp_size=%s\n' "$(human_size "$repo_root/.tmp")"
+if [[ -n "$artifact_tmpdir" ]]; then
+	printf 'artifact_tmpdir=%s\n' "$artifact_tmpdir"
+	printf 'artifact_tmpdir_size=%s\n' "$(human_size "$artifact_tmpdir")"
+fi
 if [[ -n "${TMPDIR:-}" ]]; then
 	printf 'tmpdir=%s\n' "$TMPDIR"
 fi
