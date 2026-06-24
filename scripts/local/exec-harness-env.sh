@@ -40,12 +40,33 @@ else
 	target_dir="${HOME%/}/.codex-lab/working/_target-cache/$repo_name/exec-harness"
 fi
 
+if [[ -n "${CODEX_EXEC_HARNESS_OUTPUT_ROOT:-}" ]]; then
+	output_root="$CODEX_EXEC_HARNESS_OUTPUT_ROOT"
+elif [[ -n "$artifact_root" && -d "$artifact_root" && -w "$artifact_root" ]]; then
+	output_root="${artifact_root%/}/local/$repo_name/exec-harness/output"
+else
+	output_root="$repo_root/.tmp/codex-exec-harness"
+fi
+
 case "$target_dir" in
 /*) ;;
 *) target_dir="$repo_root/${target_dir#./}" ;;
 esac
+case "$output_root" in
+/*) ;;
+*) output_root="$repo_root/${output_root#./}" ;;
+esac
+
+report_json="${CODEX_EXEC_HARNESS_REPORT_JSON:-$output_root/report.json}"
+case "$report_json" in
+/*) ;;
+*) report_json="$repo_root/${report_json#./}" ;;
+esac
 
 if [[ "${CODEX_EXEC_HARNESS_NO_MKDIR:-}" != "1" ]]; then
 	mkdir -p "$target_dir"
+	mkdir -p "$output_root"
 fi
 printf 'export CARGO_TARGET_DIR=%q\n' "$target_dir"
+printf 'export CODEX_EXEC_HARNESS_OUTPUT_ROOT=%q\n' "$output_root"
+printf 'export CODEX_EXEC_HARNESS_REPORT_JSON=%q\n' "$report_json"

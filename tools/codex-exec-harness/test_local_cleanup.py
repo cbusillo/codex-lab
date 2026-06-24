@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -62,6 +63,75 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             self.assertFalse((workspace / ".tmp" / "codex-exec-harness-ci").exists())
             self.assertFalse((workspace / "exec-harness-target").exists())
             self.assertTrue((workspace / "local-cargo-target").exists())
+
+    def test_local_cleanup_space_skips_unbounded_exec_harness_output(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            with tempfile.TemporaryDirectory() as external_dir:
+                output_root = Path(external_dir) / "custom-output"
+                make_probe_dir(output_root)
+
+                completed = run_local_cleanup(
+                    workspace,
+                    "--apply",
+                    CODEX_EXEC_HARNESS_OUTPUT_ROOT=str(output_root),
+                )
+
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertIn("custom exec harness output root", completed.stdout)
+                self.assertTrue(output_root.exists())
+
+    def test_local_cleanup_space_rejects_repo_output_traversal(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            output_root = workspace / ".tmp" / "codex-exec-harness" / ".." / ".." / "codex-rs"
+
+            completed = run_local_cleanup(
+                workspace,
+                "--apply",
+                CODEX_EXEC_HARNESS_OUTPUT_ROOT=str(output_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue((workspace / "codex-rs").exists())
+
+    def test_local_cleanup_space_rejects_artifact_output_traversal(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            output_root = (
+                artifact_root
+                / "local"
+                / "codex-lab"
+                / "exec-harness"
+                / "output"
+                / ".."
+                / ".."
+                / "bazel"
+            )
+            make_probe_dir(artifact_root / "local" / "codex-lab" / "bazel")
+
+            completed = run_local_cleanup(
+                workspace,
+                "--apply",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+                CODEX_EXEC_HARNESS_OUTPUT_ROOT=str(output_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue((artifact_root / "local" / "codex-lab" / "bazel").exists())
+
+    def test_local_cleanup_space_reports_existing_unbounded_output_root(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            output_root = workspace / "custom-output"
+            make_probe_dir(output_root)
+
+            completed = run_local_cleanup(
+                workspace,
+                "--apply",
+                CODEX_EXEC_HARNESS_OUTPUT_ROOT=str(output_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("custom exec harness output root", completed.stdout)
+            self.assertTrue(output_root.exists())
 
     def test_cargo_build_env_prefers_explicit_target(self) -> None:
         with copied_cleanup_workspace() as workspace:
@@ -302,8 +372,16 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             )
 
             self.assertEqual(
-                f"export CARGO_TARGET_DIR={workspace / 'explicit-target'}\n",
-                env.stdout,
+                str(workspace / "explicit-target"),
+                exported_value(env.stdout, "CARGO_TARGET_DIR"),
+            )
+            self.assertEqual(
+                str(workspace / ".tmp" / "codex-exec-harness"),
+                exported_value(env.stdout, "CODEX_EXEC_HARNESS_OUTPUT_ROOT"),
+            )
+            self.assertEqual(
+                str(workspace / ".tmp" / "codex-exec-harness" / "report.json"),
+                exported_value(env.stdout, "CODEX_EXEC_HARNESS_REPORT_JSON"),
             )
             self.assertTrue((workspace / "explicit-target").exists())
 
@@ -319,11 +397,20 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             )
 
             self.assertEqual(
-                f"export CARGO_TARGET_DIR={workspace / 'existing-target'}\n",
-                env.stdout,
+                str(workspace / "existing-target"),
+                exported_value(env.stdout, "CARGO_TARGET_DIR"),
+            )
+            self.assertIn(
+                f"{artifact_root / 'local'}/",
+                exported_value(env.stdout, "CODEX_EXEC_HARNESS_OUTPUT_ROOT"),
+            )
+            self.assertTrue(
+                exported_value(env.stdout, "CODEX_EXEC_HARNESS_OUTPUT_ROOT").endswith(
+                    "/exec-harness/output"
+                )
             )
             self.assertTrue((workspace / "existing-target").exists())
-            self.assertFalse((artifact_root / "local").exists())
+            self.assertTrue((artifact_root / "local").exists())
 
     def test_exec_harness_env_uses_artifact_root_when_configured(self) -> None:
         with copied_cleanup_workspace() as workspace:
@@ -356,6 +443,21 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 f"export CARGO_TARGET_DIR={artifact_root / 'local' / 'codex-lab' / 'exec-harness' / 'cargo-target'}/",
                 env.stdout,
             )
+            self.assertEqual(
+                str(artifact_root / "local" / "codex-lab" / "exec-harness" / "output"),
+                exported_value(env.stdout, "CODEX_EXEC_HARNESS_OUTPUT_ROOT"),
+            )
+            self.assertEqual(
+                str(
+                    artifact_root
+                    / "local"
+                    / "codex-lab"
+                    / "exec-harness"
+                    / "output"
+                    / "report.json"
+                ),
+                exported_value(env.stdout, "CODEX_EXEC_HARNESS_REPORT_JSON"),
+            )
             self.assertNotIn(f"/local/{workspace.name}/", env.stdout)
 
     def test_exec_harness_env_without_artifact_root_uses_home_fallback(self) -> None:
@@ -367,12 +469,16 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             )
 
             self.assertTrue(
-                env.stdout.startswith(
-                    f"export CARGO_TARGET_DIR={workspace / 'home' / '.codex-lab' / 'working' / '_target-cache'}/"
+                exported_value(env.stdout, "CARGO_TARGET_DIR").startswith(
+                    str(workspace / "home" / ".codex-lab" / "working" / "_target-cache")
                 ),
                 env.stdout,
             )
-            self.assertIn("/exec-harness\n", env.stdout)
+            self.assertIn("/exec-harness", exported_value(env.stdout, "CARGO_TARGET_DIR"))
+            self.assertEqual(
+                str(workspace / ".tmp" / "codex-exec-harness"),
+                exported_value(env.stdout, "CODEX_EXEC_HARNESS_OUTPUT_ROOT"),
+            )
 
     def test_exec_harness_env_uses_unique_name_without_git_metadata(self) -> None:
         with copied_cleanup_workspace() as workspace_one:
@@ -424,13 +530,68 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             self.assertIn("Sccache\n", completed.stdout)
             self.assertIn("Temp\nrepo_tmp=", completed.stdout)
 
+    def test_setup_artifacts_dry_run_prints_user_bazelrc(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            completed = run_setup_artifacts(
+                workspace,
+                "--artifact-root",
+                str(workspace / "artifact-root"),
+            )
 
-def run_local_cleanup(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("Dry run", completed.stdout)
+            self.assertIn(
+                f"common --disk_cache={workspace / 'artifact-root' / 'local' / 'codex-lab' / 'bazel' / 'disk-cache'}",
+                completed.stdout,
+            )
+            self.assertFalse((workspace / "user.bazelrc").exists())
+
+    def test_setup_artifacts_apply_writes_user_bazelrc(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+            completed = run_setup_artifacts(
+                workspace,
+                "--apply",
+                "--artifact-root",
+                str(artifact_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue((workspace / "user.bazelrc").exists())
+            self.assertTrue((artifact_root / "local" / "codex-lab" / "bazel").exists())
+            self.assertIn(
+                f"common --output_base={artifact_root / 'local' / 'codex-lab' / 'bazel' / 'output-base'}",
+                (workspace / "user.bazelrc").read_text(),
+            )
+
+    def test_setup_artifacts_apply_requires_writable_artifact_root(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "missing-artifact-root"
+            completed = run_setup_artifacts(
+                workspace,
+                "--apply",
+                "--artifact-root",
+                str(artifact_root),
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("artifact root is not mounted or writable", completed.stderr)
+            self.assertFalse((workspace / "user.bazelrc").exists())
+
+
+def run_local_cleanup(
+    workspace: Path, *args: str, **env_overrides: str
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    env.pop("CODEX_EXEC_HARNESS_OUTPUT_ROOT", None)
+    env.pop("CODEX_EXEC_HARNESS_REPORT_JSON", None)
+    env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
     env["CODEX_EXEC_HARNESS_CARGO_TARGET_DIR"] = str(
         workspace / "exec-harness-target"
     )
     env["CODEX_LAB_CARGO_TARGET_DIR"] = str(workspace / "local-cargo-target")
+    env.update(env_overrides)
     return subprocess.run(
         [
             "just",
@@ -475,6 +636,8 @@ def run_exec_harness_env(
     env = os.environ.copy()
     env.pop("CARGO_TARGET_DIR", None)
     env.pop("CODEX_EXEC_HARNESS_CARGO_TARGET_DIR", None)
+    env.pop("CODEX_EXEC_HARNESS_OUTPUT_ROOT", None)
+    env.pop("CODEX_EXEC_HARNESS_REPORT_JSON", None)
     env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
     env.pop("CODEX_LAB_HOME", None)
     env.update(env_overrides)
@@ -488,6 +651,29 @@ def run_exec_harness_env(
     )
 
 
+def run_setup_artifacts(
+    workspace: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
+    return subprocess.run(
+        [str(workspace / "scripts" / "local" / "setup-artifacts.sh"), *args],
+        check=False,
+        env=env,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+
+def exported_value(stdout: str, key: str) -> str:
+    prefix = f"export {key}="
+    for line in stdout.splitlines():
+        if line.startswith(prefix):
+            return shlex.split(line)[1].split("=", 1)[1]
+    raise AssertionError(f"missing export for {key}: {stdout}")
+
+
 class copied_cleanup_workspace:
     def __enter__(self) -> Path:
         self._temp_dir = tempfile.TemporaryDirectory()
@@ -499,6 +685,7 @@ class copied_cleanup_workspace:
         copy_file("scripts/local/cargo-build-env.sh", workspace)
         copy_file("scripts/local/exec-harness-env.sh", workspace)
         copy_file("scripts/local/speed-status.sh", workspace)
+        copy_file("scripts/local/setup-artifacts.sh", workspace)
 
         make_probe_dir(workspace / "codex-rs" / "target")
         make_probe_dir(workspace / ".tmp" / "codex-exec-harness")

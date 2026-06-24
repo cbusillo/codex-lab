@@ -37,9 +37,11 @@ eval "$exec_harness_env"
 printf 'target_dir=%s\n' "$CARGO_TARGET_DIR"
 printf 'target_size=%s\n' "$(human_size "$CARGO_TARGET_DIR")"
 unset CARGO_TARGET_DIR
-exec_harness_output_root="${CODEX_EXEC_HARNESS_OUTPUT_ROOT:-$repo_root/.tmp/codex-exec-harness}"
-printf 'output_root=%s\n' "$exec_harness_output_root"
-printf 'output_size=%s\n' "$(human_size "$exec_harness_output_root")"
+printf 'output_root=%s\n' "$CODEX_EXEC_HARNESS_OUTPUT_ROOT"
+printf 'output_size=%s\n' "$(human_size "$CODEX_EXEC_HARNESS_OUTPUT_ROOT")"
+printf 'report_json=%s\n' "$CODEX_EXEC_HARNESS_REPORT_JSON"
+unset CODEX_EXEC_HARNESS_OUTPUT_ROOT
+unset CODEX_EXEC_HARNESS_REPORT_JSON
 
 section "Artifact Root"
 if [[ -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then

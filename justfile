@@ -6,9 +6,6 @@ set windows-shell := ["python", "-c", 'import os, runpy; runpy.run_path(os.envir
 
 rust_min_stack := "8388608" # 8 MiB
 python := if os_family() == "windows" { "python" } else { "python3" }
-exec_harness_output_root := env_var_or_default("CODEX_EXEC_HARNESS_OUTPUT_ROOT", justfile_directory() / ".tmp/codex-exec-harness")
-exec_harness_report_json := env_var_or_default("CODEX_EXEC_HARNESS_REPORT_JSON", exec_harness_output_root / "report.json")
-
 # Display help
 help:
     just -l
@@ -53,9 +50,10 @@ app-server-test-client *args:
 # Build the local Codex CLI and run every exec harness scenario.
 [no-cd]
 exec-harness-test:
-    eval "$({{ justfile_directory() }}/scripts/local/exec-harness-env.sh)"
-    cargo build --manifest-path {{ justfile_directory() }}/codex-rs/Cargo.toml -p codex-cli --bin codex
-    codex_bin="${CARGO_TARGET_DIR:-{{ justfile_directory() }}/codex-rs/target}/debug/codex"; {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin "$codex_bin" --output-root {{ exec_harness_output_root }} --report-json {{ exec_harness_report_json }}
+    eval "$({{ justfile_directory() }}/scripts/local/exec-harness-env.sh)" && \
+      cargo build --manifest-path {{ justfile_directory() }}/codex-rs/Cargo.toml -p codex-cli --bin codex && \
+      codex_bin="${CARGO_TARGET_DIR:-{{ justfile_directory() }}/codex-rs/target}/debug/codex" && \
+      {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin "$codex_bin" --output-root "$CODEX_EXEC_HARNESS_OUTPUT_ROOT" --report-json "$CODEX_EXEC_HARNESS_REPORT_JSON"
 
 [no-cd]
 local-cleanup-space *args:
@@ -64,6 +62,11 @@ local-cleanup-space *args:
 [no-cd]
 local-cargo-env:
     {{ justfile_directory() }}/scripts/local/cargo-build-env.sh
+
+[no-cd]
+[unix]
+local-artifact-setup *args:
+    {{ justfile_directory() }}/scripts/local/setup-artifacts.sh {args}
 
 [no-cd]
 local-speed-status:
