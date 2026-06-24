@@ -90,6 +90,59 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
     }
 }
 
+fn thread_spawn_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {
+    match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) => Some(*parent_thread_id),
+        _ => None,
+    }
+}
+
+fn child_session_provenance(
+    parent_thread_session_provenance: Option<SessionProvenance>,
+    manager_session_provenance: Option<SessionProvenance>,
+) -> Option<SessionProvenance> {
+    parent_thread_session_provenance.or(manager_session_provenance)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_session_provenance(request_id: &str) -> SessionProvenance {
+        SessionProvenance {
+            request_id: Some(request_id.to_string()),
+            repository: Some("cbusillo/codex-lab".to_string()),
+            issue_number: Some(126),
+            issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
+            source: Some("launchplane".to_string()),
+            origin: Some("audit".to_string()),
+        }
+    }
+
+    #[test]
+    fn child_session_provenance_prefers_parent_thread() {
+        let parent_provenance = test_session_provenance("parent-req");
+        let manager_provenance = test_session_provenance("manager-req");
+
+        assert_eq!(
+            child_session_provenance(
+                Some(parent_provenance.clone()),
+                Some(manager_provenance.clone()),
+            ),
+            Some(parent_provenance)
+        );
+        assert_eq!(
+            child_session_provenance(
+                /*parent_thread_session_provenance*/ None,
+                Some(manager_provenance.clone()),
+            ),
+            Some(manager_provenance)
+        );
+    }
+}
+
 fn is_multi_agent_v2_usage_hint_message(item: &ResponseItem, usage_hint_texts: &[String]) -> bool {
     let ResponseItem::Message { role, content, .. } = item else {
         return false;
@@ -358,11 +411,22 @@ impl AgentControl {
                 .await?
             }
             (Some(session_source), None, inheritance) => {
+                let session_provenance = if let Some(parent_thread_id) =
+                    thread_spawn_parent_thread_id(&session_source)
+                    && let Ok(parent_thread) = state.get_thread(parent_thread_id).await
+                {
+                    child_session_provenance(
+                        parent_thread.config_snapshot().await.session_provenance,
+                        state.session_provenance(),
+                    )
+                } else {
+                    child_session_provenance(None, state.session_provenance())
+                };
                 Box::pin(state.spawn_new_thread_with_source(
                     config.clone(),
                     self.clone(),
                     session_source,
-                    /*session_provenance*/ None,
+                    session_provenance,
                     options.parent_thread_id,
                     /*forked_from_thread_id*/ None,
                     /*thread_source*/ Some(ThreadSource::Subagent),

@@ -380,6 +380,24 @@ impl ThreadManager {
         environment_manager: Arc<EnvironmentManager>,
         state_db: Option<StateDbHandle>,
     ) -> Self {
+        Self::with_models_provider_home_state_and_session_provenance_for_tests(
+            auth,
+            provider,
+            codex_home,
+            environment_manager,
+            state_db,
+            /*session_provenance*/ None,
+        )
+    }
+
+    pub(crate) fn with_models_provider_home_state_and_session_provenance_for_tests(
+        auth: CodexAuth,
+        provider: ModelProviderInfo,
+        codex_home: PathBuf,
+        environment_manager: Arc<EnvironmentManager>,
+        state_db: Option<StateDbHandle>,
+        session_provenance: Option<SessionProvenance>,
+    ) -> Self {
         set_thread_manager_test_mode_for_tests(/*enabled*/ true);
         let auth_manager = AuthManager::from_auth_for_testing(auth);
         let installation_id = uuid::Uuid::new_v4().to_string();
@@ -424,7 +442,7 @@ impl ThreadManager {
                 attestation_provider: None,
                 auth_manager,
                 session_source: SessionSource::Exec,
-                session_provenance: None,
+                session_provenance,
                 installation_id,
                 analytics_events_client: None,
                 state_db,
@@ -999,6 +1017,10 @@ impl ThreadManagerState {
         self.state_db.clone()
     }
 
+    pub(crate) fn session_provenance(&self) -> Option<SessionProvenance> {
+        self.session_provenance.clone()
+    }
+
     pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {
         self.threads
             .read()
@@ -1243,7 +1265,17 @@ impl ThreadManagerState {
         let environments = environments.unwrap_or_else(|| {
             default_thread_environment_selections(self.environment_manager.as_ref(), &config.cwd)
         });
-        let session_provenance = initial_history.get_initial_session_provenance();
+        let parent_thread_session_provenance = if let Some(parent_thread_id) = parent_thread_id
+            && let Ok(parent_thread) = self.get_thread(parent_thread_id).await
+        {
+            parent_thread.config_snapshot().await.session_provenance
+        } else {
+            None
+        };
+        let session_provenance = session_provenance_for_initial_history(
+            &initial_history,
+            parent_thread_session_provenance.or_else(|| self.session_provenance.clone()),
+        );
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
@@ -1682,6 +1714,15 @@ fn append_interrupted_boundary(
             InitialHistory::Forked(resumed.history)
         }
     }
+}
+
+fn session_provenance_for_initial_history(
+    initial_history: &InitialHistory,
+    fallback: Option<SessionProvenance>,
+) -> Option<SessionProvenance> {
+    initial_history
+        .get_initial_session_provenance()
+        .or(fallback)
 }
 
 #[cfg(test)]

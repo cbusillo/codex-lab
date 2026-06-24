@@ -21,6 +21,7 @@ use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
@@ -93,6 +94,17 @@ fn spawn_agent_call(call_id: &str) -> ResponseItem {
     }
 }
 
+fn test_session_provenance() -> SessionProvenance {
+    SessionProvenance {
+        request_id: Some("req-123".to_string()),
+        repository: Some("cbusillo/codex-lab".to_string()),
+        issue_number: Some(126),
+        issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
+        source: Some("launchplane".to_string()),
+        origin: Some("audit".to_string()),
+    }
+}
+
 struct AgentControlHarness {
     _home: TempDir,
     config: Config,
@@ -103,15 +115,21 @@ struct AgentControlHarness {
 
 impl AgentControlHarness {
     async fn new() -> Self {
+        Self::new_with_session_provenance(/*session_provenance*/ None).await
+    }
+
+    async fn new_with_session_provenance(session_provenance: Option<SessionProvenance>) -> Self {
         let (home, config) = test_config().await;
         let state_db = init_state_db(&config).await;
-        let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
-            CodexAuth::from_api_key("dummy"),
-            config.model_provider.clone(),
-            config.codex_home.to_path_buf(),
-            std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-            state_db.clone(),
-        );
+        let manager =
+            ThreadManager::with_models_provider_home_state_and_session_provenance_for_tests(
+                CodexAuth::from_api_key("dummy"),
+                config.model_provider.clone(),
+                config.codex_home.to_path_buf(),
+                std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+                state_db.clone(),
+                session_provenance,
+            );
         let control = manager.agent_control();
         Self {
             _home: home,
@@ -727,6 +745,41 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
         .into_iter()
         .find(|entry| *entry == expected);
     assert_eq!(captured, Some(expected));
+}
+
+#[tokio::test]
+async fn spawn_agent_preserves_session_provenance() {
+    let session_provenance = test_session_provenance();
+    let harness =
+        AgentControlHarness::new_with_session_provenance(Some(session_provenance.clone())).await;
+    let (parent_thread_id, _) = harness.start_thread().await;
+    let thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("spawned"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(AgentPath::try_from("/root/worker").expect("agent path")),
+                agent_nickname: None,
+                agent_role: None,
+            })),
+        )
+        .await
+        .expect("spawn_agent should succeed");
+
+    let child_thread = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("thread should be registered");
+    let snapshot = child_thread.config_snapshot().await;
+
+    assert_eq!(
+        snapshot.session_provenance.as_ref(),
+        Some(&session_provenance)
+    );
 }
 
 #[tokio::test]

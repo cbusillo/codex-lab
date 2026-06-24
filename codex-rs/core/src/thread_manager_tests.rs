@@ -17,6 +17,9 @@ use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ResumedHistory;
+use codex_protocol::protocol::SessionMeta;
+use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -51,6 +54,53 @@ fn assistant_msg(text: &str) -> ResponseItem {
         }],
         phase: None,
     }
+}
+
+fn test_session_provenance(request_id: &str) -> SessionProvenance {
+    SessionProvenance {
+        request_id: Some(request_id.to_string()),
+        repository: Some("cbusillo/codex-lab".to_string()),
+        issue_number: Some(126),
+        issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
+        source: Some("launchplane".to_string()),
+        origin: Some("audit".to_string()),
+    }
+}
+
+fn session_meta_with_provenance(session_provenance: SessionProvenance) -> RolloutItem {
+    RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            id: ThreadId::new(),
+            session_provenance: Some(session_provenance),
+            ..SessionMeta::default()
+        },
+        git: None,
+    })
+}
+
+#[test]
+fn initial_history_session_provenance_falls_back_when_history_lacks_meta() {
+    let fallback = test_session_provenance("fallback");
+
+    let got = session_provenance_for_initial_history(
+        &InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("recent task"))]),
+        Some(fallback.clone()),
+    );
+
+    assert_eq!(got, Some(fallback));
+}
+
+#[test]
+fn initial_history_session_provenance_prefers_embedded_meta() {
+    let fallback = test_session_provenance("fallback");
+    let embedded = test_session_provenance("embedded");
+
+    let got = session_provenance_for_initial_history(
+        &InitialHistory::Forked(vec![session_meta_with_provenance(embedded.clone())]),
+        Some(fallback),
+    );
+
+    assert_eq!(got, Some(embedded));
 }
 
 fn contextual_user_interrupted_marker() -> ResponseItem {
