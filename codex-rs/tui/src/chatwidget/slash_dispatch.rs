@@ -7,20 +7,15 @@
 
 use super::goal_validation::GoalObjectiveValidationSource;
 use super::*;
-use crate::account_label::account_display_label;
-use crate::account_label::account_mode_priority;
-use crate::app_event::AuthAccountSelection;
 use crate::app_event::AuthProfileSelection;
 use crate::app_event::ThreadGoalSetMode;
+use crate::bottom_pane::LoginAccountsView;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
-use codex_app_server_protocol::AuthMode;
-use codex_config::types::AuthCredentialsStoreMode;
-use codex_login::StoredAccount;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -45,7 +40,7 @@ const LOGIN_USAGE: &str = "Usage: /login [default|<profile>|add <profile>]";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 
 impl ChatWidget {
-    fn open_login_profile_picker(&mut self) {
+    fn show_login_accounts_view(&mut self) {
         let profiles = match codex_login::list_auth_profiles(&self.config.codex_home) {
             Ok(profiles) => profiles,
             Err(err) => {
@@ -53,98 +48,21 @@ impl ChatWidget {
                 return;
             }
         };
-
-        let current_auth_home = self.config.auth_home.to_path_buf();
-        let default_auth_home = self.config.codex_home.to_path_buf();
-        let default_description = default_login_profile_description(
-            &default_auth_home,
-            self.config.cli_auth_credentials_store_mode,
-        );
         let existing_profile_names = profiles
             .iter()
             .map(|profile| profile.name.as_str())
             .chain(std::iter::once("default"))
             .collect::<Vec<_>>();
-        let new_profile_name = next_login_profile_name(&existing_profile_names);
-        let account_items = match login_account_items(
+        let add_profile_name = next_login_profile_name(&existing_profile_names);
+        let default_auth_home_is_current = self.config.auth_home == self.config.codex_home;
+        let view = LoginAccountsView::new(
             &self.config.codex_home,
-            current_auth_home == default_auth_home,
-        ) {
-            Ok(items) => items,
-            Err(err) => {
-                self.add_error_message(format!("Failed to list stored accounts: {err}"));
-                Vec::new()
-            }
-        };
-
-        let mut items = Vec::with_capacity(profiles.len() + account_items.len() + 2);
-        items.push(SelectionItem {
-            name: "default".to_string(),
-            description: Some(default_description),
-            is_current: current_auth_home == default_auth_home,
-            actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::SwitchAuthProfile {
-                    selection: AuthProfileSelection::Default,
-                });
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        });
-
-        for profile in profiles {
-            let name = profile.name.clone();
-            let description = login_profile_description(&profile);
-            let is_current = current_auth_home == profile.home;
-            items.push(SelectionItem {
-                name: name.clone(),
-                description: Some(description),
-                is_current,
-                actions: vec![Box::new(move |tx| {
-                    tx.send(AppEvent::SwitchAuthProfile {
-                        selection: AuthProfileSelection::Named {
-                            profile_name: name.clone(),
-                            login_after_switch: false,
-                        },
-                    });
-                })],
-                dismiss_on_select: true,
-                ..Default::default()
-            });
-        }
-
-        items.extend(account_items);
-
-        items.push(SelectionItem {
-            name: "Add login...".to_string(),
-            description: Some("Open ChatGPT sign-in for a new login".to_string()),
-            actions: vec![Box::new({
-                let new_profile_name = new_profile_name.clone();
-                move |tx| {
-                    let profile_name = new_profile_name.clone();
-                    tx.send(AppEvent::SwitchAuthProfile {
-                        selection: AuthProfileSelection::Named {
-                            profile_name,
-                            login_after_switch: true,
-                        },
-                    });
-                }
-            })],
-            dismiss_on_select: true,
-            selected_description: Some(format!(
-                "Starts browser login for new auth profile `{new_profile_name}`."
-            )),
-            ..Default::default()
-        });
-
-        self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Choose Login".to_string()),
-            subtitle: Some("Start a fresh session with the selected account.".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            is_searchable: true,
-            search_placeholder: Some("Search logins".to_string()),
-            ..Default::default()
-        });
+            self.app_event_tx.clone(),
+            add_profile_name,
+            default_auth_home_is_current,
+            self.config.cli_auth_credentials_store_mode,
+        );
+        self.bottom_pane.show_view(Box::new(view));
         self.request_redraw();
     }
 
@@ -631,7 +549,7 @@ impl ChatWidget {
                 self.add_plugins_output();
             }
             SlashCommand::Login => {
-                self.open_login_profile_picker();
+                self.show_login_accounts_view();
             }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
@@ -1251,131 +1169,6 @@ impl ChatWidget {
     }
 }
 
-fn login_profile_description(profile: &codex_login::AuthProfileEntry) -> String {
-    let mut details = Vec::new();
-    if let Some(email) = profile.metadata.email.as_deref() {
-        details.push(email.to_string());
-    }
-    if let Some(last_login_at) = profile.metadata.last_login_at.as_ref() {
-        details.push(format!("last login {last_login_at}"));
-    }
-    if details.is_empty() {
-        "Use this saved auth profile".to_string()
-    } else {
-        details.join(" - ")
-    }
-}
-
-fn login_account_items(
-    codex_home: &std::path::Path,
-    default_auth_home_is_current: bool,
-) -> std::io::Result<Vec<SelectionItem>> {
-    let active_account_id = codex_login::get_active_account_id(codex_home)?;
-    let mut accounts = codex_login::list_accounts(codex_home)?;
-    accounts.sort_by(|left, right| {
-        let left_key = login_account_sort_key(left);
-        let right_key = login_account_sort_key(right);
-        left_key
-            .cmp(&right_key)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-
-    Ok(accounts
-        .into_iter()
-        .map(|account| {
-            login_account_item(
-                account,
-                default_auth_home_is_current
-                    .then_some(active_account_id.as_deref())
-                    .flatten(),
-            )
-        })
-        .collect())
-}
-
-fn login_account_item(account: StoredAccount, active_account_id: Option<&str>) -> SelectionItem {
-    let is_current = active_account_id == Some(account.id.as_str());
-    let is_supported = login_account_activation_supported(account.mode);
-    let account_id = account.id.clone();
-    let (name, mut description) = login_account_display(account);
-    if is_current {
-        description = active_login_account_description(&description);
-    } else if is_supported {
-        description = format!("{description} - press Enter to use");
-    } else {
-        description = format!("{description} - activation unavailable");
-    }
-    let search_value = (!is_current && is_supported)
-        .then(|| format!("{name} {description} stored account account-store"));
-    let mut item = SelectionItem {
-        name,
-        description: Some(description),
-        search_value,
-        ..Default::default()
-    };
-    if is_current || !is_supported {
-        item.is_disabled = true;
-    } else {
-        let label = item.name.clone();
-        item.actions.push(Box::new(move |tx| {
-            tx.send(AppEvent::SwitchAuthAccount {
-                selection: AuthAccountSelection {
-                    account_id: account_id.clone(),
-                    label: label.clone(),
-                },
-            });
-        }));
-        item.dismiss_on_select = true;
-    }
-    item
-}
-
-fn login_account_activation_supported(mode: AuthMode) -> bool {
-    matches!(
-        mode,
-        AuthMode::ApiKey | AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens
-    )
-}
-
-fn active_login_account_description(description: &str) -> String {
-    if let Some(rest) = description.strip_prefix("Stored account") {
-        format!("Active stored account{rest}")
-    } else {
-        format!("Active {description}")
-    }
-}
-
-fn login_account_sort_key(account: &StoredAccount) -> (u8, String) {
-    (
-        account_mode_priority(account.mode),
-        account_display_label(account).to_ascii_lowercase(),
-    )
-}
-
-fn login_account_display(account: StoredAccount) -> (String, String) {
-    let name = account_display_label(&account);
-    match account.mode {
-        AuthMode::ApiKey => (name, "Stored account - API key".to_string()),
-        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
-            let tokens = account.tokens.as_ref();
-            let mut details = vec!["Stored account".to_string(), "ChatGPT".to_string()];
-            if let Some(account_id) = tokens.and_then(|tokens| {
-                tokens
-                    .account_id
-                    .as_deref()
-                    .or(tokens.id_token.chatgpt_account_id.as_deref())
-            }) {
-                details.push(account_id.to_string());
-            }
-            (name, details.join(" - "))
-        }
-        AuthMode::AgentIdentity => (name, "Stored account - agent identity".to_string()),
-        AuthMode::PersonalAccessToken => {
-            (name, "Stored account - personal access token".to_string())
-        }
-    }
-}
-
 fn next_login_profile_name(existing: &[&str]) -> String {
     const PREFIX: &str = "account";
     if !existing.contains(&PREFIX) {
@@ -1389,34 +1182,4 @@ fn next_login_profile_name(existing: &[&str]) -> String {
         }
     }
     unreachable!("unbounded suffix search should always return")
-}
-
-fn default_login_profile_description(
-    codex_home: &std::path::Path,
-    auth_credentials_store_mode: AuthCredentialsStoreMode,
-) -> String {
-    match codex_login::load_auth_dot_json(codex_home, auth_credentials_store_mode) {
-        Ok(Some(auth)) => auth_dot_json_login_description(&auth),
-        Ok(None) => "Use the default Codex Lab login".to_string(),
-        Err(err) => format!("Default login status unavailable: {err}"),
-    }
-}
-
-fn auth_dot_json_login_description(auth: &codex_login::AuthDotJson) -> String {
-    if auth.openai_api_key.is_some() {
-        return "API key login".to_string();
-    }
-
-    let mut details = Vec::new();
-    if let Some(email) = auth.account_email() {
-        details.push(email);
-    }
-    if let Some(account_id) = auth.account_id() {
-        details.push(account_id);
-    }
-    if !details.is_empty() {
-        return details.join(" - ");
-    }
-
-    "Use the default Codex Lab login".to_string()
 }
