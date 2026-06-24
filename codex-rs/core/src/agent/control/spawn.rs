@@ -29,6 +29,7 @@ fn external_command_backend_from_spec(
         args_write: defaults.args_write.unwrap_or_default(),
         env: defaults.env.unwrap_or_default(),
         timeout_ms: 30_000,
+        launch_family: Some(spec.family.to_string()),
     }
 }
 
