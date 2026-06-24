@@ -64,6 +64,60 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             self.assertFalse((workspace / "exec-harness-target").exists())
             self.assertTrue((workspace / "local-cargo-target").exists())
 
+    def test_local_cleanup_space_deletes_artifact_temp(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_tmp = artifact_root / "local" / "codex-lab" / "tmp"
+            make_probe_dir(artifact_tmp)
+
+            completed = run_local_cleanup(
+                workspace,
+                "--apply",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("artifact-volume temporary output", completed.stdout)
+            self.assertFalse(artifact_tmp.exists())
+
+    def test_local_cleanup_space_can_preserve_artifact_temp(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_tmp = artifact_root / "local" / "codex-lab" / "tmp"
+            make_probe_dir(artifact_tmp)
+
+            completed = run_local_cleanup(
+                workspace,
+                "--apply",
+                "--keep-artifact-temp",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue(artifact_tmp.exists())
+
+    def test_local_cleanup_space_rejects_artifact_temp_symlink_escape(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            escaped_tmp = workspace / "escaped-tmp"
+            make_probe_dir(escaped_tmp)
+            make_probe_dir(artifact_root)
+            (artifact_root / "local").symlink_to(
+                escaped_tmp,
+                target_is_directory=True,
+            )
+            make_probe_dir(escaped_tmp / "codex-lab" / "tmp")
+
+            completed = run_local_cleanup(
+                workspace,
+                "--apply",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("artifact temp outside expected artifact root", completed.stdout)
+            self.assertTrue(escaped_tmp.exists())
+
     def test_local_cleanup_space_skips_unbounded_exec_harness_output(self) -> None:
         with copied_cleanup_workspace() as workspace:
             with tempfile.TemporaryDirectory() as external_dir:
@@ -530,6 +584,52 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             self.assertIn("Sccache\n", completed.stdout)
             self.assertIn("Temp\nrepo_tmp=", completed.stdout)
 
+    def test_artifact_env_exports_package_temp_and_sccache_paths(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            completed = run_artifact_env(
+                workspace,
+                "--artifact-root",
+                str(artifact_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual(
+                str(artifact_root / "local" / "codex-lab" / "pnpm-store"),
+                exported_value(completed.stdout, "pnpm_config_store_dir"),
+            )
+            self.assertEqual(
+                str(artifact_root / "local" / "codex-lab" / "npm-cache"),
+                exported_value(completed.stdout, "NPM_CONFIG_CACHE"),
+            )
+            self.assertEqual(
+                str(artifact_root / "local" / "codex-lab" / "tmp"),
+                exported_value(completed.stdout, "TMPDIR"),
+            )
+            self.assertEqual(
+                str(artifact_root / "local" / "codex-lab" / "sccache"),
+                exported_value(completed.stdout, "SCCACHE_DIR"),
+            )
+            self.assertTrue((artifact_root / "local" / "codex-lab" / "pnpm-store").exists())
+            self.assertTrue((artifact_root / "local" / "codex-lab" / "tmp").exists())
+
+    def test_artifact_env_no_mkdir_does_not_create_paths(self) -> None:
+        with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "artifact-root"
+            artifact_root.mkdir()
+
+            completed = run_artifact_env(
+                workspace,
+                "--no-mkdir",
+                "--artifact-root",
+                str(artifact_root),
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertFalse((artifact_root / "local").exists())
+
     def test_setup_artifacts_dry_run_prints_user_bazelrc(self) -> None:
         with copied_cleanup_workspace() as workspace:
             completed = run_setup_artifacts(
@@ -544,6 +644,7 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 f"common --disk_cache={workspace / 'artifact-root' / 'local' / 'codex-lab' / 'bazel' / 'disk-cache'}",
                 completed.stdout,
             )
+            self.assertIn("local package-manager caches", completed.stdout)
             self.assertFalse((workspace / "user.bazelrc").exists())
 
     def test_setup_artifacts_apply_writes_user_bazelrc(self) -> None:
@@ -666,6 +767,21 @@ def run_setup_artifacts(
     )
 
 
+def run_artifact_env(
+    workspace: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
+    return subprocess.run(
+        [str(workspace / "scripts" / "local" / "artifact-env.sh"), *args],
+        check=False,
+        env=env,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+
 def exported_value(stdout: str, key: str) -> str:
     prefix = f"export {key}="
     for line in stdout.splitlines():
@@ -682,6 +798,7 @@ class copied_cleanup_workspace:
         copy_file("justfile", workspace)
         copy_file("scripts/just-shell.py", workspace)
         copy_file("scripts/local/cleanup-space.sh", workspace)
+        copy_file("scripts/local/artifact-env.sh", workspace)
         copy_file("scripts/local/cargo-build-env.sh", workspace)
         copy_file("scripts/local/exec-harness-env.sh", workspace)
         copy_file("scripts/local/speed-status.sh", workspace)

@@ -69,6 +69,11 @@ local-artifact-setup *args:
     {{ justfile_directory() }}/scripts/local/setup-artifacts.sh {args}
 
 [no-cd]
+[unix]
+local-artifact-env *args:
+    {{ justfile_directory() }}/scripts/local/artifact-env.sh {args}
+
+[no-cd]
 local-speed-status:
     {{ justfile_directory() }}/scripts/local/speed-status.sh
 

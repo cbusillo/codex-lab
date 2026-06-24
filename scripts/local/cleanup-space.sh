@@ -6,10 +6,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 apply=0
 keep_exec_harness_cache=0
 keep_local_cargo_cache=0
+keep_artifact_temp=0
 
 usage() {
 	cat <<USAGE
-Usage: scripts/local/cleanup-space.sh [--apply] [--keep-exec-harness-cache] [--keep-local-cargo-cache]
+Usage: scripts/local/cleanup-space.sh [--apply] [--keep-exec-harness-cache] [--keep-local-cargo-cache] [--keep-artifact-temp]
 
 Remove rebuildable local build artifacts. The default mode is a dry run.
 
@@ -17,6 +18,7 @@ Options:
   --apply                   Delete paths instead of only listing them.
   --keep-exec-harness-cache Preserve the shared exec harness target cache.
   --keep-local-cargo-cache  Preserve the artifact-volume local Cargo target cache.
+  --keep-artifact-temp      Preserve artifact-volume temporary output.
   -h, --help                Show this help.
 USAGE
 }
@@ -31,6 +33,9 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--keep-local-cargo-cache)
 		keep_local_cargo_cache=1
+		;;
+	--keep-artifact-temp)
+		keep_artifact_temp=1
 		;;
 	-h | --help)
 		usage
@@ -120,6 +125,27 @@ is_bounded_exec_harness_output_root() {
 	return 1
 }
 
+is_bounded_artifact_temp_root() {
+	local path="$1"
+	local physical
+	if ! physical="$(physical_path "$path")"; then
+		return 1
+	fi
+	if [[ -z "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then
+		return 1
+	fi
+	local artifact_root
+	if ! artifact_root="$(physical_path "$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT")"; then
+		return 1
+	fi
+	case "$physical" in
+	"$artifact_root"/local/codex-lab/tmp | "$artifact_root"/local/codex-lab/tmp/*)
+		return 0
+		;;
+	esac
+	return 1
+}
+
 mode="dry run"
 if [[ "$apply" -eq 1 ]]; then
 	mode="apply"
@@ -157,6 +183,20 @@ if [[ "$keep_local_cargo_cache" -eq 0 ]]; then
 	eval "$local_cargo_env"
 	remove_path "$CARGO_TARGET_DIR" "artifact-volume local Cargo target cache"
 	unset CARGO_TARGET_DIR
+fi
+
+if [[ "$keep_artifact_temp" -eq 0 && -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then
+	if artifact_env="$("$repo_root/scripts/local/artifact-env.sh" --no-mkdir 2>/dev/null)"; then
+		artifact_tmpdir="$(
+			eval "$artifact_env"
+			printf '%s' "$TMPDIR"
+		)"
+		if is_bounded_artifact_temp_root "$artifact_tmpdir"; then
+			remove_path "$artifact_tmpdir" "artifact-volume temporary output"
+		elif [[ -e "$artifact_tmpdir" || -L "$artifact_tmpdir" ]]; then
+			printf '%8s  %s  (%s)\n' "skipped" "$artifact_tmpdir" "artifact temp outside expected artifact root"
+		fi
+	fi
 fi
 
 echo

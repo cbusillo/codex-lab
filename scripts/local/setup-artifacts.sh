@@ -10,7 +10,8 @@ usage() {
 Usage: scripts/local/setup-artifacts.sh [--apply] [--artifact-root DIR]
 
 Generate local artifact-routing config for this checkout. The default mode is a
-dry run and prints the user.bazelrc that would be written.
+dry run and prints the user.bazelrc that would be written plus the opt-in local
+environment command for package-manager, temp, and optional sccache routing.
 
 Options:
   --apply              Write user.bazelrc.
@@ -79,7 +80,11 @@ if [[ "$apply" -eq 1 ]]; then
 	mkdir -p "$bazel_root"
 	render_user_bazelrc >"$user_bazelrc"
 	printf 'Wrote %s\n' "$user_bazelrc"
+	"$repo_root/scripts/local/artifact-env.sh" --artifact-root "$artifact_root" >/dev/null
+	printf 'Prepared package-manager and temp directories under %s/local/codex-lab.\n' "$artifact_root"
 else
 	printf 'Dry run. Re-run with --apply to write %s.\n\n' "$user_bazelrc"
 	render_user_bazelrc
+	printf '\nTo route local package-manager caches, temp output, and optional sccache for a shell, run:\n'
+	printf '  eval "$(%q --artifact-root %q)"\n' "$repo_root/scripts/local/artifact-env.sh" "$artifact_root"
 fi
