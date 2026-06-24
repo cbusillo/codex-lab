@@ -146,11 +146,22 @@ async fn run_external_agent_inner(
         ExternalCommandProtocol::RawCli => None,
     };
 
+    let launch_cwd = external_agent_launch_cwd(launch);
+    if launch.backend.launch_family.as_deref() == Some("antigravity") {
+        if !launch.cwd.is_dir() {
+            return Err(anyhow::anyhow!(
+                "antigravity workspace directory does not exist: {}",
+                launch.cwd.display()
+            ));
+        }
+        tokio::fs::create_dir_all(&launch_cwd).await?;
+    }
+
     let invocation = build_external_agent_invocation(launch, &message)?;
     let mut command = Command::new(&invocation.command);
     command
         .args(&invocation.args)
-        .current_dir(&launch.cwd)
+        .current_dir(&launch_cwd)
         .stdin(if request_json.is_some() {
             Stdio::piped()
         } else {
@@ -345,12 +356,32 @@ fn build_external_agent_invocation(
             .cloned(),
     );
     if launch.backend.protocol == ExternalCommandProtocol::RawCli {
+        if launch.backend.launch_family.as_deref() == Some("antigravity") {
+            args.push("--add-dir".to_string());
+            args.push(launch.cwd.display().to_string());
+            args.push("-p".to_string());
+        }
         args.push(message.to_string());
     }
     Ok(ExternalAgentInvocation {
         command: PathBuf::from(command),
         args,
     })
+}
+
+fn external_agent_launch_cwd(launch: &ExternalAgentLaunch) -> PathBuf {
+    if launch.backend.launch_family.as_deref() == Some("antigravity") {
+        return antigravity_launch_dir();
+    }
+    launch.cwd.clone()
+}
+
+fn antigravity_launch_dir() -> PathBuf {
+    crate::config::find_codex_home()
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("code"))
+        .join("agent-cache")
+        .join("antigravity")
 }
 
 fn mode_args(backend: &ExternalCommandAgentBackendConfig, is_read_only: bool) -> &[String] {
@@ -548,6 +579,86 @@ mod tests {
                 "--readonly".to_string(),
                 "inspect this repo".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn antigravity_invocation_adds_repo_dir_and_prompt_flag() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                command: "agy".to_string(),
+                protocol: ExternalCommandProtocol::RawCli,
+                args_write: vec!["--dangerously-skip-permissions".to_string()],
+                launch_family: Some("antigravity".to_string()),
+                timeout_ms: 5_000,
+                ..Default::default()
+            },
+            false,
+        );
+
+        let invocation = build_external_agent_invocation(&launch, "inspect this repo")
+            .expect("antigravity invocation should build");
+
+        assert_eq!(invocation.command, PathBuf::from("agy"));
+        assert_eq!(
+            invocation.args,
+            vec![
+                "--dangerously-skip-permissions".to_string(),
+                "--add-dir".to_string(),
+                temp_dir.path().display().to_string(),
+                "-p".to_string(),
+                "inspect this repo".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_launch_cwd_uses_private_cache_dir() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                launch_family: Some("antigravity".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+
+        let launch_cwd = external_agent_launch_cwd(&launch);
+
+        assert!(launch_cwd.ends_with("agent-cache/antigravity"));
+        assert_ne!(launch_cwd, launch.cwd);
+    }
+
+    #[tokio::test]
+    async fn antigravity_launch_requires_existing_workspace_dir() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let missing_workspace = temp_dir.path().join("missing-workspace");
+        let mut launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                command: "/bin/echo".to_string(),
+                protocol: ExternalCommandProtocol::RawCli,
+                launch_family: Some("antigravity".to_string()),
+                timeout_ms: 5_000,
+                ..Default::default()
+            },
+            false,
+        );
+        launch.cwd = missing_workspace.clone();
+
+        let err = run_external_agent_inner(&launch)
+            .await
+            .expect_err("missing antigravity workspace should fail before spawn");
+
+        assert!(
+            err.to_string().contains(&format!(
+                "antigravity workspace directory does not exist: {}",
+                missing_workspace.display()
+            )),
+            "unexpected error: {err}"
         );
     }
 

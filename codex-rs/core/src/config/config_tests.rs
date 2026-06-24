@@ -7096,6 +7096,7 @@ async fn agent_role_external_command_backend_loads_from_config_toml() -> std::io
                 args_write: vec!["--write".to_string()],
                 env: HashMap::from([("EXTERNAL_AGENT_ENV".to_string(), "enabled".to_string(),)]),
                 timeout_ms: 1234,
+                launch_family: None,
             },
         ))
     );
@@ -7288,6 +7289,7 @@ config_file = "./agents/external.toml"
                 args_write: vec!["--write".to_string()],
                 env: HashMap::from([("EXTERNAL_AGENT_ENV".to_string(), "enabled".to_string(),)]),
                 timeout_ms: 4321,
+                launch_family: None,
             },
         ))
     );

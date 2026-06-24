@@ -2050,6 +2050,7 @@ pub struct ExternalCommandAgentBackendConfig {
     pub args_write: Vec<String>,
     pub env: std::collections::HashMap<String, String>,
     pub timeout_ms: u64,
+    pub launch_family: Option<String>,
 }
 
 impl Default for ExternalCommandAgentBackendConfig {
@@ -2062,6 +2063,7 @@ impl Default for ExternalCommandAgentBackendConfig {
             args_write: Vec::new(),
             env: std::collections::HashMap::new(),
             timeout_ms: 30_000,
+            launch_family: None,
         }
     }
 }
@@ -2078,6 +2080,7 @@ impl AgentRoleBackendConfig {
                     args_write: command.args_write.unwrap_or_default(),
                     env: command.env.unwrap_or_default(),
                     timeout_ms: command.timeout_ms.unwrap_or(30_000),
+                    launch_family: None,
                 })
             }
         }
