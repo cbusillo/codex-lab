@@ -176,7 +176,7 @@ async fn service_tier_commands_lowercase_catalog_names() {
 }
 
 #[tokio::test]
-async fn login_slash_command_opens_profile_picker() {
+async fn login_slash_command_opens_accounts_view() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     write_chatgpt_auth(
         &chat.config.codex_home,
@@ -194,14 +194,14 @@ async fn login_slash_command_opens_profile_picker() {
     chat.dispatch_command(SlashCommand::Login);
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
-    assert!(popup.contains("Choose Login"));
-    assert!(popup.contains("default"));
-    assert!(popup.contains("default@example.com"));
+    assert!(popup.contains("Manage Accounts"));
+    assert!(popup.contains("Connected Accounts"));
+    assert!(popup.contains("ChatGPT (default@example.com)"));
     assert!(popup.contains("account-default"));
-    assert!(popup.contains("work"));
-    assert!(popup.contains("me@example.com"));
-    assert!(popup.contains("Add login..."));
-    assert!(popup.contains("Open ChatGPT sign-in for a new login"));
+    assert!(popup.contains("(current)"));
+    assert!(popup.contains("Add account..."));
+    assert!(!popup.contains("Choose Login"));
+    assert!(!popup.contains("work"));
 }
 
 #[tokio::test]
@@ -228,13 +228,14 @@ async fn login_slash_command_lists_selectable_stored_accounts() {
     chat.dispatch_command(SlashCommand::Login);
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Manage Accounts"));
     assert!(popup.contains("ChatGPT (stored@example.com)"));
-    assert!(popup.contains("Active stored account - ChatGPT - account-stored"));
+    assert!(popup.contains("(current)"));
+    assert!(popup.contains("ChatGPT - account-stored"));
     assert!(popup.contains("Automation key"));
-    assert!(popup.contains("Stored account - API key - press Enter to use"));
+    assert!(popup.contains("API key"));
     assert!(!popup.contains("sk-test-secret-value"));
-    assert!(popup.contains("Add login..."));
-    assert_chatwidget_snapshot!("login_picker_stored_accounts_selectable", popup);
+    assert!(popup.contains("Add account..."));
 }
 
 #[tokio::test]
@@ -242,7 +243,6 @@ async fn login_slash_command_add_selection_starts_profile_login() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
 
     chat.dispatch_command(SlashCommand::Login);
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_matches!(
@@ -268,7 +268,6 @@ async fn login_slash_command_stored_account_selection_switches_account() {
     .expect("insert api key account");
 
     chat.dispatch_command(SlashCommand::Login);
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_matches!(
@@ -298,9 +297,9 @@ async fn login_slash_command_stored_account_selectable_from_auth_profile() {
     chat.dispatch_command(SlashCommand::Login);
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("Automation key"));
-    assert!(popup.contains("Stored account - API key - press Enter to use"));
+    assert!(popup.contains("API key"));
+    assert!(!popup.contains("(current)"));
 
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_matches!(
@@ -312,7 +311,7 @@ async fn login_slash_command_stored_account_selectable_from_auth_profile() {
 }
 
 #[tokio::test]
-async fn login_slash_command_search_excludes_active_stored_account() {
+async fn login_slash_command_active_stored_account_is_not_selectable() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let account = codex_login::upsert_api_key_account(
         &chat.config.codex_home,
@@ -327,19 +326,14 @@ async fn login_slash_command_search_excludes_active_stored_account() {
     chat.dispatch_command(SlashCommand::Login);
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("Automation key"));
-    assert!(popup.contains("Active stored account - API key"));
+    assert!(popup.contains("(current)"));
 
-    for c in "automation".chars() {
-        chat.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-    }
-
-    let popup = render_bottom_popup(&chat, /*width*/ 100);
-    assert!(!popup.contains("Automation key"));
-    assert!(!popup.contains("Active stored account - API key"));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(render_bottom_popup(&chat, /*width*/ 100).contains("Manage Accounts"));
 }
 
 #[tokio::test]
-async fn login_slash_command_search_excludes_unsupported_stored_account() {
+async fn login_slash_command_unsupported_stored_account_is_not_selectable() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let path = chat.config.codex_home.join("auth_accounts.json");
     let account = StoredAccount {
@@ -368,13 +362,8 @@ async fn login_slash_command_search_excludes_unsupported_stored_account() {
     assert!(popup.contains("Agent identity"));
     assert!(popup.contains("activation unavailable"));
 
-    for c in "agent".chars() {
-        chat.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-    }
-
-    let popup = render_bottom_popup(&chat, /*width*/ 100);
-    assert!(!popup.contains("Agent identity"));
-    assert!(!popup.contains("activation unavailable"));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(render_bottom_popup(&chat, /*width*/ 100).contains("Manage Accounts"));
 }
 
 #[tokio::test]
@@ -389,7 +378,6 @@ async fn login_slash_command_add_selection_moves_after_account_rows() {
     .expect("insert api key account");
 
     chat.dispatch_command(SlashCommand::Login);
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -411,7 +399,6 @@ async fn login_slash_command_add_selection_avoids_existing_profile_name() {
         .expect("record profile login");
 
     chat.dispatch_command(SlashCommand::Login);
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
