@@ -37,6 +37,7 @@ fn save_and_load_run_round_trips_compact_index() -> anyhow::Result<()> {
     let loaded = store.load_run("run_1")?;
     let index_text = std::fs::read_to_string(store.runs_path())?;
     let sidecar_text = std::fs::read_to_string(store.output_path("run_1")?)?;
+    let metadata_text = std::fs::read_to_string(store.run_metadata_path("run_1")?)?;
 
     assert_eq!(loaded, run);
     assert_eq!(path, store.runs_path());
@@ -45,6 +46,8 @@ fn save_and_load_run_round_trips_compact_index() -> anyhow::Result<()> {
     assert!(index_text.contains("finding_digests"));
     assert!(!index_text.contains("Body Title"));
     assert!(sidecar_text.contains("Body Title"));
+    assert!(metadata_text.contains("finding_count"));
+    assert!(!metadata_text.contains("Body Title"));
     Ok(())
 }
 
@@ -359,7 +362,7 @@ fn canonical_store_ignores_legacy_unscoped_runs() -> anyhow::Result<()> {
 }
 
 #[test]
-fn corrupt_sidecar_does_not_block_store_listing() -> anyhow::Result<()> {
+fn corrupt_output_sidecar_does_not_block_store_listing() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
     let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
@@ -373,7 +376,58 @@ fn corrupt_sidecar_does_not_block_store_listing() -> anyhow::Result<()> {
 }
 
 #[test]
-fn corrupt_index_is_a_read_error() -> anyhow::Result<()> {
+fn corrupt_metadata_sidecar_does_not_block_store_listing() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+    let bad_path = store.run_metadata_path("bad_run")?;
+    std::fs::create_dir_all(bad_path.parent().expect("metadata path parent"))?;
+    std::fs::write(&bad_path, "not json\n")?;
+    corrupt_runs_index(&store)?;
+
+    assert_eq!(run_ids(store.list_runs()?), vec!["run_1".to_string()]);
+    Ok(())
+}
+
+#[test]
+fn corrupt_index_recovers_reads_from_run_metadata() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let run = sample_run("run_1", &sample_output(vec![sample_finding("Recovered")]));
+    store.save_run(&run)?;
+    corrupt_runs_index(&store)?;
+
+    assert_eq!(store.load_run("run_1")?, run);
+    assert_eq!(run_ids(store.list_runs()?), vec!["run_1".to_string()]);
+    Ok(())
+}
+
+#[test]
+fn corrupt_index_recovers_detail_from_metadata_and_output() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let output = sample_output(vec![sample_finding("Recovered detail")]);
+    let run = sample_run("run_1", &output);
+    store.save_run(&run)?;
+    store.save_output("run_1", &output)?;
+    corrupt_runs_index(&store)?;
+
+    let detail = store.finding_detail("run_1", "f1", DETAIL_MAX_BYTES)?;
+    let run_detail = store.detail("run_1", None, DETAIL_MAX_BYTES)?;
+
+    assert_eq!(detail.kind, AutoReviewDetailKind::Finding);
+    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
+    assert!(detail.content.contains("title: Recovered detail"));
+    assert_eq!(run_detail.kind, AutoReviewDetailKind::Run);
+    assert!(run_detail.content.contains("title: Recovered detail"));
+    Ok(())
+}
+
+#[test]
+fn corrupt_index_still_blocks_writes() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
     let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
@@ -381,8 +435,8 @@ fn corrupt_index_is_a_read_error() -> anyhow::Result<()> {
     corrupt_runs_index(&store)?;
 
     let error = store
-        .list_runs()
-        .expect_err("corrupt canonical index should be explicit");
+        .save_run(&sample_run("run_2", &sample_output(Vec::new())))
+        .expect_err("corrupt canonical index should block writes");
 
     assert!(
         error
@@ -394,7 +448,201 @@ fn corrupt_index_is_a_read_error() -> anyhow::Result<()> {
 }
 
 #[test]
-fn non_canonical_index_shape_is_a_read_error() -> anyhow::Result<()> {
+fn corrupt_index_still_blocks_supersede_writes() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+    corrupt_runs_index(&store)?;
+
+    let error = store
+        .mark_superseded("run_1", "run_2")
+        .expect_err("corrupt canonical index should block supersede writes");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to parse auto review runs index"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn corrupt_index_still_blocks_supersede_writes_when_metadata_is_missing() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+    std::fs::remove_file(store.run_metadata_path("run_1")?)?;
+    corrupt_runs_index(&store)?;
+
+    let error = store
+        .mark_superseded("run_1", "run_2")
+        .expect_err("corrupt canonical index should block supersede writes");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to parse auto review runs index"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn supersede_writes_recover_when_index_is_missing() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+    std::fs::remove_file(store.runs_path())?;
+
+    assert!(store.mark_superseded("run_1", "run_2")?);
+
+    let run = store.load_run("run_1")?;
+    assert_eq!(run.status, AutoReviewRunStatus::Superseded);
+    assert_eq!(run.superseded_by.as_deref(), Some("run_2"));
+    Ok(())
+}
+
+#[test]
+fn corrupt_index_still_blocks_orphan_reconciliation_writes() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("run_1", &sample_output(Vec::new()))
+    })?;
+    corrupt_runs_index(&store)?;
+
+    let error = store
+        .reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 3)
+        .expect_err("corrupt canonical index should block reconciliation writes");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to parse auto review runs index"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn save_run_preserves_metadata_runs_when_index_is_missing() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+    std::fs::remove_file(store.runs_path())?;
+
+    store.save_run(&sample_run("run_2", &sample_output(Vec::new())))?;
+
+    assert_eq!(
+        run_ids(store.list_runs()?),
+        vec!["run_1".to_string(), "run_2".to_string()]
+    );
+    Ok(())
+}
+
+#[test]
+fn orphan_reconciliation_recovers_when_index_is_missing() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("run_1", &sample_output(Vec::new()))
+    })?;
+    std::fs::remove_file(store.runs_path())?;
+
+    assert_eq!(
+        store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 3)?,
+        1
+    );
+
+    let run = store.load_run("run_1")?;
+    assert_eq!(run.status, AutoReviewRunStatus::Lost);
+    Ok(())
+}
+
+#[test]
+fn save_run_backfills_metadata_for_existing_index_runs() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let run = sample_run("run_1", &sample_output(Vec::new()));
+    let mut index = AutoReviewRunsIndex::default();
+    index.upsert(run.clone());
+    let json = serde_json::to_string_pretty(&index)?;
+    std::fs::create_dir_all(store.runs_path().parent().expect("runs parent"))?;
+    std::fs::write(store.runs_path(), format!("{json}\n"))?;
+
+    store.save_run(&sample_run("run_2", &sample_output(Vec::new())))?;
+    corrupt_runs_index(&store)?;
+
+    assert_eq!(
+        run_ids(store.list_runs()?),
+        vec!["run_1".to_string(), "run_2".to_string()]
+    );
+    assert_eq!(store.load_run("run_1")?, run);
+    Ok(())
+}
+
+#[test]
+fn save_run_prunes_metadata_for_runs_evicted_from_index() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    for index in 0..=DEFAULT_MAX_RUNS {
+        let output = sample_output(Vec::new());
+        store.save_run(&AutoReviewRun {
+            run_id: format!("run_{index:03}"),
+            started_at_unix_secs: index as i64,
+            completed_at_unix_secs: Some(index as i64),
+            ..sample_run("unused", &output)
+        })?;
+    }
+
+    let evicted_metadata_path = store.run_metadata_path("run_000")?;
+    corrupt_runs_index(&store)?;
+
+    assert!(!evicted_metadata_path.exists());
+    assert!(!run_ids(store.list_runs()?).contains(&"run_000".to_string()));
+    Ok(())
+}
+
+#[test]
+fn metadata_write_failure_does_not_update_index_or_prune_existing_metadata() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+    let before = std::fs::read_to_string(store.runs_path())?;
+    let bad_metadata_path = store.run_metadata_path("run_2")?;
+    std::fs::create_dir_all(&bad_metadata_path)?;
+
+    let error = store
+        .save_run(&sample_run("run_2", &sample_output(Vec::new())))
+        .expect_err("metadata write failure should block index update");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to write auto review run metadata"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(std::fs::read_to_string(store.runs_path())?, before);
+    assert!(store.run_metadata_path("run_1")?.exists());
+    Ok(())
+}
+
+#[test]
+fn non_canonical_index_shape_recovers_as_empty() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
     let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
@@ -410,9 +658,11 @@ fn non_canonical_index_shape_is_a_read_error() -> anyhow::Result<()> {
     std::fs::create_dir_all(store.runs_path().parent().expect("runs parent"))?;
     std::fs::write(store.runs_path(), serde_json::to_vec_pretty(&index)?)?;
 
+    assert!(store.list_runs()?.is_empty());
+
     let error = store
-        .list_runs()
-        .expect_err("non-canonical compact index should be explicit");
+        .save_run(&sample_run("run_2", &sample_output(Vec::new())))
+        .expect_err("non-canonical compact index should block writes");
 
     assert!(
         error

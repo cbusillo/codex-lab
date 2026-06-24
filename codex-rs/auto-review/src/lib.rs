@@ -32,6 +32,7 @@ const STORE_DIR: &str = "auto-review";
 const STATE_DIR: &str = "state";
 const REVIEW_DIR: &str = "review";
 const RUNS_FILENAME: &str = "runs.json";
+const RUN_METADATA_DIR: &str = "run-metadata";
 const OUTPUTS_DIR: &str = "outputs";
 const OMITTED_TEMPLATE_PREFIX: &str = "... ";
 const OMITTED_TEMPLATE_SUFFIX: &str = " more finding(s) omitted";
@@ -214,23 +215,36 @@ impl AutoReviewStore {
 
     pub fn save_run(&self, run: &AutoReviewRun) -> Result<PathBuf> {
         validate_run(run)?;
-        let mut index = self.load_index_for_read()?;
+        let mut index = self.load_index_for_write()?;
         index.upsert(run.clone());
-        self.save_index_with_preferred_run(index, run.run_id.as_str())
+        let index = self.merged_compacted_index(index, run.run_id.as_str())?;
+        self.save_run_metadata_index(&index)?;
+        let path = self.save_index(index.clone())?;
+        if let Err(err) = self.prune_run_metadata_except(&index) {
+            tracing::warn!(
+                error = %err,
+                "failed to prune stale auto review run metadata"
+            );
+        }
+        Ok(path)
     }
 
-    fn save_index_with_preferred_run(
+    fn merged_compacted_index(
         &self,
-        index: AutoReviewRunsIndex,
+        mut index: AutoReviewRunsIndex,
         preferred_run_id: &str,
-    ) -> Result<PathBuf> {
-        let mut index = index;
+    ) -> Result<AutoReviewRunsIndex> {
         let runs_path = self.runs_path();
         if runs_path.exists() {
             let latest = load_runs_index_file(&runs_path)?;
             index.merge_latest_from_disk(latest, preferred_run_id);
         }
         index.compact_to_preserving(DEFAULT_MAX_RUNS, preferred_run_id);
+        Ok(index)
+    }
+
+    fn save_index(&self, index: AutoReviewRunsIndex) -> Result<PathBuf> {
+        let runs_path = self.runs_path();
         let json = serde_json::to_string_pretty(&index)?;
         write_atomically(&runs_path, &format!("{json}\n")).with_context(|| {
             format!(
@@ -244,7 +258,7 @@ impl AutoReviewStore {
     pub fn mark_superseded(&self, run_id: &str, superseded_by: &str) -> Result<bool> {
         validate_safe_id(run_id).context("auto review run_id")?;
         validate_safe_id(superseded_by).context("auto review superseded_by")?;
-        let mut index = self.load_index_for_read()?;
+        let mut index = self.load_index_for_write()?;
         let Some(run) = index.runs.iter_mut().find(|run| run.run_id == run_id) else {
             return Ok(false);
         };
@@ -281,7 +295,7 @@ impl AutoReviewStore {
         }
         validate_safe_id(superseded_by).context("auto review superseded_by")?;
         let mut changed = 0;
-        for run in self.load_index_for_read()?.runs {
+        for run in self.load_index_for_write()?.runs {
             if run.run_id == superseded_by
                 || run.target.worktree_diff_fingerprint.as_deref() != Some(fingerprint)
                 || !duplicate_target_matches_branch_head(&run, active_branch, active_head)
@@ -308,7 +322,7 @@ impl AutoReviewStore {
             .into_iter()
             .map(|run_id| run_id.as_ref().to_string())
             .collect::<BTreeSet<_>>();
-        let mut index = self.load_index_for_read()?;
+        let mut index = self.load_index_for_write()?;
         let mut changed = Vec::new();
         for run in &mut index.runs {
             if !run.status.is_in_flight() {
@@ -439,12 +453,157 @@ impl AutoReviewStore {
         self.root.join(RUNS_FILENAME)
     }
 
-    fn load_index_for_read(&self) -> Result<AutoReviewRunsIndex> {
+    fn load_index_strict(&self) -> Result<AutoReviewRunsIndex> {
         let path = self.runs_path();
         if !path.exists() {
             return Ok(AutoReviewRunsIndex::default());
         }
         load_runs_index_file(&path)
+    }
+
+    fn load_index_for_write(&self) -> Result<AutoReviewRunsIndex> {
+        if self.runs_path().exists() {
+            self.load_index_strict()
+        } else {
+            self.load_metadata_index_for_read()
+        }
+    }
+
+    fn load_index_for_read(&self) -> Result<AutoReviewRunsIndex> {
+        let path = self.runs_path();
+        if !path.exists() {
+            return self.load_metadata_index_for_read();
+        }
+        match load_runs_index_file(&path) {
+            Ok(index) => Ok(index),
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "auto review runs index is unreadable; recovering from run metadata"
+                );
+                self.load_metadata_index_for_read()
+            }
+        }
+    }
+
+    fn load_metadata_index_for_read(&self) -> Result<AutoReviewRunsIndex> {
+        let mut index = AutoReviewRunsIndex::default();
+        for run in self.load_metadata_runs() {
+            index.upsert(run);
+        }
+        index.compact_to_preserving(DEFAULT_MAX_RUNS, "");
+        index.validate()?;
+        Ok(index)
+    }
+
+    fn run_metadata_path(&self, run_id: &str) -> Result<PathBuf> {
+        validate_safe_id(run_id).context("auto review run_id")?;
+        Ok(self
+            .root
+            .join(RUN_METADATA_DIR)
+            .join(format!("{run_id}.json")))
+    }
+
+    fn save_run_metadata(&self, run: &AutoReviewRun) -> Result<()> {
+        let path = self.run_metadata_path(&run.run_id)?;
+        let json = serde_json::to_string_pretty(run)?;
+        write_atomically(&path, &format!("{json}\n")).with_context(|| {
+            format!(
+                "failed to write auto review run metadata {}",
+                path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    fn save_run_metadata_index(&self, index: &AutoReviewRunsIndex) -> Result<()> {
+        for run in &index.runs {
+            self.save_run_metadata(run)?;
+        }
+        Ok(())
+    }
+
+    fn prune_run_metadata_except(&self, index: &AutoReviewRunsIndex) -> Result<()> {
+        let metadata_dir = self.root.join(RUN_METADATA_DIR);
+        if !metadata_dir.exists() {
+            return Ok(());
+        }
+        let retained_run_ids = index
+            .runs
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let entries = std::fs::read_dir(&metadata_dir).with_context(|| {
+            format!(
+                "failed to read auto review run metadata directory {}",
+                metadata_dir.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to read auto review run metadata directory {}",
+                    metadata_dir.display()
+                )
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if validate_safe_id(run_id).is_ok() && !retained_run_ids.contains(run_id) {
+                std::fs::remove_file(&path).with_context(|| {
+                    format!(
+                        "failed to remove auto review run metadata {}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn load_metadata_run(&self, run_id: &str) -> Result<AutoReviewRun> {
+        let path = self.run_metadata_path(run_id)?;
+        let json = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read auto review run metadata {run_id}"))?;
+        let run: AutoReviewRun = serde_json::from_str(&json)
+            .with_context(|| format!("failed to parse auto review run metadata {run_id}"))?;
+        validate_run(&run)?;
+        Ok(run)
+    }
+
+    fn load_metadata_runs(&self) -> Vec<AutoReviewRun> {
+        let metadata_dir = self.root.join(RUN_METADATA_DIR);
+        if !metadata_dir.exists() {
+            return Vec::new();
+        }
+
+        let mut run_ids = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&metadata_dir) else {
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if validate_safe_id(run_id).is_ok() {
+                run_ids.push(run_id.to_string());
+            }
+        }
+
+        run_ids.sort();
+        run_ids
+            .into_iter()
+            .filter_map(|run_id| self.load_metadata_run(&run_id).ok())
+            .collect()
     }
 
     pub fn save_output(&self, run_id: &str, output: &ReviewOutputEvent) -> Result<PathBuf> {
@@ -1235,7 +1394,10 @@ fn has_scoped_store_files(codex_home: &Path) -> bool {
 
     for entry in entries.flatten() {
         let store_root = entry.path().join(STORE_DIR);
-        if store_root.join(RUNS_FILENAME).exists() || has_json_file(&store_root.join(OUTPUTS_DIR)) {
+        if store_root.join(RUNS_FILENAME).exists()
+            || has_json_file(&store_root.join(RUN_METADATA_DIR))
+            || has_json_file(&store_root.join(OUTPUTS_DIR))
+        {
             return true;
         }
     }
