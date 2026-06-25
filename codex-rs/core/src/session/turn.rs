@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::SkillInjections;
+use crate::account_switching::AccountSwitchOutcome;
+use crate::account_switching::RateLimitSwitchState;
 use crate::build_skill_injections;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
@@ -79,6 +81,7 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::error::UsageLimitReachedError;
 use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::build_hook_prompt_message;
@@ -198,6 +201,7 @@ pub(crate) async fn run_turn(
     // However, we defer that drain until after sampling in two cases:
     // 1. At the start of a turn, so the fresh turn input in `input` gets sampled first.
     // 2. After auto-compact, when model/tool continuation needs to resume before any steer.
+    let mut rate_limit_switch_state = RateLimitSwitchState::default();
 
     loop {
         // Note that pending_input would be something like a message the user
@@ -239,6 +243,7 @@ pub(crate) async fn run_turn(
             turn_metadata_header.as_deref(),
             sampling_request_input.clone(),
             auto_review_awareness_input_item.clone(),
+            &mut rate_limit_switch_state,
             cancellation_token.child_token(),
         )
         .await
@@ -1009,6 +1014,7 @@ async fn run_sampling_request(
     turn_metadata_header: Option<&str>,
     input: Vec<ResponseItem>,
     request_only_input_item: Option<ResponseItem>,
+    rate_limit_switch_state: &mut RateLimitSwitchState,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     let router = built_tools(sess.as_ref(), turn_context.as_ref(), &cancellation_token).await?;
@@ -1080,6 +1086,17 @@ async fn run_sampling_request(
                 if let Some(rate_limits) = rate_limits {
                     sess.update_rate_limits(&turn_context, *rate_limits).await;
                 }
+                if maybe_switch_account_after_usage_limit(
+                    &sess,
+                    client_session,
+                    rate_limit_switch_state,
+                    &e,
+                )
+                .await
+                {
+                    turn_context.turn_timing_state.record_sampling_retry();
+                    continue;
+                }
                 return Err(CodexErr::UsageLimitReached(e));
             }
             Err(err) => err,
@@ -1100,6 +1117,63 @@ async fn run_sampling_request(
         )
         .await?;
         turn_context.turn_timing_state.record_sampling_retry();
+    }
+}
+
+async fn maybe_switch_account_after_usage_limit(
+    sess: &Arc<Session>,
+    client_session: &mut ModelClientSession,
+    rate_limit_switch_state: &mut RateLimitSwitchState,
+    limit_err: &UsageLimitReachedError,
+) -> bool {
+    if !sess.auto_switch_accounts_on_rate_limit().await {
+        return false;
+    }
+    if codex_login::auth::read_codex_api_key_from_env().is_some() {
+        return false;
+    }
+    let Some((codex_home, current_account_id, _)) = sess.account_usage_context().await else {
+        return false;
+    };
+
+    let now = chrono::Utc::now();
+    let auth_home = sess.auth_home().await;
+    let allow_api_key_fallback = sess.api_key_fallback_on_all_accounts_limited().await;
+    let current_mode = sess
+        .current_auth_mode()
+        .unwrap_or(codex_app_server_protocol::AuthMode::ApiKey);
+    let auth_credentials_store_mode = sess.cli_auth_credentials_store_mode().await;
+    match crate::account_switching::switch_active_account_on_rate_limit(
+        codex_home.as_path(),
+        auth_home.as_path(),
+        rate_limit_switch_state,
+        allow_api_key_fallback,
+        now,
+        current_account_id.as_str(),
+        current_mode,
+        limit_err.resets_at,
+        auth_credentials_store_mode,
+    ) {
+        Ok(AccountSwitchOutcome::Switched(account)) => {
+            info!(
+                from_account_id = %current_account_id,
+                to_account_id = %account.id,
+                reason = "usage_limit_reached",
+                "usage limit hit; auto-switching active account"
+            );
+            sess.services.auth_manager.reload().await;
+            *client_session = sess.services.model_client.new_session();
+            true
+        }
+        Ok(AccountSwitchOutcome::NoCandidate) => false,
+        Err(err) => {
+            warn!(
+                from_account_id = %current_account_id,
+                error = %err,
+                "failed to auto-switch account after usage limit"
+            );
+            false
+        }
     }
 }
 

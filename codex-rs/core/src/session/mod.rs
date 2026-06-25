@@ -46,8 +46,10 @@ use chrono::Utc;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::TurnCodexErrorFact;
+use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::McpServerElicitationRequest;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
@@ -1059,6 +1061,15 @@ impl Session {
         state.session_configuration.codex_home().clone()
     }
 
+    pub(crate) async fn auth_home(&self) -> AbsolutePathBuf {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .auth_home
+            .clone()
+    }
+
     pub(crate) fn subscribe_out_of_band_elicitation_pause_state(&self) -> watch::Receiver<bool> {
         self.out_of_band_elicitation_paused.subscribe()
     }
@@ -1486,6 +1497,37 @@ impl Session {
             .session_configuration
             .original_config_do_not_use
             .clone()
+    }
+
+    pub(crate) async fn auto_switch_accounts_on_rate_limit(&self) -> bool {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .auto_switch_accounts_on_rate_limit
+    }
+
+    pub(crate) async fn api_key_fallback_on_all_accounts_limited(&self) -> bool {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .api_key_fallback_on_all_accounts_limited
+    }
+
+    pub(crate) async fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .cli_auth_credentials_store_mode
+    }
+
+    pub(crate) fn current_auth_mode(&self) -> Option<AuthMode> {
+        self.services
+            .auth_manager
+            .auth_cached()
+            .map(|auth| auth.auth_mode())
     }
 
     pub(crate) async fn provider(&self) -> ModelProviderInfo {
