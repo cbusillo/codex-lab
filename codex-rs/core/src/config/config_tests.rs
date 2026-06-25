@@ -4850,6 +4850,46 @@ async fn config_defaults_to_file_cli_auth_store_mode() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn config_resolves_account_auto_switch_defaults() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml::default();
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(config.auto_switch_accounts_on_rate_limit);
+    assert!(!config.api_key_fallback_on_all_accounts_limited);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_resolves_account_auto_switch_overrides() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        auto_switch_accounts_on_rate_limit: Some(false),
+        api_key_fallback_on_all_accounts_limited: Some(true),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(!config.auto_switch_accounts_on_rate_limit);
+    assert!(config.api_key_fallback_on_all_accounts_limited);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn config_resolves_explicit_keyring_auth_store_mode() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {

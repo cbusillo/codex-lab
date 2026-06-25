@@ -357,6 +357,14 @@ pub struct ConfigToml {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
 
+    /// When true, Codex may switch between saved ChatGPT accounts when the
+    /// active account is rate or usage limited. Defaults to `true`.
+    pub auto_switch_accounts_on_rate_limit: Option<bool>,
+
+    /// When true, Codex may fall back to a saved API key account after all
+    /// saved ChatGPT accounts are limited. Defaults to `false`.
+    pub api_key_fallback_on_all_accounts_limited: Option<bool>,
+
     /// Optional product SKU forwarded on host-owned Codex Apps MCP requests.
     pub apps_mcp_product_sku: Option<String>,
 

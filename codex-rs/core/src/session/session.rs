@@ -527,6 +527,34 @@ impl Session {
             .unwrap_or(u64::MAX),
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => 0,
         };
+        if config.auto_switch_accounts_on_rate_limit
+            && codex_login::auth::read_codex_api_key_from_env().is_none()
+            && matches!(
+                initial_history,
+                InitialHistory::New | InitialHistory::Cleared
+            )
+            && matches!(session_configuration.session_source, SessionSource::Cli)
+        {
+            match crate::account_switching::switch_active_account_to_preferred_for_new_session(
+                &config.codex_home,
+                &config.auth_home,
+                Utc::now(),
+                config.cli_auth_credentials_store_mode,
+            ) {
+                Ok(Some(account)) => {
+                    info!(
+                        to_account_id = %account.id,
+                        reason = "new_session_preferred_reset",
+                        "auto-switching active account for new session"
+                    );
+                    auth_manager.reload().await;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!("failed to auto-switch account for new session: {err}");
+                }
+            }
+        }
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
         // - initialize thread persistence with new or resumed session info
