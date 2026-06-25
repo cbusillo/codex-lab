@@ -65,6 +65,8 @@ struct RateLimitInfo {
     last_refresh_attempt_at: Option<DateTime<Utc>>,
     #[serde(default)]
     last_usage_limit_hit_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    last_usage_limit_reached_type: Option<RateLimitReachedType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,31 +199,56 @@ pub fn record_rate_limit_snapshot(
     snapshot: RateLimitSnapshot,
     observed_at: DateTime<Utc>,
 ) -> io::Result<()> {
-    let plan = snapshot.plan_type.clone();
+    record_rate_limit_snapshot_with_plan(
+        codex_home,
+        account_id,
+        snapshot.plan_type.clone(),
+        snapshot,
+        observed_at,
+    )
+}
+
+pub fn record_rate_limit_snapshot_with_plan(
+    codex_home: &Path,
+    account_id: &str,
+    plan: Option<PlanType>,
+    snapshot: RateLimitSnapshot,
+    observed_at: DateTime<Utc>,
+) -> io::Result<()> {
     let primary_next_reset_at = snapshot
         .primary
         .as_ref()
-        .and_then(|window| reset_seconds_to_datetime(observed_at, window.resets_at));
+        .and_then(|window| unix_seconds_to_datetime(window.resets_at));
     let secondary_next_reset_at = snapshot
         .secondary
         .as_ref()
-        .and_then(|window| reset_seconds_to_datetime(observed_at, window.resets_at));
+        .and_then(|window| unix_seconds_to_datetime(window.resets_at));
     with_usage_file(codex_home, account_id, plan, |data| {
         data.last_updated = observed_at;
         let mut info = data.rate_limit.take().unwrap_or_default();
+        let existing_primary_next_reset_at = info.primary_next_reset_at;
+        let existing_secondary_next_reset_at = info.secondary_next_reset_at;
+        let existing_last_usage_limit_hit_at = info.last_usage_limit_hit_at;
+        let existing_reached_type = info
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.rate_limit_reached_type)
+            .or(info.last_usage_limit_reached_type);
+        let reached_type = snapshot.rate_limit_reached_type.or(existing_reached_type);
         info.snapshot = Some(snapshot);
+        if let Some(snapshot) = info.snapshot.as_mut() {
+            snapshot.rate_limit_reached_type = reached_type;
+        }
         info.observed_at = Some(observed_at);
-        info.primary_next_reset_at = primary_next_reset_at;
-        info.secondary_next_reset_at = secondary_next_reset_at;
+        info.primary_next_reset_at = primary_next_reset_at.or(existing_primary_next_reset_at);
+        info.secondary_next_reset_at = secondary_next_reset_at.or(existing_secondary_next_reset_at);
+        info.last_usage_limit_hit_at = existing_last_usage_limit_hit_at;
         data.rate_limit = Some(info);
     })
 }
 
-fn reset_seconds_to_datetime(
-    observed_at: DateTime<Utc>,
-    resets_in_seconds: Option<i64>,
-) -> Option<DateTime<Utc>> {
-    resets_in_seconds.map(|seconds| observed_at + Duration::seconds(seconds))
+fn unix_seconds_to_datetime(resets_at: Option<i64>) -> Option<DateTime<Utc>> {
+    resets_at.and_then(|seconds| DateTime::from_timestamp(seconds, 0))
 }
 
 pub fn list_rate_limit_snapshots(codex_home: &Path) -> io::Result<Vec<StoredRateLimitSnapshot>> {
@@ -277,6 +304,7 @@ pub fn record_usage_limit_hint(
         data.last_updated = observed_at;
         let mut info = data.rate_limit.take().unwrap_or_default();
         info.last_usage_limit_hit_at = Some(observed_at);
+        info.last_usage_limit_reached_type = reached_type;
         if let Some(snapshot) = info.snapshot.as_mut() {
             snapshot.rate_limit_reached_type = reached_type;
         }
@@ -345,12 +373,12 @@ mod tests {
     fn records_and_lists_rate_limit_snapshot() {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
-        let resets_in_seconds = 3600;
-        let reset_at = now + Duration::seconds(resets_in_seconds);
+        let reset_at_seconds = 3600;
+        let reset_at = DateTime::from_timestamp(reset_at_seconds, 0);
         record_rate_limit_snapshot(
             temp.path(),
             "acct/one",
-            snapshot(resets_in_seconds, 42.0),
+            snapshot(reset_at_seconds, 42.0),
             now,
         )
         .expect("record snapshot");
@@ -359,7 +387,7 @@ mod tests {
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].account_id, "acct/one");
         assert_eq!(snapshots[0].plan, Some(PlanType::Plus));
-        assert_eq!(snapshots[0].primary_next_reset_at, Some(reset_at));
+        assert_eq!(snapshots[0].primary_next_reset_at, reset_at);
         assert!(temp.path().join("usage").join("acct_one.json").exists());
     }
 
@@ -382,6 +410,55 @@ mod tests {
 
         let snapshots = list_rate_limit_snapshots(temp.path()).expect("list snapshots");
         assert_eq!(snapshots[0].plan, Some(PlanType::Pro));
+        assert_eq!(snapshots[0].primary_next_reset_at, Some(reset_at));
+        assert_eq!(snapshots[0].secondary_next_reset_at, Some(reset_at));
+        assert_eq!(snapshots[0].last_usage_limit_hit_at, Some(now));
+        assert_eq!(
+            snapshots[0]
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.rate_limit_reached_type),
+            Some(RateLimitReachedType::RateLimitReached)
+        );
+    }
+
+    #[test]
+    fn snapshot_recording_preserves_usage_limit_hint_fields() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        let reset_at = now + Duration::hours(2);
+        record_usage_limit_hint(
+            temp.path(),
+            "acct",
+            Some(PlanType::Plus),
+            Some(reset_at),
+            now,
+            Some(RateLimitReachedType::RateLimitReached),
+        )
+        .expect("record hint");
+
+        record_rate_limit_snapshot(
+            temp.path(),
+            "acct",
+            RateLimitSnapshot {
+                limit_id: Some("codex".to_string()),
+                limit_name: Some("Codex".to_string()),
+                primary: Some(RateLimitWindow {
+                    used_percent: 88.0,
+                    window_minutes: Some(300),
+                    resets_at: None,
+                }),
+                secondary: None,
+                credits: None,
+                individual_limit: None,
+                plan_type: Some(PlanType::Plus),
+                rate_limit_reached_type: None,
+            },
+            now + Duration::minutes(1),
+        )
+        .expect("record snapshot");
+
+        let snapshots = list_rate_limit_snapshots(temp.path()).expect("list snapshots");
         assert_eq!(snapshots[0].primary_next_reset_at, Some(reset_at));
         assert_eq!(snapshots[0].secondary_next_reset_at, Some(reset_at));
         assert_eq!(snapshots[0].last_usage_limit_hit_at, Some(now));

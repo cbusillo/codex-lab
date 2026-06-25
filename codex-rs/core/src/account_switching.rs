@@ -310,6 +310,7 @@ pub fn switch_active_account_on_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use chrono::Duration;
     use codex_config::types::AuthCredentialsStoreMode;
     use codex_login::auth::AuthDotJson;
@@ -319,6 +320,33 @@ mod tests {
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use pretty_assertions::assert_eq;
+    use serde::Serialize;
+    use serde_json::json;
+
+    fn fake_jwt(account_id: &str, email: &str) -> String {
+        #[derive(Serialize)]
+        struct Header {
+            alg: &'static str,
+            typ: &'static str,
+        }
+
+        let header = Header {
+            alg: "none",
+            typ: "JWT",
+        };
+        let payload = json!({
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_user_id": format!("user-{account_id}"),
+                "chatgpt_account_id": account_id,
+            },
+        });
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let header_b64 = encode(&serde_json::to_vec(&header).expect("serialize header"));
+        let payload_b64 = encode(&serde_json::to_vec(&payload).expect("serialize payload"));
+        let signature_b64 = encode(b"sig");
+        format!("{header_b64}.{payload_b64}.{signature_b64}")
+    }
 
     fn token_data(account_id: &str, email: &str) -> TokenData {
         TokenData {
@@ -328,7 +356,7 @@ mod tests {
                 chatgpt_user_id: Some(format!("user-{account_id}")),
                 chatgpt_account_id: Some(account_id.to_string()),
                 chatgpt_account_is_fedramp: false,
-                raw_jwt: format!("jwt-{account_id}"),
+                raw_jwt: fake_jwt(account_id, email),
             },
             access_token: format!("access-{account_id}"),
             refresh_token: format!("refresh-{account_id}"),
@@ -354,14 +382,14 @@ mod tests {
             .id
     }
 
-    fn rate_limit_snapshot(resets_in_seconds: i64, used_percent: f64) -> RateLimitSnapshot {
+    fn rate_limit_snapshot(resets_at_seconds: i64, used_percent: f64) -> RateLimitSnapshot {
         RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: Some("Codex".to_string()),
             primary: Some(RateLimitWindow {
                 used_percent,
                 window_minutes: Some(300),
-                resets_at: Some(resets_in_seconds),
+                resets_at: Some(resets_at_seconds),
             }),
             secondary: None,
             credits: None,
@@ -382,14 +410,14 @@ mod tests {
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &slower,
-            rate_limit_snapshot(3 * 60 * 60, 10.0),
+            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, 10.0),
             now,
         )
         .expect("record slower");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &faster,
-            rate_limit_snapshot(60 * 60, 80.0),
+            rate_limit_snapshot(now.timestamp() + 60 * 60, 80.0),
             now,
         )
         .expect("record faster");
@@ -479,8 +507,12 @@ mod tests {
         let candidate = upsert_chatgpt(temp.path(), "candidate");
         codex_login::set_active_account_id(temp.path(), Some(current.clone())).expect("set active");
         let current_auth = AuthDotJson {
+            auth_mode: None,
+            openai_api_key: None,
             tokens: Some(token_data("current", "user@example.com")),
-            ..Default::default()
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
         };
         save_auth(temp.path(), &current_auth, AuthCredentialsStoreMode::File)
             .expect("save current auth");

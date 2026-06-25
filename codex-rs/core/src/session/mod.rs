@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::account_usage;
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
 use crate::agent::agent_status_from_event;
@@ -195,6 +196,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
+use codex_protocol::protocol::RateLimitReachedType;
 
 mod background_auto_review;
 mod config_lock;
@@ -3130,10 +3132,66 @@ impl Session {
     }
 
     pub(crate) async fn record_rate_limits_info(&self, new_rate_limits: RateLimitSnapshot) {
+        let usage_snapshot = new_rate_limits.clone();
         {
             let mut state = self.state.lock().await;
             state.set_rate_limits(new_rate_limits);
         }
+        self.record_rate_limit_snapshot_for_active_account(usage_snapshot)
+            .await;
+    }
+
+    pub(crate) async fn record_usage_limit_hint_for_active_account(
+        &self,
+        plan_type: Option<codex_protocol::account::PlanType>,
+        resets_at: Option<chrono::DateTime<Utc>>,
+        reached_type: Option<RateLimitReachedType>,
+    ) {
+        let Some((codex_home, account_id, fallback_plan)) = self.account_usage_context().await
+        else {
+            return;
+        };
+        let plan_type = plan_type.or(fallback_plan);
+        if let Err(err) = account_usage::record_usage_limit_hint(
+            codex_home.as_path(),
+            &account_id,
+            plan_type,
+            resets_at,
+            Utc::now(),
+            reached_type,
+        ) {
+            warn!(?err, "failed to record account usage limit hint");
+        }
+    }
+
+    async fn record_rate_limit_snapshot_for_active_account(&self, snapshot: RateLimitSnapshot) {
+        let Some((codex_home, account_id, fallback_plan)) = self.account_usage_context().await
+        else {
+            return;
+        };
+        let plan_type = snapshot.plan_type.clone().or(fallback_plan);
+        if let Err(err) = account_usage::record_rate_limit_snapshot_with_plan(
+            codex_home.as_path(),
+            &account_id,
+            plan_type,
+            snapshot,
+            Utc::now(),
+        ) {
+            warn!(?err, "failed to record account rate limit snapshot");
+        }
+    }
+
+    async fn account_usage_context(
+        &self,
+    ) -> Option<(
+        AbsolutePathBuf,
+        String,
+        Option<codex_protocol::account::PlanType>,
+    )> {
+        let auth = self.services.auth_manager.auth_cached()?;
+        let account_id = auth.get_account_id()?;
+        let plan_type = auth.account_plan_type();
+        Some((self.codex_home().await, account_id, plan_type))
     }
 
     pub(crate) async fn mcp_dependency_prompted(&self) -> HashSet<String> {

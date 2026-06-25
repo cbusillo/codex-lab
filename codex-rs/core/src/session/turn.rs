@@ -1070,6 +1070,12 @@ async fn run_sampling_request(
                 return Err(CodexErr::ContextWindowExceeded);
             }
             Err(CodexErr::UsageLimitReached(e)) => {
+                sess.record_usage_limit_hint_for_active_account(
+                    e.plan_type.clone().map(Into::into),
+                    e.resets_at.clone(),
+                    e.rate_limit_reached_type,
+                )
+                .await;
                 let rate_limits = e.rate_limits.clone();
                 if let Some(rate_limits) = rate_limits {
                     sess.update_rate_limits(&turn_context, *rate_limits).await;
