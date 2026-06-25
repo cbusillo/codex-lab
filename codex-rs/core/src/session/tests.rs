@@ -3313,6 +3313,144 @@ async fn record_usage_limit_hint_persists_hint_for_active_account() {
 }
 
 #[tokio::test]
+async fn usage_limit_hint_uses_active_saved_api_key_account_id() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let account = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-active".to_string(),
+        Some("active".to_string()),
+        true,
+    )
+    .expect("upsert api key account");
+    let (session, _turn_context, _rx) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::from_api_key("sk-active"),
+        Vec::new(),
+        codex_home.path(),
+        |_| {},
+    )
+    .await;
+
+    session
+        .record_usage_limit_hint_for_active_account(
+            None,
+            None,
+            Some(RateLimitReachedType::RateLimitReached),
+        )
+        .await;
+
+    let snapshots = account_usage::list_rate_limit_snapshots(codex_home.path())
+        .expect("list account usage snapshots");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].account_id, account.id);
+}
+
+#[tokio::test]
+async fn usage_limit_hint_reads_saved_api_key_from_auth_home_and_writes_codex_home() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let codex_home = temp.path().join("codex-home");
+    let auth_home = temp.path().join("auth-home");
+    std::fs::create_dir_all(&codex_home).expect("create codex home");
+    std::fs::create_dir_all(&auth_home).expect("create auth home");
+    let account = codex_login::upsert_api_key_account(
+        &auth_home,
+        "sk-active".to_string(),
+        Some("active".to_string()),
+        true,
+    )
+    .expect("upsert api key account");
+    let (session, _turn_context, _rx) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::from_api_key("sk-active"),
+        Vec::new(),
+        &codex_home,
+        |config| {
+            config.auth_home =
+                codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(auth_home.clone())
+                    .expect("absolute auth home");
+        },
+    )
+    .await;
+
+    session
+        .record_usage_limit_hint_for_active_account(
+            None,
+            None,
+            Some(RateLimitReachedType::RateLimitReached),
+        )
+        .await;
+
+    let codex_snapshots = account_usage::list_rate_limit_snapshots(&codex_home)
+        .expect("list codex home usage snapshots");
+    assert_eq!(codex_snapshots.len(), 1);
+    assert_eq!(codex_snapshots[0].account_id, account.id);
+    let auth_snapshots = account_usage::list_rate_limit_snapshots(&auth_home)
+        .expect("list auth home usage snapshots");
+    assert!(auth_snapshots.is_empty());
+}
+
+#[tokio::test]
+async fn usage_limit_hint_ignores_mismatched_saved_api_key_account_id() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-stale".to_string(),
+        Some("stale".to_string()),
+        true,
+    )
+    .expect("upsert api key account");
+    let (session, _turn_context, _rx) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::from_api_key("sk-current"),
+        Vec::new(),
+        codex_home.path(),
+        |_| {},
+    )
+    .await;
+
+    session
+        .record_usage_limit_hint_for_active_account(
+            None,
+            None,
+            Some(RateLimitReachedType::RateLimitReached),
+        )
+        .await;
+
+    let snapshots = account_usage::list_rate_limit_snapshots(codex_home.path())
+        .expect("list account usage snapshots");
+    assert!(snapshots.is_empty());
+}
+
+#[tokio::test]
+async fn usage_limit_hint_prefers_chatgpt_token_account_id_over_saved_active_account() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-active".to_string(),
+        Some("active".to_string()),
+        true,
+    )
+    .expect("upsert api key account");
+    let (session, _turn_context, _rx) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        codex_home.path(),
+        |_| {},
+    )
+    .await;
+
+    session
+        .record_usage_limit_hint_for_active_account(
+            Some(PlanType::Pro),
+            None,
+            Some(RateLimitReachedType::RateLimitReached),
+        )
+        .await;
+
+    let snapshots = account_usage::list_rate_limit_snapshots(codex_home.path())
+        .expect("list account usage snapshots");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].account_id, "account_id");
+}
+
+#[tokio::test]
 async fn set_rate_limits_updates_plan_type_when_present() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let config = build_test_config(codex_home.path()).await;
