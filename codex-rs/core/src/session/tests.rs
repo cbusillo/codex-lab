@@ -1,5 +1,6 @@
 use super::turn_context::TurnEnvironment;
 use super::*;
+use crate::account_usage;
 use crate::codex_thread::TryStartTurnIfIdleRejectionReason;
 use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
@@ -73,6 +74,8 @@ use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::registry::ToolExecutor;
 use crate::tools::router::ToolCallSource;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use chrono::TimeZone;
+use chrono::Utc;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::McpElicitationSchema;
 use codex_config::config_toml::ConfigToml;
@@ -93,6 +96,7 @@ use codex_otel::THREAD_SKILLS_ENABLED_TOTAL_METRIC;
 use codex_otel::THREAD_SKILLS_KEPT_TOTAL_METRIC;
 use codex_otel::THREAD_SKILLS_TRUNCATED_METRIC;
 use codex_otel::TelemetryAuthMode;
+use codex_protocol::account::PlanType;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -109,6 +113,7 @@ use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkApprovalProtocol;
+use codex_protocol::protocol::RateLimitReachedType;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::RealtimeAudioFrame;
@@ -3230,6 +3235,81 @@ async fn set_rate_limits_retains_previous_credits() {
             rate_limit_reached_type: None,
         })
     );
+}
+
+#[tokio::test]
+async fn record_rate_limits_info_persists_snapshot_for_active_account() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let codex_home = session.codex_home().await;
+    let snapshot = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 72.5,
+            window_minutes: Some(300),
+            resets_at: Some(900),
+        }),
+        secondary: Some(RateLimitWindow {
+            used_percent: 12.5,
+            window_minutes: Some(10_080),
+            resets_at: Some(3_600),
+        }),
+        credits: None,
+        individual_limit: None,
+        plan_type: Some(PlanType::Plus),
+        rate_limit_reached_type: None,
+    };
+
+    session.record_rate_limits_info(snapshot.clone()).await;
+
+    let snapshots = account_usage::list_rate_limit_snapshots(codex_home.as_path())
+        .expect("list account usage snapshots");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].account_id, "account_id");
+    assert_eq!(snapshots[0].plan, Some(PlanType::Plus));
+    assert_eq!(snapshots[0].snapshot, Some(snapshot));
+    assert_eq!(
+        snapshots[0].primary_next_reset_at,
+        Some(Utc.timestamp_opt(900, 0).single().unwrap())
+    );
+    assert_eq!(
+        snapshots[0].secondary_next_reset_at,
+        Some(Utc.timestamp_opt(3_600, 0).single().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn record_usage_limit_hint_persists_hint_for_active_account() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let codex_home = session.codex_home().await;
+    let resets_at = Utc.timestamp_opt(1_800, 0).single().unwrap();
+
+    session
+        .record_usage_limit_hint_for_active_account(
+            Some(PlanType::Pro),
+            Some(resets_at),
+            Some(RateLimitReachedType::RateLimitReached),
+        )
+        .await;
+
+    let snapshots = account_usage::list_rate_limit_snapshots(codex_home.as_path())
+        .expect("list account usage snapshots");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].account_id, "account_id");
+    assert_eq!(snapshots[0].plan, Some(PlanType::Pro));
+    assert_eq!(snapshots[0].primary_next_reset_at, Some(resets_at));
+    assert_eq!(snapshots[0].secondary_next_reset_at, Some(resets_at));
+    assert!(snapshots[0].last_usage_limit_hit_at.is_some());
 }
 
 #[tokio::test]
