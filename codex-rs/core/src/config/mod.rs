@@ -939,6 +939,14 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
+    /// Whether Codex may automatically switch saved accounts when the active
+    /// ChatGPT account is rate or usage limited.
+    pub auto_switch_accounts_on_rate_limit: bool,
+
+    /// Whether Codex may fall back to a saved API key account once all saved
+    /// ChatGPT accounts are limited.
+    pub api_key_fallback_on_all_accounts_limited: bool,
+
     /// Optional path override for the host-owned apps MCP server.
     pub apps_mcp_path_override: Option<String>,
 
@@ -3651,6 +3659,12 @@ impl Config {
             chatgpt_base_url: cfg
                 .chatgpt_base_url
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+            auto_switch_accounts_on_rate_limit: cfg
+                .auto_switch_accounts_on_rate_limit
+                .unwrap_or(true),
+            api_key_fallback_on_all_accounts_limited: cfg
+                .api_key_fallback_on_all_accounts_limited
+                .unwrap_or(false),
             apps_mcp_path_override,
             apps_mcp_product_sku: cfg.apps_mcp_product_sku.clone(),
             realtime_audio: cfg
