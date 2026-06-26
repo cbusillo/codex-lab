@@ -49,6 +49,10 @@ fn fast_tier_command() -> ServiceTierCommand {
 }
 
 fn fake_jwt(email: &str, account_id: &str) -> String {
+    fake_jwt_with_plan(email, account_id, Some("plus"))
+}
+
+fn fake_jwt_with_plan(email: &str, account_id: &str, plan_type: Option<&str>) -> String {
     #[derive(Serialize)]
     struct Header {
         alg: &'static str,
@@ -59,11 +63,15 @@ fn fake_jwt(email: &str, account_id: &str) -> String {
         alg: "none",
         typ: "JWT",
     };
+    let mut auth_payload = json!({
+        "chatgpt_account_id": account_id,
+    });
+    if let Some(plan_type) = plan_type {
+        auth_payload["chatgpt_plan_type"] = json!(plan_type);
+    }
     let payload = json!({
         "email": email,
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": account_id,
-        },
+        "https://api.openai.com/auth": auth_payload,
     });
     let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let header_b64 = encode(&serde_json::to_vec(&header).expect("serialize header"));
@@ -73,7 +81,15 @@ fn fake_jwt(email: &str, account_id: &str) -> String {
 }
 
 fn make_chatgpt_tokens(account_id: &str, email: &str) -> TokenData {
-    let id_token = fake_jwt(email, account_id);
+    make_chatgpt_tokens_with_plan(account_id, email, Some("plus"))
+}
+
+fn make_chatgpt_tokens_with_plan(
+    account_id: &str,
+    email: &str,
+    plan_type: Option<&str>,
+) -> TokenData {
+    let id_token = fake_jwt_with_plan(email, account_id, plan_type);
     let access_token = fake_jwt(email, account_id);
     TokenData {
         id_token: codex_login::token_data::parse_chatgpt_jwt_claims(&id_token)
@@ -199,7 +215,8 @@ async fn login_slash_command_opens_accounts_view() {
     assert!(popup.contains("Manage Accounts"));
     assert!(popup.contains("Connected Accounts"));
     assert!(popup.contains("ChatGPT (default@example.com)"));
-    assert!(popup.contains("account-default"));
+    assert!(popup.contains("Plus Plan"));
+    assert!(!popup.contains("account-default"));
     assert!(popup.contains("(current)"));
     assert!(popup.contains("Add account..."));
     assert!(!popup.contains("Choose Login"));
@@ -233,11 +250,67 @@ async fn login_slash_command_lists_selectable_stored_accounts() {
     assert!(popup.contains("Manage Accounts"));
     assert!(popup.contains("ChatGPT (stored@example.com)"));
     assert!(popup.contains("(current)"));
-    assert!(popup.contains("ChatGPT - account-stored"));
+    assert!(popup.contains("Plus Plan"));
+    assert!(!popup.contains("account-stored"));
     assert!(popup.contains("Automation key"));
     assert!(popup.contains("API key"));
     assert!(!popup.contains("sk-test-secret-value"));
     assert!(popup.contains("Add account..."));
+}
+
+#[tokio::test]
+async fn login_slash_command_chatgpt_details_show_plan_without_account_ids() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let path = chat.config.codex_home.join("auth_accounts.json");
+    let accounts = vec![
+        StoredAccount {
+            id: "chatgpt-without-plan".to_string(),
+            mode: AuthMode::Chatgpt,
+            label: Some("missing-plan@example.com".to_string()),
+            openai_api_key: None,
+            tokens: Some(make_chatgpt_tokens_with_plan(
+                "account-without-plan",
+                "missing-plan@example.com",
+                None,
+            )),
+            last_refresh: Some(Utc::now()),
+            created_at: None,
+            last_used_at: None,
+        },
+        StoredAccount {
+            id: "chatgpt-auth-tokens".to_string(),
+            mode: AuthMode::ChatgptAuthTokens,
+            label: Some("hosted@example.com".to_string()),
+            openai_api_key: None,
+            tokens: Some(make_chatgpt_tokens_with_plan(
+                "account-auth-tokens",
+                "hosted@example.com",
+                Some("pro"),
+            )),
+            last_refresh: Some(Utc::now()),
+            created_at: None,
+            last_used_at: None,
+        },
+    ];
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&json!({
+            "version": 1,
+            "active_account_id": null,
+            "accounts": accounts,
+        }))
+        .expect("serialize accounts file"),
+    )
+    .expect("write accounts file");
+
+    chat.dispatch_command(SlashCommand::Login);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(popup.contains("ChatGPT (missing-plan@example.com)"));
+    assert!(popup.contains("ChatGPT (hosted@example.com)"));
+    assert!(popup.contains("Pro Plan"));
+    assert!(!popup.contains("account-without-plan"));
+    assert!(!popup.contains("account-auth-tokens"));
 }
 
 #[tokio::test]
