@@ -121,7 +121,10 @@ pub(crate) use list_selection_view::SelectionViewParams;
 pub(crate) use list_selection_view::SideContentWidth;
 pub(crate) use list_selection_view::popup_content_width;
 pub(crate) use list_selection_view::side_by_side_layout_widths;
+pub(crate) use login_accounts_view::LOGIN_ADD_ACCOUNT_VIEW_ID;
 pub(crate) use login_accounts_view::LoginAccountsView;
+pub(crate) use login_accounts_view::LoginAddAccountState;
+pub(crate) use login_accounts_view::LoginAddAccountView;
 pub(crate) use memories_settings_view::MemoriesSettingsView;
 use slash_commands::ServiceTierCommand;
 mod feedback_view;
@@ -1259,6 +1262,12 @@ impl BottomPane {
     #[cfg(test)]
     pub(crate) fn active_view_id(&self) -> Option<&'static str> {
         self.view_stack.last().and_then(|view| view.view_id())
+    }
+
+    pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {
+        self.view_stack
+            .last()
+            .and_then(|view| view.active_login_add_account_id())
     }
 
     /// Return true when the pane is in the regular composer state without any

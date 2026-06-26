@@ -5,14 +5,21 @@
 //! cache used for multi-agent navigation.
 
 use super::*;
+use crate::app::PendingDirectLoginAddAccount;
 use crate::app_event::AuthAccountSelection;
 use crate::app_event::AuthProfileSelection;
+use crate::bottom_pane::LoginAddAccountState;
+use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_protocol::CancelLoginAccountParams;
+use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_cloud_config::cloud_config_bundle_loader_for_storage;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_login::CLIENT_ID;
+use codex_login::ServerOptions;
 
 struct AuthSwitchRollback {
     codex_home: PathBuf,
@@ -1207,6 +1214,176 @@ impl App {
                     "Failed to attach to stored account session: {err}"
                 ));
             }
+        }
+    }
+
+    pub(super) async fn start_login_add_account_chatgpt(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        if !self
+            .chat_widget
+            .update_login_add_account_view(LoginAddAccountState::Starting)
+        {
+            return;
+        }
+
+        if self.config.auth_home != self.config.codex_home {
+            self.start_default_store_login_add_account_chatgpt().await;
+            return;
+        }
+
+        let request_handle = app_server.request_handle();
+        let response = request_handle
+            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
+                request_id: app_server.next_request_id(),
+                params: LoginAccountParams::Chatgpt {
+                    codex_streamlined_login: false,
+                },
+            })
+            .await;
+
+        match response {
+            Ok(LoginAccountResponse::Chatgpt { login_id, auth_url }) => {
+                self.pending_login_add_account_id = Some(login_id.clone());
+                self.completed_login_add_account_id = None;
+                self.open_local_auth_url_in_browser(&request_handle, &auth_url);
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Waiting {
+                        login_id,
+                        auth_url,
+                    });
+            }
+            Ok(other) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Failed(format!(
+                        "Unexpected login response: {other:?}"
+                    )));
+            }
+            Err(err) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Failed(format!(
+                        "Failed to start ChatGPT login: {err}"
+                    )));
+            }
+        }
+    }
+
+    pub(super) async fn cancel_login_add_account_chatgpt(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        if let Some(pending) = self.pending_direct_login_add_account.take() {
+            pending.shutdown.shutdown();
+            return;
+        }
+
+        let Some(login_id) = self.pending_login_add_account_id.take() else {
+            return;
+        };
+        self.completed_login_add_account_id = None;
+        let request_handle = app_server.request_handle();
+        if let Err(err) = request_handle
+            .request_typed::<CancelLoginAccountResponse>(ClientRequest::CancelLoginAccount {
+                request_id: app_server.next_request_id(),
+                params: CancelLoginAccountParams { login_id },
+            })
+            .await
+        {
+            tracing::warn!("failed to cancel add-account ChatGPT login: {err}");
+        }
+    }
+
+    async fn start_default_store_login_add_account_chatgpt(&mut self) {
+        let opts = ServerOptions {
+            open_browser: false,
+            ..ServerOptions::new(
+                self.config.codex_home.to_path_buf(),
+                CLIENT_ID.to_string(),
+                self.config.forced_chatgpt_workspace_id.clone(),
+                self.config.cli_auth_credentials_store_mode,
+            )
+        };
+
+        let server = match codex_login::run_login_server(opts) {
+            Ok(server) => server,
+            Err(err) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Failed(format!(
+                        "Failed to start ChatGPT login: {err}"
+                    )));
+                return;
+            }
+        };
+
+        let auth_url = server.auth_url.clone();
+        let shutdown = server.cancel_handle();
+        let completion_tx = self.app_event_tx.clone();
+        self.direct_login_add_account_attempt_id =
+            self.direct_login_add_account_attempt_id.wrapping_add(1);
+        let attempt_id = self.direct_login_add_account_attempt_id;
+        tokio::spawn(async move {
+            let result = server
+                .block_until_done()
+                .await
+                .map_err(|err| err.to_string());
+            completion_tx.send(AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result });
+        });
+
+        self.pending_direct_login_add_account = Some(PendingDirectLoginAddAccount {
+            attempt_id,
+            shutdown,
+        });
+        self.open_url_in_browser(auth_url.clone());
+        if !self
+            .chat_widget
+            .update_login_add_account_view(LoginAddAccountState::Waiting {
+                login_id: "default-store".to_string(),
+                auth_url,
+            })
+        {
+            if let Some(pending) = self.pending_direct_login_add_account.take() {
+                pending.shutdown.shutdown();
+            }
+        }
+    }
+
+    pub(super) async fn complete_login_add_account_chatgpt(
+        &mut self,
+        attempt_id: u64,
+        result: Result<(), String>,
+    ) {
+        if self
+            .pending_direct_login_add_account
+            .as_ref()
+            .map(|pending| pending.attempt_id)
+            != Some(attempt_id)
+        {
+            return;
+        }
+
+        self.pending_direct_login_add_account = None;
+        match result {
+            Ok(()) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Complete);
+            }
+            Err(err) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Failed(format!(
+                        "ChatGPT login did not complete: {err}"
+                    )));
+            }
+        }
+    }
+
+    fn open_local_auth_url_in_browser(
+        &mut self,
+        request_handle: &AppServerRequestHandle,
+        url: &str,
+    ) {
+        if matches!(request_handle, AppServerRequestHandle::InProcess(_)) {
+            self.open_url_in_browser(url.to_string());
         }
     }
 

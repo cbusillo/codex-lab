@@ -280,7 +280,10 @@ use crate::bottom_pane::ExperimentalFeaturesView;
 use crate::bottom_pane::GoalStatusIndicator;
 use crate::bottom_pane::HistoryEntry;
 use crate::bottom_pane::InputResult;
+use crate::bottom_pane::LOGIN_ADD_ACCOUNT_VIEW_ID;
 use crate::bottom_pane::LocalImageAttachment;
+use crate::bottom_pane::LoginAddAccountState;
+use crate::bottom_pane::LoginAddAccountView;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::bottom_pane::MemoriesSettingsView;
 use crate::bottom_pane::MentionBinding;
@@ -1073,6 +1076,27 @@ impl ChatWidget {
             self.bottom_pane.list_keymap(),
         );
         self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn open_login_add_account_view(&mut self) {
+        let view = LoginAddAccountView::new(self.app_event_tx.clone());
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn update_login_add_account_view(&mut self, state: LoginAddAccountState) -> bool {
+        if !self
+            .bottom_pane
+            .dismiss_active_view_if_id(LOGIN_ADD_ACCOUNT_VIEW_ID)
+        {
+            return false;
+        }
+        let view = LoginAddAccountView::with_state(self.app_event_tx.clone(), state);
+        self.bottom_pane.show_view(Box::new(view));
+        true
+    }
+
+    pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {
+        self.bottom_pane.active_login_add_account_id()
     }
 
     pub(crate) fn dismiss_account_switch_settings_popup(&mut self) {

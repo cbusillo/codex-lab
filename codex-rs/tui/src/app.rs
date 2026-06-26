@@ -572,7 +572,16 @@ pub(crate) struct App {
     // Serialize hook enablement writes per hook so stale completions cannot
     // persist an older toggle after a newer one.
     pending_hook_enabled_writes: HashMap<String, Option<bool>>,
+    pending_direct_login_add_account: Option<PendingDirectLoginAddAccount>,
+    direct_login_add_account_attempt_id: u64,
+    pending_login_add_account_id: Option<String>,
+    completed_login_add_account_id: Option<String>,
     pending_auth_profile_login: Option<PendingAuthProfileLogin>,
+}
+
+pub(crate) struct PendingDirectLoginAddAccount {
+    pub(crate) attempt_id: u64,
+    pub(crate) shutdown: codex_login::ShutdownHandle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1067,6 +1076,10 @@ See the Codex keymap documentation for supported actions and examples."
             pending_startup_thread_start,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            pending_direct_login_add_account: None,
+            direct_login_add_account_attempt_id: 0,
+            pending_login_add_account_id: None,
+            completed_login_add_account_id: None,
             pending_auth_profile_login: None,
         };
         if let Some(entry) = startup_hooks_browser {

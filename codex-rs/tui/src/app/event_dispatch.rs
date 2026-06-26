@@ -321,6 +321,22 @@ impl App {
                         .add_error_message(format!("Logout failed: {err}"));
                 }
             },
+            AppEvent::ShowLoginAccounts => {
+                self.chat_widget.show_login_accounts_view();
+            }
+            AppEvent::ShowLoginAddAccount => {
+                self.chat_widget.open_login_add_account_view();
+            }
+            AppEvent::LoginStartChatGpt => {
+                self.start_login_add_account_chatgpt(app_server).await;
+            }
+            AppEvent::LoginCancelChatGpt => {
+                self.cancel_login_add_account_chatgpt(app_server).await;
+            }
+            AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result } => {
+                self.complete_login_add_account_chatgpt(attempt_id, result)
+                    .await;
+            }
             AppEvent::SwitchAuthProfile { selection } => {
                 self.switch_auth_profile(tui, app_server, selection).await;
             }

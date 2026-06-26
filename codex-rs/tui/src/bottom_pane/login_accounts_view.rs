@@ -24,17 +24,18 @@ use crate::account_label::account_display_label;
 use crate::account_label::account_mode_priority;
 use crate::app_event::AppEvent;
 use crate::app_event::AuthAccountSelection;
-use crate::app_event::AuthProfileSelection;
 use crate::app_event_sender::AppEventSender;
 use crate::render::renderable::Renderable;
 
 use super::BottomPaneView;
 use super::ViewCompletion;
 
+pub(crate) const LOGIN_ACCOUNTS_VIEW_ID: &str = "login-accounts";
+pub(crate) const LOGIN_ADD_ACCOUNT_VIEW_ID: &str = "login-add-account";
+
 /// Interactive view shown for `/login` to manage stored accounts.
 pub(crate) struct LoginAccountsView {
     app_event_tx: AppEventSender,
-    add_profile_name: String,
     accounts: Vec<AccountRow>,
     selected: usize,
     error: Option<String>,
@@ -55,7 +56,6 @@ impl LoginAccountsView {
     pub(crate) fn new(
         codex_home: &std::path::Path,
         app_event_tx: AppEventSender,
-        add_profile_name: String,
         default_auth_home_is_current: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> Self {
@@ -106,7 +106,6 @@ impl LoginAccountsView {
 
         Self {
             app_event_tx,
-            add_profile_name,
             accounts,
             selected,
             error,
@@ -153,12 +152,7 @@ impl LoginAccountsView {
     fn handle_enter(&mut self) {
         if self.selected == self.add_row_index() {
             self.finish(ViewCompletion::Accepted);
-            self.app_event_tx.send(AppEvent::SwitchAuthProfile {
-                selection: AuthProfileSelection::Named {
-                    profile_name: self.add_profile_name.clone(),
-                    login_after_switch: true,
-                },
-            });
+            self.app_event_tx.send(AppEvent::ShowLoginAddAccount);
             return;
         }
 
@@ -209,8 +203,239 @@ impl BottomPaneView for LoginAccountsView {
         self.completion
     }
 
+    fn view_id(&self) -> Option<&'static str> {
+        Some(LOGIN_ACCOUNTS_VIEW_ID)
+    }
+
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoginAddAccountState {
+    Choose,
+    Starting,
+    Waiting { login_id: String, auth_url: String },
+    Failed(String),
+    Complete,
+}
+
+pub(crate) struct LoginAddAccountView {
+    app_event_tx: AppEventSender,
+    state: LoginAddAccountState,
+    selected: usize,
+    is_complete: bool,
+    completion: Option<ViewCompletion>,
+}
+
+impl LoginAddAccountView {
+    pub(crate) fn new(app_event_tx: AppEventSender) -> Self {
+        Self {
+            app_event_tx,
+            state: LoginAddAccountState::Choose,
+            selected: 0,
+            is_complete: false,
+            completion: None,
+        }
+    }
+
+    pub(crate) fn with_state(app_event_tx: AppEventSender, state: LoginAddAccountState) -> Self {
+        Self {
+            app_event_tx,
+            state,
+            selected: 0,
+            is_complete: false,
+            completion: None,
+        }
+    }
+
+    pub(crate) fn waiting_login_id(&self) -> Option<&str> {
+        match &self.state {
+            LoginAddAccountState::Waiting { login_id, .. } => Some(login_id),
+            LoginAddAccountState::Choose
+            | LoginAddAccountState::Starting
+            | LoginAddAccountState::Failed(_)
+            | LoginAddAccountState::Complete => None,
+        }
+    }
+
+    fn finish(&mut self, completion: ViewCompletion) {
+        if matches!(
+            self.state,
+            LoginAddAccountState::Starting | LoginAddAccountState::Waiting { .. }
+        ) {
+            self.app_event_tx.send(AppEvent::LoginCancelChatGpt);
+        }
+        self.is_complete = true;
+        self.completion = Some(completion);
+    }
+
+    fn handle_enter(&mut self) {
+        match self.state {
+            LoginAddAccountState::Choose | LoginAddAccountState::Failed(_) => {
+                if self.selected == 0 {
+                    self.state = LoginAddAccountState::Starting;
+                    self.app_event_tx.send(AppEvent::LoginStartChatGpt);
+                }
+            }
+            LoginAddAccountState::Complete => {
+                self.finish(ViewCompletion::Accepted);
+                self.app_event_tx.send(AppEvent::ShowLoginAccounts);
+            }
+            LoginAddAccountState::Starting | LoginAddAccountState::Waiting { .. } => {}
+        }
+    }
+
+    fn content_line_count(&self) -> usize {
+        match &self.state {
+            LoginAddAccountState::Choose => 7,
+            LoginAddAccountState::Starting => 6,
+            LoginAddAccountState::Waiting { .. } => 8,
+            LoginAddAccountState::Failed(_) => 8,
+            LoginAddAccountState::Complete => 6,
+        }
+    }
+}
+
+impl BottomPaneView for LoginAddAccountView {
+    fn handle_key_event(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.finish(ViewCompletion::Cancelled),
+            KeyCode::Enter => self.handle_enter(),
+            _ => {}
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.is_complete
+    }
+
+    fn completion(&self) -> Option<ViewCompletion> {
+        self.completion
+    }
+
+    fn view_id(&self) -> Option<&'static str> {
+        Some(LOGIN_ADD_ACCOUNT_VIEW_ID)
+    }
+
+    fn active_login_add_account_id(&self) -> Option<&str> {
+        self.waiting_login_id()
+    }
+
+    fn prefer_esc_to_handle_key_event(&self) -> bool {
+        true
+    }
+}
+
+impl Renderable for LoginAddAccountView {
+    fn desired_height(&self, _width: u16) -> u16 {
+        (self.content_line_count() + 2).max(9) as u16
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(Color::White))
+            .title(" Add Account ")
+            .title_alignment(Alignment::Center);
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let mut lines = Vec::new();
+        match &self.state {
+            LoginAddAccountState::Choose => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Choose a sign-in method",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(""));
+                lines.push(render_selectable_line(
+                    "ChatGPT sign-in",
+                    self.selected == 0,
+                    false,
+                ));
+                lines.push(Line::from(Span::styled(
+                    "Open the auth webpage and add a ChatGPT account.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("Start", "Close"));
+            }
+            LoginAddAccountState::Starting => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Opening ChatGPT sign-in...",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Waiting for the authentication page.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("", "Cancel"));
+            }
+            LoginAddAccountState::Waiting { auth_url, .. } => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Finish signing in with ChatGPT in your browser",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(""));
+                lines.push(Line::from("If your browser did not open, visit:"));
+                lines.push(Line::from(Span::styled(
+                    auth_url.clone(),
+                    Style::default().fg(Color::Cyan),
+                )));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("", "Cancel"));
+            }
+            LoginAddAccountState::Failed(message) => {
+                lines.push(Line::from(vec![Span::styled(
+                    "ChatGPT sign-in failed",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    message.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+                lines.push(Line::from(""));
+                lines.push(render_selectable_line("Try again", true, false));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("Retry", "Close"));
+            }
+            LoginAddAccountState::Complete => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Account added",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "The account list will refresh with your new ChatGPT account.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("Continue", "Close"));
+            }
+        }
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left)
+            .style(Style::default().fg(Color::White))
+            .render(
+                Rect {
+                    x: inner.x.saturating_add(1),
+                    y: inner.y,
+                    width: inner.width.saturating_sub(2),
+                    height: inner.height,
+                },
+                buf,
+            );
     }
 }
 
@@ -346,6 +571,26 @@ impl AccountRow {
 
 fn render_selectable_line(label: &str, selected: bool, active: bool) -> Line<'static> {
     Line::from(render_selectable_spans(label, selected, active))
+}
+
+fn add_account_hint_line(enter_label: &str, cancel_label: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    if !enter_label.is_empty() {
+        spans.push(Span::styled("Enter", Style::default().fg(Color::Green)));
+        spans.push(Span::styled(
+            format!(" {enter_label}  "),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.push(Span::styled(
+        "Esc",
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        format!(" {cancel_label}"),
+        Style::default().fg(Color::DarkGray),
+    ));
+    Line::from(spans)
 }
 
 fn render_selectable_spans(label: &str, selected: bool, active: bool) -> Vec<Span<'static>> {
