@@ -19,11 +19,13 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
+use textwrap::wrap;
 
 use crate::account_label::account_display_label;
 use crate::account_label::account_mode_priority;
 use crate::app_event::AppEvent;
 use crate::app_event::AuthAccountSelection;
+use crate::app_event::RemoveAuthAccountSelection;
 use crate::app_event_sender::AppEventSender;
 use crate::render::renderable::Renderable;
 
@@ -39,6 +41,8 @@ pub(crate) struct LoginAccountsView {
     accounts: Vec<AccountRow>,
     selected: usize,
     error: Option<String>,
+    feedback: Option<LoginAccountsFeedback>,
+    mode: LoginAccountsMode,
     is_complete: bool,
     completion: Option<ViewCompletion>,
 }
@@ -52,12 +56,25 @@ struct AccountRow {
     is_active: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoginAccountsFeedback {
+    Info(String),
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LoginAccountsMode {
+    List,
+    ConfirmRemove { account_id: String, label: String },
+}
+
 impl LoginAccountsView {
-    pub(crate) fn new(
+    pub(crate) fn new_with_feedback(
         codex_home: &std::path::Path,
         app_event_tx: AppEventSender,
         default_auth_home_is_current: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
+        feedback: Option<LoginAccountsFeedback>,
     ) -> Self {
         let mut error = sync_account_store_from_auth(
             codex_home,
@@ -109,6 +126,8 @@ impl LoginAccountsView {
             accounts,
             selected,
             error,
+            feedback,
+            mode: LoginAccountsMode::List,
             is_complete: false,
             completion: None,
         }
@@ -150,6 +169,14 @@ impl LoginAccountsView {
     }
 
     fn handle_enter(&mut self) {
+        if let LoginAccountsMode::ConfirmRemove { account_id, label } = self.mode.clone() {
+            self.app_event_tx.send(AppEvent::RemoveAuthAccount {
+                selection: RemoveAuthAccountSelection { account_id, label },
+            });
+            self.finish(ViewCompletion::Accepted);
+            return;
+        }
+
         if self.selected == self.add_row_index() {
             self.finish(ViewCompletion::Accepted);
             self.app_event_tx.send(AppEvent::ShowLoginAddAccount);
@@ -172,24 +199,75 @@ impl LoginAccountsView {
         self.finish(ViewCompletion::Accepted);
     }
 
-    fn content_line_count(&self) -> usize {
+    fn handle_disconnect(&mut self) {
+        let Some(account) = self.selected_account() else {
+            return;
+        };
+        self.mode = LoginAccountsMode::ConfirmRemove {
+            account_id: account.id.clone(),
+            label: account.label.clone(),
+        };
+    }
+
+    fn cancel_confirm_remove(&mut self) {
+        self.mode = LoginAccountsMode::List;
+    }
+
+    fn wrapped_line_count(message: &str, width: u16) -> usize {
+        let width = width.max(1) as usize;
+        wrap(message, width).len().max(1)
+    }
+
+    fn content_line_count(&self, width: u16) -> usize {
+        let content_width = width.saturating_sub(4).max(1);
         let mut lines = 0;
-        if self.error.is_some() {
-            lines += 2;
+        if let Some(error) = &self.error {
+            lines += Self::wrapped_line_count(error, content_width) + 1;
+        }
+        if let Some(feedback) = &self.feedback {
+            let message = match feedback {
+                LoginAccountsFeedback::Info(message) | LoginAccountsFeedback::Error(message) => {
+                    message
+                }
+            };
+            lines += Self::wrapped_line_count(message, content_width) + 1;
         }
         lines += 2;
         lines += self.accounts.len().max(1);
-        lines += 4;
+        lines += 3;
+        lines += Self::wrapped_line_count(
+            "up/down Navigate  Enter Select  d Disconnect  Esc Close",
+            content_width,
+        );
+        if let LoginAccountsMode::ConfirmRemove { label, .. } = &self.mode {
+            let confirmation = format!("Disconnect {label}?");
+            lines += 1;
+            lines += Self::wrapped_line_count(&confirmation, content_width);
+            lines += Self::wrapped_line_count(
+                "Press Enter to disconnect or Esc to cancel.",
+                content_width,
+            );
+        }
         lines
     }
 }
 
 impl BottomPaneView for LoginAccountsView {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if matches!(self.mode, LoginAccountsMode::ConfirmRemove { .. }) {
+            match key_event.code {
+                KeyCode::Esc | KeyCode::Char('n') => self.cancel_confirm_remove(),
+                KeyCode::Enter | KeyCode::Char('y') => self.handle_enter(),
+                _ => {}
+            }
+            return;
+        }
+
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => self.finish(ViewCompletion::Cancelled),
             KeyCode::Up => self.select_previous(),
             KeyCode::Down => self.select_next(),
+            KeyCode::Char('d') => self.handle_disconnect(),
             KeyCode::Enter => self.handle_enter(),
             _ => {}
         }
@@ -440,8 +518,8 @@ impl Renderable for LoginAddAccountView {
 }
 
 impl Renderable for LoginAccountsView {
-    fn desired_height(&self, _width: u16) -> u16 {
-        (self.content_line_count() + 2).max(9) as u16
+    fn desired_height(&self, width: u16) -> u16 {
+        (self.content_line_count(width) + 2).max(9) as u16
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -460,6 +538,17 @@ impl Renderable for LoginAccountsView {
             lines.push(Line::from(vec![Span::styled(
                 error.clone(),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(""));
+        }
+        if let Some(feedback) = &self.feedback {
+            let (message, color) = match feedback {
+                LoginAccountsFeedback::Info(message) => (message, Color::Green),
+                LoginAccountsFeedback::Error(message) => (message, Color::Red),
+            };
+            lines.push(Line::from(vec![Span::styled(
+                message.clone(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             )]));
             lines.push(Line::from(""));
         }
@@ -495,11 +584,27 @@ impl Renderable for LoginAccountsView {
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::styled(" Select  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
+                "d",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Disconnect  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
                 "Esc",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Close", Style::default().fg(Color::DarkGray)),
         ]));
+
+        if let LoginAccountsMode::ConfirmRemove { label, .. } = &self.mode {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                format!("Disconnect {label}?"),
+                Style::default().add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from("Press Enter to disconnect or Esc to cancel."));
+        }
 
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })

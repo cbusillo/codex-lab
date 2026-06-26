@@ -272,6 +272,82 @@ async fn login_slash_command_stored_account_selection_switches_account() {
 }
 
 #[tokio::test]
+async fn login_slash_command_disconnects_stored_account_after_confirmation() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-test-secret-value".to_string(),
+        Some("Automation key".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("insert api key account");
+
+    chat.dispatch_command(SlashCommand::Login);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Disconnect Automation key?"));
+    assert!(popup.contains("Press Enter to disconnect or Esc to cancel."));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::RemoveAuthAccount {
+            selection,
+        }) if selection.account_id == account.id && selection.label == "Automation key"
+    );
+}
+
+#[tokio::test]
+async fn login_slash_command_disconnect_confirmation_can_be_cancelled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-test-secret-value".to_string(),
+        Some("Automation key".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("insert api key account");
+
+    chat.dispatch_command(SlashCommand::Login);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(render_bottom_popup(&chat, /*width*/ 100).contains("Manage Accounts"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn login_slash_command_disconnects_active_account_after_confirmation() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-test-secret-value".to_string(),
+        Some("Automation key".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("insert api key account");
+    codex_login::set_active_account_id(&chat.config.codex_home, Some(account.id.clone()))
+        .expect("set active account");
+
+    chat.dispatch_command(SlashCommand::Login);
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("(current)"));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    assert!(render_bottom_popup(&chat, /*width*/ 100).contains("Disconnect Automation key?"));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::RemoveAuthAccount {
+            selection,
+        }) if selection.account_id == account.id && selection.label == "Automation key"
+    );
+}
+
+#[tokio::test]
 async fn login_slash_command_stored_account_selectable_from_auth_profile() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let account = codex_login::upsert_api_key_account(

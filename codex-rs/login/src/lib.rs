@@ -58,6 +58,7 @@ pub use auth_account_import::import_auth_accounts_from_auth_homes;
 pub use auth_accounts::StoredAccount;
 pub use auth_accounts::activate_account;
 pub use auth_accounts::auth_for_account;
+pub use auth_accounts::clear_active_account;
 pub use auth_accounts::commit_active_account;
 pub use auth_accounts::find_account;
 pub use auth_accounts::get_active_account_id;

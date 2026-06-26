@@ -8,6 +8,8 @@ use super::*;
 use crate::app::PendingDirectLoginAddAccount;
 use crate::app_event::AuthAccountSelection;
 use crate::app_event::AuthProfileSelection;
+use crate::app_event::RemoveAuthAccountSelection;
+use crate::bottom_pane::LoginAccountsFeedback;
 use crate::bottom_pane::LoginAddAccountState;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::CancelLoginAccountParams;
@@ -1215,6 +1217,230 @@ impl App {
                 ));
             }
         }
+    }
+
+    pub(super) async fn remove_auth_account(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        selection: RemoveAuthAccountSelection,
+    ) {
+        if !self.pending_primary_events.is_empty() {
+            self.chat_widget.add_error_message(
+                "Cannot disconnect stored accounts while the primary thread is still attaching."
+                    .to_string(),
+            );
+            return;
+        }
+
+        let was_default_active = codex_login::get_active_account_id(&self.config.codex_home)
+            .ok()
+            .flatten()
+            .is_some_and(|active_id| active_id == selection.account_id);
+        let current_session_uses_default_auth_home =
+            self.config.auth_home == self.config.codex_home;
+        let needs_session_restart = was_default_active && current_session_uses_default_auth_home;
+        if needs_session_restart
+            && !matches!(self.app_server_target, crate::AppServerTarget::Embedded)
+        {
+            self.chat_widget.add_error_message(
+                "/login active-account disconnect requires an embedded Codex Lab app server."
+                    .to_string(),
+            );
+            self.chat_widget.add_info_message(
+                "Use an embedded Codex Lab app server to disconnect the active stored account from /login."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
+        let removed =
+            match codex_login::remove_account(&self.config.codex_home, &selection.account_id) {
+                Ok(removed) => removed,
+                Err(err) => {
+                    self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(
+                            LoginAccountsFeedback::Error(format!(
+                                "Failed to disconnect {}: {err}",
+                                selection.label
+                            )),
+                        ));
+                    return;
+                }
+            };
+
+        let Some(_removed) = removed else {
+            self.chat_widget
+                .show_login_accounts_view_with_feedback(Some(LoginAccountsFeedback::Error(
+                    format!("Stored account {} no longer exists.", selection.label),
+                )));
+            return;
+        };
+
+        let mut feedback =
+            LoginAccountsFeedback::Info(format!("Disconnected {}.", selection.label));
+
+        if was_default_active {
+            match codex_login::get_active_account_id(&self.config.codex_home) {
+                Ok(Some(fallback_account_id)) => {
+                    if let Err(err) = codex_login::activate_account(
+                        &self.config.codex_home,
+                        &fallback_account_id,
+                        self.config.cli_auth_credentials_store_mode,
+                    ) {
+                        let clear_result = codex_login::clear_active_account(
+                            &self.config.codex_home,
+                            self.config.cli_auth_credentials_store_mode,
+                        );
+                        if let Err(clear_err) = clear_result {
+                            self.chat_widget.show_login_accounts_view_with_feedback(Some(
+                                LoginAccountsFeedback::Error(format!(
+                                    "Disconnected {}, but failed to activate the next account ({err}) or clear active auth ({clear_err}).",
+                                    selection.label
+                                )),
+                            ));
+                            return;
+                        }
+                        feedback = LoginAccountsFeedback::Error(format!(
+                            "Disconnected {}, but failed to activate the next account: {err}. Active auth was cleared.",
+                            selection.label
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    if let Err(err) = codex_login::clear_active_account(
+                        &self.config.codex_home,
+                        self.config.cli_auth_credentials_store_mode,
+                    ) {
+                        self.chat_widget
+                            .show_login_accounts_view_with_feedback(Some(
+                                LoginAccountsFeedback::Error(format!(
+                                    "Disconnected {}, but failed to clear active auth: {err}",
+                                    selection.label
+                                )),
+                            ));
+                        return;
+                    }
+                }
+                Err(err) => {
+                    self.chat_widget.show_login_accounts_view_with_feedback(Some(
+                        LoginAccountsFeedback::Error(format!(
+                            "Disconnected {}, but failed to read the next active account: {err}",
+                            selection.label
+                        )),
+                    ));
+                    return;
+                }
+            }
+
+            if needs_session_restart {
+                if let Err(err) = self
+                    .restart_default_auth_session_after_account_removal(
+                        tui,
+                        app_server,
+                        &selection.label,
+                    )
+                    .await
+                {
+                    self.chat_widget.add_error_message(err);
+                    return;
+                }
+            }
+        }
+
+        self.chat_widget
+            .show_login_accounts_view_with_feedback(Some(feedback));
+    }
+
+    async fn restart_default_auth_session_after_account_removal(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        label: &str,
+    ) -> Result<(), String> {
+        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            return Ok(());
+        }
+
+        let default_auth_home = self.config.codex_home.clone();
+        let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            self.config.codex_home.to_path_buf(),
+            default_auth_home.to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.chatgpt_base_url.clone(),
+        )
+        .await;
+        let config = self
+            .config_for_auth_profile_switch(
+                default_auth_home,
+                replacement_cloud_config_bundle.clone(),
+            )
+            .await
+            .map_err(|err| format!("Failed to load config after disconnecting {label}: {err}"))?;
+
+        let replacement_client = crate::start_embedded_app_server(
+            self.arg0_paths.clone(),
+            config.clone(),
+            self.cli_kv_overrides.clone(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            replacement_cloud_config_bundle.clone(),
+            self.feedback.clone(),
+            /*log_db*/ None,
+            self.state_db.clone(),
+            self.environment_manager.clone(),
+        )
+        .await
+        .map(AppServerClient::InProcess)
+        .map_err(|err| {
+            format!("Failed to restart app server after disconnecting {label}: {err}")
+        })?;
+
+        let mut replacement_session =
+            AppServerSession::new(replacement_client, app_server.thread_params_mode())
+                .with_remote_cwd_override(app_server.remote_cwd_override().map(PathBuf::from));
+        let started = match replacement_session
+            .start_thread_with_session_start_source(&config, Some(ThreadStartSource::Clear))
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                if let Err(shutdown_err) = replacement_session.shutdown().await {
+                    tracing::warn!(
+                        "failed to shut down replacement app server after account removal start failure: {shutdown_err}"
+                    );
+                }
+                return Err(format!(
+                    "Failed to start session after disconnecting {label}: {err}"
+                ));
+            }
+        };
+
+        self.shutdown_current_thread(app_server).await;
+        let tracked_thread_ids: Vec<ThreadId> =
+            self.thread_event_channels.keys().copied().collect();
+        for thread_id in tracked_thread_ids {
+            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
+                tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
+            }
+        }
+
+        let old_client = app_server.swap_client(replacement_session.into_client());
+        self.config = config;
+        self.cloud_config_bundle = replacement_cloud_config_bundle;
+        if let Err(err) = old_client.shutdown().await {
+            tracing::warn!("failed to shut down previous app server after account removal: {err}");
+        }
+
+        self.replace_chat_widget_with_app_server_thread(
+            tui, app_server, started, /*initial_user_message*/ None,
+        )
+        .await
+        .map_err(|err| format!("Failed to attach after disconnecting {label}: {err}"))?;
+        tui.frame_requester().schedule_frame();
+        Ok(())
     }
 
     pub(super) async fn start_login_add_account_chatgpt(

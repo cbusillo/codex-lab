@@ -122,6 +122,7 @@ pub(crate) use list_selection_view::SideContentWidth;
 pub(crate) use list_selection_view::popup_content_width;
 pub(crate) use list_selection_view::side_by_side_layout_widths;
 pub(crate) use login_accounts_view::LOGIN_ADD_ACCOUNT_VIEW_ID;
+pub(crate) use login_accounts_view::LoginAccountsFeedback;
 pub(crate) use login_accounts_view::LoginAccountsView;
 pub(crate) use login_accounts_view::LoginAddAccountState;
 pub(crate) use login_accounts_view::LoginAddAccountView;

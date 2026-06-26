@@ -90,6 +90,12 @@ pub(crate) struct AuthAccountSelection {
     pub(crate) label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoveAuthAccountSelection {
+    pub(crate) account_id: String,
+    pub(crate) label: String,
+}
+
 impl RealtimeAudioDeviceKind {
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -282,6 +288,11 @@ pub(crate) enum AppEvent {
     /// Start a fresh session using credentials from the selected stored account.
     SwitchAuthAccount {
         selection: AuthAccountSelection,
+    },
+
+    /// Remove the selected stored account from the default account store.
+    RemoveAuthAccount {
+        selection: RemoveAuthAccountSelection,
     },
 
     /// Request to exit the application due to a fatal error.
