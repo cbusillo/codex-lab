@@ -266,6 +266,8 @@ use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
 use crate::auto_review_denials;
 use crate::auto_review_denials::RecentAutoReviewDenials;
+use crate::bottom_pane::ACCOUNT_SWITCH_SETTINGS_VIEW_ID;
+use crate::bottom_pane::AccountSwitchSettingsView;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
@@ -1063,6 +1065,21 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
+    pub(crate) fn open_account_switch_settings_popup(&mut self) {
+        let view = AccountSwitchSettingsView::new(
+            self.config.auto_switch_accounts_on_rate_limit,
+            self.config.api_key_fallback_on_all_accounts_limited,
+            self.app_event_tx.clone(),
+            self.bottom_pane.list_keymap(),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn dismiss_account_switch_settings_popup(&mut self) {
+        self.bottom_pane
+            .dismiss_active_view_if_id(ACCOUNT_SWITCH_SETTINGS_VIEW_ID);
+    }
+
     pub(crate) fn open_memories_enable_prompt(&mut self) {
         let items = vec![
             SelectionItem {
@@ -1102,6 +1119,14 @@ impl ChatWidget {
     pub(crate) fn set_memory_settings(&mut self, use_memories: bool, generate_memories: bool) {
         self.config.memories.use_memories = use_memories;
         self.config.memories.generate_memories = generate_memories;
+    }
+
+    pub(crate) fn set_auto_switch_accounts_on_rate_limit(&mut self, enabled: bool) {
+        self.config.auto_switch_accounts_on_rate_limit = enabled;
+    }
+
+    pub(crate) fn set_api_key_fallback_on_all_accounts_limited(&mut self, enabled: bool) {
+        self.config.api_key_fallback_on_all_accounts_limited = enabled;
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {

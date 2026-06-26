@@ -833,6 +833,15 @@ pub(crate) enum AppEvent {
         generate_memories: bool,
     },
 
+    /// Open account switching settings from the general settings menu.
+    OpenAccountSwitchSettings,
+
+    /// Update whether Codex should switch accounts after rate or usage limits.
+    SetAutoSwitchAccountsOnRateLimit(bool),
+
+    /// Update whether saved API keys may be used after all ChatGPT accounts are limited.
+    SetApiKeyFallbackOnAllAccountsLimited(bool),
+
     /// Clear all persisted local memory artifacts via the app-server.
     ResetMemories,
 
