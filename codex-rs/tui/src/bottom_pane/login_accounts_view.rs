@@ -20,6 +20,8 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
+use std::path::Path;
+use std::path::PathBuf;
 use textwrap::wrap;
 
 use crate::account_label::account_display_label;
@@ -40,6 +42,9 @@ pub(crate) const LOGIN_ADD_ACCOUNT_VIEW_ID: &str = "login-add-account";
 /// Interactive view shown for `/login` to manage stored accounts.
 pub(crate) struct LoginAccountsView {
     app_event_tx: AppEventSender,
+    codex_home: PathBuf,
+    default_auth_home_is_current: bool,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     accounts: Vec<AccountRow>,
     selected: usize,
     error: Option<String>,
@@ -72,62 +77,27 @@ enum LoginAccountsMode {
 
 impl LoginAccountsView {
     pub(crate) fn new_with_feedback(
-        codex_home: &std::path::Path,
+        codex_home: &Path,
         app_event_tx: AppEventSender,
         default_auth_home_is_current: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
         feedback: Option<LoginAccountsFeedback>,
     ) -> Self {
-        let mut error = sync_account_store_from_auth(
+        let mut loaded = load_account_rows(
             codex_home,
             default_auth_home_is_current,
             auth_credentials_store_mode,
+            /*previously_selected_id*/ None,
         );
-        let active_account_id = default_auth_home_is_current
-            .then(|| {
-                codex_login::get_active_account_id(codex_home)
-                    .ok()
-                    .flatten()
-            })
-            .flatten();
-        let (mut accounts, error) = match codex_login::list_accounts(codex_home) {
-            Ok(accounts) => (
-                accounts
-                    .into_iter()
-                    .map(|account| AccountRow::from(account, active_account_id.as_deref()))
-                    .collect::<Vec<_>>(),
-                error,
-            ),
-            Err(err) => {
-                if error.is_none() {
-                    error = Some(format!("Failed to read accounts: {err}"));
-                }
-                (Vec::new(), error)
-            }
-        };
-
-        accounts.sort_by(|left, right| {
-            account_mode_priority(left.mode)
-                .cmp(&account_mode_priority(right.mode))
-                .then_with(|| {
-                    left.label
-                        .to_ascii_lowercase()
-                        .cmp(&right.label.to_ascii_lowercase())
-                })
-                .then_with(|| left.label.cmp(&right.label))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-
-        let selected = active_account_id
-            .as_ref()
-            .and_then(|id| accounts.iter().position(|account| &account.id == id))
-            .unwrap_or(0);
 
         Self {
             app_event_tx,
-            accounts,
-            selected,
-            error,
+            codex_home: codex_home.to_path_buf(),
+            default_auth_home_is_current,
+            auth_credentials_store_mode,
+            accounts: loaded.accounts,
+            selected: loaded.selected,
+            error: loaded.error.take(),
             feedback,
             mode: LoginAccountsMode::List,
             is_complete: false,
@@ -211,6 +181,23 @@ impl LoginAccountsView {
         };
     }
 
+    fn reload_accounts(&mut self) {
+        let previously_selected_id = self
+            .accounts
+            .get(self.selected)
+            .map(|account| account.id.clone());
+        let loaded = load_account_rows(
+            &self.codex_home,
+            self.default_auth_home_is_current,
+            self.auth_credentials_store_mode,
+            previously_selected_id,
+        );
+        self.accounts = loaded.accounts;
+        self.selected = loaded.selected;
+        self.error = loaded.error;
+        self.feedback = None;
+    }
+
     fn cancel_confirm_remove(&mut self) {
         self.mode = LoginAccountsMode::List;
     }
@@ -270,6 +257,7 @@ impl BottomPaneView for LoginAccountsView {
             KeyCode::Up => self.select_previous(),
             KeyCode::Down => self.select_next(),
             KeyCode::Char('d') => self.handle_disconnect(),
+            KeyCode::Char('r') => self.reload_accounts(),
             KeyCode::Enter => self.handle_enter(),
             _ => {}
         }
@@ -962,8 +950,74 @@ fn account_detail(account: &StoredAccount) -> Option<String> {
     (!details.is_empty()).then(|| details.join(" - "))
 }
 
+struct LoadedLoginAccounts {
+    accounts: Vec<AccountRow>,
+    selected: usize,
+    error: Option<String>,
+}
+
+fn load_account_rows(
+    codex_home: &Path,
+    default_auth_home_is_current: bool,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    previously_selected_id: Option<String>,
+) -> LoadedLoginAccounts {
+    let mut error = sync_account_store_from_auth(
+        codex_home,
+        default_auth_home_is_current,
+        auth_credentials_store_mode,
+    );
+    let active_account_id = default_auth_home_is_current
+        .then(|| {
+            codex_login::get_active_account_id(codex_home)
+                .ok()
+                .flatten()
+        })
+        .flatten();
+    let mut accounts = match codex_login::list_accounts(codex_home) {
+        Ok(accounts) => accounts
+            .into_iter()
+            .map(|account| AccountRow::from(account, active_account_id.as_deref()))
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            if error.is_none() {
+                error = Some(format!("Failed to read accounts: {err}"));
+            }
+            Vec::new()
+        }
+    };
+
+    accounts.sort_by(|left, right| {
+        account_mode_priority(left.mode)
+            .cmp(&account_mode_priority(right.mode))
+            .then_with(|| {
+                left.label
+                    .to_ascii_lowercase()
+                    .cmp(&right.label.to_ascii_lowercase())
+            })
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let selected = previously_selected_id
+        .as_ref()
+        .and_then(|id| accounts.iter().position(|account| &account.id == id))
+        .or_else(|| {
+            active_account_id
+                .as_ref()
+                .and_then(|id| accounts.iter().position(|account| &account.id == id))
+        })
+        .unwrap_or(0);
+
+    LoadedLoginAccounts {
+        accounts,
+        selected,
+        error,
+    }
+}
+
 fn sync_account_store_from_auth(
-    codex_home: &std::path::Path,
+    codex_home: &Path,
     default_auth_home_is_current: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> Option<String> {
