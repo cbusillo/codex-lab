@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_event::AuthProfileSelection;
+use crate::app_event::SecretApiKey;
 use crate::bottom_pane::LoginAddAccountState;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use base64::Engine;
@@ -462,11 +463,66 @@ async fn login_slash_command_add_view_starts_chatgpt_login() {
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("Add Account"));
     assert!(popup.contains("ChatGPT sign-in"));
-    assert!(popup.contains("Open the auth webpage"));
+    assert!(popup.contains("API key"));
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::LoginStartChatGpt));
+}
+
+#[tokio::test]
+async fn login_add_account_view_saves_api_key_selection() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.open_login_add_account_view();
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Paste your OpenAI API key"));
+
+    chat.handle_paste("sk-test-added-key".to_string());
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("*****************"));
+    assert!(!popup.contains("sk-test-added-key"));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::LoginAddAccountApiKey { api_key })
+            if api_key.expose_secret() == "sk-test-added-key"
+    );
+
+    let debug = format!(
+        "{:?}",
+        AppEvent::LoginAddAccountApiKey {
+            api_key: SecretApiKey::new("sk-test-added-key".to_string()),
+        }
+    );
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("sk-test-added-key"));
+}
+
+#[tokio::test]
+async fn login_add_account_api_key_input_accepts_q_character() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.open_login_add_account_view();
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Paste your OpenAI API key"));
+    assert!(popup.contains("*"));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::LoginAddAccountApiKey { api_key }) if api_key.expose_secret() == "q"
+    );
 }
 
 #[tokio::test]
@@ -483,6 +539,43 @@ async fn login_add_account_view_shows_browser_waiting_state() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("Finish signing in with ChatGPT in your browser"));
+    assert!(popup.contains("https://auth.example.com/start"));
+    assert!(popup.contains("Press C to use a code."));
+}
+
+#[tokio::test]
+async fn login_add_account_waiting_state_can_switch_to_device_code() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.open_login_add_account_view();
+    assert!(
+        chat.update_login_add_account_view(LoginAddAccountState::Waiting {
+            login_id: "login-1".to_string(),
+            auth_url: "https://auth.example.com/start".to_string(),
+        })
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::LoginStartDeviceCode));
+}
+
+#[tokio::test]
+async fn login_add_account_waiting_state_ignores_ctrl_c_device_code_shortcut() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.open_login_add_account_view();
+    assert!(
+        chat.update_login_add_account_view(LoginAddAccountState::Waiting {
+            login_id: "login-1".to_string(),
+            auth_url: "https://auth.example.com/start".to_string(),
+        })
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(_)));
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("https://auth.example.com/start"));
 }
 

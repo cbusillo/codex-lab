@@ -197,17 +197,34 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
             });
             LOGGER.write_json_line(value);
         }
+        AppEvent::LoginAddAccountApiKey { .. } => {
+            let value = json!({
+                "ts": now_ts(),
+                "dir": "to_tui",
+                "kind": "app_event",
+                "variant": "LoginAddAccountApiKey",
+            });
+            LOGGER.write_json_line(value);
+        }
         // Noise or control flow – record variant only
         other => {
             let value = json!({
                 "ts": now_ts(),
                 "dir": "to_tui",
                 "kind": "app_event",
-                "variant": format!("{other:?}").split('(').next().unwrap_or("app_event"),
+                "variant": app_event_variant_name(other),
             });
             LOGGER.write_json_line(value);
         }
     }
+}
+
+fn app_event_variant_name(event: &AppEvent) -> String {
+    let name = format!("{event:?}");
+    let end = name
+        .find(|ch| matches!(ch, '(' | ' ' | '{'))
+        .unwrap_or(name.len());
+    name[..end].to_string()
 }
 
 pub(crate) fn log_outbound_op(op: &AppCommand) {

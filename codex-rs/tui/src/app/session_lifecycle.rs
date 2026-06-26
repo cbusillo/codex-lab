@@ -6,6 +6,8 @@
 
 use super::*;
 use crate::app::PendingDirectLoginAddAccount;
+use crate::app::PendingDirectLoginAddAccountCancellation;
+use crate::app::PendingDirectLoginAddAccountKind;
 use crate::app_event::AuthAccountSelection;
 use crate::app_event::AuthProfileSelection;
 use crate::app_event::RemoveAuthAccountSelection;
@@ -22,6 +24,7 @@ use codex_config::CloudConfigBundleLoader;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::CLIENT_ID;
 use codex_login::ServerOptions;
+use tokio_util::sync::CancellationToken;
 
 struct AuthSwitchRollback {
     codex_home: PathBuf,
@@ -1495,12 +1498,212 @@ impl App {
         }
     }
 
+    pub(super) async fn save_login_add_account_api_key(
+        &mut self,
+        app_server: &mut AppServerSession,
+        api_key: &str,
+    ) {
+        let trimmed_key = api_key.trim();
+        if trimmed_key.is_empty() {
+            self.chat_widget
+                .update_login_add_account_view(LoginAddAccountState::ApiKeyFailed(
+                    "API key cannot be empty".to_string(),
+                ));
+            return;
+        }
+
+        self.chat_widget
+            .update_login_add_account_view(LoginAddAccountState::SavingApiKey);
+
+        if self.config.auth_home != self.config.codex_home {
+            // /login manages the default stored-account list; named auth
+            // profiles use their dedicated login commands instead.
+            match codex_login::login_with_api_key(
+                &self.config.codex_home,
+                trimmed_key,
+                self.config.cli_auth_credentials_store_mode,
+            ) {
+                Ok(()) => {
+                    self.chat_widget
+                        .update_login_add_account_view(LoginAddAccountState::Complete);
+                }
+                Err(err) => {
+                    self.chat_widget.update_login_add_account_view(
+                        LoginAddAccountState::ApiKeyFailed(format!(
+                            "Failed to store API key: {err}"
+                        )),
+                    );
+                }
+            }
+            return;
+        }
+
+        let response = app_server
+            .request_handle()
+            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
+                request_id: app_server.next_request_id(),
+                params: LoginAccountParams::ApiKey {
+                    api_key: trimmed_key.to_string(),
+                },
+            })
+            .await;
+
+        match response {
+            Ok(LoginAccountResponse::ApiKey {}) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Complete);
+            }
+            Ok(other) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::ApiKeyFailed(format!(
+                        "Unexpected login response: {other:?}"
+                    )));
+            }
+            Err(err) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::ApiKeyFailed(format!(
+                        "Failed to store API key: {err}"
+                    )));
+            }
+        }
+    }
+
+    pub(super) async fn start_login_add_account_device_code(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        self.cancel_login_add_account_chatgpt(app_server).await;
+        if !self
+            .chat_widget
+            .update_login_add_account_view(LoginAddAccountState::DeviceCodeStarting)
+        {
+            return;
+        }
+
+        if self.config.auth_home != self.config.codex_home {
+            self.start_default_store_login_add_account_device_code()
+                .await;
+            return;
+        }
+
+        let response = app_server
+            .request_handle()
+            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
+                request_id: app_server.next_request_id(),
+                params: LoginAccountParams::ChatgptDeviceCode,
+            })
+            .await;
+
+        match response {
+            Ok(LoginAccountResponse::ChatgptDeviceCode {
+                login_id,
+                verification_url,
+                user_code,
+            }) => {
+                self.pending_login_add_account_id = Some(login_id.clone());
+                self.completed_login_add_account_id = None;
+                if !self.chat_widget.update_login_add_account_view(
+                    LoginAddAccountState::DeviceCodeWaiting {
+                        login_id: login_id.clone(),
+                        verification_url,
+                        user_code,
+                    },
+                ) {
+                    self.pending_login_add_account_id = None;
+                    self.completed_login_add_account_id = None;
+                    let request_handle = app_server.request_handle();
+                    if let Err(err) = request_handle
+                        .request_typed::<CancelLoginAccountResponse>(
+                            ClientRequest::CancelLoginAccount {
+                                request_id: app_server.next_request_id(),
+                                params: CancelLoginAccountParams { login_id },
+                            },
+                        )
+                        .await
+                    {
+                        tracing::warn!("failed to cancel add-account device-code login: {err}");
+                    }
+                }
+            }
+            Ok(other) => {
+                self.chat_widget.update_login_add_account_view(
+                    LoginAddAccountState::DeviceCodeFailed(format!(
+                        "Unexpected login response: {other:?}"
+                    )),
+                );
+            }
+            Err(err) => {
+                self.chat_widget.update_login_add_account_view(
+                    LoginAddAccountState::DeviceCodeFailed(format!(
+                        "Failed to start code login: {err}"
+                    )),
+                );
+            }
+        }
+    }
+
+    async fn start_default_store_login_add_account_device_code(&mut self) {
+        let opts = ServerOptions::new(
+            self.config.codex_home.to_path_buf(),
+            CLIENT_ID.to_string(),
+            self.config.forced_chatgpt_workspace_id.clone(),
+            self.config.cli_auth_credentials_store_mode,
+        );
+
+        let device_code = match codex_login::request_device_code(&opts).await {
+            Ok(device_code) => device_code,
+            Err(err) => {
+                self.chat_widget.update_login_add_account_view(
+                    LoginAddAccountState::DeviceCodeFailed(format!(
+                        "Failed to start code login: {err}"
+                    )),
+                );
+                return;
+            }
+        };
+
+        self.direct_login_add_account_attempt_id =
+            self.direct_login_add_account_attempt_id.wrapping_add(1);
+        let attempt_id = self.direct_login_add_account_attempt_id;
+        let login_id = format!("default-device-code-{attempt_id}");
+        let verification_url = device_code.verification_url.clone();
+        let user_code = device_code.user_code.clone();
+        let completion_tx = self.app_event_tx.clone();
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = cancel_for_task.cancelled() => Err("Login was not completed".to_string()),
+                result = codex_login::complete_device_code_login(opts, device_code) => {
+                    result.map_err(|err| err.to_string())
+                }
+            };
+            completion_tx.send(AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result });
+        });
+
+        self.pending_direct_login_add_account = Some(PendingDirectLoginAddAccount {
+            attempt_id,
+            cancellation: PendingDirectLoginAddAccountCancellation::DeviceCode(cancel),
+        });
+        if !self.chat_widget.update_login_add_account_view(
+            LoginAddAccountState::DeviceCodeWaiting {
+                login_id,
+                verification_url,
+                user_code,
+            },
+        ) {
+            if let Some(pending) = self.pending_direct_login_add_account.take() {
+                pending.cancellation.cancel();
+            }
+        }
+    }
+
     pub(super) async fn cancel_login_add_account_chatgpt(
         &mut self,
         app_server: &mut AppServerSession,
     ) {
         if let Some(pending) = self.pending_direct_login_add_account.take() {
-            pending.shutdown.shutdown();
+            pending.cancellation.cancel();
             return;
         }
 
@@ -1558,7 +1761,7 @@ impl App {
 
         self.pending_direct_login_add_account = Some(PendingDirectLoginAddAccount {
             attempt_id,
-            shutdown,
+            cancellation: PendingDirectLoginAddAccountCancellation::Browser(shutdown),
         });
         self.open_url_in_browser(auth_url.clone());
         if !self
@@ -1569,7 +1772,7 @@ impl App {
             })
         {
             if let Some(pending) = self.pending_direct_login_add_account.take() {
-                pending.shutdown.shutdown();
+                pending.cancellation.cancel();
             }
         }
     }
@@ -1588,17 +1791,26 @@ impl App {
             return;
         }
 
-        self.pending_direct_login_add_account = None;
+        let Some(pending) = self.pending_direct_login_add_account.take() else {
+            return;
+        };
+        let login_kind = pending.cancellation.kind();
         match result {
             Ok(()) => {
                 self.chat_widget
                     .update_login_add_account_view(LoginAddAccountState::Complete);
             }
             Err(err) => {
-                self.chat_widget
-                    .update_login_add_account_view(LoginAddAccountState::Failed(format!(
-                        "ChatGPT login did not complete: {err}"
-                    )));
+                let message = format!("ChatGPT login did not complete: {err}");
+                let state = match login_kind {
+                    PendingDirectLoginAddAccountKind::Browser => {
+                        LoginAddAccountState::Failed(message)
+                    }
+                    PendingDirectLoginAddAccountKind::DeviceCode => {
+                        LoginAddAccountState::DeviceCodeFailed(message)
+                    }
+                };
+                self.chat_widget.update_login_add_account_view(state);
             }
         }
     }

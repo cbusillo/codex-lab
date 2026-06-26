@@ -330,6 +330,13 @@ impl App {
             AppEvent::LoginStartChatGpt => {
                 self.start_login_add_account_chatgpt(app_server).await;
             }
+            AppEvent::LoginAddAccountApiKey { api_key } => {
+                self.save_login_add_account_api_key(app_server, api_key.expose_secret())
+                    .await;
+            }
+            AppEvent::LoginStartDeviceCode => {
+                self.start_login_add_account_device_code(app_server).await;
+            }
             AppEvent::LoginCancelChatGpt => {
                 self.cancel_login_add_account_chatgpt(app_server).await;
             }
