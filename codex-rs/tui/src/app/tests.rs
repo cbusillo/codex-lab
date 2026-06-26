@@ -30,11 +30,14 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::PermissionProfileSnapshot;
 use crate::legacy_core::config::TerminalResizeReflowMaxRows;
+use codex_app_server_protocol::AccountLoginCompletedNotification;
+use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AdditionalFileSystemPermissions;
 use codex_app_server_protocol::AdditionalNetworkPermissions;
 use codex_app_server_protocol::AdditionalPermissionProfile;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
@@ -3617,6 +3620,126 @@ async fn side_thread_ignores_global_mcp_startup_notifications() {
 }
 
 #[tokio::test]
+async fn login_add_account_ignores_stale_app_server_success_update() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+    app.pending_login_add_account_id = Some("new-login".to_string());
+    app.chat_widget.open_login_add_account_view();
+    app.chat_widget.update_login_add_account_view(
+        crate::bottom_pane::LoginAddAccountState::Waiting {
+            login_id: "new-login".to_string(),
+            auth_url: "https://auth.example.com/new-login".to_string(),
+        },
+    );
+
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountLoginCompleted(AccountLoginCompletedNotification {
+                login_id: Some("old-login".to_string()),
+                success: true,
+                error: None,
+            }),
+        ),
+    )
+    .await;
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountUpdated(AccountUpdatedNotification {
+                auth_mode: Some(AuthMode::Chatgpt),
+                plan_type: None,
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        app.pending_login_add_account_id.as_deref(),
+        Some("new-login")
+    );
+    assert_eq!(app.completed_login_add_account_id, None);
+
+    app.chat_widget
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            KeyModifiers::NONE,
+        ));
+    assert!(matches!(
+        app_event_rx.try_recv(),
+        Ok(AppEvent::LoginCancelChatGpt)
+    ));
+
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountLoginCompleted(AccountLoginCompletedNotification {
+                login_id: Some("new-login".to_string()),
+                success: true,
+                error: None,
+            }),
+        ),
+    )
+    .await;
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountUpdated(AccountUpdatedNotification {
+                auth_mode: Some(AuthMode::Chatgpt),
+                plan_type: None,
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        app.pending_login_add_account_id.as_deref(),
+        Some("new-login")
+    );
+    assert_eq!(app.completed_login_add_account_id, None);
+
+    app.chat_widget.open_login_add_account_view();
+    app.chat_widget.update_login_add_account_view(
+        crate::bottom_pane::LoginAddAccountState::Waiting {
+            login_id: "new-login".to_string(),
+            auth_url: "https://auth.example.com/new-login".to_string(),
+        },
+    );
+
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountLoginCompleted(AccountLoginCompletedNotification {
+                login_id: Some("new-login".to_string()),
+                success: true,
+                error: None,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        app.completed_login_add_account_id.as_deref(),
+        Some("new-login")
+    );
+
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountUpdated(AccountUpdatedNotification {
+                auth_mode: Some(AuthMode::Chatgpt),
+                plan_type: None,
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(app.pending_login_add_account_id, None);
+    assert_eq!(app.completed_login_add_account_id, None);
+}
+
+#[tokio::test]
 async fn side_restore_user_message_puts_inline_question_back_in_composer() {
     let mut app = make_test_app().await;
     let user_message = crate::chatwidget::UserMessage::from("side question");
@@ -4050,6 +4173,10 @@ async fn make_test_app() -> App {
         pending_startup_thread_start: false,
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
+        pending_direct_login_add_account: None,
+        direct_login_add_account_attempt_id: 0,
+        pending_login_add_account_id: None,
+        completed_login_add_account_id: None,
         pending_auth_profile_login: None,
     }
 }
@@ -4119,6 +4246,10 @@ async fn make_test_app_with_channels() -> (
             pending_startup_thread_start: false,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            pending_direct_login_add_account: None,
+            direct_login_add_account_attempt_id: 0,
+            pending_login_add_account_id: None,
+            completed_login_add_account_id: None,
             pending_auth_profile_login: None,
         },
         rx,

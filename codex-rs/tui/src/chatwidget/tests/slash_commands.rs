@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_event::AuthProfileSelection;
+use crate::bottom_pane::LoginAddAccountState;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use base64::Engine;
 use chrono::Utc;
@@ -239,21 +240,13 @@ async fn login_slash_command_lists_selectable_stored_accounts() {
 }
 
 #[tokio::test]
-async fn login_slash_command_add_selection_starts_profile_login() {
+async fn login_slash_command_add_selection_opens_add_account_flow() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
 
     chat.dispatch_command(SlashCommand::Login);
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::SwitchAuthProfile {
-            selection: AuthProfileSelection::Named {
-                profile_name,
-                login_after_switch,
-            },
-        }) if profile_name == "account" && login_after_switch
-    );
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowLoginAddAccount));
 }
 
 #[tokio::test]
@@ -381,36 +374,55 @@ async fn login_slash_command_add_selection_moves_after_account_rows() {
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::SwitchAuthProfile {
-            selection: AuthProfileSelection::Named {
-                profile_name,
-                login_after_switch,
-            },
-        }) if profile_name == "account" && login_after_switch
-    );
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowLoginAddAccount));
 }
 
 #[tokio::test]
-async fn login_slash_command_add_selection_avoids_existing_profile_name() {
+async fn login_slash_command_add_view_starts_chatgpt_login() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    codex_login::record_auth_profile_login(&chat.config.codex_home, "account", None, None)
-        .expect("record profile login");
 
-    chat.dispatch_command(SlashCommand::Login);
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.open_login_add_account_view();
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Add Account"));
+    assert!(popup.contains("ChatGPT sign-in"));
+    assert!(popup.contains("Open the auth webpage"));
+
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::SwitchAuthProfile {
-            selection: AuthProfileSelection::Named {
-                profile_name,
-                login_after_switch,
-            },
-        }) if profile_name == "account-2" && login_after_switch
+    assert_matches!(rx.try_recv(), Ok(AppEvent::LoginStartChatGpt));
+}
+
+#[tokio::test]
+async fn login_add_account_view_shows_browser_waiting_state() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.open_login_add_account_view();
+    assert!(
+        chat.update_login_add_account_view(LoginAddAccountState::Waiting {
+            login_id: "login-1".to_string(),
+            auth_url: "https://auth.example.com/start".to_string(),
+        })
     );
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Finish signing in with ChatGPT in your browser"));
+    assert!(popup.contains("https://auth.example.com/start"));
+}
+
+#[tokio::test]
+async fn login_slash_command_add_selection_works_from_named_auth_profile() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let profile_home =
+        codex_login::profile_home(&chat.config.codex_home, "work").expect("profile home path");
+    std::fs::create_dir_all(&profile_home).expect("create profile home");
+    chat.config.auth_home =
+        AbsolutePathBuf::from_absolute_path(profile_home).expect("profile home is absolute");
+
+    chat.dispatch_command(SlashCommand::Login);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowLoginAddAccount));
 }
 
 #[tokio::test]

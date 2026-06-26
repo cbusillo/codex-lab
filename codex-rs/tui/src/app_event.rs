@@ -256,6 +256,24 @@ pub(crate) enum AppEvent {
     /// Request app-server account logout, then exit after it succeeds.
     Logout,
 
+    /// Show the interactive account manager for `/login`.
+    ShowLoginAccounts,
+
+    /// Show the add-account flow from the account manager.
+    ShowLoginAddAccount,
+
+    /// Start a ChatGPT browser login from the add-account flow.
+    LoginStartChatGpt,
+
+    /// Cancel the active ChatGPT add-account login attempt.
+    LoginCancelChatGpt,
+
+    /// Direct default-store ChatGPT add-account login finished.
+    LoginAddAccountChatGptCompleted {
+        attempt_id: u64,
+        result: Result<(), String>,
+    },
+
     /// Start a fresh session using the selected auth profile for credential storage.
     SwitchAuthProfile {
         selection: AuthProfileSelection,

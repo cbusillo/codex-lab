@@ -55,6 +55,11 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
+    /// Active login id for the add-account view while it is waiting on browser auth.
+    fn active_login_add_account_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Handle Ctrl-C while this view is active.
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         CancellationEvent::NotHandled

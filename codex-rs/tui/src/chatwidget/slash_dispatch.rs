@@ -40,25 +40,11 @@ const LOGIN_USAGE: &str = "Usage: /login [default|<profile>|add <profile>]";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 
 impl ChatWidget {
-    fn show_login_accounts_view(&mut self) {
-        let profiles = match codex_login::list_auth_profiles(&self.config.codex_home) {
-            Ok(profiles) => profiles,
-            Err(err) => {
-                self.add_error_message(format!("Failed to list auth profiles: {err}"));
-                return;
-            }
-        };
-        let existing_profile_names = profiles
-            .iter()
-            .map(|profile| profile.name.as_str())
-            .chain(std::iter::once("default"))
-            .collect::<Vec<_>>();
-        let add_profile_name = next_login_profile_name(&existing_profile_names);
+    pub(crate) fn show_login_accounts_view(&mut self) {
         let default_auth_home_is_current = self.config.auth_home == self.config.codex_home;
         let view = LoginAccountsView::new(
             &self.config.codex_home,
             self.app_event_tx.clone(),
-            add_profile_name,
             default_auth_home_is_current,
             self.config.cli_auth_credentials_store_mode,
         );
@@ -1164,19 +1150,4 @@ impl ChatWidget {
         self.bottom_pane.drain_pending_submission_state();
         false
     }
-}
-
-fn next_login_profile_name(existing: &[&str]) -> String {
-    const PREFIX: &str = "account";
-    if !existing.contains(&PREFIX) {
-        return PREFIX.to_string();
-    }
-
-    for suffix in 2.. {
-        let candidate = format!("{PREFIX}-{suffix}");
-        if !existing.iter().any(|name| *name == candidate) {
-            return candidate;
-        }
-    }
-    unreachable!("unbounded suffix search should always return")
 }
