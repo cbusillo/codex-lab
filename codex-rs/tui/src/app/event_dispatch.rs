@@ -343,6 +343,9 @@ impl App {
             AppEvent::SwitchAuthAccount { selection } => {
                 self.switch_auth_account(tui, app_server, selection).await;
             }
+            AppEvent::RemoveAuthAccount { selection } => {
+                self.remove_auth_account(tui, app_server, selection).await;
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }

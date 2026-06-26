@@ -551,6 +551,47 @@ fn remove_account_promotes_remaining_account_when_active_is_removed() {
 }
 
 #[test]
+fn clear_active_account_removes_active_marker_and_auth_file() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = upsert_api_key_account(
+        temp.path(),
+        "sk-active".to_string(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("insert active account");
+    crate::save_auth(
+        temp.path(),
+        &crate::AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: Some("sk-active".to_string()),
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+        },
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("write auth file");
+
+    assert_eq!(
+        Some(stored.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+
+    clear_active_account(temp.path(), AuthCredentialsStoreMode::File).expect("clear active");
+
+    assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
+    assert_eq!(
+        None,
+        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+            .expect("auth should be readable")
+    );
+}
+
+#[test]
 fn remove_account_matching_credentials_removes_api_key_or_chatgpt_account() {
     let temp = TempDir::new().expect("tempdir");
     let api = upsert_api_key_account(

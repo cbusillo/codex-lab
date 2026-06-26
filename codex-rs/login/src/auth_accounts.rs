@@ -559,6 +559,14 @@ pub fn remove_account(codex_home: &Path, account_id: &str) -> io::Result<Option<
     Ok(removed)
 }
 
+pub fn clear_active_account(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<()> {
+    set_active_account_id(codex_home, None)?;
+    crate::delete_auth(codex_home, auth_credentials_store_mode).map(|_| ())
+}
+
 pub fn remove_account_matching_credentials(
     codex_home: &Path,
     mode: AuthMode,
