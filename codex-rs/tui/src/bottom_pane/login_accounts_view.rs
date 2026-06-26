@@ -931,14 +931,12 @@ fn account_detail(account: &StoredAccount) -> Option<String> {
     match account.mode {
         AuthMode::ApiKey => details.push("API key".to_string()),
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
-            details.push("ChatGPT".to_string());
-            if let Some(account_id) = account.tokens.as_ref().and_then(|tokens| {
-                tokens
-                    .account_id
-                    .as_deref()
-                    .or(tokens.id_token.chatgpt_account_id.as_deref())
-            }) {
-                details.push(account_id.to_string());
+            if let Some(plan) = account
+                .tokens
+                .as_ref()
+                .and_then(|tokens| tokens.id_token.get_chatgpt_plan_type())
+            {
+                details.push(format!("{plan} Plan"));
             }
         }
         AuthMode::AgentIdentity => details.push("agent identity".to_string()),
