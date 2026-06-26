@@ -241,6 +241,39 @@ async fn login_slash_command_lists_selectable_stored_accounts() {
 }
 
 #[tokio::test]
+async fn login_slash_command_refreshes_open_accounts_view() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-initial-key".to_string(),
+        Some("Initial key".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("insert initial api key account");
+
+    chat.dispatch_command(SlashCommand::Login);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Initial key"));
+    assert!(!popup.contains("Later key"));
+
+    codex_login::upsert_api_key_account(
+        &chat.config.codex_home,
+        "sk-later-key".to_string(),
+        Some("Later key".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("insert later api key account");
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(popup.contains("Initial key"));
+    assert!(popup.contains("Later key"));
+    assert!(popup.contains("Manage Accounts"));
+}
+
+#[tokio::test]
 async fn login_slash_command_add_selection_opens_add_account_flow() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
 
