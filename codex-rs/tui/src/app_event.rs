@@ -8,6 +8,7 @@
 //! Exit is modelled explicitly via `AppEvent::Exit(ExitMode)` so callers can request shutdown-first
 //! quits without reaching into the app loop or coupling to shutdown/exit sequencing.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
@@ -94,6 +95,25 @@ pub(crate) struct AuthAccountSelection {
 pub(crate) struct RemoveAuthAccountSelection {
     pub(crate) account_id: String,
     pub(crate) label: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SecretApiKey(String);
+
+impl SecretApiKey {
+    pub(crate) fn new(api_key: String) -> Self {
+        Self(api_key)
+    }
+
+    pub(crate) fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
 }
 
 impl RealtimeAudioDeviceKind {
@@ -270,6 +290,14 @@ pub(crate) enum AppEvent {
 
     /// Start a ChatGPT browser login from the add-account flow.
     LoginStartChatGpt,
+
+    /// Save an API key from the add-account flow.
+    LoginAddAccountApiKey {
+        api_key: SecretApiKey,
+    },
+
+    /// Start a ChatGPT device-code login from the add-account flow.
+    LoginStartDeviceCode,
 
     /// Cancel the active ChatGPT add-account login attempt.
     LoginCancelChatGpt,

@@ -581,7 +581,38 @@ pub(crate) struct App {
 
 pub(crate) struct PendingDirectLoginAddAccount {
     pub(crate) attempt_id: u64,
-    pub(crate) shutdown: codex_login::ShutdownHandle,
+    pub(crate) cancellation: PendingDirectLoginAddAccountCancellation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingDirectLoginAddAccountKind {
+    Browser,
+    DeviceCode,
+}
+
+pub(crate) enum PendingDirectLoginAddAccountCancellation {
+    Browser(codex_login::ShutdownHandle),
+    DeviceCode(tokio_util::sync::CancellationToken),
+}
+
+impl PendingDirectLoginAddAccountCancellation {
+    pub(crate) fn kind(&self) -> PendingDirectLoginAddAccountKind {
+        match self {
+            PendingDirectLoginAddAccountCancellation::Browser(_) => {
+                PendingDirectLoginAddAccountKind::Browser
+            }
+            PendingDirectLoginAddAccountCancellation::DeviceCode(_) => {
+                PendingDirectLoginAddAccountKind::DeviceCode
+            }
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        match self {
+            PendingDirectLoginAddAccountCancellation::Browser(shutdown) => shutdown.shutdown(),
+            PendingDirectLoginAddAccountCancellation::DeviceCode(token) => token.cancel(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

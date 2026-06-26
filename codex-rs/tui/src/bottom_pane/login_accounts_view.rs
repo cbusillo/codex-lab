@@ -5,6 +5,7 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::StoredAccount;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
@@ -26,6 +27,7 @@ use crate::account_label::account_mode_priority;
 use crate::app_event::AppEvent;
 use crate::app_event::AuthAccountSelection;
 use crate::app_event::RemoveAuthAccountSelection;
+use crate::app_event::SecretApiKey;
 use crate::app_event_sender::AppEventSender;
 use crate::render::renderable::Renderable;
 
@@ -293,8 +295,24 @@ impl BottomPaneView for LoginAccountsView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LoginAddAccountState {
     Choose,
+    ApiKey {
+        value: String,
+        error: Option<String>,
+    },
+    SavingApiKey,
     Starting,
-    Waiting { login_id: String, auth_url: String },
+    Waiting {
+        login_id: String,
+        auth_url: String,
+    },
+    DeviceCodeStarting,
+    DeviceCodeWaiting {
+        login_id: String,
+        verification_url: String,
+        user_code: String,
+    },
+    DeviceCodeFailed(String),
+    ApiKeyFailed(String),
     Failed(String),
     Complete,
 }
@@ -330,9 +348,15 @@ impl LoginAddAccountView {
 
     pub(crate) fn waiting_login_id(&self) -> Option<&str> {
         match &self.state {
-            LoginAddAccountState::Waiting { login_id, .. } => Some(login_id),
+            LoginAddAccountState::Waiting { login_id, .. }
+            | LoginAddAccountState::DeviceCodeWaiting { login_id, .. } => Some(login_id),
             LoginAddAccountState::Choose
+            | LoginAddAccountState::ApiKey { .. }
+            | LoginAddAccountState::SavingApiKey
             | LoginAddAccountState::Starting
+            | LoginAddAccountState::DeviceCodeStarting
+            | LoginAddAccountState::DeviceCodeFailed(_)
+            | LoginAddAccountState::ApiKeyFailed(_)
             | LoginAddAccountState::Failed(_)
             | LoginAddAccountState::Complete => None,
         }
@@ -341,7 +365,10 @@ impl LoginAddAccountView {
     fn finish(&mut self, completion: ViewCompletion) {
         if matches!(
             self.state,
-            LoginAddAccountState::Starting | LoginAddAccountState::Waiting { .. }
+            LoginAddAccountState::Starting
+                | LoginAddAccountState::Waiting { .. }
+                | LoginAddAccountState::DeviceCodeStarting
+                | LoginAddAccountState::DeviceCodeWaiting { .. }
         ) {
             self.app_event_tx.send(AppEvent::LoginCancelChatGpt);
         }
@@ -350,26 +377,79 @@ impl LoginAddAccountView {
     }
 
     fn handle_enter(&mut self) {
-        match self.state {
+        match &mut self.state {
             LoginAddAccountState::Choose | LoginAddAccountState::Failed(_) => {
                 if self.selected == 0 {
                     self.state = LoginAddAccountState::Starting;
                     self.app_event_tx.send(AppEvent::LoginStartChatGpt);
+                } else {
+                    self.state = LoginAddAccountState::ApiKey {
+                        value: String::new(),
+                        error: None,
+                    };
                 }
+            }
+            LoginAddAccountState::ApiKey { value, error } => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    *error = Some("API key cannot be empty".to_string());
+                } else {
+                    self.app_event_tx.send(AppEvent::LoginAddAccountApiKey {
+                        api_key: SecretApiKey::new(trimmed.to_string()),
+                    });
+                    self.state = LoginAddAccountState::SavingApiKey;
+                }
+            }
+            LoginAddAccountState::ApiKeyFailed(_) => {
+                self.state = LoginAddAccountState::ApiKey {
+                    value: String::new(),
+                    error: None,
+                };
+            }
+            LoginAddAccountState::DeviceCodeFailed(_) => {
+                self.state = LoginAddAccountState::DeviceCodeStarting;
+                self.app_event_tx.send(AppEvent::LoginStartDeviceCode);
             }
             LoginAddAccountState::Complete => {
                 self.finish(ViewCompletion::Accepted);
                 self.app_event_tx.send(AppEvent::ShowLoginAccounts);
             }
-            LoginAddAccountState::Starting | LoginAddAccountState::Waiting { .. } => {}
+            LoginAddAccountState::SavingApiKey
+            | LoginAddAccountState::Starting
+            | LoginAddAccountState::Waiting { .. }
+            | LoginAddAccountState::DeviceCodeStarting
+            | LoginAddAccountState::DeviceCodeWaiting { .. } => {}
+        }
+    }
+
+    fn handle_api_key_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        if let LoginAddAccountState::ApiKey { value, error } = &mut self.state {
+            value.push(ch);
+            *error = None;
+        }
+    }
+
+    fn handle_api_key_backspace(&mut self) {
+        if let LoginAddAccountState::ApiKey { value, error } = &mut self.state {
+            value.pop();
+            *error = None;
         }
     }
 
     fn content_line_count(&self) -> usize {
         match &self.state {
             LoginAddAccountState::Choose => 7,
+            LoginAddAccountState::ApiKey { error, .. } => 7 + usize::from(error.is_some()) * 2,
+            LoginAddAccountState::SavingApiKey => 6,
             LoginAddAccountState::Starting => 6,
             LoginAddAccountState::Waiting { .. } => 8,
+            LoginAddAccountState::DeviceCodeStarting => 6,
+            LoginAddAccountState::DeviceCodeWaiting { .. } => 10,
+            LoginAddAccountState::DeviceCodeFailed(_) => 8,
+            LoginAddAccountState::ApiKeyFailed(_) => 8,
             LoginAddAccountState::Failed(_) => 8,
             LoginAddAccountState::Complete => 6,
         }
@@ -378,9 +458,32 @@ impl LoginAddAccountView {
 
 impl BottomPaneView for LoginAddAccountView {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.finish(ViewCompletion::Cancelled),
-            KeyCode::Enter => self.handle_enter(),
+        match (&self.state, key_event.code) {
+            (_, KeyCode::Esc) => self.finish(ViewCompletion::Cancelled),
+            (LoginAddAccountState::ApiKey { .. }, KeyCode::Char('q'))
+                if text_input_modifiers(key_event.modifiers) =>
+            {
+                self.handle_api_key_char('q');
+            }
+            (_, KeyCode::Char('q')) => self.finish(ViewCompletion::Cancelled),
+            (LoginAddAccountState::Choose, KeyCode::Up | KeyCode::Down) => {
+                self.selected = if self.selected == 0 { 1 } else { 0 };
+            }
+            (LoginAddAccountState::Waiting { .. }, KeyCode::Char('c' | 'C'))
+                if key_event.modifiers.is_empty() =>
+            {
+                self.state = LoginAddAccountState::DeviceCodeStarting;
+                self.app_event_tx.send(AppEvent::LoginStartDeviceCode);
+            }
+            (LoginAddAccountState::ApiKey { .. }, KeyCode::Backspace | KeyCode::Delete) => {
+                self.handle_api_key_backspace();
+            }
+            (LoginAddAccountState::ApiKey { .. }, KeyCode::Char(ch))
+                if text_input_modifiers(key_event.modifiers) =>
+            {
+                self.handle_api_key_char(ch);
+            }
+            (_, KeyCode::Enter) => self.handle_enter(),
             _ => {}
         }
     }
@@ -403,6 +506,15 @@ impl BottomPaneView for LoginAddAccountView {
 
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
+    }
+
+    fn handle_paste(&mut self, pasted: String) -> bool {
+        if let LoginAddAccountState::ApiKey { value, error } = &mut self.state {
+            *value = pasted.trim().to_string();
+            *error = None;
+            return true;
+        }
+        false
     }
 }
 
@@ -435,12 +547,38 @@ impl Renderable for LoginAddAccountView {
                     self.selected == 0,
                     false,
                 ));
+                lines.push(render_selectable_line("API key", self.selected == 1, false));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("Start", "Close"));
+            }
+            LoginAddAccountState::ApiKey { value, error } => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Paste your OpenAI API key",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(mask_api_key_input(value)));
+                if let Some(error) = error {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        error.clone(),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("Save", "Back"));
+            }
+            LoginAddAccountState::SavingApiKey => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Saving API key...",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "Open the auth webpage and add a ChatGPT account.",
+                    "The account list will refresh when the key is saved.",
                     Style::default().fg(Color::DarkGray),
                 )));
                 lines.push(Line::from(""));
-                lines.push(add_account_hint_line("Start", "Close"));
+                lines.push(add_account_hint_line("", "Cancel"));
             }
             LoginAddAccountState::Starting => {
                 lines.push(Line::from(vec![Span::styled(
@@ -466,8 +604,75 @@ impl Renderable for LoginAddAccountView {
                     auth_url.clone(),
                     Style::default().fg(Color::Cyan),
                 )));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "Not seeing a browser? ",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled("Press C to use a code.", Style::default().fg(Color::Cyan)),
+                ]));
                 lines.push(Line::from(""));
                 lines.push(add_account_hint_line("", "Cancel"));
+            }
+            LoginAddAccountState::DeviceCodeStarting => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Generating sign-in code...",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Waiting for a one-time ChatGPT code.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("", "Cancel"));
+            }
+            LoginAddAccountState::DeviceCodeWaiting {
+                verification_url,
+                user_code,
+                ..
+            } => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Complete sign-in using this code",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from("Visit this link on any device:"));
+                lines.push(Line::from(Span::styled(
+                    verification_url.clone(),
+                    Style::default().fg(Color::Cyan),
+                )));
+                lines.push(Line::from(vec![
+                    Span::styled("Code: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        user_code.clone(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Keep this code private. It expires after 15 minutes.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("", "Cancel"));
+            }
+            LoginAddAccountState::DeviceCodeFailed(message)
+            | LoginAddAccountState::ApiKeyFailed(message) => {
+                lines.push(Line::from(vec![Span::styled(
+                    "Add account failed",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    message.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+                lines.push(Line::from(""));
+                lines.push(render_selectable_line("Try again", true, false));
+                lines.push(Line::from(""));
+                lines.push(add_account_hint_line("Retry", "Close"));
             }
             LoginAddAccountState::Failed(message) => {
                 lines.push(Line::from(vec![Span::styled(
@@ -696,6 +901,18 @@ fn add_account_hint_line(enter_label: &str, cancel_label: &str) -> Line<'static>
         Style::default().fg(Color::DarkGray),
     ));
     Line::from(spans)
+}
+
+fn mask_api_key_input(value: &str) -> String {
+    if value.is_empty() {
+        "sk-...".to_string()
+    } else {
+        "*".repeat(value.chars().count())
+    }
+}
+
+fn text_input_modifiers(modifiers: KeyModifiers) -> bool {
+    !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 fn render_selectable_spans(label: &str, selected: bool, active: bool) -> Vec<Span<'static>> {
