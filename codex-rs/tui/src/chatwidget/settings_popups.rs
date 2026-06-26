@@ -90,29 +90,43 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) fn open_realtime_audio_popup(&mut self) {
-        let items = [
-            RealtimeAudioDeviceKind::Microphone,
-            RealtimeAudioDeviceKind::Speaker,
-        ]
-        .into_iter()
-        .map(|kind| {
-            let description = Some(format!(
-                "Current: {}",
-                self.current_realtime_audio_selection_label(kind)
-            ));
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::OpenRealtimeAudioDeviceSelection { kind });
-            })];
-            SelectionItem {
-                name: kind.title().to_string(),
-                description,
-                actions,
-                dismiss_on_select: true,
-                ..Default::default()
-            }
-        })
-        .collect();
+    pub(crate) fn open_settings_popup(&mut self) {
+        let mut items = Vec::new();
+        items.push(SelectionItem {
+            name: "Accounts".to_string(),
+            description: Some("Configure automatic account switching.".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenAccountSwitchSettings);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        if self.realtime_audio_device_selection_enabled() {
+            items.extend(
+                [
+                    RealtimeAudioDeviceKind::Microphone,
+                    RealtimeAudioDeviceKind::Speaker,
+                ]
+                .into_iter()
+                .map(|kind| {
+                    let description = Some(format!(
+                        "Current: {}",
+                        self.current_realtime_audio_selection_label(kind)
+                    ));
+                    let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                        tx.send(AppEvent::OpenRealtimeAudioDeviceSelection { kind });
+                    })];
+                    SelectionItem {
+                        name: kind.title().to_string(),
+                        description,
+                        actions,
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    }
+                }),
+            );
+        }
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Settings".to_string()),

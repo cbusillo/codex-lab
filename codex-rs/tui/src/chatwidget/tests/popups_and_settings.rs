@@ -2233,6 +2233,39 @@ async fn memories_settings_toggle_saves_on_enter() {
 }
 
 #[tokio::test]
+async fn settings_popup_includes_accounts() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.open_settings_popup();
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(popup.contains("Settings"));
+    assert!(popup.contains("Accounts"));
+    assert!(popup.contains("Configure automatic account switching."));
+}
+
+#[tokio::test]
+async fn account_switch_settings_toggle_saves_on_enter() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.auto_switch_accounts_on_rate_limit = true;
+    chat.config.api_key_fallback_on_all_accounts_limited = false;
+
+    chat.open_account_switch_settings_popup();
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetAutoSwitchAccountsOnRateLimit(false))
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetApiKeyFallbackOnAllAccountsLimited(true))
+    );
+}
+
+#[tokio::test]
 async fn memories_reset_confirmation_sends_event_on_confirm() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::MemoryTool, /*enabled*/ true);
@@ -2272,7 +2305,7 @@ async fn personality_selection_popup_snapshot() {
 #[tokio::test]
 async fn realtime_audio_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
-    chat.open_realtime_audio_popup();
+    chat.open_settings_popup();
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("realtime_audio_selection_popup", popup);
@@ -2282,7 +2315,7 @@ async fn realtime_audio_selection_popup_snapshot() {
 #[tokio::test]
 async fn realtime_audio_selection_popup_narrow_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
-    chat.open_realtime_audio_popup();
+    chat.open_settings_popup();
 
     let popup = render_bottom_popup(&chat, /*width*/ 56);
     assert_chatwidget_snapshot!("realtime_audio_selection_popup_narrow", popup);

@@ -1620,6 +1620,17 @@ impl App {
                 )
                 .await;
             }
+            AppEvent::OpenAccountSwitchSettings => {
+                self.chat_widget.open_account_switch_settings_popup();
+            }
+            AppEvent::SetAutoSwitchAccountsOnRateLimit(enabled) => {
+                self.update_auto_switch_accounts_on_rate_limit(app_server, enabled)
+                    .await;
+            }
+            AppEvent::SetApiKeyFallbackOnAllAccountsLimited(enabled) => {
+                self.update_api_key_fallback_on_all_accounts_limited(app_server, enabled)
+                    .await;
+            }
             AppEvent::ResetMemories => {
                 self.reset_memories_with_app_server(app_server).await;
             }
