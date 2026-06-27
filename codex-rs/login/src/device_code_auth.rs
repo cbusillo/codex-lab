@@ -1,4 +1,7 @@
+use codex_browser::BrowserConfig;
+use codex_browser::BrowserManager;
 use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::Deserializer;
@@ -23,7 +26,7 @@ pub struct DeviceCode {
     interval: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq)]
 struct UserCodeResp {
     device_auth_id: String,
     #[serde(alias = "user_code", alias = "usercode")]
@@ -62,6 +65,7 @@ struct CodeSuccessResp {
 async fn request_user_code(
     client: &reqwest::Client,
     auth_base_url: &str,
+    base_url: &str,
     client_id: &str,
 ) -> std::io::Result<UserCodeResp> {
     let url = format!("{auth_base_url}/deviceauth/usercode");
@@ -77,8 +81,11 @@ async fn request_user_code(
         .await
         .map_err(std::io::Error::other)?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp.text().await.map_err(std::io::Error::other)?;
+
+    if !status.is_success() {
         if status == StatusCode::NOT_FOUND {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -86,13 +93,153 @@ async fn request_user_code(
             ));
         }
 
+        if looks_like_cloudflare_challenge(status, &headers, &body) {
+            return request_user_code_via_browser(base_url, client_id).await;
+        }
+
         return Err(std::io::Error::other(format!(
             "device code request failed with status {status}"
         )));
     }
 
-    let body = resp.text().await.map_err(std::io::Error::other)?;
     serde_json::from_str(&body).map_err(std::io::Error::other)
+}
+
+fn looks_like_cloudflare_challenge(status: StatusCode, headers: &HeaderMap, body: &str) -> bool {
+    if status != StatusCode::FORBIDDEN {
+        return false;
+    }
+
+    if body_has_cloudflare_challenge_signal(body) {
+        return true;
+    }
+
+    header_is_cloudflare_challenge(headers)
+}
+
+fn body_has_cloudflare_challenge_signal(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("_cf_chl_opt")
+        || lower.contains("challenge-platform")
+        || lower.contains("just a moment")
+        || lower.contains("enable javascript and cookies")
+        || (lower.contains("cloudflare") && lower.contains("challenge"))
+}
+
+fn header_is_cloudflare_challenge(headers: &HeaderMap) -> bool {
+    headers
+        .get("cf-mitigated")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("challenge"))
+        || headers
+            .get_all("server-timing")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .any(|value| value.to_ascii_lowercase().contains("chlray"))
+        || headers
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .any(|cookie| cookie.contains("__cf_bm="))
+}
+
+async fn request_user_code_via_browser(
+    base_url: &str,
+    client_id: &str,
+) -> std::io::Result<UserCodeResp> {
+    let manager = BrowserManager::new(BrowserConfig {
+        enabled: true,
+        headless: true,
+        ..Default::default()
+    });
+    let result = request_user_code_via_browser_with_manager(
+        &manager,
+        base_url,
+        client_id,
+        Duration::from_secs(4),
+    )
+    .await;
+    let _ = manager.stop().await;
+    result
+}
+
+async fn request_user_code_via_browser_with_manager(
+    manager: &BrowserManager,
+    base_url: &str,
+    client_id: &str,
+    settle_delay: Duration,
+) -> std::io::Result<UserCodeResp> {
+    let issuer = base_url.trim_end_matches('/');
+    let authorize_page = format!("{issuer}/codex/device");
+
+    tokio::time::timeout(Duration::from_secs(30), manager.goto(&authorize_page))
+        .await
+        .map_err(|_| std::io::Error::other("browser navigation timed out"))?
+        .map_err(|err| std::io::Error::other(format!("browser navigation failed: {err}")))?;
+
+    // Give browser-managed challenge scripts a bounded window to set cookies
+    // before retrying the device-code API request from that browser context.
+    tokio::time::sleep(settle_delay).await;
+
+    let api_url = format!("{issuer}/api/accounts/deviceauth/usercode");
+    let api_url_literal = serde_json::to_string(&api_url).map_err(std::io::Error::other)?;
+    let payload_literal = serde_json::to_string(&serde_json::json!({ "client_id": client_id }))
+        .map_err(std::io::Error::other)?;
+    let script = format!(
+        r#"(async () => {{
+            try {{
+                const resp = await fetch({api_url_literal}, {{
+                    method: "POST",
+                    credentials: "include",
+                    headers: {{ "Content-Type": "application/json" }},
+                    body: {payload_literal}
+                }});
+                const text = await resp.text();
+                return {{ ok: resp.ok, status: resp.status, body: text }};
+            }} catch (err) {{
+                return {{ ok: false, status: 0, body: String(err) }};
+            }}
+        }})()"#
+    );
+
+    for _ in 0..3 {
+        let value =
+            tokio::time::timeout(Duration::from_secs(15), manager.execute_javascript(&script))
+                .await
+                .map_err(|_| std::io::Error::other("browser fetch timed out"))?
+                .map_err(|err| std::io::Error::other(format!("browser execution failed: {err}")))?;
+
+        let fetch_result = value.get("value").unwrap_or(&value);
+        let status = fetch_result
+            .get("status")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+        let ok = fetch_result
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let body = fetch_result
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+
+        if ok {
+            return serde_json::from_str(body).map_err(std::io::Error::other);
+        }
+
+        if status == i64::from(StatusCode::FORBIDDEN.as_u16()) {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        return Err(std::io::Error::other(format!(
+            "device code request failed with status {status} while using browser fallback"
+        )));
+    }
+
+    Err(std::io::Error::other(
+        "device code request failed after browser fallback retries",
+    ))
 }
 
 /// Poll token endpoint until a code is issued or timeout occurs.
@@ -160,7 +307,7 @@ pub async fn request_device_code(opts: &ServerOptions) -> std::io::Result<Device
     let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let base_url = opts.issuer.trim_end_matches('/');
     let api_base_url = format!("{base_url}/api/accounts");
-    let uc = request_user_code(&client, &api_base_url, &opts.client_id).await?;
+    let uc = request_user_code(&client, &api_base_url, base_url, &opts.client_id).await?;
 
     Ok(DeviceCode {
         verification_url: format!("{base_url}/codex/device"),
@@ -226,3 +373,7 @@ pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {
     print_device_code_prompt(&device_code.verification_url, &device_code.user_code);
     complete_device_code_login(opts, device_code).await
 }
+
+#[cfg(test)]
+#[path = "device_code_auth_tests.rs"]
+mod tests;
