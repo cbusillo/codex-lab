@@ -1215,22 +1215,19 @@ fn sample_auto_review_run_with_findings(
     let output = ReviewOutputEvent {
         findings: findings
             .into_iter()
-            .enumerate()
-            .map(|(index, (title, body))| {
-                let line = u32::try_from(index + 1).expect("test fixture line number fits u32");
-                ReviewFinding {
-                    title,
-                    body,
-                    confidence_score: 0.92,
-                    priority: 1,
-                    code_location: ReviewCodeLocation {
-                        absolute_file_path: PathBuf::from("/repo/src/lib.rs"),
-                        line_range: ReviewLineRange {
-                            start: line,
-                            end: line,
-                        },
+            .zip(1_u32..)
+            .map(|((title, body), line)| ReviewFinding {
+                title,
+                body,
+                confidence_score: 0.92,
+                priority: 1,
+                code_location: ReviewCodeLocation {
+                    absolute_file_path: PathBuf::from("/repo/src/lib.rs"),
+                    line_range: ReviewLineRange {
+                        start: line,
+                        end: line,
                     },
-                }
+                },
             })
             .collect(),
         overall_correctness: "patch is incorrect".to_string(),
@@ -1258,6 +1255,10 @@ fn sample_auto_review_run_with_findings(
         started_at_unix_secs: 1,
         completed_at_unix_secs: Some(2),
         model: Some("review-model".to_string()),
+        reasoning_effort: None,
+        prompt_token_estimate: None,
+        token_count: None,
+        saved_token_estimate: None,
         superseded_by: None,
         cancel_reason: None,
         error_summary: None,

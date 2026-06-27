@@ -271,11 +271,28 @@ Example with notification opt-out:
   `.code/code-bridge.json` metadata used by local WebSocket bridge hosts,
   authenticating only to loopback WebSocket endpoints. Workspace metadata
   availability returns `status: "available"` with `service: null` because the
-  legacy WebSocket contract does not expose HTTP service counters. The request
+  legacy WebSocket contract does not expose HTTP service counters. The
+  `controlAvailable` field is `true` only for descriptor-backed HTTP services;
+  workspace metadata availability is status-only and reports
+  `controlAvailable: false`. The request
   does not start Code Bridge, subscribe to events, proxy telemetry, request
   screenshots, or change `remoteControl/*` behavior. When no bridge is
   discoverable or the bridge is unreachable, the request succeeds with
   `status: "unavailable"` and an `unavailableReason`.
+- `codeBridge/subscribe` — experimental; connect to the descriptor-backed Code
+  Bridge HTTP service as an app-server subscriber and apply a subscription
+  filter. The request validates that the bridge accepts the filter but does not
+  stream events through app-server yet.
+- `codeBridge/screenshot` — experimental; request a screenshot from a named
+  Code Bridge producer client (`targetClientId`) and wait for the matching
+  response. The response includes the bridge request id, status, screenshot
+  payload when successful, and an optional bridge error. `timeoutMs` defaults to
+  the bridge control timeout and cannot exceed the bridge protocol maximum.
+- `codeBridge/javascript` — experimental; request JavaScript execution from a
+  named Code Bridge producer client (`targetClientId`) and wait for the matching
+  control response. The response includes the bridge request id, status,
+  summary, JSON result when provided, and an optional bridge error. The
+  JavaScript source is bounded to the Code Bridge event text limit.
 - `remoteControl/pairing/start` — experimental; start a short-lived remote-control pairing artifact for the current app-server process. Pass `manualCode: true` to also request a manual pairing code. Returns `pairingCode`, `manualPairingCode`, `environmentId`, and Unix-seconds `expiresAt`; app-server intentionally does not expose the backend `serverId`.
 - `remoteControl/pairing/status` — experimental; poll whether a remote-control `pairingCode` or `manualPairingCode` has been claimed. Pass exactly one of the two fields. Returns `claimed`.
 - `remoteControl/client/list` — experimental; list controller devices granted access to an environment. Pass `environmentId` and optional `cursor`, `limit`, and `order`; returns picker-oriented client metadata plus `nextCursor`. This signed-in account-management operation works while the local relay is disabled or unenrolled.

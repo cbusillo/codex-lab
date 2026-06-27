@@ -480,6 +480,7 @@ use codex_app_server_protocol::ServerRequest;
 mod account_processor;
 mod apps_processor;
 mod catalog_processor;
+mod code_bridge_control;
 mod code_bridge_processor;
 mod command_exec_processor;
 mod config_processor;

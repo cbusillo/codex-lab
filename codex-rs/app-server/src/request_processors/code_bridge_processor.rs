@@ -45,6 +45,10 @@ impl CodeBridgeRequestProcessor {
             .unwrap_or(home_response)
     }
 
+    pub(super) fn descriptor_path(&self) -> &Path {
+        &self.descriptor_path
+    }
+
     async fn home_descriptor_status_read(&self) -> CodeBridgeStatusReadResponse {
         let client = match CodeBridgeClient::from_descriptor_path(&self.descriptor_path) {
             Ok(client) => client,
@@ -76,6 +80,7 @@ impl CodeBridgeRequestProcessor {
 fn available(status: BridgeServiceStatus) -> CodeBridgeStatusReadResponse {
     CodeBridgeStatusReadResponse {
         status: CodeBridgeAvailability::Available,
+        control_available: true,
         service: Some(ApiCodeBridgeServiceStatus {
             protocol_version: status.protocol_version,
             connected_producer_count: status.connected_producer_count,
@@ -90,6 +95,7 @@ fn available(status: BridgeServiceStatus) -> CodeBridgeStatusReadResponse {
 fn unavailable(reason: CodeBridgeUnavailableReason) -> CodeBridgeStatusReadResponse {
     CodeBridgeStatusReadResponse {
         status: CodeBridgeAvailability::Unavailable,
+        control_available: false,
         service: None,
         unavailable_reason: Some(reason),
     }
@@ -98,6 +104,7 @@ fn unavailable(reason: CodeBridgeUnavailableReason) -> CodeBridgeStatusReadRespo
 fn available_workspace_metadata_bridge() -> CodeBridgeStatusReadResponse {
     CodeBridgeStatusReadResponse {
         status: CodeBridgeAvailability::Available,
+        control_available: false,
         service: None,
         unavailable_reason: None,
     }
@@ -222,6 +229,7 @@ mod code_bridge_processor_tests {
     use codex_code_bridge_service::BridgeServiceConfig;
     use futures::SinkExt;
     use futures::StreamExt;
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
@@ -244,6 +252,7 @@ mod code_bridge_processor_tests {
             Some(CodeBridgeUnavailableReason::DescriptorMissing)
         );
         assert_eq!(response.service, None);
+        assert!(!response.control_available);
     }
 
     #[tokio::test]
@@ -263,6 +272,7 @@ mod code_bridge_processor_tests {
         let response = processor.status_read().await;
 
         assert_eq!(response.status, CodeBridgeAvailability::Available);
+        assert!(response.control_available);
         assert_eq!(response.unavailable_reason, None);
         let service_status = response.service.expect("service status");
         assert_eq!(
@@ -317,6 +327,7 @@ mod code_bridge_processor_tests {
             Some(CodeBridgeUnavailableReason::ServiceUnreachable)
         );
         assert_eq!(response.service, None);
+        assert!(!response.control_available);
         accept_task.abort();
         let _ = accept_task.await;
     }
@@ -375,6 +386,7 @@ mod code_bridge_processor_tests {
         let response = processor.status_read().await;
 
         assert_eq!(response.status, CodeBridgeAvailability::Available);
+        assert!(!response.control_available);
         assert_eq!(response.unavailable_reason, None);
         assert_eq!(response.service, None);
         accept_task.await.expect("accept task");
@@ -408,5 +420,6 @@ mod code_bridge_processor_tests {
             Some(CodeBridgeUnavailableReason::UnsupportedEndpoint)
         );
         assert_eq!(response.service, None);
+        assert!(!response.control_available);
     }
 }
