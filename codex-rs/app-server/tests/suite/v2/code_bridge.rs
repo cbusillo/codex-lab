@@ -14,6 +14,7 @@ use codex_app_server_protocol::CodeBridgeScreenshotResponse;
 use codex_app_server_protocol::CodeBridgeStatusReadResponse;
 use codex_app_server_protocol::CodeBridgeSubscribeResponse;
 use codex_app_server_protocol::CodeBridgeUnavailableReason;
+use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_code_bridge_client::CodeBridgeClient;
@@ -57,6 +58,7 @@ async fn code_bridge_status_read_reports_missing_descriptor() -> Result<()> {
     let received: CodeBridgeStatusReadResponse = response_for(&mut app_server, request_id).await?;
 
     assert_eq!(received.status, CodeBridgeAvailability::Unavailable);
+    assert!(!received.control_available);
     assert_eq!(
         received.unavailable_reason,
         Some(CodeBridgeUnavailableReason::DescriptorMissing)
@@ -77,6 +79,7 @@ async fn code_bridge_status_read_reports_running_service() -> Result<()> {
     let received: CodeBridgeStatusReadResponse = response_for(&mut app_server, request_id).await?;
 
     assert_eq!(received.status, CodeBridgeAvailability::Available);
+    assert!(received.control_available);
     assert_eq!(received.unavailable_reason, None);
     let bridge_status = received.service.expect("service status");
     assert_eq!(bridge_status.protocol_version, PROTOCOL_VERSION);
@@ -140,6 +143,7 @@ async fn code_bridge_status_read_reports_workspace_metadata_bridge() -> Result<(
     let received: CodeBridgeStatusReadResponse = response_for(&mut app_server, request_id).await?;
 
     assert_eq!(received.status, CodeBridgeAvailability::Available);
+    assert!(!received.control_available);
     assert_eq!(received.unavailable_reason, None);
     assert_eq!(received.service, None);
     accept_task.await?;
@@ -173,6 +177,8 @@ async fn code_bridge_subscribe_accepts_filter_through_jsonrpc() -> Result<()> {
             status: CodeBridgeRequestStatus::Accepted,
         }
     );
+    let status = client_status(service.descriptor_path()).await?;
+    assert_eq!(status.connected_subscriber_count, 1);
 
     service.shutdown().await;
     Ok(())
@@ -358,6 +364,80 @@ async fn code_bridge_javascript_timeout_returns_typed_response() -> Result<()> {
 
     service.shutdown().await;
     Ok(())
+}
+
+#[tokio::test]
+async fn code_bridge_screenshot_timeout_returns_typed_response() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let service =
+        codex_code_bridge_service::start(BridgeServiceConfig::new(codex_home.path().to_path_buf()))
+            .await?;
+    let mut app_server = initialized_app_server(&codex_home).await?;
+    let client = CodeBridgeClient::from_descriptor_path(service.descriptor_path())?;
+    let (_producer, _producer_events) = producer_session(
+        &client,
+        CapabilitySet {
+            provide_screenshot: true,
+            ..CapabilitySet::default()
+        },
+    )
+    .await?;
+
+    let received: CodeBridgeScreenshotResponse = jsonrpc_response(
+        &mut app_server,
+        "codeBridge/screenshot",
+        json!({
+            "targetClientId": "producer-1",
+            "timeoutMs": 1,
+        }),
+    )
+    .await?;
+
+    assert_eq!(received.status, CodeBridgeControlStatus::TimedOut);
+    assert_eq!(received.screenshot, None);
+    let error = received.error.expect("timeout error");
+    assert_eq!(error.code, CodeBridgeErrorCode::Timeout);
+
+    service.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn code_bridge_screenshot_rejects_invalid_timeout() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let service =
+        codex_code_bridge_service::start(BridgeServiceConfig::new(codex_home.path().to_path_buf()))
+            .await?;
+    let mut app_server = initialized_app_server(&codex_home).await?;
+
+    let request_id = app_server
+        .send_raw_request(
+            "codeBridge/screenshot",
+            Some(json!({
+                "targetClientId": "producer-1",
+                "timeoutMs": 0,
+            })),
+        )
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, -32602);
+    assert!(error.error.message.contains("timeoutMs must be between"));
+
+    service.shutdown().await;
+    Ok(())
+}
+
+async fn client_status(
+    descriptor_path: &std::path::Path,
+) -> Result<codex_code_bridge_protocol::BridgeServiceStatus> {
+    Ok(CodeBridgeClient::from_descriptor_path(descriptor_path)?
+        .status()
+        .await?)
 }
 
 async fn initialized_app_server(codex_home: &TempDir) -> Result<TestAppServer> {

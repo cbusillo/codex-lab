@@ -9,6 +9,7 @@ use ts_rs::TS;
 #[ts(export_to = "v2/")]
 pub struct CodeBridgeStatusReadResponse {
     pub status: CodeBridgeAvailability,
+    pub control_available: bool,
     pub service: Option<CodeBridgeServiceStatus>,
     pub unavailable_reason: Option<CodeBridgeUnavailableReason>,
 }

@@ -271,7 +271,10 @@ Example with notification opt-out:
   `.code/code-bridge.json` metadata used by local WebSocket bridge hosts,
   authenticating only to loopback WebSocket endpoints. Workspace metadata
   availability returns `status: "available"` with `service: null` because the
-  legacy WebSocket contract does not expose HTTP service counters. The request
+  legacy WebSocket contract does not expose HTTP service counters. The
+  `controlAvailable` field is `true` only for descriptor-backed HTTP services;
+  workspace metadata availability is status-only and reports
+  `controlAvailable: false`. The request
   does not start Code Bridge, subscribe to events, proxy telemetry, request
   screenshots, or change `remoteControl/*` behavior. When no bridge is
   discoverable or the bridge is unreachable, the request succeeds with
