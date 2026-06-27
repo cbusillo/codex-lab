@@ -937,6 +937,21 @@ impl MessageProcessor {
                 let response = self.code_bridge_processor.status_read().await;
                 Ok(Some(response.into()))
             }
+            ClientRequest::CodeBridgeSubscribe { params, .. } => self
+                .code_bridge_processor
+                .subscribe(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::CodeBridgeScreenshot { params, .. } => self
+                .code_bridge_processor
+                .screenshot(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::CodeBridgeJavascript { params, .. } => self
+                .code_bridge_processor
+                .javascript(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::RemoteControlPairingStart { params, .. } => self
                 .remote_control_processor
                 .pairing_start(params, app_server_client_name.as_deref())

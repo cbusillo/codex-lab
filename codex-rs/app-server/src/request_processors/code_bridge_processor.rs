@@ -45,6 +45,10 @@ impl CodeBridgeRequestProcessor {
             .unwrap_or(home_response)
     }
 
+    pub(super) fn descriptor_path(&self) -> &Path {
+        &self.descriptor_path
+    }
+
     async fn home_descriptor_status_read(&self) -> CodeBridgeStatusReadResponse {
         let client = match CodeBridgeClient::from_descriptor_path(&self.descriptor_path) {
             Ok(client) => client,
@@ -222,6 +226,7 @@ mod code_bridge_processor_tests {
     use codex_code_bridge_service::BridgeServiceConfig;
     use futures::SinkExt;
     use futures::StreamExt;
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;

@@ -41,7 +41,16 @@ const IGNORED_DEFINITIONS: &[&str] = &["Option<()>"];
 const JSON_V1_ALLOWLIST: &[&str] = &["InitializeParams", "InitializeResponse"];
 const EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES: &[&str] = &[
     "CodeBridgeAvailability",
+    "CodeBridgeConsoleLevel",
+    "CodeBridgeControlStatus",
+    "CodeBridgeError",
+    "CodeBridgeErrorCode",
+    "CodeBridgeEventKind",
+    "CodeBridgeRequestStatus",
     "CodeBridgeServiceStatus",
+    "CodeBridgeScreenshotMediaType",
+    "CodeBridgeScreenshotPayload",
+    "CodeBridgeSubscriptionFilter",
     "CodeBridgeUnavailableReason",
     "RemoteControlClient",
     "RemoteControlClientsListOrder",
