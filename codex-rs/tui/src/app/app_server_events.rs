@@ -7,6 +7,7 @@ use super::app_server_event_targets::server_request_thread_id;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
+use crate::app_event::RateLimitRefreshOrigin;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use crate::bottom_pane::LoginAddAccountState;
@@ -91,16 +92,30 @@ impl App {
                 return;
             }
             ServerNotification::AccountUpdated(notification) => {
+                let previously_had_chatgpt_account = self.chat_widget.has_chatgpt_account();
+                let has_chatgpt_account = notification
+                    .auth_mode
+                    .is_some_and(AuthMode::has_chatgpt_account);
                 self.chat_widget.update_account_state(
                     status_account_display_from_auth_mode(
                         notification.auth_mode,
                         notification.plan_type,
                     ),
                     notification.plan_type,
-                    notification
-                        .auth_mode
-                        .is_some_and(AuthMode::has_chatgpt_account),
+                    has_chatgpt_account,
                 );
+                if !previously_had_chatgpt_account
+                    && has_chatgpt_account
+                    && self
+                        .chat_widget
+                        .config_ref()
+                        .model_provider
+                        .requires_openai_auth
+                {
+                    self.app_event_tx.send(AppEvent::RefreshRateLimits {
+                        origin: RateLimitRefreshOrigin::StartupPrefetch,
+                    });
+                }
                 self.maybe_record_completed_auth_profile_login(notification);
                 self.maybe_complete_login_add_account(notification);
                 return;

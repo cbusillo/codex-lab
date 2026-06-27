@@ -3620,6 +3620,75 @@ async fn side_thread_ignores_global_mcp_startup_notifications() {
 }
 
 #[tokio::test]
+async fn account_update_prefetches_rate_limits_on_chatgpt_login_transition() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+    while app_event_rx.try_recv().is_ok() {}
+
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountUpdated(AccountUpdatedNotification {
+                auth_mode: None,
+                plan_type: None,
+            }),
+        ),
+    )
+    .await;
+
+    for event in drain_app_events(&mut app_event_rx) {
+        assert!(
+            !matches!(event, AppEvent::RefreshRateLimits { .. }),
+            "unauthenticated account update should not prefetch rate limits"
+        );
+    }
+
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountUpdated(AccountUpdatedNotification {
+                auth_mode: Some(AuthMode::Chatgpt),
+                plan_type: None,
+            }),
+        ),
+    )
+    .await;
+
+    let refresh_origins = drain_app_events(&mut app_event_rx)
+        .into_iter()
+        .filter_map(|event| match event {
+            AppEvent::RefreshRateLimits { origin } => Some(origin),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        refresh_origins,
+        vec![RateLimitRefreshOrigin::StartupPrefetch],
+        "ChatGPT login transition should emit exactly one startup prefetch"
+    );
+
+    app.handle_app_server_event(
+        &mut app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(
+            ServerNotification::AccountUpdated(AccountUpdatedNotification {
+                auth_mode: Some(AuthMode::Chatgpt),
+                plan_type: None,
+            }),
+        ),
+    )
+    .await;
+
+    for event in drain_app_events(&mut app_event_rx) {
+        assert!(
+            !matches!(event, AppEvent::RefreshRateLimits { .. }),
+            "repeated ChatGPT account update should not prefetch rate limits"
+        );
+    }
+}
+
+#[tokio::test]
 async fn login_add_account_ignores_stale_app_server_success_update() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
@@ -3661,6 +3730,7 @@ async fn login_add_account_ignores_stale_app_server_success_update() {
         Some("new-login")
     );
     assert_eq!(app.completed_login_add_account_id, None);
+    while app_event_rx.try_recv().is_ok() {}
 
     app.chat_widget
         .handle_key_event(crossterm::event::KeyEvent::new(
