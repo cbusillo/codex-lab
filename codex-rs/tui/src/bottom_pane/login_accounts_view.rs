@@ -523,6 +523,21 @@ impl Renderable for LoginAddAccountView {
         block.render(area, buf);
 
         let mut lines = Vec::new();
+        let hyperlink_url = match &self.state {
+            LoginAddAccountState::Waiting { auth_url, .. } => Some(auth_url.as_str()),
+            LoginAddAccountState::DeviceCodeWaiting {
+                verification_url, ..
+            } => Some(verification_url.as_str()),
+            LoginAddAccountState::Choose
+            | LoginAddAccountState::ApiKey { .. }
+            | LoginAddAccountState::SavingApiKey
+            | LoginAddAccountState::Starting
+            | LoginAddAccountState::DeviceCodeStarting
+            | LoginAddAccountState::DeviceCodeFailed(_)
+            | LoginAddAccountState::ApiKeyFailed(_)
+            | LoginAddAccountState::Failed(_)
+            | LoginAddAccountState::Complete => None,
+        };
         match &self.state {
             LoginAddAccountState::Choose => {
                 lines.push(Line::from(vec![Span::styled(
@@ -590,7 +605,9 @@ impl Renderable for LoginAddAccountView {
                 lines.push(Line::from("If your browser did not open, visit:"));
                 lines.push(Line::from(Span::styled(
                     auth_url.clone(),
-                    Style::default().fg(Color::Cyan),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::UNDERLINED),
                 )));
                 lines.push(Line::from(vec![
                     Span::styled(
@@ -627,7 +644,9 @@ impl Renderable for LoginAddAccountView {
                 lines.push(Line::from("Visit this link on any device:"));
                 lines.push(Line::from(Span::styled(
                     verification_url.clone(),
-                    Style::default().fg(Color::Cyan),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::UNDERLINED),
                 )));
                 lines.push(Line::from(vec![
                     Span::styled("Code: ", Style::default().fg(Color::DarkGray)),
@@ -694,19 +713,22 @@ impl Renderable for LoginAddAccountView {
             }
         }
 
+        let content_area = Rect {
+            x: inner.x.saturating_add(1),
+            y: inner.y,
+            width: inner.width.saturating_sub(2),
+            height: inner.height,
+        };
+
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Left)
             .style(Style::default().fg(Color::White))
-            .render(
-                Rect {
-                    x: inner.x.saturating_add(1),
-                    y: inner.y,
-                    width: inner.width.saturating_sub(2),
-                    height: inner.height,
-                },
-                buf,
-            );
+            .render(content_area, buf);
+
+        if let Some(url) = hyperlink_url {
+            crate::terminal_hyperlinks::mark_url_hyperlink(buf, content_area, url);
+        }
     }
 }
 
@@ -1059,3 +1081,7 @@ fn format_timestamp(ts: DateTime<Utc>) -> String {
         .format("%Y-%m-%d %H:%M")
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "login_accounts_view_tests.rs"]
+mod tests;

@@ -1,0 +1,18 @@
+---
+source: tui/src/bottom_pane/login_accounts_view_tests.rs
+expression: "render_snapshot(&buf, area)"
+---
+┌──────── Add Account ─────────┐
+│ Complete sign-in using this  │
+│ code                         │
+│ Visit this link on any       │
+│ device:                      │
+│ https://chatgpt.com/device?f │
+│ low=abcdefghijklmnopqrstuvwx │
+│ yz                           │
+│ Code: ABCD-EFGH              │
+│                              │
+│ Keep this code private. It   │
+│ expires after 15 minutes.    │
+│                              │
+└──────────────────────────────┘

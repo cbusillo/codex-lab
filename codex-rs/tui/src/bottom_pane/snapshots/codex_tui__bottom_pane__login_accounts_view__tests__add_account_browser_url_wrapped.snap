@@ -1,0 +1,16 @@
+---
+source: tui/src/bottom_pane/login_accounts_view_tests.rs
+expression: "render_snapshot(&buf, area)"
+---
+┌──────── Add Account ─────────┐
+│ Finish signing in with       │
+│ ChatGPT in your browser      │
+│                              │
+│ If your browser did not      │
+│ open, visit:                 │
+│ https://auth.example.com/log │
+│ in?state=abcdefghijklmnopqrs │
+│ tuvwxyz                      │
+│ Not seeing a browser? Press  │
+│ C to use a code.             │
+└──────────────────────────────┘
