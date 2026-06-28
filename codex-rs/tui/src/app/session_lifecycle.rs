@@ -89,6 +89,60 @@ impl Drop for AuthSwitchRollback {
     }
 }
 
+struct AppServerThreadUiSnapshot {
+    chat_widget: ChatWidget,
+    thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+    thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
+    agent_navigation: AgentNavigationState,
+    side_threads: HashMap<ThreadId, SideThreadState>,
+    active_thread_id: Option<ThreadId>,
+    active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
+    primary_thread_id: Option<ThreadId>,
+    last_subagent_backfill_attempt: Option<ThreadId>,
+    primary_session_configured: Option<ThreadSessionState>,
+    pending_primary_events: VecDeque<ThreadBufferedEvent>,
+    pending_app_server_requests: PendingAppServerRequests,
+    pending_startup_thread_start: bool,
+}
+
+impl AppServerThreadUiSnapshot {
+    fn take_from(app: &mut App, replacement_chat_widget: ChatWidget) -> Self {
+        Self {
+            chat_widget: std::mem::replace(&mut app.chat_widget, replacement_chat_widget),
+            thread_event_channels: std::mem::take(&mut app.thread_event_channels),
+            thread_event_listener_tasks: std::mem::take(&mut app.thread_event_listener_tasks),
+            agent_navigation: std::mem::take(&mut app.agent_navigation),
+            side_threads: std::mem::take(&mut app.side_threads),
+            active_thread_id: app.active_thread_id.take(),
+            active_thread_rx: app.active_thread_rx.take(),
+            primary_thread_id: app.primary_thread_id.take(),
+            last_subagent_backfill_attempt: app.last_subagent_backfill_attempt.take(),
+            primary_session_configured: app.primary_session_configured.take(),
+            pending_primary_events: std::mem::take(&mut app.pending_primary_events),
+            pending_app_server_requests: std::mem::take(&mut app.pending_app_server_requests),
+            pending_startup_thread_start: std::mem::take(&mut app.pending_startup_thread_start),
+        }
+    }
+
+    fn restore(self, app: &mut App) {
+        app.abort_all_thread_event_listeners();
+        app.chat_widget = self.chat_widget;
+        app.thread_event_channels = self.thread_event_channels;
+        app.thread_event_listener_tasks = self.thread_event_listener_tasks;
+        app.agent_navigation = self.agent_navigation;
+        app.side_threads = self.side_threads;
+        app.active_thread_id = self.active_thread_id;
+        app.active_thread_rx = self.active_thread_rx;
+        app.primary_thread_id = self.primary_thread_id;
+        app.last_subagent_backfill_attempt = self.last_subagent_backfill_attempt;
+        app.primary_session_configured = self.primary_session_configured;
+        app.pending_primary_events = self.pending_primary_events;
+        app.pending_app_server_requests = self.pending_app_server_requests;
+        app.pending_startup_thread_start = self.pending_startup_thread_start;
+        app.sync_active_agent_label();
+    }
+}
+
 impl App {
     async fn commit_replacement_app_server_thread(
         &mut self,
@@ -104,11 +158,10 @@ impl App {
         let previous_cloud_config_bundle =
             std::mem::replace(&mut self.cloud_config_bundle, cloud_config_bundle);
         if let Err(err) = self
-            .replace_chat_widget_with_app_server_thread(
+            .replace_chat_widget_with_app_server_thread_preserving_previous_ui_on_error(
                 tui,
                 &mut replacement_session,
                 started,
-                /*initial_user_message*/ None,
             )
             .await
         {
@@ -726,18 +779,65 @@ impl App {
         started: AppServerStartedThread,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
     ) -> Result<()> {
+        self.replace_chat_widget_with_app_server_thread_inner(
+            tui,
+            app_server,
+            started,
+            initial_user_message,
+            /*preserve_previous_ui_on_error*/ false,
+        )
+        .await
+    }
+
+    async fn replace_chat_widget_with_app_server_thread_preserving_previous_ui_on_error(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        started: AppServerStartedThread,
+    ) -> Result<()> {
+        self.replace_chat_widget_with_app_server_thread_inner(
+            tui, app_server, started, /*initial_user_message*/ None,
+            /*preserve_previous_ui_on_error*/ true,
+        )
+        .await
+    }
+
+    async fn replace_chat_widget_with_app_server_thread_inner(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        started: AppServerStartedThread,
+        initial_user_message: Option<crate::chatwidget::UserMessage>,
+        preserve_previous_ui_on_error: bool,
+    ) -> Result<()> {
         // Initial messages are for freshly attached primary threads only. Thread switches and
         // resume/fork flows pass `None` so they cannot replay old history and then auto-submit a new
         // user turn by accident.
-        self.reset_thread_event_state();
         let init = self.chatwidget_init_for_forked_or_resumed_thread(
             tui,
             self.config.clone(),
             initial_user_message,
         );
-        self.replace_chat_widget(ChatWidget::new_with_app_event(init));
-        self.enqueue_primary_thread_session(started.session, started.turns)
-            .await?;
+        let replacement_chat_widget = ChatWidget::new_with_app_event(init);
+        let previous_ui = if preserve_previous_ui_on_error {
+            Some(AppServerThreadUiSnapshot::take_from(
+                self,
+                replacement_chat_widget,
+            ))
+        } else {
+            self.reset_thread_event_state();
+            self.replace_chat_widget(replacement_chat_widget);
+            None
+        };
+        let result = self
+            .enqueue_primary_thread_session(started.session, started.turns)
+            .await;
+        if let Err(err) = result {
+            if let Some(previous_ui) = previous_ui {
+                previous_ui.restore(self);
+            }
+            return Err(err);
+        }
         self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
     }
@@ -2040,6 +2140,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::make_test_app;
+    use crate::chatwidget::ChatWidgetInit;
+    use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::WarningNotification;
+    use codex_protocol::ThreadId;
 
     #[test]
     fn terminal_thread_read_error_detection_matches_not_loaded_errors() {
@@ -2092,5 +2197,78 @@ mod tests {
 
         assert!(App::can_fallback_from_include_turns_error(&unmaterialized));
         assert!(App::can_fallback_from_include_turns_error(&ephemeral));
+    }
+
+    #[tokio::test]
+    async fn app_server_thread_ui_snapshot_restores_previous_thread_state() {
+        let mut app = make_test_app().await;
+        let original_thread_id = ThreadId::new();
+        let replacement_thread_id = ThreadId::new();
+        app.primary_thread_id = Some(original_thread_id);
+        app.active_thread_id = Some(original_thread_id);
+        app.thread_event_channels.insert(
+            original_thread_id,
+            ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
+        );
+        app.agent_navigation.upsert(
+            original_thread_id,
+            Some("main".to_string()),
+            Some("primary".to_string()),
+            /*is_closed*/ false,
+        );
+        app.pending_primary_events
+            .push_back(ThreadBufferedEvent::Notification(
+                ServerNotification::Warning(WarningNotification {
+                    thread_id: Some(original_thread_id.to_string()),
+                    message: "pending".to_string(),
+                }),
+            ));
+        let original_config = app.config.clone();
+        let replacement_config = {
+            let mut config = original_config.clone();
+            config.model = Some("replacement-model".to_string());
+            config
+        };
+        let replacement_chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+            config: replacement_config,
+            frame_requester: crate::tui::FrameRequester::test_dummy(),
+            app_event_tx: app.app_event_tx.clone(),
+            workspace_command_runner: None,
+            initial_user_message: None,
+            enhanced_keys_supported: false,
+            has_chatgpt_account: false,
+            model_catalog: app.model_catalog.clone(),
+            feedback: codex_feedback::CodexFeedback::new(),
+            is_first_run: false,
+            status_account_display: None,
+            runtime_model_provider_base_url: None,
+            initial_plan_type: None,
+            model: None,
+            startup_tooltip_override: None,
+            status_line_invalid_items_warned: app.status_line_invalid_items_warned.clone(),
+            terminal_title_invalid_items_warned: app.terminal_title_invalid_items_warned.clone(),
+            session_telemetry: app.session_telemetry.clone(),
+        });
+
+        let snapshot = AppServerThreadUiSnapshot::take_from(&mut app, replacement_chat_widget);
+        app.primary_thread_id = Some(replacement_thread_id);
+        app.active_thread_id = Some(replacement_thread_id);
+        app.thread_event_channels.insert(
+            replacement_thread_id,
+            ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
+        );
+
+        snapshot.restore(&mut app);
+
+        assert_eq!(app.chat_widget.config_ref().model, original_config.model);
+        assert_eq!(app.primary_thread_id, Some(original_thread_id));
+        assert_eq!(app.active_thread_id, Some(original_thread_id));
+        assert!(app.thread_event_channels.contains_key(&original_thread_id));
+        assert!(
+            !app.thread_event_channels
+                .contains_key(&replacement_thread_id)
+        );
+        assert!(app.agent_navigation.get(&original_thread_id).is_some());
+        assert_eq!(app.pending_primary_events.len(), 1);
     }
 }
