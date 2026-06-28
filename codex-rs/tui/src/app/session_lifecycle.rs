@@ -90,6 +90,48 @@ impl Drop for AuthSwitchRollback {
 }
 
 impl App {
+    async fn commit_replacement_app_server_thread(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        mut replacement_session: AppServerSession,
+        started: AppServerStartedThread,
+        config: Config,
+        cloud_config_bundle: CloudConfigBundleLoader,
+        old_client_shutdown_warning: &str,
+    ) -> Result<()> {
+        let previous_config = std::mem::replace(&mut self.config, config);
+        let previous_cloud_config_bundle =
+            std::mem::replace(&mut self.cloud_config_bundle, cloud_config_bundle);
+        if let Err(err) = self
+            .replace_chat_widget_with_app_server_thread(
+                tui,
+                &mut replacement_session,
+                started,
+                /*initial_user_message*/ None,
+            )
+            .await
+        {
+            if let Err(shutdown_err) = replacement_session.shutdown().await {
+                tracing::warn!(
+                    "failed to shut down replacement app server after attach failure: {shutdown_err}"
+                );
+            }
+            self.config = previous_config;
+            self.cloud_config_bundle = previous_cloud_config_bundle;
+            return Err(err);
+        }
+
+        let old_client = app_server.swap_client(replacement_session.into_client());
+        drop(previous_config);
+        drop(previous_cloud_config_bundle);
+        if let Err(err) = old_client.shutdown().await {
+            tracing::warn!("{old_client_shutdown_warning}: {err}");
+        }
+        tui.frame_requester().schedule_frame();
+        Ok(())
+    }
+
     async fn config_for_auth_profile_switch(
         &self,
         auth_home: AbsolutePathBuf,
@@ -828,6 +870,14 @@ impl App {
             return;
         }
 
+        if !self.pending_primary_events.is_empty() {
+            self.chat_widget.add_error_message(
+                "Cannot switch auth profiles while the primary thread is still attaching."
+                    .to_string(),
+            );
+            return;
+        }
+
         let (auth_home, profile_name, profile_label) = match selection {
             AuthProfileSelection::Default => (
                 self.config.codex_home.to_path_buf(),
@@ -962,25 +1012,19 @@ impl App {
             }
         }
 
-        let old_client = app_server.swap_client(replacement_session.into_client());
-        self.config = config.clone();
-        self.cloud_config_bundle = replacement_cloud_config_bundle;
-        if let Err(err) = old_client.shutdown().await {
-            tracing::warn!(
-                "failed to shut down previous app server after auth profile switch: {err}"
-            );
-        }
-
         let switched = match self
-            .replace_chat_widget_with_app_server_thread(
-                tui, app_server, started, /*initial_user_message*/ None,
+            .commit_replacement_app_server_thread(
+                tui,
+                app_server,
+                replacement_session,
+                started,
+                config.clone(),
+                replacement_cloud_config_bundle,
+                "failed to shut down previous app server after auth profile switch",
             )
             .await
         {
-            Ok(()) => {
-                tui.frame_requester().schedule_frame();
-                true
-            }
+            Ok(()) => true,
             Err(err) => {
                 self.chat_widget
                     .add_error_message(format!("Failed to attach to auth profile session: {err}"));
@@ -1183,8 +1227,6 @@ impl App {
             }
         };
 
-        rollback.disarm();
-
         self.shutdown_current_thread(app_server).await;
         let tracked_thread_ids: Vec<ThreadId> =
             self.thread_event_channels.keys().copied().collect();
@@ -1194,21 +1236,20 @@ impl App {
             }
         }
 
-        let old_client = app_server.swap_client(replacement_session.into_client());
-        self.config = config;
-        self.cloud_config_bundle = replacement_cloud_config_bundle;
-        if let Err(err) = old_client.shutdown().await {
-            tracing::warn!("failed to shut down previous app server after account switch: {err}");
-        }
-
         match self
-            .replace_chat_widget_with_app_server_thread(
-                tui, app_server, started, /*initial_user_message*/ None,
+            .commit_replacement_app_server_thread(
+                tui,
+                app_server,
+                replacement_session,
+                started,
+                config,
+                replacement_cloud_config_bundle,
+                "failed to shut down previous app server after account switch",
             )
             .await
         {
             Ok(()) => {
-                tui.frame_requester().schedule_frame();
+                rollback.disarm();
                 self.chat_widget.add_info_message(
                     format!("Using stored account {} for this session.", selection.label),
                     Some("The previous session remains resumable.".to_string()),
@@ -1430,19 +1471,17 @@ impl App {
             }
         }
 
-        let old_client = app_server.swap_client(replacement_session.into_client());
-        self.config = config;
-        self.cloud_config_bundle = replacement_cloud_config_bundle;
-        if let Err(err) = old_client.shutdown().await {
-            tracing::warn!("failed to shut down previous app server after account removal: {err}");
-        }
-
-        self.replace_chat_widget_with_app_server_thread(
-            tui, app_server, started, /*initial_user_message*/ None,
+        self.commit_replacement_app_server_thread(
+            tui,
+            app_server,
+            replacement_session,
+            started,
+            config,
+            replacement_cloud_config_bundle,
+            "failed to shut down previous app server after account removal",
         )
         .await
         .map_err(|err| format!("Failed to attach after disconnecting {label}: {err}"))?;
-        tui.frame_requester().schedule_frame();
         Ok(())
     }
 

@@ -214,6 +214,18 @@ fn stored_account_switch_pending_attach_message_snapshot() {
     assert_app_snapshot!("stored_account_switch_pending_attach_message", rendered);
 }
 
+#[test]
+fn auth_profile_switch_pending_attach_message_snapshot() {
+    let rendered = lines_to_single_string(
+        &history_cell::new_error_event(
+            "Cannot switch auth profiles while the primary thread is still attaching.".to_string(),
+        )
+        .display_lines(/*width*/ 80),
+    );
+
+    assert_app_snapshot!("auth_profile_switch_pending_attach_message", rendered);
+}
+
 #[tokio::test]
 async fn enqueue_primary_thread_session_replays_buffered_approval_after_attach() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
