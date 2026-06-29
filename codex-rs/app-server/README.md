@@ -279,10 +279,11 @@ Example with notification opt-out:
   screenshots, or change `remoteControl/*` behavior. When no bridge is
   discoverable or the bridge is unreachable, the request succeeds with
   `status: "unavailable"` and an `unavailableReason`.
-- `codeBridge/subscribe` — experimental; connect to the descriptor-backed Code
-  Bridge HTTP service as an app-server subscriber and apply a subscription
-  filter. The request validates that the bridge accepts the filter but does not
-  stream events through app-server yet.
+- `codeBridge/subscribe` — experimental; validate a subscription filter and
+  return `accepted` without opening an app-server event stream. App-server does
+  not proxy Code Bridge telemetry; use one-shot controls such as
+  `codeBridge/screenshot` and `codeBridge/javascript` for descriptor-backed
+  bridge interaction.
 - `codeBridge/screenshot` — experimental; request a screenshot from a named
   Code Bridge producer client (`targetClientId`) and wait for the matching
   response. The response includes the bridge request id, status, screenshot
