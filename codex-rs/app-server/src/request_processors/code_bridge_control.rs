@@ -1,11 +1,9 @@
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::request_processors::code_bridge_processor::CodeBridgeRequestProcessor;
-use codex_app_server_protocol::CodeBridgeConsoleLevel;
 use codex_app_server_protocol::CodeBridgeControlStatus;
 use codex_app_server_protocol::CodeBridgeError;
 use codex_app_server_protocol::CodeBridgeErrorCode;
-use codex_app_server_protocol::CodeBridgeEventKind;
 use codex_app_server_protocol::CodeBridgeJavascriptParams;
 use codex_app_server_protocol::CodeBridgeJavascriptResponse;
 use codex_app_server_protocol::CodeBridgeRequestStatus;
@@ -32,13 +30,11 @@ use codex_code_bridge_protocol::ControlResponseMessage;
 use codex_code_bridge_protocol::ControlStatus;
 use codex_code_bridge_protocol::ErrorCode;
 use codex_code_bridge_protocol::ErrorMessage;
-use codex_code_bridge_protocol::EventKind;
 use codex_code_bridge_protocol::MAX_CONTROL_TIMEOUT_MS;
 use codex_code_bridge_protocol::MAX_EVENT_TEXT_BYTES;
 use codex_code_bridge_protocol::ScreenshotMediaType;
 use codex_code_bridge_protocol::ScreenshotResponseMessage;
 use codex_code_bridge_protocol::SourceKind;
-use codex_code_bridge_protocol::SubscriptionFilter;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -58,22 +54,8 @@ impl CodeBridgeRequestProcessor {
         params: CodeBridgeSubscribeParams,
     ) -> Result<CodeBridgeSubscribeResponse, JSONRPCErrorError> {
         validate_filter(&params.filter)?;
-        let client = self.client()?;
-        let session = subscriber_session(
-            &client,
-            "app-server-subscribe",
-            CapabilitySet {
-                subscribe_events: true,
-                ..CapabilitySet::default()
-            },
-        )
-        .await?;
-        expect_ack(
-            client
-                .subscribe(&session, map_filter(params.filter))
-                .await
-                .map_err(map_client_error)?,
-        )?;
+        // App-server does not expose a stream to drain bridge events yet, so
+        // preserve the v2 response shape without creating an orphan subscriber.
         Ok(CodeBridgeSubscribeResponse {
             status: CodeBridgeRequestStatus::Accepted,
         })
@@ -333,33 +315,6 @@ fn validate_timeout(timeout_ms: Option<u64>) -> Result<u64, JSONRPCErrorError> {
         )));
     }
     Ok(timeout_ms)
-}
-
-fn map_filter(filter: CodeBridgeSubscriptionFilter) -> SubscriptionFilter {
-    SubscriptionFilter {
-        levels: filter.levels.into_iter().map(map_console_level).collect(),
-        event_kinds: filter.event_kinds.into_iter().map(map_event_kind).collect(),
-        client_ids: filter.client_ids,
-    }
-}
-
-fn map_console_level(level: CodeBridgeConsoleLevel) -> codex_code_bridge_protocol::ConsoleLevel {
-    match level {
-        CodeBridgeConsoleLevel::Trace => codex_code_bridge_protocol::ConsoleLevel::Trace,
-        CodeBridgeConsoleLevel::Info => codex_code_bridge_protocol::ConsoleLevel::Info,
-        CodeBridgeConsoleLevel::Warn => codex_code_bridge_protocol::ConsoleLevel::Warn,
-        CodeBridgeConsoleLevel::Error => codex_code_bridge_protocol::ConsoleLevel::Error,
-    }
-}
-
-fn map_event_kind(kind: CodeBridgeEventKind) -> EventKind {
-    match kind {
-        CodeBridgeEventKind::Console => EventKind::Console,
-        CodeBridgeEventKind::Error => EventKind::Error,
-        CodeBridgeEventKind::Pageview => EventKind::Pageview,
-        CodeBridgeEventKind::Screenshot => EventKind::Screenshot,
-        CodeBridgeEventKind::ControlResult => EventKind::ControlResult,
-    }
 }
 
 fn map_screenshot_response(response: ScreenshotResponseMessage) -> CodeBridgeScreenshotResponse {

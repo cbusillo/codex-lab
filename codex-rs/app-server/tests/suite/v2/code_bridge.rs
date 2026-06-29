@@ -151,7 +151,7 @@ async fn code_bridge_status_read_reports_workspace_metadata_bridge() -> Result<(
 }
 
 #[tokio::test]
-async fn code_bridge_subscribe_accepts_filter_through_jsonrpc() -> Result<()> {
+async fn code_bridge_subscribe_accepts_without_opening_orphan_session() -> Result<()> {
     let codex_home = TempDir::new()?;
     let service =
         codex_code_bridge_service::start(BridgeServiceConfig::new(codex_home.path().to_path_buf()))
@@ -178,7 +178,7 @@ async fn code_bridge_subscribe_accepts_filter_through_jsonrpc() -> Result<()> {
         }
     );
     let status = client_status(service.descriptor_path()).await?;
-    assert_eq!(status.connected_subscriber_count, 1);
+    assert_eq!(status.connected_subscriber_count, 0);
 
     service.shutdown().await;
     Ok(())
