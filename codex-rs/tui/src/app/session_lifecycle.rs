@@ -141,6 +141,46 @@ impl AppServerThreadUiSnapshot {
         app.pending_startup_thread_start = self.pending_startup_thread_start;
         app.sync_active_agent_label();
     }
+
+    fn previous_thread_ids(&self) -> Vec<ThreadId> {
+        let mut thread_ids: Vec<ThreadId> = self.thread_event_channels.keys().copied().collect();
+        for thread_id in [
+            self.chat_widget.thread_id(),
+            self.active_thread_id,
+            self.primary_thread_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !thread_ids.contains(&thread_id) {
+                thread_ids.push(thread_id);
+            }
+        }
+        thread_ids
+    }
+
+    async fn discard_previous_threads(
+        mut self,
+        app_server: &mut AppServerSession,
+    ) -> Vec<ThreadId> {
+        let thread_ids = self.previous_thread_ids();
+
+        for thread_id in thread_ids.iter().copied() {
+            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
+                tracing::warn!("failed to unsubscribe replaced thread {thread_id}: {err}");
+            }
+        }
+
+        for handle in self
+            .thread_event_listener_tasks
+            .drain()
+            .map(|(_, handle)| handle)
+        {
+            handle.abort();
+        }
+
+        thread_ids
+    }
 }
 
 impl App {
@@ -160,6 +200,7 @@ impl App {
         if let Err(err) = self
             .replace_chat_widget_with_app_server_thread_preserving_previous_ui_on_error(
                 tui,
+                app_server,
                 &mut replacement_session,
                 started,
             )
@@ -785,6 +826,7 @@ impl App {
             started,
             initial_user_message,
             /*preserve_previous_ui_on_error*/ false,
+            /*previous_app_server_for_cleanup*/ None,
         )
         .await
     }
@@ -792,12 +834,17 @@ impl App {
     async fn replace_chat_widget_with_app_server_thread_preserving_previous_ui_on_error(
         &mut self,
         tui: &mut tui::Tui,
-        app_server: &mut AppServerSession,
+        previous_app_server: &mut AppServerSession,
+        replacement_app_server: &mut AppServerSession,
         started: AppServerStartedThread,
     ) -> Result<()> {
         self.replace_chat_widget_with_app_server_thread_inner(
-            tui, app_server, started, /*initial_user_message*/ None,
+            tui,
+            replacement_app_server,
+            started,
+            /*initial_user_message*/ None,
             /*preserve_previous_ui_on_error*/ true,
+            Some(previous_app_server),
         )
         .await
     }
@@ -809,6 +856,7 @@ impl App {
         started: AppServerStartedThread,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
         preserve_previous_ui_on_error: bool,
+        previous_app_server_for_cleanup: Option<&mut AppServerSession>,
     ) -> Result<()> {
         // Initial messages are for freshly attached primary threads only. Thread switches and
         // resume/fork flows pass `None` so they cannot replay old history and then auto-submit a new
@@ -832,11 +880,35 @@ impl App {
         let result = self
             .enqueue_primary_thread_session(started.session, started.turns)
             .await;
+        self.finish_app_server_thread_replacement(
+            app_server,
+            previous_ui,
+            previous_app_server_for_cleanup,
+            result,
+        )
+        .await
+    }
+
+    async fn finish_app_server_thread_replacement(
+        &mut self,
+        app_server: &mut AppServerSession,
+        previous_ui: Option<AppServerThreadUiSnapshot>,
+        previous_app_server_for_cleanup: Option<&mut AppServerSession>,
+        result: Result<()>,
+    ) -> Result<()> {
         if let Err(err) = result {
             if let Some(previous_ui) = previous_ui {
                 previous_ui.restore(self);
             }
             return Err(err);
+        }
+        if let Some(previous_ui) = previous_ui {
+            if let Some(previous_app_server) = previous_app_server_for_cleanup {
+                previous_ui
+                    .discard_previous_threads(previous_app_server)
+                    .await;
+                self.backtrack.pending_rollback = None;
+            }
         }
         self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
@@ -1103,15 +1175,6 @@ impl App {
             }
         };
 
-        self.shutdown_current_thread(app_server).await;
-        let tracked_thread_ids: Vec<ThreadId> =
-            self.thread_event_channels.keys().copied().collect();
-        for thread_id in tracked_thread_ids {
-            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
-                tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
-            }
-        }
-
         let switched = match self
             .commit_replacement_app_server_thread(
                 tui,
@@ -1326,15 +1389,6 @@ impl App {
                 return;
             }
         };
-
-        self.shutdown_current_thread(app_server).await;
-        let tracked_thread_ids: Vec<ThreadId> =
-            self.thread_event_channels.keys().copied().collect();
-        for thread_id in tracked_thread_ids {
-            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
-                tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
-            }
-        }
 
         match self
             .commit_replacement_app_server_thread(
@@ -1561,15 +1615,6 @@ impl App {
                 ));
             }
         };
-
-        self.shutdown_current_thread(app_server).await;
-        let tracked_thread_ids: Vec<ThreadId> =
-            self.thread_event_channels.keys().copied().collect();
-        for thread_id in tracked_thread_ids {
-            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
-                tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
-            }
-        }
 
         self.commit_replacement_app_server_thread(
             tui,
@@ -2142,6 +2187,8 @@ mod tests {
     use super::*;
     use crate::app::test_support::make_test_app;
     use crate::chatwidget::ChatWidgetInit;
+    use crate::session_state::ThreadSessionState;
+    use codex_app_server_protocol::AskForApproval;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::WarningNotification;
     use codex_protocol::ThreadId;
@@ -2229,26 +2276,7 @@ mod tests {
             config.model = Some("replacement-model".to_string());
             config
         };
-        let replacement_chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
-            config: replacement_config,
-            frame_requester: crate::tui::FrameRequester::test_dummy(),
-            app_event_tx: app.app_event_tx.clone(),
-            workspace_command_runner: None,
-            initial_user_message: None,
-            enhanced_keys_supported: false,
-            has_chatgpt_account: false,
-            model_catalog: app.model_catalog.clone(),
-            feedback: codex_feedback::CodexFeedback::new(),
-            is_first_run: false,
-            status_account_display: None,
-            runtime_model_provider_base_url: None,
-            initial_plan_type: None,
-            model: None,
-            startup_tooltip_override: None,
-            status_line_invalid_items_warned: app.status_line_invalid_items_warned.clone(),
-            terminal_title_invalid_items_warned: app.terminal_title_invalid_items_warned.clone(),
-            session_telemetry: app.session_telemetry.clone(),
-        });
+        let replacement_chat_widget = replacement_chat_widget(&app, replacement_config);
 
         let snapshot = AppServerThreadUiSnapshot::take_from(&mut app, replacement_chat_widget);
         app.primary_thread_id = Some(replacement_thread_id);
@@ -2270,5 +2298,274 @@ mod tests {
         );
         assert!(app.agent_navigation.get(&original_thread_id).is_some());
         assert_eq!(app.pending_primary_events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn app_server_thread_ui_snapshot_discards_previous_listener_tasks() -> Result<()> {
+        struct DropNotify(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for DropNotify {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        let mut app = make_test_app().await;
+        let original_thread_id = ThreadId::new();
+        app.primary_thread_id = Some(original_thread_id);
+        app.active_thread_id = Some(original_thread_id);
+        app.thread_event_channels.insert(
+            original_thread_id,
+            ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
+        );
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        app.thread_event_listener_tasks.insert(
+            original_thread_id,
+            tokio::spawn(async move {
+                let _notify = DropNotify(Some(dropped_tx));
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+            .await
+            .expect("listener task should start")
+            .expect("listener task should notify after starting");
+
+        let replacement_chat_widget = replacement_chat_widget(&app, app.config.clone());
+        let snapshot = AppServerThreadUiSnapshot::take_from(&mut app, replacement_chat_widget);
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+
+        let discarded_thread_ids = snapshot.discard_previous_threads(&mut app_server).await;
+
+        assert_eq!(discarded_thread_ids, vec![original_thread_id]);
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("listener task should be aborted")
+            .expect("listener task should notify on drop");
+        app_server.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn app_server_thread_ui_snapshot_collects_all_previous_thread_ids() {
+        let mut app = make_test_app().await;
+        let channel_thread_id = ThreadId::new();
+        let chat_widget_thread_id = ThreadId::new();
+        let active_thread_id = ThreadId::new();
+        let primary_thread_id = ThreadId::new();
+        app.chat_widget
+            .handle_thread_session(test_thread_session(&app, chat_widget_thread_id));
+        app.active_thread_id = Some(active_thread_id);
+        app.primary_thread_id = Some(primary_thread_id);
+        app.thread_event_channels.insert(
+            channel_thread_id,
+            ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
+        );
+        let replacement_chat_widget = replacement_chat_widget(&app, app.config.clone());
+
+        let snapshot = AppServerThreadUiSnapshot::take_from(&mut app, replacement_chat_widget);
+        let mut thread_ids = snapshot.previous_thread_ids();
+        thread_ids.sort_by_key(ToString::to_string);
+        let mut expected_thread_ids = vec![
+            channel_thread_id,
+            chat_widget_thread_id,
+            active_thread_id,
+            primary_thread_id,
+        ];
+        expected_thread_ids.sort_by_key(ToString::to_string);
+
+        assert_eq!(thread_ids, expected_thread_ids);
+    }
+
+    #[tokio::test]
+    async fn app_server_thread_replacement_discards_previous_ui_after_success() -> Result<()> {
+        let mut app = make_test_app().await;
+        let original_thread_id = ThreadId::new();
+        let replacement_thread_id = ThreadId::new();
+        app.primary_thread_id = Some(original_thread_id);
+        app.active_thread_id = Some(original_thread_id);
+        app.thread_event_channels.insert(
+            original_thread_id,
+            ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
+        );
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        app.thread_event_listener_tasks
+            .insert(original_thread_id, drop_notify_task(dropped_tx, started_tx));
+        wait_for_task_start(started_rx).await;
+        let replacement_chat_widget = replacement_chat_widget(&app, app.config.clone());
+        let previous_ui = Some(AppServerThreadUiSnapshot::take_from(
+            &mut app,
+            replacement_chat_widget,
+        ));
+        app.enqueue_primary_thread_session(
+            test_thread_session(&app, replacement_thread_id),
+            Vec::new(),
+        )
+        .await?;
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut previous_app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+
+        app.finish_app_server_thread_replacement(
+            &mut app_server,
+            previous_ui,
+            Some(&mut previous_app_server),
+            Ok(()),
+        )
+        .await?;
+
+        assert_eq!(app.primary_thread_id, Some(replacement_thread_id));
+        assert_eq!(app.active_thread_id, Some(replacement_thread_id));
+        assert!(
+            app.thread_event_channels
+                .contains_key(&replacement_thread_id)
+        );
+        assert!(!app.thread_event_channels.contains_key(&original_thread_id));
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("previous listener task should be aborted after attach succeeds")
+            .expect("previous listener task should notify on drop");
+        app_server.shutdown().await?;
+        previous_app_server.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn app_server_thread_replacement_restores_previous_ui_on_attach_error() -> Result<()> {
+        let mut app = make_test_app().await;
+        let original_thread_id = ThreadId::new();
+        let replacement_thread_id = ThreadId::new();
+        app.primary_thread_id = Some(original_thread_id);
+        app.active_thread_id = Some(original_thread_id);
+        app.thread_event_channels.insert(
+            original_thread_id,
+            ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
+        );
+        let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        app.thread_event_listener_tasks
+            .insert(original_thread_id, drop_notify_task(dropped_tx, started_tx));
+        wait_for_task_start(started_rx).await;
+        let replacement_chat_widget = replacement_chat_widget(&app, app.config.clone());
+        let previous_ui = Some(AppServerThreadUiSnapshot::take_from(
+            &mut app,
+            replacement_chat_widget,
+        ));
+        app.primary_thread_id = Some(replacement_thread_id);
+        app.active_thread_id = Some(replacement_thread_id);
+        app.thread_event_channels.insert(
+            replacement_thread_id,
+            ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
+        );
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let err = color_eyre::eyre::eyre!("forced replacement attach error");
+
+        let result = app
+            .finish_app_server_thread_replacement(&mut app_server, previous_ui, None, Err(err))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(app.primary_thread_id, Some(original_thread_id));
+        assert_eq!(app.active_thread_id, Some(original_thread_id));
+        assert!(app.thread_event_channels.contains_key(&original_thread_id));
+        assert!(
+            !app.thread_event_channels
+                .contains_key(&replacement_thread_id)
+        );
+        assert!(matches!(
+            dropped_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        app.abort_all_thread_event_listeners();
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("restored listener task should be abortable after cleanup")
+            .expect("restored listener task should notify on drop");
+        app_server.shutdown().await?;
+        Ok(())
+    }
+
+    fn replacement_chat_widget(app: &App, config: Config) -> ChatWidget {
+        ChatWidget::new_with_app_event(ChatWidgetInit {
+            config,
+            frame_requester: crate::tui::FrameRequester::test_dummy(),
+            app_event_tx: app.app_event_tx.clone(),
+            workspace_command_runner: None,
+            initial_user_message: None,
+            enhanced_keys_supported: false,
+            has_chatgpt_account: false,
+            model_catalog: app.model_catalog.clone(),
+            feedback: codex_feedback::CodexFeedback::new(),
+            is_first_run: false,
+            status_account_display: None,
+            runtime_model_provider_base_url: None,
+            initial_plan_type: None,
+            model: None,
+            startup_tooltip_override: None,
+            status_line_invalid_items_warned: app.status_line_invalid_items_warned.clone(),
+            terminal_title_invalid_items_warned: app.terminal_title_invalid_items_warned.clone(),
+            session_telemetry: app.session_telemetry.clone(),
+        })
+    }
+
+    fn test_thread_session(app: &App, thread_id: ThreadId) -> ThreadSessionState {
+        ThreadSessionState {
+            thread_id,
+            forked_from_id: None,
+            fork_parent_title: None,
+            thread_name: None,
+            model: app.chat_widget.current_model().to_string(),
+            model_provider_id: app.config.model_provider_id.clone(),
+            service_tier: app.chat_widget.current_service_tier().map(str::to_string),
+            approval_policy: AskForApproval::from(app.config.permissions.approval_policy.value()),
+            approvals_reviewer: app.config.approvals_reviewer,
+            permission_profile: app.config.permissions.permission_profile().clone(),
+            active_permission_profile: app.config.permissions.active_permission_profile(),
+            cwd: app.config.cwd.clone(),
+            runtime_workspace_roots: app.config.workspace_roots.clone(),
+            instruction_source_paths: Vec::new(),
+            reasoning_effort: app.chat_widget.current_reasoning_effort(),
+            collaboration_mode: None,
+            personality: None,
+            message_history: None,
+            network_proxy: None,
+            rollout_path: None,
+        }
+    }
+
+    struct DropNotify(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropNotify {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    fn drop_notify_task(
+        dropped_tx: tokio::sync::oneshot::Sender<()>,
+        started_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let _notify = DropNotify(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        })
+    }
+
+    async fn wait_for_task_start(started_rx: tokio::sync::oneshot::Receiver<()>) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+            .await
+            .expect("listener task should start")
+            .expect("listener task should notify after starting");
     }
 }
