@@ -605,13 +605,12 @@ impl ToolRegistry {
                 outcome.additional_contexts.clone(),
             )
             .await;
-            let replacement_text = if outcome.should_stop {
+            let replacement_text = if outcome.should_block {
                 Some(
                     outcome
                         .feedback_message
                         .clone()
-                        .or_else(|| outcome.stop_reason.clone())
-                        .unwrap_or_else(|| "PostToolUse hook stopped execution".to_string()),
+                        .unwrap_or_else(|| "PostToolUse hook blocked tool output".to_string()),
                 )
             } else {
                 outcome.feedback_message.clone()
