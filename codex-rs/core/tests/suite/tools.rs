@@ -7,6 +7,18 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_code_bridge_client::CodeBridgeClient;
+use codex_code_bridge_client::ControlResponse;
+use codex_code_bridge_client::ScreenshotResponse;
+use codex_code_bridge_protocol::BridgePayload;
+use codex_code_bridge_protocol::CapabilitySet;
+use codex_code_bridge_protocol::ClientMetadata;
+use codex_code_bridge_protocol::ClientRole;
+use codex_code_bridge_protocol::ControlCommand;
+use codex_code_bridge_protocol::ControlStatus;
+use codex_code_bridge_protocol::ScreenshotMediaType;
+use codex_code_bridge_protocol::ScreenshotPayload;
+use codex_code_bridge_protocol::SourceKind;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
@@ -49,6 +61,252 @@ fn tool_names(body: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_bridge_screenshot_returns_bounded_metadata_and_image_output() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "code-bridge-screenshot";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    call_id,
+                    "code_bridge",
+                    r#"{"action":"screenshot","targetClientId":"producer-1","timeoutMs":1000}"#,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+    let bridge = codex_code_bridge_service::start(
+        codex_code_bridge_service::BridgeServiceConfig::new(test.codex_home_path().to_path_buf()),
+    )
+    .await?;
+    let bridge_client = CodeBridgeClient::from_descriptor_path(bridge.descriptor_path())?;
+    let producer_session = bridge_client
+        .hello(
+            "producer-1",
+            ClientRole::Producer,
+            CapabilitySet {
+                provide_screenshot: true,
+                ..CapabilitySet::default()
+            },
+            ClientMetadata {
+                source_kind: SourceKind::TestFixture,
+                label: Some("core-suite-producer".to_string()),
+                provenance: None,
+            },
+        )
+        .await?;
+    let mut producer_events = bridge_client.events(&producer_session, 0).await?;
+    let producer_client = bridge_client.clone();
+    let producer_task = tokio::spawn(async move {
+        loop {
+            let message = producer_events.next_message().await?;
+            let BridgePayload::ScreenshotRequest(request) = message.envelope.payload else {
+                continue;
+            };
+            producer_client
+                .respond_screenshot(
+                    &producer_session,
+                    ScreenshotResponse {
+                        request_id: request.request_id,
+                        status: ControlStatus::Ok,
+                        screenshot: Some(ScreenshotPayload {
+                            width: 1,
+                            height: 1,
+                            media_type: ScreenshotMediaType::Png,
+                            data_base64: "iVBORw0KGgo=".to_string(),
+                        }),
+                        error: None,
+                    },
+                )
+                .await?;
+            return anyhow::Ok(());
+        }
+    });
+
+    test.submit_turn("capture the browser").await?;
+
+    producer_task.await??;
+    bridge.shutdown().await;
+
+    let output = responses
+        .requests()
+        .last()
+        .context("follow-up model request should be captured")?
+        .function_call_output(call_id)["output"]
+        .clone();
+    let items = output
+        .as_array()
+        .context("screenshot output should be structured content")?;
+    assert_eq!(items.len(), 2);
+    let metadata = items[0]["text"].as_str().context("metadata text item")?;
+    let metadata: Value = serde_json::from_str(metadata)?;
+    assert_eq!(metadata["status"], "ok");
+    assert_eq!(metadata["screenshot"]["mediaType"], "image/png");
+    assert!(metadata["screenshot"].get("dataBase64").is_none());
+    assert_eq!(items[1]["type"], "input_image");
+    assert_eq!(items[1]["image_url"], "data:image/png;base64,iVBORw0KGgo=");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_bridge_status_tool_is_model_visible_and_bounded_when_unavailable() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "code-bridge-status";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "code_bridge", r#"{"action":"status"}"#),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("check Code Bridge status").await?;
+
+    let requests = responses.requests();
+    let tools = tool_names(&requests[0].body_json());
+    assert!(
+        tools.contains(&"code_bridge".to_string()),
+        "code_bridge should be visible to the model; got {tools:?}"
+    );
+
+    let output = responses
+        .function_call_output_text(call_id)
+        .context("function_call_output present for code_bridge status")?;
+    let output: Value = serde_json::from_str(&output)?;
+    assert_eq!(output["status"], "unavailable");
+    let message = output["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains(test.codex_home_path().to_string_lossy().as_ref()),
+        "status output should not expose local descriptor path: {message}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_bridge_javascript_returns_bounded_control_output() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "code-bridge-javascript";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    call_id,
+                    "code_bridge",
+                    r#"{"action":"javascript","targetClientId":"producer-1","code":"window.location.href","timeoutMs":1000}"#,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+    let bridge = codex_code_bridge_service::start(
+        codex_code_bridge_service::BridgeServiceConfig::new(test.codex_home_path().to_path_buf()),
+    )
+    .await?;
+    let bridge_client = CodeBridgeClient::from_descriptor_path(bridge.descriptor_path())?;
+    let producer_session = bridge_client
+        .hello(
+            "producer-1",
+            ClientRole::Producer,
+            CapabilitySet {
+                provide_control: true,
+                provide_javascript_execution: true,
+                ..CapabilitySet::default()
+            },
+            ClientMetadata {
+                source_kind: SourceKind::TestFixture,
+                label: Some("core-suite-producer".to_string()),
+                provenance: None,
+            },
+        )
+        .await?;
+    let mut producer_events = bridge_client.events(&producer_session, 0).await?;
+    let producer_client = bridge_client.clone();
+    let producer_task = tokio::spawn(async move {
+        loop {
+            let message = producer_events.next_message().await?;
+            let BridgePayload::ControlRequest(request) = message.envelope.payload else {
+                continue;
+            };
+            assert_eq!(request.target_client_id, "producer-1");
+            assert_eq!(
+                request.command,
+                ControlCommand::ExecuteJavascript {
+                    code: "window.location.href".to_string()
+                }
+            );
+            producer_client
+                .respond_control_with_result(
+                    &producer_session,
+                    ControlResponse {
+                        request_id: request.request_id,
+                        status: ControlStatus::Ok,
+                        summary: "javascript completed".to_string(),
+                        error: None,
+                    },
+                    json!({ "href": "https://example.test/" }),
+                )
+                .await?;
+            return anyhow::Ok(());
+        }
+    });
+
+    test.submit_turn("inspect the browser location").await?;
+
+    producer_task.await??;
+    bridge.shutdown().await;
+
+    let output = responses
+        .function_call_output_text(call_id)
+        .context("function_call_output present for code_bridge javascript")?;
+    let output: Value = serde_json::from_str(&output)?;
+    assert_eq!(output["status"], "ok");
+    assert_eq!(output["summary"], "javascript completed");
+    assert_eq!(output["result"], json!({ "href": "https://example.test/" }));
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

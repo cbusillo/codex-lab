@@ -460,10 +460,7 @@ impl CodeBridgeClient {
 
     fn endpoint_path(&self, segments: &[&str]) -> Url {
         let mut url = self.endpoint_url.clone();
-        {
-            let mut path_segments = url
-                .path_segments_mut()
-                .expect("validated loopback HTTP URLs support path segments");
+        if let Ok(mut path_segments) = url.path_segments_mut() {
             path_segments.pop_if_empty();
             for segment in segments {
                 path_segments.push(segment);
