@@ -4,6 +4,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::CodeBridgeHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::DynamicToolHandler;
@@ -26,6 +27,7 @@ use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
 use crate::tools::handlers::agent_jobs::SpawnAgentsOnCsvHandler;
+use crate::tools::handlers::code_bridge_spec::CODE_BRIDGE_TOOL_NAME;
 use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
@@ -644,6 +646,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     let environment_mode = turn_context.tool_environment_mode();
 
     planned_tools.add(PlanHandler);
+    let code_bridge_tool_name = ToolName::plain(CODE_BRIDGE_TOOL_NAME);
+    let code_bridge_owned_by_extension_tool = context
+        .extension_tool_executors
+        .iter()
+        .any(|executor| executor.tool_name() == code_bridge_tool_name);
+    let code_bridge_owned_by_dynamic_tool = context.dynamic_tools.iter().any(|tool| {
+        DynamicToolHandler::new(tool)
+            .is_some_and(|handler| handler.tool_name() == code_bridge_tool_name)
+    });
+    if !code_bridge_owned_by_extension_tool && !code_bridge_owned_by_dynamic_tool {
+        planned_tools.add(CodeBridgeHandler);
+    }
 
     if turn_context.config.experimental_request_user_input_enabled {
         planned_tools.add(RequestUserInputHandler {

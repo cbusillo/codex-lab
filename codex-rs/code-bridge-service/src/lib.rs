@@ -1045,8 +1045,11 @@ fn envelope_to_sse_event(sequence: u64, envelope: BridgeEnvelope) -> Result<SseE
                 ),
             },
         };
-        serde_json::to_string(&fallback)
-            .expect("Code Bridge serialization fallback should serialize")
+        serde_json::to_string(&fallback).unwrap_or_else(|fallback_err| {
+            format!(
+                r#"{{"sequence":{sequence},"error":"failed to serialize Code Bridge fallback event: {fallback_err}"}}"#
+            )
+        })
     });
     Ok(SseEvent::default()
         .id(sequence.to_string())

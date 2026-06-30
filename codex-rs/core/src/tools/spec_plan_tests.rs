@@ -747,6 +747,29 @@ async fn invalid_mcp_tools_are_not_registered() {
 }
 
 #[tokio::test]
+async fn plain_dynamic_code_bridge_tool_keeps_ownership() {
+    let plan = probe_with(
+        |_| {},
+        ToolPlanInputs {
+            dynamic_tools: vec![dynamic_tool(
+                /*namespace*/ None,
+                "code_bridge",
+                /*defer_loading*/ false,
+            )],
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    plan.assert_visible_contains(&["code_bridge"]);
+    plan.assert_registered_contains(&["code_bridge"]);
+    let ToolSpec::Function(tool) = plan.visible_spec("code_bridge") else {
+        panic!("expected code_bridge function spec");
+    };
+    assert_eq!(tool.description, "code_bridge dynamic tool");
+}
+
+#[tokio::test]
 async fn request_plugin_install_requires_all_discovery_features_and_discoverable_tools() {
     let discoverable_tools = Some(vec![discoverable_plugin("github", "GitHub")]);
     for disabled_feature in [Feature::ToolSuggest, Feature::Apps, Feature::Plugins] {
