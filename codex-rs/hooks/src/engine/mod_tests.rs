@@ -1226,6 +1226,75 @@ fn profile_user_layers_load_shared_hooks_json_once() {
 }
 
 #[test]
+fn hooks_json_top_level_metadata_does_not_block_discovery() {
+    let temp = tempdir().expect("create temp dir");
+    let config_path =
+        AbsolutePathBuf::try_from(temp.path().join("config.toml")).expect("absolute config path");
+    let hooks_json_path =
+        AbsolutePathBuf::try_from(temp.path().join("hooks.json")).expect("absolute hooks path");
+    fs::write(
+        hooks_json_path.as_path(),
+        r#"{
+              "$schema": "https://example.test/hooks.schema.json",
+              "version": 1,
+              "description": "project hooks",
+              "hooks": {
+                "PreToolUse": [
+                  {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                      {
+                        "type": "command",
+                        "command": "python3 /tmp/json-hook.py"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }"#,
+    )
+    .expect("write hooks.json");
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![ConfigLayerEntry::new(
+            ConfigLayerSource::System { file: config_path },
+            TomlValue::Table(Default::default()),
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("config layer stack");
+
+    let engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        /*bypass_hook_trust*/ true,
+        Some(&config_layer_stack),
+        Vec::new(),
+        Vec::new(),
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+    );
+
+    assert!(engine.warnings().is_empty());
+    let preview = engine.preview_pre_tool_use(&PreToolUseRequest {
+        session_id: ThreadId::new(),
+        turn_id: "turn-1".to_string(),
+        subagent: None,
+        cwd: cwd(),
+        transcript_path: None,
+        model: "gpt-test".to_string(),
+        permission_mode: "default".to_string(),
+        tool_name: "Bash".to_string(),
+        matcher_aliases: Vec::new(),
+        tool_use_id: "tool-1".to_string(),
+        tool_input: serde_json::json!({ "command": "echo hello" }),
+    });
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0].source_path, hooks_json_path);
+}
+
+#[test]
 fn malformed_hooks_json_is_reported_as_startup_warning() {
     let temp = tempdir().expect("create temp dir");
     let config_path =
