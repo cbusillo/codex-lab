@@ -1086,6 +1086,46 @@ async fn auto_review_finding_detail_read_rejects_unknown_finding_id() -> Result<
 }
 
 #[tokio::test]
+async fn auto_review_finding_detail_read_rejects_wrong_review_target() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    let thread_id = start_thread_with_cwd(&mut mcp, &thread_cwd).await?;
+    let (mut run, output) = sample_auto_review_run("run_wrong_target", &thread_cwd, "Stored body");
+    run.target = auto_review_target_for_cwd(codex_home.path(), &thread_cwd).await;
+    run.review_target = CoreReviewTarget::Custom {
+        instructions: "review a different target".to_string(),
+    };
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
+
+    let request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: "run_wrong_target".to_string(),
+            finding_id: Some("f1".to_string()),
+            max_bytes: Some(180),
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error.error.message.contains("auto review detail not found"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn auto_review_finding_detail_read_rejects_stale_run() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
