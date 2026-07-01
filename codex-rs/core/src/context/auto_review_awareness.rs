@@ -1,12 +1,8 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
-use codex_auto_review::AutoReviewDiagnostics;
-use codex_auto_review::AutoReviewFreshness;
+use codex_auto_review::AutoReviewLedgerProjection;
 use codex_auto_review::AutoReviewRun;
-use codex_auto_review::AutoReviewRunSource;
-use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
 use codex_auto_review::AutoReviewSummary;
@@ -111,10 +107,9 @@ fn render_awareness(
 ) -> Option<AutoReviewAwareness> {
     let mut lines = Vec::new();
     let mut status_lines = Vec::new();
-    let mut counts = BTreeMap::<String, usize>::new();
     let mut current_summary: Option<(&AutoReviewRun, AutoReviewSummary)> = None;
-    let diagnostics =
-        AutoReviewDiagnostics::from_runs(runs, Some(active_target), Some(active_review_target));
+    let projection =
+        AutoReviewLedgerProjection::from_runs(runs, active_target, active_review_target);
 
     if let Some(run_id) = &active_snapshot.pending_run_id {
         status_lines.push(format!("- pending background run: {run_id}"));
@@ -124,14 +119,10 @@ fn render_awareness(
     }
 
     for run in runs {
-        let freshness = run.freshness(active_target);
-        let key = status_count_key(run, freshness, active_review_target);
-        *counts.entry(key).or_default() += 1;
-
-        let summary = run.summary(active_target, active_review_target);
+        let summary = run.project(active_target, active_review_target).summary;
         if !summary.content.is_empty() {
             match &current_summary {
-                Some((selected_run, _)) if !run_is_newer(run, selected_run) => {}
+                Some((selected_run, _)) if run.sort_key() <= selected_run.sort_key() => {}
                 _ => current_summary = Some((run, summary)),
             }
         }
@@ -149,7 +140,10 @@ fn render_awareness(
         lines
     });
 
-    if status_lines.is_empty() && current_finding_lines.is_none() && counts.is_empty() {
+    if status_lines.is_empty()
+        && current_finding_lines.is_none()
+        && projection.status_counts.is_empty()
+    {
         return None;
     }
 
@@ -166,13 +160,13 @@ fn render_awareness(
             "- finding detail is available by stable run_id/finding_id; normal turns include summaries only (max {SUMMARY_MAX_BYTES} bytes)."
         ));
     }
-    if !counts.is_empty() {
+    if !projection.status_counts.is_empty() {
         lines.push("- recent run status counts:".to_string());
-        for (key, count) in counts.into_iter().take(MAX_STATUS_LINES) {
-            lines.push(format!("  - {key}: {count}"));
+        for count in projection.status_counts.iter().take(MAX_STATUS_LINES) {
+            lines.push(format!("  - {}: {}", count.label(), count.count));
         }
     }
-    if let Some(diagnostics) = diagnostics {
+    if let Some(diagnostics) = projection.diagnostics {
         lines.push(format!(
             "- recent run diagnostics: {}",
             diagnostics.compact_line()
@@ -180,69 +174,6 @@ fn render_awareness(
     }
 
     AutoReviewAwareness::new(lines.join("\n"))
-}
-
-fn run_is_newer(candidate: &AutoReviewRun, selected: &AutoReviewRun) -> bool {
-    let candidate_time = candidate
-        .completed_at_unix_secs
-        .unwrap_or(candidate.started_at_unix_secs);
-    let selected_time = selected
-        .completed_at_unix_secs
-        .unwrap_or(selected.started_at_unix_secs);
-    (candidate_time, &candidate.run_id) > (selected_time, &selected.run_id)
-}
-
-fn status_count_key(
-    run: &AutoReviewRun,
-    freshness: AutoReviewFreshness,
-    active_review_target: &ReviewTarget,
-) -> String {
-    let target = if freshness == AutoReviewFreshness::Current
-        && review_target_matches(&run.review_target, active_review_target)
-    {
-        "target_current"
-    } else {
-        "off_target"
-    };
-    let freshness = match freshness {
-        AutoReviewFreshness::Current => "current",
-        AutoReviewFreshness::Stale => "stale",
-        AutoReviewFreshness::Detached => "detached",
-    };
-    let status = match &run.status {
-        AutoReviewRunStatus::Pending => "pending",
-        AutoReviewRunStatus::Snapshotting => "snapshotting",
-        AutoReviewRunStatus::Running => "running",
-        AutoReviewRunStatus::Reviewing => "reviewing",
-        AutoReviewRunStatus::Resolving => "resolving",
-        AutoReviewRunStatus::Completed => "completed",
-        AutoReviewRunStatus::Failed => "failed",
-        AutoReviewRunStatus::Cancelled => "cancelled",
-        AutoReviewRunStatus::Superseded => "superseded",
-        AutoReviewRunStatus::Skipped => "skipped",
-        AutoReviewRunStatus::Lost => "lost",
-    };
-    let source = match &run.source {
-        AutoReviewRunSource::Manual => "manual",
-        AutoReviewRunSource::Background => "background",
-    };
-    format!("{source}/{status}/{freshness}/{target}")
-}
-
-fn review_target_matches(stored: &ReviewTarget, active: &ReviewTarget) -> bool {
-    match (stored, active) {
-        (
-            ReviewTarget::Commit {
-                sha: stored_sha, ..
-            },
-            ReviewTarget::Commit {
-                sha: active_sha, ..
-            },
-        ) => stored_sha == active_sha,
-        (ReviewTarget::CurrentTurnDiff { .. }, ReviewTarget::UncommittedChanges)
-        | (ReviewTarget::UncommittedChanges, ReviewTarget::CurrentTurnDiff { .. }) => true,
-        _ => stored == active,
-    }
 }
 
 fn truncate_utf8_with_marker(value: &str, max_bytes: usize) -> String {
