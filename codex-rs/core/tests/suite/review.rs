@@ -2124,6 +2124,77 @@ async fn automatic_background_review_skips_oversized_diff() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_skips_oversized_wrapped_scope() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_wrapped_large.txt\n+wrapped\n*** End Patch";
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-1"),
+            ev_apply_patch_custom_tool_call("auto-bg-wrapped-large", patch),
+            ev_completed("resp-1"),
+        ]),
+    }];
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_assistant_message("msg-1", "patch applied"),
+            ev_completed("resp-2"),
+        ]),
+    }];
+    let (server, _completions) =
+        start_streaming_sse_server(vec![foreground_tool, foreground_complete]).await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .with_config(|config| {
+            config.background_auto_review_max_diff_bytes = Some(360);
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file whose wrapped review scope is too large")
+        .await?;
+
+    let pending_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+    let skipped_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Skipped,
+        Some(pending_status.run_id.as_str()),
+    )
+    .await;
+    assert_diff_review_target(&skipped_status.review_target);
+    let error_summary = skipped_status.error_summary.as_deref().unwrap_or_default();
+    assert!(
+        error_summary.contains("auto review scope exceeds configured background review size limit"),
+        "unexpected error summary: {error_summary}"
+    );
+    let runs = load_auto_review_runs(codex_home.path())?;
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.run_id, skipped_status.run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Skipped);
+    assert_eq!(
+        run.error_summary.as_deref(),
+        skipped_status.error_summary.as_deref()
+    );
+    server
+        .assert_request_count_stays(2, Duration::from_millis(2500))
+        .await;
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_background_review_suppresses_unchanged_dirty_diff() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
