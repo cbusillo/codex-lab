@@ -324,8 +324,101 @@ fn auto_review_summary_stale_latest_snapshot() {
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
 ○ Auto Review has no current findings · latest stale · run-stale
   completed · stale · code-gpt-5.5
-  Latest findings are hidden because they no longer match this worktree.
+  Latest review output is stale and hidden because it no longer matches this worktree.
   1 stale completed off-target
+");
+}
+
+#[test]
+fn auto_review_summary_stale_latest_with_content_stays_hidden_snapshot() {
+    let latest = auto_review_summary(
+        "run-stale-content",
+        AutoReviewFreshness::Stale,
+        /*rendered_findings*/ 2,
+        "[P1] Old finding\nThis finding belonged to an older checkout.",
+    );
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(latest),
+        current: None,
+        status_counts: vec![AutoReviewStatusCount {
+            status: BackgroundAutoReviewStatus::Completed,
+            source: AutoReviewRunSource::Background,
+            freshness: AutoReviewFreshness::Stale,
+            target_matches: false,
+            count: 1,
+        }],
+        diagnostics: None,
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
+○ Auto Review has no current findings · latest stale · run-stale-content
+  completed · stale · code-gpt-5.5
+  Latest review output is stale and hidden because it no longer matches this worktree.
+  1 stale completed off-target
+");
+}
+
+#[test]
+fn auto_review_summary_detached_latest_with_content_stays_hidden_snapshot() {
+    let latest = auto_review_summary(
+        "run-detached-content",
+        AutoReviewFreshness::Detached,
+        /*rendered_findings*/ 1,
+        "[P1] Detached finding\nThis finding belonged to a detached snapshot.",
+    );
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(latest),
+        current: None,
+        status_counts: vec![AutoReviewStatusCount {
+            status: BackgroundAutoReviewStatus::Completed,
+            source: AutoReviewRunSource::Background,
+            freshness: AutoReviewFreshness::Detached,
+            target_matches: false,
+            count: 1,
+        }],
+        diagnostics: None,
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
+○ Auto Review has no current findings · latest detached · run-detached-content
+  completed · detached · code-gpt-5.5
+  Latest review output is detached and hidden because it no longer matches this worktree.
+  1 detached completed off-target
+");
+}
+
+#[test]
+fn auto_review_summary_current_latest_without_current_stays_hidden_snapshot() {
+    let latest = auto_review_summary(
+        "run-current-off-target",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 1,
+        "[P1] Different review target\nThis finding belongs to another review target.",
+    );
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(latest),
+        current: None,
+        status_counts: vec![AutoReviewStatusCount {
+            status: BackgroundAutoReviewStatus::Completed,
+            source: AutoReviewRunSource::Background,
+            freshness: AutoReviewFreshness::Current,
+            target_matches: false,
+            count: 1,
+        }],
+        diagnostics: None,
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
+○ Auto Review has no current findings · latest current · run-current-off-target
+  completed · current · code-gpt-5.5
+  Latest review output is hidden because it does not apply to this review target.
+  1 current completed off-target
 ");
 }
 

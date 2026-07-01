@@ -106,14 +106,20 @@ fn push_no_current_summary_lines(
             Span::from(latest.run_id.clone()).dim(),
         ]));
         push_summary_metadata(lines, latest);
-        if latest.content.trim().is_empty() {
-            lines.push(Line::from(vec![
-                "  ".into(),
-                "Latest findings are hidden because they no longer match this worktree.".dim(),
-            ]));
-        } else {
-            push_summary_content(lines, latest);
-        }
+        let hidden_reason = match latest.freshness {
+            AutoReviewFreshness::Current => {
+                "Latest review output is hidden because it does not apply to this review target."
+                    .to_string()
+            }
+            AutoReviewFreshness::Stale | AutoReviewFreshness::Detached => format!(
+                "Latest review output is {} and hidden because it no longer matches this worktree.",
+                freshness_label(latest.freshness)
+            ),
+        };
+        lines.push(Line::from(vec![
+            "  ".into(),
+            Span::from(hidden_reason).dim(),
+        ]));
     } else {
         lines.push(Line::from(vec![
             "✔ ".green(),
