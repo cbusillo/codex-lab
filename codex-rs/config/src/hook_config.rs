@@ -5,12 +5,62 @@ use std::path::PathBuf;
 use codex_protocol::protocol::HookEventName;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct HooksFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default)]
     pub hooks: HookEventsToml,
+}
+
+impl<'de> Deserialize<'de> for HooksFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct HooksFileWire {
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default)]
+            hooks: HookEventsToml,
+            #[serde(flatten)]
+            extra: BTreeMap<String, serde_json::Value>,
+        }
+
+        let wire = HooksFileWire::deserialize(deserializer)?;
+        for key in wire.extra.keys() {
+            if is_top_level_hook_event_key(key) {
+                return Err(serde::de::Error::unknown_field(key, HOOKS_FILE_FIELDS));
+            }
+        }
+
+        Ok(Self {
+            description: wire.description,
+            hooks: wire.hooks,
+        })
+    }
+}
+
+const HOOKS_FILE_FIELDS: &[&str] = &["description", "hooks"];
+
+fn is_top_level_hook_event_key(key: &str) -> bool {
+    matches!(
+        key,
+        "PreToolUse"
+            | "PermissionRequest"
+            | "PostToolUse"
+            | "PreCompact"
+            | "PostCompact"
+            | "SessionStart"
+            | "UserPromptSubmit"
+            | "SubagentStart"
+            | "SubagentStop"
+            | "Stop"
+    )
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

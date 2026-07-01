@@ -35,6 +35,7 @@ fn hooks_file_deserializes_existing_json_shape() {
     assert_eq!(
         parsed,
         HooksFile {
+            description: None,
             hooks: HookEventsToml {
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
@@ -44,6 +45,51 @@ fn hooks_file_deserializes_existing_json_shape() {
                         timeout_sec: Some(10),
                         r#async: false,
                         status_message: Some("checking".to_string()),
+                    }],
+                }],
+                ..Default::default()
+            },
+        }
+    );
+}
+
+#[test]
+fn hooks_file_ignores_top_level_metadata() {
+    let parsed: HooksFile = serde_json::from_str(
+        r#"{
+  "$schema": "https://example.test/hooks.schema.json",
+  "version": 1,
+  "description": "project hooks",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /tmp/pre.py"
+          }
+        ]
+      }
+    ]
+  }
+}"#,
+    )
+    .expect("hooks.json with metadata should deserialize");
+
+    assert_eq!(
+        parsed,
+        HooksFile {
+            description: Some("project hooks".to_string()),
+            hooks: HookEventsToml {
+                pre_tool_use: vec![MatcherGroup {
+                    matcher: Some("^Bash$".to_string()),
+                    hooks: vec![HookHandlerConfig::Command {
+                        command: "python3 /tmp/pre.py".to_string(),
+                        command_windows: None,
+                        timeout_sec: None,
+                        r#async: false,
+                        status_message: None,
                     }],
                 }],
                 ..Default::default()
