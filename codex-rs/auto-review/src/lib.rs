@@ -54,6 +54,54 @@ pub struct AutoReviewDuplicateMatch {
     pub prompt_token_estimate: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoReviewRunProjection {
+    pub run_id: String,
+    pub status: AutoReviewRunStatus,
+    pub source: AutoReviewRunSource,
+    pub freshness: AutoReviewFreshness,
+    pub target_matches: bool,
+    pub started_at_unix_secs: i64,
+    pub completed_at_unix_secs: Option<i64>,
+    pub model: Option<String>,
+    pub error_summary: Option<String>,
+    pub summary: AutoReviewSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoReviewStatusCount {
+    pub status: AutoReviewRunStatus,
+    pub source: AutoReviewRunSource,
+    pub freshness: AutoReviewFreshness,
+    pub target_matches: bool,
+    pub count: usize,
+}
+
+impl AutoReviewStatusCount {
+    pub fn label(&self) -> String {
+        let target = if self.target_matches {
+            "target_current"
+        } else {
+            "off_target"
+        };
+        format!(
+            "{}/{}/{}/{}",
+            source_label(&self.source),
+            status_label(&self.status),
+            freshness_label(&self.freshness),
+            target,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoReviewLedgerProjection {
+    pub latest: Option<AutoReviewRunProjection>,
+    pub current: Option<AutoReviewRunProjection>,
+    pub status_counts: Vec<AutoReviewStatusCount>,
+    pub diagnostics: Option<AutoReviewDiagnostics>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutoReviewDiagnostics {
     pub recent_runs: usize,
@@ -187,6 +235,109 @@ impl AutoReviewDiagnostics {
             parts.push(format!("longest_elapsed={longest_elapsed_bucket}"));
         }
         parts.join(" ")
+    }
+}
+
+impl AutoReviewLedgerProjection {
+    pub fn from_runs<'a>(
+        runs: impl IntoIterator<Item = &'a AutoReviewRun>,
+        active_target: &AutoReviewRunTarget,
+        active_review_target: &ReviewTarget,
+    ) -> Self {
+        let runs = runs.into_iter().collect::<Vec<_>>();
+        let latest = runs
+            .iter()
+            .copied()
+            .max_by_key(|run| run.sort_key())
+            .map(|run| run.project(active_target, active_review_target));
+        let current = runs
+            .iter()
+            .copied()
+            .filter(|run| run.target_matches(active_target, active_review_target))
+            .max_by_key(|run| run.sort_key())
+            .map(|run| run.project(active_target, active_review_target));
+
+        let mut status_counts = Vec::<AutoReviewStatusCount>::new();
+        for run in &runs {
+            let freshness = run.freshness(active_target);
+            let target_matches = run.target_matches(active_target, active_review_target);
+            if let Some(count) = status_counts.iter_mut().find(|count| {
+                count.status == run.status
+                    && count.source == run.source
+                    && count.freshness == freshness
+                    && count.target_matches == target_matches
+            }) {
+                count.count += 1;
+            } else {
+                status_counts.push(AutoReviewStatusCount {
+                    status: run.status.clone(),
+                    source: run.source.clone(),
+                    freshness,
+                    target_matches,
+                    count: 1,
+                });
+            }
+        }
+        status_counts.sort_by(|left, right| {
+            status_count_order_key(left).cmp(&status_count_order_key(right))
+        });
+
+        Self {
+            latest,
+            current,
+            status_counts,
+            diagnostics: AutoReviewDiagnostics::from_runs(
+                runs.iter().copied(),
+                Some(active_target),
+                Some(active_review_target),
+            ),
+        }
+    }
+}
+
+fn status_count_order_key(
+    count: &AutoReviewStatusCount,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    (
+        source_label(&count.source),
+        status_label(&count.status),
+        freshness_label(&count.freshness),
+        if count.target_matches {
+            "target_current"
+        } else {
+            "off_target"
+        },
+    )
+}
+
+fn source_label(source: &AutoReviewRunSource) -> &'static str {
+    match source {
+        AutoReviewRunSource::Manual => "manual",
+        AutoReviewRunSource::Background => "background",
+    }
+}
+
+fn status_label(status: &AutoReviewRunStatus) -> &'static str {
+    match status {
+        AutoReviewRunStatus::Pending => "pending",
+        AutoReviewRunStatus::Snapshotting => "snapshotting",
+        AutoReviewRunStatus::Running => "running",
+        AutoReviewRunStatus::Reviewing => "reviewing",
+        AutoReviewRunStatus::Resolving => "resolving",
+        AutoReviewRunStatus::Completed => "completed",
+        AutoReviewRunStatus::Failed => "failed",
+        AutoReviewRunStatus::Cancelled => "cancelled",
+        AutoReviewRunStatus::Superseded => "superseded",
+        AutoReviewRunStatus::Skipped => "skipped",
+        AutoReviewRunStatus::Lost => "lost",
+    }
+}
+
+fn freshness_label(freshness: &AutoReviewFreshness) -> &'static str {
+    match freshness {
+        AutoReviewFreshness::Current => "current",
+        AutoReviewFreshness::Stale => "stale",
+        AutoReviewFreshness::Detached => "detached",
     }
 }
 
@@ -816,6 +967,42 @@ pub struct AutoReviewRun {
 }
 
 impl AutoReviewRun {
+    pub fn sort_key(&self) -> (i64, &str) {
+        (
+            self.completed_at_unix_secs
+                .unwrap_or(self.started_at_unix_secs),
+            self.run_id.as_str(),
+        )
+    }
+
+    pub fn target_matches(
+        &self,
+        active_target: &AutoReviewRunTarget,
+        active_review_target: &ReviewTarget,
+    ) -> bool {
+        self.freshness(active_target) == AutoReviewFreshness::Current
+            && review_target_matches(&self.review_target, active_review_target)
+    }
+
+    pub fn project(
+        &self,
+        active_target: &AutoReviewRunTarget,
+        active_review_target: &ReviewTarget,
+    ) -> AutoReviewRunProjection {
+        AutoReviewRunProjection {
+            run_id: self.run_id.clone(),
+            status: self.status.clone(),
+            source: self.source.clone(),
+            freshness: self.freshness(active_target),
+            target_matches: self.target_matches(active_target, active_review_target),
+            started_at_unix_secs: self.started_at_unix_secs,
+            completed_at_unix_secs: self.completed_at_unix_secs,
+            model: self.model.clone(),
+            error_summary: self.error_summary.clone(),
+            summary: self.summary(active_target, active_review_target),
+        }
+    }
+
     pub fn visible_finding_digests<'a>(
         &'a self,
         active_target: &AutoReviewRunTarget,

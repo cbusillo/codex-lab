@@ -11,6 +11,7 @@ use super::AutoReviewDetailKind;
 use super::AutoReviewDiagnostics;
 use super::AutoReviewDuplicateDisposition;
 use super::AutoReviewFreshness;
+use super::AutoReviewLedgerProjection;
 use super::AutoReviewRun;
 use super::AutoReviewRunFreshness;
 use super::AutoReviewRunSource;
@@ -1135,6 +1136,89 @@ fn summary_marks_omitted_findings_when_count_cap_is_hit() {
     assert_eq!(summary.rendered_findings, 20);
     assert_eq!(summary.omitted_findings, 5);
     assert!(summary.content.contains("... 5 more finding(s) omitted"));
+}
+
+#[test]
+fn ledger_projection_selects_latest_and_current_runs() {
+    let active_target = sample_target("main", "head-2", "/repo");
+    let stale_latest = AutoReviewRun {
+        run_id: "stale_latest".to_string(),
+        target: sample_target("main", "head-1", "/repo"),
+        started_at_unix_secs: 30,
+        completed_at_unix_secs: Some(40),
+        ..sample_run("unused", &sample_output(vec![sample_finding("Stale")]))
+    };
+    let current_older = AutoReviewRun {
+        run_id: "current_older".to_string(),
+        started_at_unix_secs: 10,
+        completed_at_unix_secs: Some(20),
+        ..sample_run("unused", &sample_output(vec![sample_finding("Current")]))
+    };
+
+    let projection = AutoReviewLedgerProjection::from_runs(
+        [&stale_latest, &current_older],
+        &active_target,
+        &ReviewTarget::UncommittedChanges,
+    );
+
+    assert_eq!(
+        projection.latest.as_ref().map(|run| run.run_id.as_str()),
+        Some("stale_latest")
+    );
+    assert_eq!(
+        projection.current.as_ref().map(|run| run.run_id.as_str()),
+        Some("current_older")
+    );
+    assert_eq!(
+        projection
+            .current
+            .as_ref()
+            .map(|run| run.summary.content.as_str()),
+        Some("[P1] f1: Current (/tmp/example.rs:7-9)")
+    );
+}
+
+#[test]
+fn ledger_projection_groups_status_counts_by_target_match() {
+    let active_target = sample_target("main", "head-2", "/repo");
+    let current_completed = sample_run("current_completed", &sample_output(Vec::new()));
+    let stale_completed = AutoReviewRun {
+        run_id: "stale_completed".to_string(),
+        target: sample_target("main", "head-1", "/repo"),
+        ..sample_run("unused", &sample_output(Vec::new()))
+    };
+    let running = AutoReviewRun {
+        run_id: "running".to_string(),
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("unused", &sample_output(Vec::new()))
+    };
+
+    let projection = AutoReviewLedgerProjection::from_runs(
+        [&current_completed, &stale_completed, &running],
+        &active_target,
+        &ReviewTarget::UncommittedChanges,
+    );
+
+    assert_eq!(projection.status_counts.len(), 3);
+    assert!(projection.status_counts.iter().any(|count| {
+        count.status == AutoReviewRunStatus::Completed
+            && count.freshness == AutoReviewFreshness::Current
+            && count.target_matches
+            && count.count == 1
+    }));
+    assert!(projection.status_counts.iter().any(|count| {
+        count.status == AutoReviewRunStatus::Completed
+            && count.freshness == AutoReviewFreshness::Stale
+            && !count.target_matches
+            && count.count == 1
+    }));
+    assert!(projection.status_counts.iter().any(|count| {
+        count.status == AutoReviewRunStatus::Running
+            && count.freshness == AutoReviewFreshness::Current
+            && count.target_matches
+            && count.count == 1
+    }));
 }
 
 #[test]
