@@ -261,6 +261,20 @@ impl Session {
             },
             user_facing_hint: Some("current turn changes".to_string()),
         };
+        if let Some(max_bytes) = turn_context.config.background_auto_review_max_diff_bytes
+            && let Some(error_summary) =
+                background_auto_review_size_limit_summary(&turn_diff, None, max_bytes)
+        {
+            debug!(%error_summary, "background auto review skipped: oversized diff");
+            self.record_skipped_background_auto_review(
+                &persistence,
+                generation,
+                &fingerprint,
+                error_summary,
+            )
+            .await;
+            return;
+        }
         let resolved = match resolve_review_request(review_request, cwd) {
             Ok(resolved) => resolved,
             Err(err) => {
@@ -268,23 +282,22 @@ impl Session {
                 return;
             }
         };
-        if let Some(max_diff_bytes) = turn_context.config.background_auto_review_max_diff_bytes {
-            let diff_byte_count = turn_diff.len();
-            if diff_byte_count > max_diff_bytes {
-                let error_summary = format!(
-                    "diff exceeds background review size limit: {diff_byte_count} bytes > \
-                     {max_diff_bytes} bytes"
-                );
-                debug!(%error_summary, "background auto review skipped: oversized diff");
-                self.record_skipped_background_auto_review(
-                    &persistence,
-                    generation,
-                    &fingerprint,
-                    error_summary,
-                )
-                .await;
-                return;
-            }
+        if let Some(max_bytes) = turn_context.config.background_auto_review_max_diff_bytes
+            && let Some(error_summary) = background_auto_review_size_limit_summary(
+                &turn_diff,
+                Some(resolved.prompt.as_str()),
+                max_bytes,
+            )
+        {
+            debug!(%error_summary, "background auto review skipped: oversized review scope");
+            self.record_skipped_background_auto_review(
+                &persistence,
+                generation,
+                &fingerprint,
+                error_summary,
+            )
+            .await;
+            return;
         }
 
         if self.input_queue.has_trigger_turn_mailbox_items().await
@@ -932,3 +945,27 @@ fn background_auto_review_turn_diff_prompt(turn_diff: &str) -> String {
         turn_diff.trim()
     )
 }
+
+fn background_auto_review_size_limit_summary(
+    turn_diff: &str,
+    resolved_prompt: Option<&str>,
+    max_bytes: usize,
+) -> Option<String> {
+    let diff_byte_count = turn_diff.len();
+    if diff_byte_count > max_bytes {
+        return Some(format!(
+            "diff exceeds background review size limit: {diff_byte_count} bytes > {max_bytes} bytes"
+        ));
+    }
+    let scope_byte_count = resolved_prompt?.len();
+    (scope_byte_count > max_bytes).then(|| {
+        format!(
+            "auto review scope exceeds configured background review size limit: scope is \
+             {scope_byte_count} bytes, diff is {diff_byte_count} bytes (limit {max_bytes} bytes)"
+        )
+    })
+}
+
+#[cfg(test)]
+#[path = "background_auto_review_tests.rs"]
+mod background_auto_review_tests;
