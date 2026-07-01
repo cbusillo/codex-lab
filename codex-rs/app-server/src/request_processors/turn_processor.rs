@@ -1,4 +1,5 @@
 use super::*;
+use codex_app_server_protocol::BackgroundAutoReviewControlReason as ApiBackgroundAutoReviewControlReason;
 use codex_auto_review::AutoReviewDiagnostics;
 use codex_auto_review::ReviewCoordination;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
@@ -1357,6 +1358,20 @@ impl TurnRequestProcessor {
         if run_id.is_empty() {
             return Err(invalid_request("runId must not be empty"));
         }
+        let reason = match reason {
+            ApiBackgroundAutoReviewControlReason::SupersededByRun {
+                run_id: superseding_run_id,
+            } => {
+                let superseding_run_id = superseding_run_id.trim().to_string();
+                if superseding_run_id.is_empty() {
+                    return Err(invalid_request("superseded runId must not be empty"));
+                }
+                ApiBackgroundAutoReviewControlReason::SupersededByRun {
+                    run_id: superseding_run_id,
+                }
+            }
+            reason => reason,
+        };
 
         let (_, thread) = self.load_thread(&thread_id).await?;
         self.submit_core_op(

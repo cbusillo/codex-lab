@@ -559,6 +559,43 @@ async fn background_auto_review_control_rejects_empty_run_id() -> Result<()> {
 }
 
 #[tokio::test]
+async fn background_auto_review_control_rejects_empty_superseded_run_id() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_background_auto_review_control_request(BackgroundAutoReviewControlParams {
+            thread_id: "thread-without-validation".to_string(),
+            run_id: "pending-run".to_string(),
+            action: BackgroundAutoReviewControlAction::Supersede,
+            reason: BackgroundAutoReviewControlReason::SupersededByRun {
+                run_id: "  \t  ".to_string(),
+            },
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("superseded runId must not be empty"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn background_auto_review_control_unknown_run_is_acknowledged() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
