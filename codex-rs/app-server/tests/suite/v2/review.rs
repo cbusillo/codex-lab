@@ -453,6 +453,121 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
     Ok(())
 }
 
+#[cfg_attr(target_os = "windows", ignore = "flaky on windows CI")]
+#[tokio::test]
+async fn review_start_detached_manual_review_is_readable_via_auto_review_apis() -> Result<()> {
+    let review_payload = json!({
+        "findings": [
+            {
+                "title": "Use durable review details",
+                "body": "Manual detached review body from the live review path.",
+                "confidence_score": 0.91,
+                "priority": 1,
+                "code_location": {
+                    "absolute_file_path": "/tmp/file.rs",
+                    "line_range": {"start": 4, "end": 4}
+                }
+            }
+        ],
+        "overall_correctness": "patch is incorrect",
+        "overall_explanation": "manual durable review",
+        "overall_confidence_score": 0.8
+    })
+    .to_string();
+    let server = create_mock_responses_server_repeating_assistant(&review_payload).await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_id = start_default_thread(&mut mcp).await?;
+    materialize_thread_rollout(&mut mcp, &thread_id).await?;
+
+    let review_req = mcp
+        .send_review_start_request(ReviewStartParams {
+            thread_id: thread_id.clone(),
+            delivery: Some(ReviewDelivery::Detached),
+            target: ReviewStartTarget::UncommittedChanges,
+        })
+        .await?;
+    let review_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(review_req)),
+    )
+    .await??;
+    let ReviewStartResponse {
+        turn,
+        review_thread_id,
+    } = to_response::<ReviewStartResponse>(review_resp)?;
+
+    assert_ne!(review_thread_id, thread_id);
+
+    let started = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/started"),
+    )
+    .await??;
+    let started: ThreadStartedNotification =
+        serde_json::from_value(started.params.expect("params must be present"))?;
+    assert_eq!(started.thread.id, review_thread_id);
+
+    let _completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let summary_request_id = mcp
+        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams {
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+    let summary_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(summary_request_id)),
+    )
+    .await??;
+    let summary = to_response::<AutoReviewSummaryReadResponse>(summary_response)?;
+    let current = summary.current.expect("current run summary");
+    assert_eq!(current.run_id, turn.id);
+    assert_eq!(current.status, BackgroundAutoReviewStatus::Completed);
+    assert_eq!(current.source, ApiAutoReviewRunSource::Manual);
+    assert_eq!(current.freshness, ApiAutoReviewFreshness::Current);
+    assert_eq!(current.rendered_findings, 1);
+    assert!(current.content.contains("f1"));
+    assert_eq!(
+        summary.latest.as_ref().map(|run| run.run_id.as_str()),
+        Some(current.run_id.as_str())
+    );
+
+    let detail_request_id = mcp
+        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id: current.run_id,
+            finding_id: Some("f1".to_string()),
+            max_bytes: Some(4096),
+        })
+        .await?;
+    let detail_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(detail_request_id)),
+    )
+    .await??;
+    let detail = to_response::<AutoReviewFindingDetailReadResponse>(detail_response)?;
+    assert_eq!(detail.detail_kind, AutoReviewDetailKind::Finding);
+    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
+    assert_eq!(detail.finding_count, 1);
+    assert!(
+        detail
+            .content
+            .contains("Manual detached review body from the live review path.")
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn review_start_rejects_empty_commit_sha() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
