@@ -26,11 +26,6 @@ impl PreparedReviewThread {
         self.task = self.task.replace_persistence(persistence);
         self
     }
-
-    fn with_review_lock(mut self, review_lock_guard: ReviewLockGuard) -> Self {
-        self.task = self.task.with_review_lock(review_lock_guard);
-        self
-    }
 }
 
 pub(super) enum ReviewPersistenceSpec {
@@ -65,9 +60,7 @@ pub(super) async fn spawn_review_thread(
             && persistence.is_manual()
         {
             prepared = match record_started_manual_auto_review(&sess, persistence).await {
-                Some((persistence, review_lock_guard)) => prepared
-                    .with_persistence(persistence)
-                    .with_review_lock(review_lock_guard),
+                Some(persistence) => prepared.with_persistence(persistence),
                 None => {
                     sess.send_event(
                         prepared.turn_context.as_ref(),
@@ -103,29 +96,9 @@ pub(super) async fn spawn_review_thread(
 async fn record_started_manual_auto_review(
     sess: &Arc<Session>,
     persistence: ReviewPersistenceContext,
-) -> Option<(ReviewPersistenceContext, ReviewLockGuard)> {
+) -> Option<ReviewPersistenceContext> {
     let codex_home = sess.codex_home().await;
     let coordination = ReviewCoordination::for_scope(&codex_home, persistence.store_scope());
-    let review_lock_guard = match coordination
-        .try_acquire_lock(format!("manual_auto_review:{}", persistence.run_id()))
-    {
-        Ok(Some(guard)) => guard,
-        Ok(None) => {
-            tracing::warn!(
-                run_id = %persistence.run_id(),
-                "another auto review is already running for this worktree"
-            );
-            return None;
-        }
-        Err(err) => {
-            tracing::warn!(
-                run_id = %persistence.run_id(),
-                error = %err,
-                "failed to acquire manual auto review lock"
-            );
-            return None;
-        }
-    };
     let mut published = None;
     let result = coordination.publish_next_snapshot_epoch_after(|snapshot_epoch| {
         let pending = persistence.clone().with_snapshot_epoch(snapshot_epoch);
@@ -137,7 +110,7 @@ async fn record_started_manual_auto_review(
         }
     });
     match result {
-        Ok(Some(_snapshot_epoch)) => published.map(|pending| (pending, review_lock_guard)),
+        Ok(Some(_snapshot_epoch)) => published,
         Ok(None) => {
             tracing::warn!(
                 run_id = %persistence.run_id(),
