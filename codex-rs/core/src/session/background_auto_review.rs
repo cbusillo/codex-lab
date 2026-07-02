@@ -854,9 +854,10 @@ impl Session {
 }
 
 fn auto_review_run_id_from_lock_intent(intent: &str) -> Option<String> {
+    // Manual reviews no longer participate in coordination locks. Treat legacy
+    // manual_auto_review:* locks as non-authoritative during startup recovery.
     intent
         .strip_prefix("background_auto_review:")
-        .or_else(|| intent.strip_prefix("manual_auto_review:"))
         .map(str::to_string)
 }
 
