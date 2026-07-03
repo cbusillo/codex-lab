@@ -1088,6 +1088,7 @@ async fn run_sampling_request(
                 }
                 if maybe_switch_account_after_usage_limit(
                     &sess,
+                    turn_context.as_ref(),
                     client_session,
                     rate_limit_switch_state,
                     &e,
@@ -1122,6 +1123,7 @@ async fn run_sampling_request(
 
 async fn maybe_switch_account_after_usage_limit(
     sess: &Arc<Session>,
+    turn_context: &TurnContext,
     client_session: &mut ModelClientSession,
     rate_limit_switch_state: &mut RateLimitSwitchState,
     limit_err: &UsageLimitReachedError,
@@ -1163,6 +1165,19 @@ async fn maybe_switch_account_after_usage_limit(
             );
             sess.services.auth_manager.reload().await;
             *client_session = sess.services.model_client.new_session();
+            let next_label = account
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .unwrap_or(account.id.as_str());
+            sess.send_event(
+                turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: format!("Auto-switch: now using {next_label} due to usage limit."),
+                }),
+            )
+            .await;
             true
         }
         Ok(AccountSwitchOutcome::NoCandidate) => false,

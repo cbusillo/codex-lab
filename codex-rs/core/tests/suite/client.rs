@@ -12,7 +12,10 @@ use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::StoredAccount;
+use codex_login::TokenData;
 use codex_login::default_client::originator;
+use codex_login::token_data::IdTokenInfo;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
@@ -59,6 +62,7 @@ use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
@@ -162,6 +166,38 @@ fn write_auth_json(
     .unwrap();
 
     fake_jwt
+}
+
+#[expect(clippy::unwrap_used)]
+fn fake_chatgpt_token_data(account_id: &str, email: &str) -> TokenData {
+    use base64::Engine as _;
+
+    let header = json!({ "alg": "none", "typ": "JWT" });
+    let payload = json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_user_id": format!("user-{account_id}")
+        }
+    });
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let header_b64 = encode(&serde_json::to_vec(&header).unwrap());
+    let payload_b64 = encode(&serde_json::to_vec(&payload).unwrap());
+    let signature_b64 = encode(b"sig");
+
+    TokenData {
+        id_token: IdTokenInfo {
+            email: Some(email.to_string()),
+            chatgpt_plan_type: None,
+            chatgpt_user_id: Some(format!("user-{account_id}")),
+            chatgpt_account_id: Some(account_id.to_string()),
+            chatgpt_account_is_fedramp: false,
+            raw_jwt: format!("{header_b64}.{payload_b64}.{signature_b64}"),
+        },
+        access_token: format!("access-{account_id}"),
+        refresh_token: format!("refresh-{account_id}"),
+        account_id: Some(account_id.to_string()),
+    }
 }
 
 struct ProviderAuthCommandFixture {
@@ -2755,6 +2791,121 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         "unexpected error message for submission {submission_id}: {}",
         error_event.message
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_auto_switch_emits_user_visible_notice() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+
+    let usage_limit_response = ResponseTemplate::new(429).set_body_json(json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "limit reached",
+            "resets_at": 1704067242,
+            "plan_type": "pro"
+        }
+    }));
+    let success_response = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(sse(vec![
+            ev_assistant_message("msg-1", "recovered"),
+            ev_completed("resp-2"),
+        ]));
+
+    let response_mock =
+        mount_response_sequence(&server, vec![usage_limit_response, success_response]).await;
+
+    let home = Arc::new(TempDir::new()?);
+    let current_id = "account_id".to_string();
+    let candidate_id = "candidate".to_string();
+    let accounts = vec![
+        StoredAccount {
+            id: current_id.clone(),
+            mode: codex_app_server_protocol::AuthMode::Chatgpt,
+            label: Some("Current ChatGPT".to_string()),
+            openai_api_key: None,
+            tokens: Some(fake_chatgpt_token_data(&current_id, "user@example.com")),
+            last_refresh: Some(chrono::Utc::now()),
+            created_at: None,
+            last_used_at: None,
+        },
+        StoredAccount {
+            id: candidate_id.clone(),
+            mode: codex_app_server_protocol::AuthMode::Chatgpt,
+            label: Some("Candidate ChatGPT".to_string()),
+            openai_api_key: None,
+            tokens: Some(fake_chatgpt_token_data(&candidate_id, "user@example.com")),
+            last_refresh: Some(chrono::Utc::now()),
+            created_at: None,
+            last_used_at: None,
+        },
+    ];
+    std::fs::write(
+        home.path().join("auth_accounts.json"),
+        serde_json::to_string_pretty(&json!({
+            "version": 1,
+            "active_account_id": current_id,
+            "accounts": accounts,
+        }))?,
+    )?;
+
+    let mut builder = test_codex()
+        .with_home(home.clone())
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.auto_switch_accounts_on_rate_limit = true;
+        });
+    let codex_fixture = builder.build(&server).await?;
+    let codex = codex_fixture.codex.clone();
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submission should retry after auto-switching accounts");
+
+    let warning_event = wait_for_event(&codex, |msg| {
+        matches!(
+            msg,
+            EventMsg::Warning(warning) if warning.message.starts_with("Auto-switch:")
+        )
+    })
+    .await;
+    let EventMsg::Warning(warning) = warning_event else {
+        unreachable!();
+    };
+    assert_eq!(
+        warning.message,
+        "Auto-switch: now using Candidate ChatGPT due to usage limit."
+    );
+
+    wait_for_event(&codex, |msg| matches!(msg, EventMsg::TurnComplete(_))).await;
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests
+            .get(1)
+            .and_then(|request| request.header("authorization")),
+        Some("Bearer access-candidate".to_string())
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(home.path())?,
+        Some(candidate_id.clone())
+    );
+    assert_ne!(current_id, candidate_id);
 
     Ok(())
 }
