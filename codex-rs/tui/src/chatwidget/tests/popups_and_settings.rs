@@ -2257,18 +2257,18 @@ async fn agents_settings_popup_lists_third_party_agents() {
 
     chat.open_agents_settings_popup_with_statuses(vec![
         AgentInstallStatus {
-            slug: "claude-sonnet-4.6".to_string(),
+            name: "Claude Code".to_string(),
             family: "claude".to_string(),
             command: "claude".to_string(),
-            description: "Claude Sonnet 4.6 via Claude Code.".to_string(),
+            description: "Enabled selectors: claude-opus-4.8, claude-sonnet-4.6".to_string(),
             installed: true,
             install_hint: "Install claude-code and make sure `claude` is on PATH.".to_string(),
         },
         AgentInstallStatus {
-            slug: "qwen3-coder-plus".to_string(),
+            name: "Qwen Code".to_string(),
             family: "qwen".to_string(),
             command: "qwen".to_string(),
-            description: "Qwen3 Coder Plus via Qwen Code.".to_string(),
+            description: "Enabled selectors: qwen3-coder-plus".to_string(),
             installed: false,
             install_hint: "Install qwen-code and make sure `qwen` is on PATH.".to_string(),
         },
@@ -2278,8 +2278,8 @@ async fn agents_settings_popup_lists_third_party_agents() {
     assert_chatwidget_snapshot!("agents_settings_popup", popup);
     assert!(popup.contains("Agents"));
     assert!(popup.contains("Third-party agent CLI status for spawn_agent."));
-    assert!(popup.contains("claude-sonnet-4.6"));
-    assert!(popup.contains("qwen3-coder-plus"));
+    assert!(popup.contains("Claude Code"));
+    assert!(popup.contains("Qwen Code"));
     assert!(popup.contains("installed"));
     assert!(popup.contains("not installed"));
 }

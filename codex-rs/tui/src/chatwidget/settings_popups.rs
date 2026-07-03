@@ -363,12 +363,12 @@ fn agent_status_selection_item(status: AgentInstallStatus) -> SelectionItem {
     };
 
     SelectionItem {
-        name: format!("{} ({})", status.slug, marker),
+        name: format!("{} ({})", status.name, marker),
         description: Some(description),
         selected_description,
         search_value: Some(format!(
             "{} {} {} {}",
-            status.slug, status.family, status.command, status.description
+            status.name, status.family, status.command, status.description
         )),
         dismiss_on_select: true,
         ..Default::default()
@@ -379,12 +379,12 @@ fn agent_status_selection_item(status: AgentInstallStatus) -> SelectionItem {
 mod tests {
     use super::*;
 
-    fn status(slug: &str, family: &str, command: &str, installed: bool) -> AgentInstallStatus {
+    fn status(name: &str, family: &str, command: &str, installed: bool) -> AgentInstallStatus {
         AgentInstallStatus {
-            slug: slug.to_string(),
+            name: name.to_string(),
             family: family.to_string(),
             command: command.to_string(),
-            description: format!("{slug} description"),
+            description: format!("{name} description"),
             installed,
             install_hint: format!("Install `{command}` and make sure it is on PATH."),
         }
@@ -393,13 +393,13 @@ mod tests {
     #[test]
     fn agents_settings_params_marks_installed_and_missing_agents() {
         let params = agents_settings_params(vec![
-            status("claude-sonnet-4.6", "claude", "claude", true),
-            status("qwen3-coder-plus", "qwen", "qwen", false),
+            status("Claude Code", "claude", "claude", true),
+            status("Qwen Code", "qwen", "qwen", false),
         ]);
 
         assert_eq!(params.title.as_deref(), Some("Agents"));
         assert_eq!(params.items.len(), 2);
-        assert_eq!(params.items[0].name, "claude-sonnet-4.6 (installed)");
+        assert_eq!(params.items[0].name, "Claude Code (installed)");
         assert!(params.items[0].dismiss_on_select);
         assert_eq!(
             params.items[0].description.as_deref(),
@@ -407,9 +407,9 @@ mod tests {
         );
         assert_eq!(
             params.items[0].selected_description.as_deref(),
-            Some("claude-sonnet-4.6 description Command: `claude` is available on PATH.")
+            Some("Claude Code description Command: `claude` is available on PATH.")
         );
-        assert_eq!(params.items[1].name, "qwen3-coder-plus (not installed)");
+        assert_eq!(params.items[1].name, "Qwen Code (not installed)");
         assert!(params.items[1].dismiss_on_select);
         assert_eq!(
             params.items[1].description.as_deref(),
@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(
             params.items[1].selected_description.as_deref(),
             Some(
-                "qwen3-coder-plus description Command: `qwen`. Install `qwen` and make sure it is on PATH."
+                "Qwen Code description Command: `qwen`. Install `qwen` and make sure it is on PATH."
             )
         );
     }

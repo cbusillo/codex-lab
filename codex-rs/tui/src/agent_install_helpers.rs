@@ -10,7 +10,7 @@ use codex_config::agent_defaults::AgentModelSpec;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentInstallStatus {
-    pub(crate) slug: String,
+    pub(crate) name: String,
     pub(crate) family: String,
     pub(crate) command: String,
     pub(crate) description: String,
@@ -31,25 +31,52 @@ pub(crate) fn external_agent_install_statuses_with<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let mut statuses: Vec<AgentInstallStatus> = specs
+    let mut statuses: Vec<AgentInstallStatus> = Vec::new();
+    for spec in specs
         .iter()
         .filter(|spec| is_external_agent_family(spec.family))
-        .map(|spec| AgentInstallStatus {
-            slug: spec.slug.to_string(),
+    {
+        if let Some(status) = statuses
+            .iter_mut()
+            .find(|status| status.family == spec.family && status.command == spec.cli)
+        {
+            status.description.push_str(", ");
+            status.description.push_str(spec.slug);
+            continue;
+        }
+
+        statuses.push(AgentInstallStatus {
+            name: agent_tool_name(spec.family, spec.cli).to_string(),
             family: spec.family.to_string(),
             command: spec.cli.to_string(),
-            description: spec.description.to_string(),
+            description: format!("Enabled selectors: {}.", spec.slug),
             installed: command_exists(spec.cli),
             install_hint: install_hint_for_command(spec.cli),
-        })
-        .collect();
+        });
+    }
 
-    statuses.sort_by(|a, b| a.family.cmp(&b.family).then_with(|| a.slug.cmp(&b.slug)));
+    statuses.sort_by(|a, b| a.family.cmp(&b.family).then_with(|| a.name.cmp(&b.name)));
     statuses
 }
 
 fn is_external_agent_family(family: &str) -> bool {
     matches!(family, "antigravity" | "claude" | "copilot" | "qwen")
+}
+
+fn agent_tool_name(family: &str, command: &str) -> &'static str {
+    match family {
+        "antigravity" => "Antigravity CLI",
+        "claude" => "Claude Code",
+        "copilot" => "GitHub Copilot CLI",
+        "qwen" => "Qwen Code",
+        _ => {
+            if command.is_empty() {
+                "Third-party agent CLI"
+            } else {
+                "External agent CLI"
+            }
+        }
+    }
 }
 
 fn command_exists_on_path(command: &str) -> bool {
@@ -155,9 +182,24 @@ mod tests {
         let specs = codex_config::agent_defaults::enabled_agent_model_specs();
         let statuses = external_agent_install_statuses_with(&specs, |command| command == "claude");
 
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| status.command == "claude")
+                .count(),
+            1
+        );
         assert!(statuses.iter().any(|status| {
             status.family == "claude" && status.command == "claude" && status.installed
         }));
+        let claude = statuses
+            .iter()
+            .find(|status| status.family == "claude")
+            .expect("claude status");
+        assert_eq!(claude.name, "Claude Code");
+        assert!(claude.description.contains("claude-opus-4.8"));
+        assert!(claude.description.contains("claude-sonnet-4.6"));
+        assert!(claude.description.contains("claude-haiku-4.5"));
         assert!(statuses.iter().any(|status| {
             status.family == "antigravity" && status.command == "agy" && !status.installed
         }));
