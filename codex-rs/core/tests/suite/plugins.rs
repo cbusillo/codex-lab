@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
+use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::protocol::EventMsg;
@@ -13,10 +14,13 @@ use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::WarningEvent;
 use core_test_support::apps_test_server::AppsTestServer;
+use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
@@ -33,6 +37,7 @@ use wiremock::MockServer;
 const SAMPLE_PLUGIN_CONFIG_NAME: &str = "sample@test";
 const SAMPLE_PLUGIN_DISPLAY_NAME: &str = "sample";
 const SAMPLE_PLUGIN_DESCRIPTION: &str = "inspect sample data";
+const PLUGIN_COMPACT_SUMMARY: &str = "PLUGIN_COMPACT_SUMMARY";
 
 fn sample_plugin_root(home: &TempDir) -> std::path::PathBuf {
     home.path().join("plugins/cache/test/sample/local")
@@ -185,6 +190,18 @@ fn tool_names(body: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn local_compact_model_provider(
+    server: &MockServer,
+) -> codex_model_provider_info::ModelProviderInfo {
+    let mut provider =
+        codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)["openai"]
+            .clone();
+    provider.name = "OpenAI-compatible compact test".into();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.supports_websockets = false;
+    provider
+}
+
 fn plugin_hook_test_builder(codex_home: Arc<TempDir>) -> TestCodexBuilder {
     test_codex()
         .with_home(codex_home)
@@ -196,6 +213,17 @@ fn plugin_hook_test_builder(codex_home: Arc<TempDir>) -> TestCodexBuilder {
                 .expect("test config should allow feature update");
             config.bypass_hook_trust = true;
         })
+}
+
+fn plugin_hook_compact_test_builder(
+    codex_home: Arc<TempDir>,
+    server: &MockServer,
+) -> TestCodexBuilder {
+    let model_provider = local_compact_model_provider(server);
+    plugin_hook_test_builder(codex_home).with_config(|config| {
+        config.model_provider = model_provider;
+        config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -466,6 +494,139 @@ async fn installed_plugin_skill_and_hook_survive_resume_turn() -> Result<()> {
     assert!(
         developer_text.contains("## Plugins"),
         "expected resumed plugin capability summary: {developer_text:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_plugin_skill_and_hook_survive_compact_turn() -> Result<()> {
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-initial"),
+                ev_completed("resp-initial"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-compact", PLUGIN_COMPACT_SUMMARY),
+                ev_completed("resp-compact"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-after-compact"),
+                ev_completed("resp-after-compact"),
+            ]),
+        ],
+    )
+    .await;
+
+    let codex_home = Arc::new(TempDir::new()?);
+    write_plugin_skill_plugin(codex_home.as_ref());
+    let hook_log_path = write_plugin_user_prompt_submit_hook(codex_home.as_ref());
+    let mut builder = plugin_hook_compact_test_builder(Arc::clone(&codex_home), &server);
+    let test = builder
+        .build(&server)
+        .await
+        .expect("create compact conversation");
+    let codex = Arc::clone(&test.codex);
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![codex_protocol::user_input::UserInput::Text {
+                text: "initial compact plugin hook turn".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let initial_hook = wait_for_event_match(&codex, |event| match event {
+        EventMsg::HookCompleted(completed)
+            if completed.run.event_name == HookEventName::UserPromptSubmit =>
+        {
+            Some(completed.clone())
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(initial_hook.run.source, HookSource::Plugin);
+    assert_eq!(initial_hook.run.status, HookRunStatus::Completed);
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await?;
+    let warning_event = wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
+    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
+        panic!("expected warning event after compact");
+    };
+    assert_eq!(message, super::compact::COMPACT_WARNING_MESSAGE);
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![codex_protocol::user_input::UserInput::Text {
+                text: "post compact plugin hook turn".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let post_compact_hook = wait_for_event_match(&codex, |event| match event {
+        EventMsg::HookCompleted(completed)
+            if completed.run.event_name == HookEventName::UserPromptSubmit =>
+        {
+            Some(completed.clone())
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(post_compact_hook.run.source, HookSource::Plugin);
+    assert_eq!(post_compact_hook.run.status, HookRunStatus::Completed);
+    assert!(
+        post_compact_hook
+            .run
+            .source_path
+            .ends_with("hooks/hooks.json"),
+        "expected installed plugin hooks.json source after compact, got {:?}",
+        post_compact_hook.run.source_path,
+    );
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let hook_payload: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&hook_log_path).expect("read compact plugin hook log"),
+    )
+    .expect("parse compact plugin hook payload");
+    assert_eq!(hook_payload["hook_event_name"], "UserPromptSubmit");
+    assert_eq!(hook_payload["prompt"], "post compact plugin hook turn");
+
+    let requests = responses.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected initial, compact, and post-compact requests"
+    );
+    let post_compact_request = &requests[2];
+    assert!(
+        post_compact_request.body_contains_text(PLUGIN_COMPACT_SUMMARY),
+        "expected post-compact request to include compact summary history"
+    );
+    let developer_text = post_compact_request
+        .message_input_texts("developer")
+        .join("\n\n");
+    assert!(
+        developer_text.contains("sample:sample-search: inspect sample data"),
+        "expected post-compact plugin-packaged skill guidance: {developer_text:?}"
+    );
+    assert!(
+        developer_text.contains("## Plugins"),
+        "expected post-compact plugin capability summary: {developer_text:?}"
     );
 
     Ok(())
