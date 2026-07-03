@@ -342,7 +342,7 @@ impl AccountRequestProcessor {
             self.config.cli_auth_credentials_store_mode,
         ) {
             Ok(()) => {
-                self.auth_manager.reload().await;
+                self.reload_active_auth_state().await;
                 Ok(())
             }
             Err(err) => Err(internal_error(format!("failed to save api key: {err}"))),
@@ -617,14 +617,7 @@ impl AccountRequestProcessor {
             self.config.cli_auth_credentials_store_mode,
         )
         .map_err(|err| internal_error(format!("failed to activate stored account: {err}")))?;
-        self.thread_manager.reload_auth_for_loaded_threads().await;
-        self.config_manager.replace_cloud_config_bundle_loader(
-            self.auth_manager.clone(),
-            self.config.chatgpt_base_url.clone(),
-        );
-        self.config_manager
-            .sync_default_client_residency_requirement()
-            .await;
+        self.reload_active_auth_state().await;
         Self::maybe_refresh_remote_installed_plugins_cache_for_current_config(
             &self.config_manager,
             &self.thread_manager,
@@ -724,14 +717,7 @@ impl AccountRequestProcessor {
                 }
             }
 
-            self.thread_manager.reload_auth_for_loaded_threads().await;
-            self.config_manager.replace_cloud_config_bundle_loader(
-                self.auth_manager.clone(),
-                self.config.chatgpt_base_url.clone(),
-            );
-            self.config_manager
-                .sync_default_client_residency_requirement()
-                .await;
+            self.reload_active_auth_state().await;
             Self::maybe_refresh_remote_installed_plugins_cache_for_current_config(
                 &self.config_manager,
                 &self.thread_manager,
@@ -818,6 +804,18 @@ impl AccountRequestProcessor {
             .await;
 
         Ok(LoginAccountResponse::ChatgptAuthTokens {})
+    }
+
+    async fn reload_active_auth_state(&self) {
+        // This reloads the shared AuthManager before advancing loaded thread auth windows.
+        self.thread_manager.reload_auth_for_loaded_threads().await;
+        self.config_manager.replace_cloud_config_bundle_loader(
+            self.auth_manager.clone(),
+            self.config.chatgpt_base_url.clone(),
+        );
+        self.config_manager
+            .sync_default_client_residency_requirement()
+            .await;
     }
 
     async fn send_login_success_notifications(&self, login_id: Option<Uuid>) {
