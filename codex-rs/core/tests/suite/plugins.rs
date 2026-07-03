@@ -9,6 +9,9 @@ use anyhow::Result;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookRunStatus;
+use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::Op;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::responses::ev_completed;
@@ -21,6 +24,7 @@ use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use core_test_support::wait_for_mcp_server;
 use tempfile::TempDir;
 use wiremock::MockServer;
@@ -63,6 +67,31 @@ fn write_plugin_skill_plugin(home: &TempDir) -> std::path::PathBuf {
     )
     .expect("write plugin skill");
     skill_dir.join("SKILL.md")
+}
+
+fn write_plugin_user_prompt_submit_hook(home: &TempDir) -> std::path::PathBuf {
+    let plugin_root = sample_plugin_root(home);
+    let hooks_dir = plugin_root.join("hooks");
+    std::fs::create_dir_all(hooks_dir.as_path()).expect("create plugin hooks dir");
+    let log_path = home
+        .path()
+        .join("plugins/data/sample-test/user_prompt_submit_hook_log.json");
+    std::fs::write(
+        hooks_dir.join("hooks.json"),
+        r#"{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "mkdir -p \"${PLUGIN_DATA}\" && cat > \"${PLUGIN_DATA}/user_prompt_submit_hook_log.json\"",
+        "statusMessage": "running sample plugin prompt hook"
+      }]
+    }]
+  }
+}"#,
+    )
+    .expect("write plugin hooks config");
+    log_path
 }
 
 fn write_plugin_mcp_plugin(home: &TempDir, command: &str) {
@@ -225,6 +254,88 @@ async fn capability_sections_render_in_developer_message_in_order() -> Result<()
     assert!(
         developer_text.contains("sample:sample-search: inspect sample data"),
         "expected namespaced plugin skill summary in developer message: {developer_messages:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_plugin_skill_and_hook_survive_same_turn() -> Result<()> {
+    let server = start_mock_server().await;
+    let resp_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+
+    let codex_home = Arc::new(TempDir::new()?);
+    write_plugin_skill_plugin(codex_home.as_ref());
+    let hook_log_path = write_plugin_user_prompt_submit_hook(codex_home.as_ref());
+    let mut builder = test_codex()
+        .with_home(Arc::clone(&codex_home))
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+            config.bypass_hook_trust = true;
+        });
+    let test_codex = builder
+        .build(&server)
+        .await
+        .expect("create new conversation");
+    let codex = Arc::clone(&test_codex.codex);
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![codex_protocol::user_input::UserInput::Text {
+                text: "hello from plugin hook and skill".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+
+    let completed_hook = wait_for_event_match(&codex, |event| match event {
+        EventMsg::HookCompleted(completed)
+            if completed.run.event_name == HookEventName::UserPromptSubmit =>
+        {
+            Some(completed.clone())
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(completed_hook.run.source, HookSource::Plugin);
+    assert_eq!(completed_hook.run.status, HookRunStatus::Completed);
+    assert!(
+        completed_hook.run.source_path.ends_with("hooks/hooks.json"),
+        "expected installed plugin hooks.json source, got {:?}",
+        completed_hook.run.source_path,
+    );
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let hook_payload: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&hook_log_path).expect("read plugin hook log"),
+    )
+    .expect("parse plugin hook payload");
+    assert_eq!(hook_payload["hook_event_name"], "UserPromptSubmit");
+    assert_eq!(hook_payload["prompt"], "hello from plugin hook and skill");
+
+    let request = resp_mock.single_request();
+    let developer_text = request.message_input_texts("developer").join("\n\n");
+    assert!(
+        developer_text.contains("sample:sample-search: inspect sample data"),
+        "expected plugin-packaged skill guidance in developer message: {developer_text:?}"
+    );
+    assert!(
+        developer_text.contains("## Plugins"),
+        "expected plugin capability summary alongside plugin skill: {developer_text:?}"
     );
 
     Ok(())
