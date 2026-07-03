@@ -206,10 +206,6 @@ impl LoginAccountsView {
     }
 
     fn handle_disconnect(&mut self) {
-        if self.remote_loaded {
-            return;
-        }
-
         let Some(account) = self.selected_account() else {
             return;
         };
@@ -268,11 +264,7 @@ impl LoginAccountsView {
         lines += 2;
         lines += self.accounts.len().max(1);
         lines += 3;
-        let hint = if self.remote_loaded {
-            "up/down Navigate  Enter Select  Esc Close"
-        } else {
-            "up/down Navigate  Enter Select  d Disconnect  Esc Close"
-        };
+        let hint = "up/down Navigate  Enter Select  d Disconnect  Esc Close";
         lines += Self::wrapped_line_count(hint, content_width);
         if let LoginAccountsMode::ConfirmRemove { label, .. } = &self.mode {
             let confirmation = format!("Disconnect {label}?");
@@ -302,7 +294,7 @@ impl BottomPaneView for LoginAccountsView {
             KeyCode::Esc | KeyCode::Char('q') => self.finish(ViewCompletion::Cancelled),
             KeyCode::Up => self.select_previous(),
             KeyCode::Down => self.select_next(),
-            KeyCode::Char('d') if !self.remote_loaded => self.handle_disconnect(),
+            KeyCode::Char('d') => self.handle_disconnect(),
             KeyCode::Char('r') => self.reload_accounts(),
             KeyCode::Enter => self.handle_enter(),
             _ => {}
@@ -871,18 +863,16 @@ impl Renderable for LoginAccountsView {
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::styled(" Select  ", Style::default().fg(Color::DarkGray)),
         ];
-        if !self.remote_loaded {
-            hint_spans.push(Span::styled(
-                "d",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            hint_spans.push(Span::styled(
-                " Disconnect  ",
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+        hint_spans.push(Span::styled(
+            "d",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        hint_spans.push(Span::styled(
+            " Disconnect  ",
+            Style::default().fg(Color::DarkGray),
+        ));
         hint_spans.push(Span::styled(
             "Esc",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),

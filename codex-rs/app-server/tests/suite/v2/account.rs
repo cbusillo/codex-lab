@@ -28,6 +28,9 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
+use codex_app_server_protocol::RemoveAccountParams;
+use codex_app_server_protocol::RemoveAccountResponse;
+use codex_app_server_protocol::RemoveAccountStatus;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
@@ -1104,6 +1107,141 @@ async fn list_accounts_returns_server_owned_account_entries() -> Result<()> {
     let raw = serde_json::to_string(&response)?;
     assert!(!raw.contains("sk-first"));
     assert!(!raw.contains("sk-second"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn remove_account_removes_active_account_promotes_fallback_and_notifies() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            ..Default::default()
+        },
+    )?;
+
+    let fallback = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-fallback".to_string(),
+        Some("fallback".to_string()),
+        /*make_active*/ false,
+    )?;
+    let active = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-active".to_string(),
+        Some("active".to_string()),
+        /*make_active*/ false,
+    )?;
+    codex_login::activate_account(
+        codex_home.path(),
+        &active.id,
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let req_id = mcp
+        .send_remove_account_request(RemoveAccountParams {
+            account_id: active.id.clone(),
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let remove: RemoveAccountResponse = to_response(resp)?;
+    assert_eq!(remove.status, RemoveAccountStatus::Removed);
+    assert_eq!(
+        remove.active_account_id.as_deref(),
+        Some(fallback.id.as_str())
+    );
+
+    let note = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = note.try_into()?;
+    let ServerNotification::AccountUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.auth_mode, Some(AuthMode::ApiKey));
+    assert_eq!(payload.plan_type, None);
+
+    let accounts = codex_login::list_accounts(codex_home.path())?;
+    assert!(!accounts.iter().any(|account| account.id == active.id));
+    assert!(accounts.iter().any(|account| account.id == fallback.id));
+    let active_account_id = codex_login::get_active_account_id(codex_home.path())?;
+    assert_eq!(active_account_id.as_deref(), Some(fallback.id.as_str()));
+    let auth = codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?;
+    let auth = auth.expect("fallback activation should write auth.json");
+    assert_eq!(auth.openai_api_key.as_deref(), Some("sk-fallback"));
+
+    let auth_status_id = mcp
+        .send_get_auth_status_request(GetAuthStatusParams {
+            include_token: Some(true),
+            refresh_token: Some(false),
+        })
+        .await?;
+    let auth_status_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(auth_status_id)),
+    )
+    .await??;
+    let auth_status: GetAuthStatusResponse = to_response(auth_status_resp)?;
+    assert_eq!(auth_status.auth_method, Some(AuthMode::ApiKey));
+    assert_eq!(auth_status.auth_token.as_deref(), Some("sk-fallback"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn remove_account_reports_not_found_without_changing_active_account() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+
+    let active = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-active".to_string(),
+        Some("active".to_string()),
+        /*make_active*/ false,
+    )?;
+    codex_login::activate_account(
+        codex_home.path(),
+        &active.id,
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let req_id = mcp
+        .send_remove_account_request(RemoveAccountParams {
+            account_id: "missing-account".to_string(),
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let remove: RemoveAccountResponse = to_response(resp)?;
+    assert_eq!(remove.status, RemoveAccountStatus::NotFound);
+    assert_eq!(
+        remove.active_account_id.as_deref(),
+        Some(active.id.as_str())
+    );
+
+    let active_account_id = codex_login::get_active_account_id(codex_home.path())?;
+    assert_eq!(active_account_id.as_deref(), Some(active.id.as_str()));
+    let auth = codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?;
+    let auth = auth.expect("active auth should remain materialized");
+    assert_eq!(auth.openai_api_key.as_deref(), Some("sk-active"));
 
     Ok(())
 }

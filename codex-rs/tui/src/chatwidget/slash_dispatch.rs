@@ -42,10 +42,6 @@ const LOGIN_USAGE: &str = "Usage: /login [default|<profile>|add <profile>]";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 
 impl ChatWidget {
-    pub(crate) fn show_login_accounts_view(&mut self) {
-        self.show_login_accounts_view_with_feedback(None);
-    }
-
     pub(crate) fn show_login_accounts_view_with_feedback(
         &mut self,
         feedback: Option<LoginAccountsFeedback>,

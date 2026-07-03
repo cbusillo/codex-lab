@@ -1009,6 +1009,12 @@ client_request_definitions! {
         response: v2::ListAccountsResponse,
     },
 
+    RemoveAccount => "account/remove" {
+        params: v2::RemoveAccountParams,
+        serialization: global("account-auth"),
+        response: v2::RemoveAccountResponse,
+    },
+
     LogoutAccount => "account/logout" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global("account-auth"),
@@ -2519,6 +2525,29 @@ mod tests {
             json!({
                 "method": "account/list",
                 "id": 4,
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_remove() -> Result<()> {
+        let request = ClientRequest::RemoveAccount {
+            request_id: RequestId::Integer(5),
+            params: v2::RemoveAccountParams {
+                account_id: "acc_123".to_string(),
+            },
+        };
+        assert_eq!(request.id(), &RequestId::Integer(5));
+        assert_eq!(request.method(), "account/remove");
+        assert_eq!(
+            json!({
+                "method": "account/remove",
+                "id": 5,
+                "params": {
+                    "accountId": "acc_123"
+                }
             }),
             serde_json::to_value(&request)?,
         );
