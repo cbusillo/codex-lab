@@ -3,6 +3,8 @@
 
 import importlib.util
 import json
+import os
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -349,6 +351,19 @@ class HarnessSafetyTest(unittest.TestCase):
                 HARNESS.materialize_workspace(
                     {"files": {"../outside.txt": "nope"}}, paths
                 )
+
+    def test_materialize_workspace_expands_workspace_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.make_paths(Path(tmp), "workspace-placeholder")
+
+            HARNESS.materialize_workspace(
+                {"files": {"proof.txt": "path={workspace}"}}, paths
+            )
+
+            self.assertEqual(
+                f"path={paths.workspace}",
+                (paths.workspace / "proof.txt").read_text(encoding="utf-8"),
+            )
 
     def test_fake_responses_rejects_empty_responses(self) -> None:
         with self.assertRaisesRegex(HARNESS.HarnessError, "must not be empty"):
@@ -788,14 +803,18 @@ class HarnessSafetyTest(unittest.TestCase):
             paths.workspace.mkdir(parents=True)
             artifact_dir = paths.artifacts
             artifact_dir.mkdir(parents=True)
+            (artifact_dir / "stdout.jsonl").write_text(
+                '{"type":"turn.started"}\n', encoding="utf-8"
+            )
+            (artifact_dir / "stderr.log").write_text("before sleep\n", encoding="utf-8")
 
             result = HARNESS.run_codex(
                 [
-                    "python3",
+                    sys.executable,
                     "-c",
-                    "import sys,time; print('{\"type\":\"turn.started\"}', flush=True); print('before sleep', file=sys.stderr, flush=True); time.sleep(30)",
+                    "import time; time.sleep(30)",
                 ],
-                {"timeout_seconds": 1},
+                {"timeout_seconds": 2},
                 paths,
                 artifact_dir,
             )
@@ -829,6 +848,87 @@ class HarnessSafetyTest(unittest.TestCase):
             payload = json.loads((artifact_dir / "stdout.jsonl").read_text())
             self.assertEqual(str(paths.codex_home), payload["codex_lab_home"])
             self.assertIsNone(payload["codex_home"])
+
+    def test_run_codex_can_inherit_codex_lab_auth_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_home = Path(tmp) / "source-home"
+            source_home.mkdir()
+            (source_home / "auth.json").write_text("{}", encoding="utf-8")
+            (source_home / "config.toml").write_text("model = 'real'", encoding="utf-8")
+            (source_home / "auth-profiles").mkdir()
+            (source_home / "auth-profiles" / "default.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            paths = HARNESS.make_paths(Path(tmp) / "runs", "inherit-auth")
+            paths.workspace.mkdir(parents=True)
+            artifact_dir = paths.artifacts
+            artifact_dir.mkdir(parents=True)
+            previous_home = os.environ.get("CODEX_LAB_HOME")
+            os.environ["CODEX_LAB_HOME"] = str(source_home)
+            try:
+                result = HARNESS.run_codex(
+                    [sys.executable, "-c", "print('{}')"],
+                    {"inherit_auth": True},
+                    paths,
+                    artifact_dir,
+                )
+            finally:
+                if previous_home is None:
+                    os.environ.pop("CODEX_LAB_HOME", None)
+                else:
+                    os.environ["CODEX_LAB_HOME"] = previous_home
+
+            self.assertEqual(0, result["returncode"])
+            self.assertTrue((paths.codex_home / "auth.json").is_file())
+            self.assertTrue((paths.codex_home / "auth-profiles" / "default.json").is_file())
+            self.assertFalse((paths.codex_home / "config.toml").exists())
+
+    def test_event_helpers_extract_agent_messages_and_commands(self) -> None:
+        events = [
+            {"msg": {"type": "agent_message", "message": "UNKNOWN result"}},
+            {"item": {"type": "agent_message", "text": "OdooPyInspection missing"}},
+            {"msg": {"type": "exec_command_begin", "command": ["python3", "jb-inspect.py"]}},
+            {"item": {"type": "command_execution", "command": "inspect-closeout --repo x"}},
+        ]
+
+        self.assertEqual(
+            ["UNKNOWN result", "OdooPyInspection missing"],
+            HARNESS.agent_messages_from_events(events),
+        )
+        self.assertEqual(
+            ["python3 jb-inspect.py", "inspect-closeout --repo x"],
+            HARNESS.commands_from_events(events),
+        )
+
+    def test_agent_message_and_command_expectations_are_evaluated(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "agent_messages": {"contains_all": ["UNKNOWN", "OdooPyInspection"]},
+                    "commands": {"contains_all": ["jb-inspect.py", "inspect-closeout --repo"]},
+                    "turns": [
+                        {
+                            "agent_messages": {"contains": "UNKNOWN"},
+                            "commands": {"contains": "jb-inspect.py"},
+                        }
+                    ],
+                }
+            },
+            {
+                "returncode": 0,
+                "turns": [
+                    {
+                        "agent_messages": ["UNKNOWN: OdooPyInspection missing"],
+                        "commands": ["python3 jb-inspect.py inspect-closeout --repo x"],
+                    }
+                ],
+                "agent_messages": ["UNKNOWN: OdooPyInspection missing"],
+                "commands": ["python3 jb-inspect.py inspect-closeout --repo x"],
+            },
+            [],
+        )
+
+        self.assertEqual([], failures)
 
     def test_token_usage_snapshot_from_events_uses_last_turn_completed_usage(self) -> None:
         usage = HARNESS.token_usage_snapshot_from_events(

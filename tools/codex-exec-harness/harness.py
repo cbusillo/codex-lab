@@ -84,6 +84,21 @@ def save_json(path: Path, value: Any) -> None:
         print(file=handle)
 
 
+def copy_auth_files(source: Path, destination: Path) -> None:
+    if not source.is_dir():
+        raise HarnessError(f"cannot inherit missing auth home: {source}")
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ["auth.json", "auth-profiles.json", "auth-profiles"]:
+        item = source / name
+        if not item.exists():
+            continue
+        target = destination / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        elif item.is_file():
+            shutil.copy2(item, target)
+
+
 def load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -429,7 +444,8 @@ def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
     for rel_path, content in files.items():
         if not isinstance(rel_path, str):
             raise HarnessError("file paths must be strings")
-        save_text(resolve_under(paths.workspace, rel_path, "file path"), str(content))
+        file_text = str(content).replace("{workspace}", str(paths.workspace))
+        save_text(resolve_under(paths.workspace, rel_path, "file path"), file_text)
 
     if scenario.get("git_init", True):
         subprocess.run(
@@ -439,6 +455,13 @@ def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+
+def inherit_auth_home(scenario: dict[str, Any], paths: RunPaths) -> None:
+    if scenario.get("inherit_auth") is not True:
+        return
+    source = Path(os.environ.get("CODEX_LAB_HOME") or Path.home() / ".codex-lab")
+    copy_auth_files(source, paths.codex_home)
 
 
 def save_config(scenario: dict[str, Any], paths: RunPaths, base_url: str | None) -> None:
@@ -544,6 +567,7 @@ def build_command(
 def run_codex(
     command: list[str], scenario: dict[str, Any], paths: RunPaths, artifact_dir: Path
 ) -> dict[str, Any]:
+    inherit_auth_home(scenario, paths)
     env = os.environ.copy()
     env.update(
         {
@@ -579,6 +603,10 @@ def run_codex(
             stdout = stdout.decode("utf-8", errors="replace")
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", errors="replace")
+        if not stdout and (artifact_dir / "stdout.jsonl").is_file():
+            stdout = (artifact_dir / "stdout.jsonl").read_text(encoding="utf-8")
+        if not stderr and (artifact_dir / "stderr.log").is_file():
+            stderr = (artifact_dir / "stderr.log").read_text(encoding="utf-8")
         stderr += f"\nharness: command timed out after {exc.timeout}s\n"
         returncode = 124
         timed_out = True
@@ -614,6 +642,40 @@ def event_type_counts(events: list[dict[str, Any]]) -> dict[str, int]:
         if isinstance(event_type, str):
             counts[event_type] = counts.get(event_type, 0) + 1
     return counts
+
+
+def agent_messages_from_events(events: list[dict[str, Any]]) -> list[str]:
+    messages: list[str] = []
+    for event in events:
+        msg = event.get("msg")
+        if isinstance(msg, dict) and msg.get("type") == "agent_message":
+            message = msg.get("message")
+            if isinstance(message, str):
+                messages.append(message)
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = item.get("text")
+            if isinstance(text, str):
+                messages.append(text)
+    return messages
+
+
+def commands_from_events(events: list[dict[str, Any]]) -> list[str]:
+    commands: list[str] = []
+    for event in events:
+        msg = event.get("msg")
+        if isinstance(msg, dict) and msg.get("type") == "exec_command_begin":
+            command = msg.get("command")
+            if isinstance(command, list):
+                commands.append(" ".join(str(part) for part in command))
+            elif isinstance(command, str):
+                commands.append(command)
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "command_execution":
+            command = item.get("command")
+            if isinstance(command, str):
+                commands.append(command)
+    return commands
 
 
 TOKEN_USAGE_FIELDS = [
@@ -693,6 +755,8 @@ def run_turns(
             raise HarnessError(f"turn {index + 1} did not emit a thread.started event")
 
         all_events.extend(result["events"])
+        agent_messages = agent_messages_from_events(result["events"])
+        commands = commands_from_events(result["events"])
         token_usage_snapshot = token_usage_snapshot_from_events(result["events"])
         token_usage_delta = subtract_token_usage(token_usage_snapshot, previous_token_usage)
         previous_token_usage = token_usage_snapshot
@@ -704,6 +768,8 @@ def run_turns(
                 "event_types": event_type_counts(result["events"]),
                 "responses_request_count": request_count_after - request_count_before,
                 "thread_id": result_thread_id,
+                "agent_messages": agent_messages,
+                "commands": commands,
                 "token_usage": token_usage_delta,
                 "token_usage_snapshot": token_usage_snapshot,
                 "artifact_dir": str(artifact_dir),
@@ -716,6 +782,8 @@ def run_turns(
         "returncode": turn_results[-1]["returncode"],
         "events": all_events,
         "event_types": event_type_counts(all_events),
+        "agent_messages": agent_messages_from_events(all_events),
+        "commands": commands_from_events(all_events),
         "turns": turn_results,
         "thread_id": thread_id,
         "token_usage": previous_token_usage,
@@ -815,6 +883,19 @@ def add_token_usage_assertion_failures(
             f"{label}: expected cache_ratio <= {cache_ratio_max}, "
             f"found {cache_ratio:.3f}"
         )
+
+
+def add_list_text_assertion_failures(
+    failures: list[str], values: Any, assertion: Any, label: str
+) -> None:
+    if assertion is None:
+        return
+    if not isinstance(assertion, dict):
+        raise HarnessError(f"{label} assertion must be an object")
+    if not isinstance(values, list):
+        values = []
+    text = "\n".join(str(value) for value in values)
+    add_text_assertion_failures(failures, text, assertion, label)
 
 
 def add_prefix_assertion_failures(
@@ -937,6 +1018,19 @@ def evaluate_expectations(
     if expect.get("thread_id") == "required" and not run.get("thread_id"):
         failures.append("expected a captured thread_id")
 
+    add_list_text_assertion_failures(
+        failures,
+        run.get("agent_messages"),
+        expect.get("agent_messages"),
+        "agent_messages",
+    )
+    add_list_text_assertion_failures(
+        failures,
+        run.get("commands"),
+        expect.get("commands"),
+        "commands",
+    )
+
     if expect.get("same_thread_id") is True:
         expected_thread_id = run.get("thread_id")
         if not expected_thread_id:
@@ -995,6 +1089,18 @@ def evaluate_expectations(
                 )
         if assertion.get("thread_id") == "required" and not actual_turn.get("thread_id"):
             failures.append(f"turn {index}: expected a captured thread_id")
+        add_list_text_assertion_failures(
+            failures,
+            actual_turn.get("agent_messages"),
+            assertion.get("agent_messages"),
+            f"turn {index}.agent_messages",
+        )
+        add_list_text_assertion_failures(
+            failures,
+            actual_turn.get("commands"),
+            assertion.get("commands"),
+            f"turn {index}.commands",
+        )
         token_usage_assertion = assertion.get("token_usage")
         if token_usage_assertion is not None:
             add_token_usage_assertion_failures(
