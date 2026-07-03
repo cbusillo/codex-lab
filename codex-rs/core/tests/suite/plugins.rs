@@ -22,6 +22,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
@@ -184,6 +185,19 @@ fn tool_names(body: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn plugin_hook_test_builder(codex_home: Arc<TempDir>) -> TestCodexBuilder {
+    test_codex()
+        .with_home(codex_home)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+            config.bypass_hook_trust = true;
+        })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capability_sections_render_in_developer_message_in_order() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -271,16 +285,7 @@ async fn installed_plugin_skill_and_hook_survive_same_turn() -> Result<()> {
     let codex_home = Arc::new(TempDir::new()?);
     write_plugin_skill_plugin(codex_home.as_ref());
     let hook_log_path = write_plugin_user_prompt_submit_hook(codex_home.as_ref());
-    let mut builder = test_codex()
-        .with_home(Arc::clone(&codex_home))
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::CodexHooks)
-                .expect("test config should allow feature update");
-            config.bypass_hook_trust = true;
-        });
+    let mut builder = plugin_hook_test_builder(Arc::clone(&codex_home));
     let test_codex = builder
         .build(&server)
         .await
@@ -336,6 +341,131 @@ async fn installed_plugin_skill_and_hook_survive_same_turn() -> Result<()> {
     assert!(
         developer_text.contains("## Plugins"),
         "expected plugin capability summary alongside plugin skill: {developer_text:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_plugin_skill_and_hook_survive_resume_turn() -> Result<()> {
+    let server = start_mock_server().await;
+    let _initial_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-initial"),
+            ev_completed("resp-initial"),
+        ]),
+    )
+    .await;
+
+    let codex_home = Arc::new(TempDir::new()?);
+    write_plugin_skill_plugin(codex_home.as_ref());
+    let hook_log_path = write_plugin_user_prompt_submit_hook(codex_home.as_ref());
+    let mut initial_builder = plugin_hook_test_builder(Arc::clone(&codex_home));
+    let initial = initial_builder
+        .build(&server)
+        .await
+        .expect("create initial conversation");
+    let codex = Arc::clone(&initial.codex);
+    let home = initial.home.clone();
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![codex_protocol::user_input::UserInput::Text {
+                text: "initial plugin hook turn".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let initial_hook = wait_for_event_match(&codex, |event| match event {
+        EventMsg::HookCompleted(completed)
+            if completed.run.event_name == HookEventName::UserPromptSubmit =>
+        {
+            Some(completed.clone())
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(initial_hook.run.source, HookSource::Plugin);
+    assert_eq!(initial_hook.run.status, HookRunStatus::Completed);
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let resumed_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-resume"),
+            ev_completed("resp-resume"),
+        ]),
+    )
+    .await;
+    let mut resume_builder = plugin_hook_test_builder(Arc::clone(&codex_home));
+    let resumed = resume_builder
+        .resume(&server, home, rollout_path)
+        .await
+        .expect("resume conversation");
+    let resumed_codex = Arc::clone(&resumed.codex);
+
+    resumed_codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![codex_protocol::user_input::UserInput::Text {
+                text: "resumed plugin hook turn".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let resumed_hook = wait_for_event_match(&resumed_codex, |event| match event {
+        EventMsg::HookCompleted(completed)
+            if completed.run.event_name == HookEventName::UserPromptSubmit =>
+        {
+            Some(completed.clone())
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(resumed_hook.run.source, HookSource::Plugin);
+    assert_eq!(resumed_hook.run.status, HookRunStatus::Completed);
+    assert!(
+        resumed_hook.run.source_path.ends_with("hooks/hooks.json"),
+        "expected installed plugin hooks.json source after resume, got {:?}",
+        resumed_hook.run.source_path,
+    );
+    wait_for_event(&resumed_codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let hook_payload: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&hook_log_path).expect("read resumed plugin hook log"),
+    )
+    .expect("parse resumed plugin hook payload");
+    assert_eq!(hook_payload["hook_event_name"], "UserPromptSubmit");
+    assert_eq!(hook_payload["prompt"], "resumed plugin hook turn");
+
+    let request = resumed_mock.single_request();
+    assert!(
+        request.body_contains_text("initial plugin hook turn"),
+        "expected resumed request to include the initial turn history"
+    );
+    let developer_text = request.message_input_texts("developer").join("\n\n");
+    assert!(
+        developer_text.contains("sample:sample-search: inspect sample data"),
+        "expected resumed plugin-packaged skill guidance: {developer_text:?}"
+    );
+    assert!(
+        developer_text.contains("## Plugins"),
+        "expected resumed plugin capability summary: {developer_text:?}"
     );
 
     Ok(())
