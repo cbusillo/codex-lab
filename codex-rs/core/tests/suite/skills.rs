@@ -24,6 +24,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+const HOOK_ADDED_CONTEXT: &str = "hook-added context for skill boundary";
+
 async fn write_repo_skill(
     cwd: AbsolutePathBuf,
     fs: Arc<dyn ExecutorFileSystem>,
@@ -53,9 +55,17 @@ fn shell_quote(path: &Path) -> String {
 fn write_user_prompt_submit_logging_hook(home: &Path) -> Result<()> {
     let script_path = home.join("user_prompt_submit_skill_boundary_hook.sh");
     let log_path = home.join("user_prompt_submit_skill_boundary_hook_log.jsonl");
+    let context_json =
+        serde_json::to_string(HOOK_ADDED_CONTEXT).context("serialize hook added context")?;
     fs::write(
         &script_path,
-        "#!/bin/sh\ncat >> \"$1\"\nprintf '\\n' >> \"$1\"\n",
+        format!(
+            r#"#!/bin/sh
+payload=$(cat)
+printf '%s\n' "$payload" >> "$1"
+printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"UserPromptSubmit","additionalContext":{context_json}}}}}'
+"#
+        ),
     )
     .context("write user prompt submit hook script")?;
 
@@ -91,7 +101,7 @@ fn read_user_prompt_submit_hook_inputs(home: &Path) -> Result<Vec<serde_json::Va
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn user_turn_includes_skill_instructions() -> Result<()> {
+async fn user_turn_includes_skill_instructions_and_hook_context() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -179,6 +189,13 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
                 && text.contains(skill_path_str.as_ref())
         }),
         "expected skill instructions in user input, got {user_texts:?}"
+    );
+    let developer_texts = request.message_input_texts("developer");
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text.contains(HOOK_ADDED_CONTEXT)),
+        "expected hook-added context in developer input, got {developer_texts:?}"
     );
 
     let hook_inputs = read_user_prompt_submit_hook_inputs(test.codex_home_path())?;
