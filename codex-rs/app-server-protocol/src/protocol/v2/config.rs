@@ -449,6 +449,7 @@ pub enum ConfiguredHookHandler {
     #[serde(rename = "command")]
     #[ts(rename = "command")]
     Command {
+        id: Option<String>,
         command: String,
         #[serde(rename = "commandWindows")]
         #[ts(rename = "commandWindows")]
