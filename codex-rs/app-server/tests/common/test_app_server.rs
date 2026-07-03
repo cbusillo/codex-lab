@@ -79,6 +79,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::SendAddCreditsNudgeEmailParams;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::SkillsConfigWriteParams;
 use codex_app_server_protocol::SkillsExtraRootsSetParams;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SwitchActiveAccountParams;
@@ -767,6 +768,15 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("skills/extraRoots/set", params).await
+    }
+
+    /// Send a `skills/config/write` JSON-RPC request.
+    pub async fn send_skills_config_write_request(
+        &mut self,
+        params: SkillsConfigWriteParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("skills/config/write", params).await
     }
 
     /// Send a `hooks/list` JSON-RPC request.
