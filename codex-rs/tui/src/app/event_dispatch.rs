@@ -1649,6 +1649,9 @@ impl App {
             AppEvent::OpenAccountSwitchSettings => {
                 self.chat_widget.open_account_switch_settings_popup();
             }
+            AppEvent::OpenAgentsSettings => {
+                self.chat_widget.open_agents_settings_popup();
+            }
             AppEvent::SetAutoSwitchAccountsOnRateLimit(enabled) => {
                 self.update_auto_switch_accounts_on_rate_limit(app_server, enabled)
                     .await;

@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Agents
+  Third-party agent CLI status for spawn_agent.
+
+› 1. claude-sonnet-4.6 (installed)     Claude Sonnet 4.6 via Claude Code. Command: `claude` is available on
+                                       PATH.
+  2. qwen3-coder-plus (not installed)  not installed - Install qwen-code and make sure `qwen` is on PATH.
+
+  Press enter to confirm or esc to go back
