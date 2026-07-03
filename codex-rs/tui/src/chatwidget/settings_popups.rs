@@ -4,6 +4,9 @@
 //! out of the main orchestration module without changing their event wiring.
 
 use super::*;
+use crate::agent_install_helpers::AgentInstallStatus;
+use crate::agent_install_helpers::external_agent_install_statuses;
+use codex_config::agent_defaults::enabled_agent_model_specs;
 
 impl ChatWidget {
     pub(super) fn open_theme_picker(&mut self) {
@@ -101,6 +104,15 @@ impl ChatWidget {
             dismiss_on_select: true,
             ..Default::default()
         });
+        items.push(SelectionItem {
+            name: "Agents".to_string(),
+            description: Some("Check third-party agent CLIs used by spawn_agent.".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenAgentsSettings);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
 
         if self.realtime_audio_device_selection_enabled() {
             items.extend(
@@ -135,6 +147,20 @@ impl ChatWidget {
             items,
             ..Default::default()
         });
+    }
+
+    pub(crate) fn open_agents_settings_popup(&mut self) {
+        let specs = enabled_agent_model_specs();
+        let statuses = external_agent_install_statuses(&specs);
+        self.open_agents_settings_popup_with_statuses(statuses);
+    }
+
+    pub(crate) fn open_agents_settings_popup_with_statuses(
+        &mut self,
+        statuses: Vec<AgentInstallStatus>,
+    ) {
+        self.bottom_pane
+            .show_selection_view(agents_settings_params(statuses));
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -296,5 +322,104 @@ impl ChatWidget {
             Personality::Friendly => "Warm, collaborative, and helpful.",
             Personality::Pragmatic => "Concise, task-focused, and direct.",
         }
+    }
+}
+
+fn agents_settings_params(statuses: Vec<AgentInstallStatus>) -> SelectionViewParams {
+    let items = statuses
+        .into_iter()
+        .map(agent_status_selection_item)
+        .collect();
+    SelectionViewParams {
+        title: Some("Agents".to_string()),
+        subtitle: Some("Third-party agent CLI status for spawn_agent.".to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        ..Default::default()
+    }
+}
+
+fn agent_status_selection_item(status: AgentInstallStatus) -> SelectionItem {
+    let marker = if status.installed {
+        "installed"
+    } else {
+        "not installed"
+    };
+    let description = if status.installed {
+        format!("{marker} - `{}` is on PATH", status.command)
+    } else {
+        format!("{marker} - {}", status.install_hint)
+    };
+    let selected_description = if status.installed {
+        Some(format!(
+            "{} Command: `{}` is available on PATH.",
+            status.description, status.command
+        ))
+    } else {
+        Some(format!(
+            "{} Command: `{}`. {}",
+            status.description, status.command, status.install_hint
+        ))
+    };
+
+    SelectionItem {
+        name: format!("{} ({})", status.name, marker),
+        description: Some(description),
+        selected_description,
+        search_value: Some(format!(
+            "{} {} {} {}",
+            status.name, status.family, status.command, status.description
+        )),
+        dismiss_on_select: true,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(name: &str, family: &str, command: &str, installed: bool) -> AgentInstallStatus {
+        AgentInstallStatus {
+            name: name.to_string(),
+            family: family.to_string(),
+            command: command.to_string(),
+            description: format!("{name} description"),
+            installed,
+            install_hint: format!("Install `{command}` and make sure it is on PATH."),
+        }
+    }
+
+    #[test]
+    fn agents_settings_params_marks_installed_and_missing_agents() {
+        let params = agents_settings_params(vec![
+            status("Claude Code", "claude", "claude", true),
+            status("Qwen Code", "qwen", "qwen", false),
+        ]);
+
+        assert_eq!(params.title.as_deref(), Some("Agents"));
+        assert_eq!(params.items.len(), 2);
+        assert_eq!(params.items[0].name, "Claude Code (installed)");
+        assert!(params.items[0].dismiss_on_select);
+        assert_eq!(
+            params.items[0].description.as_deref(),
+            Some("installed - `claude` is on PATH")
+        );
+        assert_eq!(
+            params.items[0].selected_description.as_deref(),
+            Some("Claude Code description Command: `claude` is available on PATH.")
+        );
+        assert_eq!(params.items[1].name, "Qwen Code (not installed)");
+        assert!(params.items[1].dismiss_on_select);
+        assert_eq!(
+            params.items[1].description.as_deref(),
+            Some("not installed - Install `qwen` and make sure it is on PATH.")
+        );
+        assert_eq!(
+            params.items[1].selected_description.as_deref(),
+            Some(
+                "Qwen Code description Command: `qwen`. Install `qwen` and make sure it is on PATH."
+            )
+        );
     }
 }

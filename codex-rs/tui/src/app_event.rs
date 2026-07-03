@@ -893,6 +893,9 @@ pub(crate) enum AppEvent {
     /// Open account switching settings from the general settings menu.
     OpenAccountSwitchSettings,
 
+    /// Open third-party agent install/status settings from the general settings menu.
+    OpenAgentsSettings,
+
     /// Update whether Codex should switch accounts after rate or usage limits.
     SetAutoSwitchAccountsOnRateLimit(bool),
 

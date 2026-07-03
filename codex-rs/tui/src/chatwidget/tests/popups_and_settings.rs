@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_install_helpers::AgentInstallStatus;
 use crate::app_event::ConnectorsSnapshot;
 use crate::chatwidget::connectors::ConnectorsCacheState;
 use codex_app_server_protocol::AppInfo;
@@ -2234,7 +2235,7 @@ async fn memories_settings_toggle_saves_on_enter() {
 
 #[tokio::test]
 async fn settings_popup_includes_accounts() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.open_settings_popup();
 
@@ -2242,6 +2243,45 @@ async fn settings_popup_includes_accounts() {
     assert!(popup.contains("Settings"));
     assert!(popup.contains("Accounts"));
     assert!(popup.contains("Configure automatic account switching."));
+    assert!(popup.contains("Agents"));
+    assert!(popup.contains("Check third-party agent CLIs used by spawn_agent."));
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAgentsSettings));
+}
+
+#[tokio::test]
+async fn agents_settings_popup_lists_third_party_agents() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.open_agents_settings_popup_with_statuses(vec![
+        AgentInstallStatus {
+            name: "Claude Code".to_string(),
+            family: "claude".to_string(),
+            command: "claude".to_string(),
+            description: "Enabled selectors: claude-opus-4.8, claude-sonnet-4.6".to_string(),
+            installed: true,
+            install_hint: "Install claude-code and make sure `claude` is on PATH.".to_string(),
+        },
+        AgentInstallStatus {
+            name: "Qwen Code".to_string(),
+            family: "qwen".to_string(),
+            command: "qwen".to_string(),
+            description: "Enabled selectors: qwen3-coder-plus".to_string(),
+            installed: false,
+            install_hint: "Install qwen-code and make sure `qwen` is on PATH.".to_string(),
+        },
+    ]);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 110);
+    assert_chatwidget_snapshot!("agents_settings_popup", popup);
+    assert!(popup.contains("Agents"));
+    assert!(popup.contains("Third-party agent CLI status for spawn_agent."));
+    assert!(popup.contains("Claude Code"));
+    assert!(popup.contains("Qwen Code"));
+    assert!(popup.contains("installed"));
+    assert!(popup.contains("not installed"));
 }
 
 #[tokio::test]
