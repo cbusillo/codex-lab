@@ -5,7 +5,7 @@ scenarios and saves evidence under `.tmp/codex-exec-harness/`.
 
 This is a small Codex-native proof harness for prompt and request-composition
 regressions. It is intentionally narrower than Every Code Lab's exec harness:
-there is no fake GitHub, no auth inheritance, and no local-model fallback logic.
+there is no fake GitHub, and no local-model fallback logic.
 Multi-turn scenarios are supported only through explicit `turns` fixtures that
 resume the captured Codex thread id.
 
@@ -49,13 +49,17 @@ Scenarios are JSON files. Supported fields:
 - `config_toml`: isolated `CODEX_LAB_HOME/config.toml` contents
 - `config_overrides`: `-c key=value` arguments passed to `codex exec`
 - `responses_api`: start a local fake Responses API and point Codex at it
+- `inherit_auth`: copy the caller's `CODEX_LAB_HOME` or `~/.codex-lab` into the
+  isolated harness home for opt-in live model scenarios
+- `skip_run_all`: omit a scenario from `run_all.py` and CI's all-scenario sweep
 - `expect`: assertions over return code, turn count, captured thread id, and
-  fake Responses request bodies
+  fake Responses request bodies, plus captured agent messages and commands
 - `timeout_seconds`: per-run timeout, defaulting to 90 seconds
 
-The fake Responses API is for request-shape proof only. Use live or local model
-runs separately when the question depends on model behavior rather than prompt
-assembly.
+The fake Responses API is for request-shape proof only. Use direct scenario runs
+with `inherit_auth` for opt-in live model checks when the question depends on
+model behavior rather than prompt assembly. Mark those scenarios
+`skip_run_all: true` unless they are safe for unauthenticated CI.
 
 ## Auto Review Proof Loop
 
@@ -116,6 +120,10 @@ under `expect.responses`.
 
 Use `expect.turns` to assert per-turn metadata such as `returncode`,
 `event_count`, `responses_request_count`, and `thread_id = "required"`.
+
+Use `expect.agent_messages` and `expect.commands` to assert text in captured
+assistant messages or shell commands from `codex exec --json` events. The same
+assertions are available per turn under `expect.turns[]`.
 
 Fake Responses fixtures may include per-response `usage` values. The harness
 forwards them through `response.completed` so scenarios can make deterministic

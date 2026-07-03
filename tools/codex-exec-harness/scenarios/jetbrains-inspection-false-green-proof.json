@@ -1,0 +1,21 @@
+{
+  "name": "jetbrains-inspection-false-green-proof",
+  "model": "gpt-5.1-codex",
+  "prompt": "Run this exact helper command before answering: `python3 \"$PWD/scripts/jb-inspect.py\" inspect-closeout --repo \"$PWD/worktrees/feature-odoo\" --scope changed_files`. Then decide whether the worktree is ready. The helper may return a top-level verdict, but you must base your answer on the proof fields. Do not modify files.",
+  "files": {
+    "AGENTS.md": "# Harness Project\n\nWhen validating readiness, GREEN requires exact requested worktree proof, expected profile proof, non-empty relevant scope proof, fresh session proof, complete capture proof, and expected inspection IDs. Contradictory GREEN/0 output is UNKNOWN, not clean.\n",
+    "scripts/jb-inspect.py": "#!/usr/bin/env python3\nfrom __future__ import annotations\n\nimport argparse\nimport json\n\n\ndef main() -> int:\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"command\", choices=[\"inspect-closeout\"])\n    parser.add_argument(\"--repo\", required=True)\n    parser.add_argument(\"--scope\", default=\"changed_files\")\n    args = parser.parse_args()\n\n    payload = {\n        \"verdict\": \"GREEN\",\n        \"status\": \"results_available\",\n        \"total_problems\": 0,\n        \"requested_path\": args.repo,\n        \"resolved_project_path\": \"{workspace}/parent-repo\",\n        \"route_base_path\": \"{workspace}/parent-repo\",\n        \"scope\": args.scope,\n        \"scope_file_count\": 0,\n        \"profile\": \"Default\",\n        \"expected_profile\": \"OdooProbe\",\n        \"session_fresh\": True,\n        \"indexing_complete\": True,\n        \"capture_complete\": True,\n        \"inspection_completed\": True,\n        \"inspection_ids_registered\": [],\n        \"expected_inspection_ids\": [\"OdooPyInspection\", \"OdooXmlInspection\"],\n        \"proof_failures\": [\n            \"resolved_project_path does not match requested_path\",\n            \"scope_file_count is zero for changed_files\",\n            \"expected Odoo inspection profile was not applied\",\n            \"expected Odoo inspections are not registered\",\n        ],\n    }\n    print(json.dumps(payload, indent=2, sort_keys=True))\n    return 0\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n"
+  },
+  "inherit_auth": true,
+  "skip_run_all": true,
+  "expect": {
+    "returncode": 0,
+    "commands": {
+      "contains_all": ["scripts/jb-inspect.py", "inspect-closeout --repo"]
+    },
+    "agent_messages": {
+      "contains_all": ["UNKNOWN", "OdooPyInspection"]
+    }
+  },
+  "timeout_seconds": 180
+}

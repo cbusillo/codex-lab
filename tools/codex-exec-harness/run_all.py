@@ -58,6 +58,14 @@ def load_summary(stdout: str) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
+def load_scenario(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def git_revision() -> str | None:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -80,7 +88,11 @@ def save_report(path: Path, report: dict[str, object]) -> None:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    scenarios = sorted(SCENARIO_DIR.glob("*.json"))
+    scenarios = [
+        scenario
+        for scenario in sorted(SCENARIO_DIR.glob("*.json"))
+        if load_scenario(scenario).get("skip_run_all") is not True
+    ]
     if not scenarios:
         print(f"no scenarios found in {SCENARIO_DIR}", file=sys.stderr)
         return 2
