@@ -364,6 +364,27 @@ impl LoginAddAccountView {
         self.completion = Some(completion);
     }
 
+    fn finish_and_show_accounts(&mut self) {
+        self.finish(ViewCompletion::Accepted);
+        self.app_event_tx.send(AppEvent::ShowLoginAccounts);
+    }
+
+    fn return_to_accounts_on_cancel(&self) -> bool {
+        matches!(
+            self.state,
+            LoginAddAccountState::Choose
+                | LoginAddAccountState::ApiKey { .. }
+                | LoginAddAccountState::ApiKeyFailed(_)
+                | LoginAddAccountState::Starting
+                | LoginAddAccountState::Waiting { .. }
+                | LoginAddAccountState::DeviceCodeStarting
+                | LoginAddAccountState::DeviceCodeWaiting { .. }
+                | LoginAddAccountState::DeviceCodeFailed(_)
+                | LoginAddAccountState::Failed(_)
+                | LoginAddAccountState::Complete
+        )
+    }
+
     fn handle_enter(&mut self) {
         match &mut self.state {
             LoginAddAccountState::Choose | LoginAddAccountState::Failed(_) => {
@@ -399,8 +420,7 @@ impl LoginAddAccountView {
                 self.app_event_tx.send(AppEvent::LoginStartDeviceCode);
             }
             LoginAddAccountState::Complete => {
-                self.finish(ViewCompletion::Accepted);
-                self.app_event_tx.send(AppEvent::ShowLoginAccounts);
+                self.finish_and_show_accounts();
             }
             LoginAddAccountState::SavingApiKey
             | LoginAddAccountState::Starting
@@ -447,11 +467,17 @@ impl LoginAddAccountView {
 impl BottomPaneView for LoginAddAccountView {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match (&self.state, key_event.code) {
+            (_, KeyCode::Esc) if self.return_to_accounts_on_cancel() => {
+                self.finish_and_show_accounts();
+            }
             (_, KeyCode::Esc) => self.finish(ViewCompletion::Cancelled),
             (LoginAddAccountState::ApiKey { .. }, KeyCode::Char('q'))
                 if text_input_modifiers(key_event.modifiers) =>
             {
                 self.handle_api_key_char('q');
+            }
+            (_, KeyCode::Char('q')) if self.return_to_accounts_on_cancel() => {
+                self.finish_and_show_accounts();
             }
             (_, KeyCode::Char('q')) => self.finish(ViewCompletion::Cancelled),
             (LoginAddAccountState::Choose, KeyCode::Up | KeyCode::Down) => {
@@ -552,7 +578,7 @@ impl Renderable for LoginAddAccountView {
                 ));
                 lines.push(render_selectable_line("API key", self.selected == 1, false));
                 lines.push(Line::from(""));
-                lines.push(add_account_hint_line("Start", "Close"));
+                lines.push(add_account_hint_line("Start", "Back"));
             }
             LoginAddAccountState::ApiKey { value, error } => {
                 lines.push(Line::from(vec![Span::styled(
@@ -679,7 +705,7 @@ impl Renderable for LoginAddAccountView {
                 lines.push(Line::from(""));
                 lines.push(render_selectable_line("Try again", true, false));
                 lines.push(Line::from(""));
-                lines.push(add_account_hint_line("Retry", "Close"));
+                lines.push(add_account_hint_line("Retry", "Back"));
             }
             LoginAddAccountState::Failed(message) => {
                 lines.push(Line::from(vec![Span::styled(
@@ -694,7 +720,7 @@ impl Renderable for LoginAddAccountView {
                 lines.push(Line::from(""));
                 lines.push(render_selectable_line("Try again", true, false));
                 lines.push(Line::from(""));
-                lines.push(add_account_hint_line("Retry", "Close"));
+                lines.push(add_account_hint_line("Retry", "Back"));
             }
             LoginAddAccountState::Complete => {
                 lines.push(Line::from(vec![Span::styled(
@@ -709,7 +735,7 @@ impl Renderable for LoginAddAccountView {
                     Style::default().fg(Color::DarkGray),
                 )));
                 lines.push(Line::from(""));
-                lines.push(add_account_hint_line("Continue", "Close"));
+                lines.push(add_account_hint_line("Continue", "Back"));
             }
         }
 

@@ -1,0 +1,73 @@
+---
+source: tui/src/bottom_pane/login_accounts_view_tests.rs
+expression: rendered
+---
+== choose ==
+┌──────────────── Add Account ─────────────────┐
+│ Choose a sign-in method                      │
+│                                              │
+│ > ChatGPT sign-in                            │
+│ API key                                      │
+│                                              │
+│ Enter Start  Esc Back                        │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+└──────────────────────────────────────────────┘
+
+== api_key_failed ==
+┌──────────────── Add Account ─────────────────┐
+│ Add account failed                           │
+│                                              │
+│ invalid API key                              │
+│                                              │
+│ > Try again                                  │
+│                                              │
+│ Enter Retry  Esc Back                        │
+│                                              │
+│                                              │
+│                                              │
+└──────────────────────────────────────────────┘
+
+== device_code_failed ==
+┌──────────────── Add Account ─────────────────┐
+│ Add account failed                           │
+│                                              │
+│ device code expired                          │
+│                                              │
+│ > Try again                                  │
+│                                              │
+│ Enter Retry  Esc Back                        │
+│                                              │
+│                                              │
+│                                              │
+└──────────────────────────────────────────────┘
+
+== failed ==
+┌──────────────── Add Account ─────────────────┐
+│ ChatGPT sign-in failed                       │
+│                                              │
+│ sign-in failed                               │
+│                                              │
+│ > Try again                                  │
+│                                              │
+│ Enter Retry  Esc Back                        │
+│                                              │
+│                                              │
+│                                              │
+└──────────────────────────────────────────────┘
+
+== complete ==
+┌──────────────── Add Account ─────────────────┐
+│ Account added                                │
+│                                              │
+│ The account list will refresh with your new  │
+│ ChatGPT account.                             │
+│                                              │
+│ Enter Continue  Esc Back                     │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+└──────────────────────────────────────────────┘
