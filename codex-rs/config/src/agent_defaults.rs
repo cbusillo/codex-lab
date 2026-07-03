@@ -9,6 +9,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+use codex_app_server_protocol::AuthMode;
+use serde::Deserialize;
+
 const CLAUDE_ALLOWED_TOOLS: &str = "Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(git status:*), Bash(git log:*), Bash(find:*), Read, Grep, Glob, LS, WebFetch, TodoRead, TodoWrite, WebSearch";
 const CLOUD_MODEL_ENV_FLAG: &str = "CODE_ENABLE_CLOUD_AGENT_MODEL";
 
@@ -42,6 +45,7 @@ const QWEN_3_CODER_READ_ONLY: &[&str] = &[];
 const QWEN_3_CODER_WRITE: &[&str] = &["-y"];
 const CLOUD_GPT5_CODEX_READ_ONLY: &[&str] = &[];
 const CLOUD_GPT5_CODEX_WRITE: &[&str] = &[];
+const MODELS_MANIFEST: &str = include_str!("../../models-manager/models.json");
 
 /// Canonical built-in external agent selectors used when no custom selector
 /// list is configured. Ordering controls default presentation priority.
@@ -292,7 +296,158 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
 ];
 
 static ALL_AGENT_MODEL_SPECS: LazyLock<Vec<AgentModelSpec>> =
-    LazyLock::new(|| AGENT_MODEL_SPECS.to_vec());
+    LazyLock::new(build_agent_model_specs);
+
+#[derive(Debug, Deserialize)]
+struct ModelsManifest {
+    models: Vec<ManifestModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestModel {
+    slug: String,
+    description: String,
+    visibility: String,
+    supported_in_api: bool,
+}
+
+fn build_agent_model_specs() -> Vec<AgentModelSpec> {
+    let mut specs = AGENT_MODEL_SPECS.to_vec();
+    specs.extend(dynamic_code_agent_specs());
+    specs
+}
+
+fn dynamic_code_agent_specs() -> Vec<AgentModelSpec> {
+    let Ok(manifest) = serde_json::from_str::<ModelsManifest>(MODELS_MANIFEST) else {
+        return Vec::new();
+    };
+
+    manifest
+        .models
+        .into_iter()
+        .filter(|model| model.supported_in_api)
+        .filter(|model| model.visibility.eq_ignore_ascii_case("list"))
+        .filter_map(dynamic_code_agent_spec)
+        .collect()
+}
+
+fn dynamic_code_agent_spec(model: ManifestModel) -> Option<AgentModelSpec> {
+    let track = code_agent_track(&model.slug)?;
+    if static_agent_model_spec(&model.slug).is_some() {
+        return None;
+    }
+
+    let candidate_version = parse_model_version_components(&model.slug)?;
+    let highest_static_version = highest_static_code_track_version(track)?;
+    if candidate_version <= highest_static_version {
+        return None;
+    }
+
+    let slug = leak_str(format!("code-{}", model.slug));
+    let model_slug = leak_str(model.slug);
+    let description = leak_str(model.description);
+    let aliases = leak_str_slice(vec![model_slug]);
+    let model_args = leak_str_slice(vec!["--model", model_slug]);
+    let is_frontline = !matches!(track, CodeAgentTrack::Mini);
+
+    Some(AgentModelSpec {
+        slug,
+        family: "code",
+        cli: "coder",
+        read_only_args: CODE_GPT5_READ_ONLY,
+        write_args: CODE_GPT5_WRITE,
+        model_args,
+        description,
+        enabled_by_default: true,
+        aliases,
+        gating_env: None,
+        is_frontline,
+        pro_only: false,
+    })
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CodeAgentTrack {
+    Base,
+    Mini,
+    Codex,
+}
+
+fn code_agent_track(model: &str) -> Option<CodeAgentTrack> {
+    let canonical = model.strip_prefix("code-").unwrap_or(model);
+    if !canonical.starts_with("gpt-") {
+        return None;
+    }
+
+    if canonical.contains("codex-spark") {
+        None
+    } else if canonical.contains("codex") {
+        Some(CodeAgentTrack::Codex)
+    } else if canonical.ends_with("-mini") {
+        Some(CodeAgentTrack::Mini)
+    } else {
+        Some(CodeAgentTrack::Base)
+    }
+}
+
+fn highest_static_code_track_version(track: CodeAgentTrack) -> Option<Vec<u32>> {
+    AGENT_MODEL_SPECS
+        .iter()
+        .filter(|spec| spec.family == "code")
+        .filter(|spec| code_agent_track(spec.slug) == Some(track))
+        .filter_map(|spec| parse_model_version_components(spec.slug))
+        .max()
+}
+
+fn parse_model_version_components(model: &str) -> Option<Vec<u32>> {
+    let canonical = model
+        .strip_prefix("code-")
+        .unwrap_or(model)
+        .rsplit('/')
+        .next()
+        .unwrap_or(model);
+    let mut components = Vec::new();
+
+    for segment in canonical.split('-') {
+        let first = segment.chars().next()?;
+        if !first.is_ascii_digit() {
+            continue;
+        }
+
+        for part in segment.split('.') {
+            if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
+                return None;
+            }
+            components.push(part.parse().ok()?);
+        }
+
+        return (!components.is_empty()).then_some(components);
+    }
+
+    None
+}
+
+fn leak_str(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
+}
+
+fn leak_str_slice(values: Vec<&'static str>) -> &'static [&'static str] {
+    Box::leak(values.into_boxed_slice())
+}
+
+fn static_agent_model_spec(identifier: &str) -> Option<&'static AgentModelSpec> {
+    let lower = identifier.to_ascii_lowercase();
+    AGENT_MODEL_SPECS
+        .iter()
+        .find(|spec| spec.slug.eq_ignore_ascii_case(&lower))
+        .or_else(|| {
+            AGENT_MODEL_SPECS.iter().find(|spec| {
+                spec.aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(&lower))
+            })
+        })
+}
 
 pub fn agent_model_specs() -> &'static [AgentModelSpec] {
     ALL_AGENT_MODEL_SPECS.as_slice()
@@ -302,6 +457,42 @@ pub fn enabled_agent_model_specs() -> Vec<&'static AgentModelSpec> {
     agent_model_specs()
         .iter()
         .filter(|spec| spec.is_enabled())
+        .collect()
+}
+
+pub fn agent_model_available_for_auth(
+    spec: &AgentModelSpec,
+    auth_mode: Option<AuthMode>,
+    supports_pro_only_models: bool,
+) -> bool {
+    let is_chatgpt_auth = auth_mode.is_some_and(AuthMode::has_chatgpt_account);
+    !spec.pro_only || (is_chatgpt_auth && supports_pro_only_models)
+}
+
+pub fn enabled_agent_model_specs_for_auth(
+    auth_mode: Option<AuthMode>,
+    supports_pro_only_models: bool,
+) -> Vec<&'static AgentModelSpec> {
+    agent_model_specs()
+        .iter()
+        .filter(|spec| spec.is_enabled())
+        .filter(|spec| agent_model_available_for_auth(spec, auth_mode, supports_pro_only_models))
+        .collect()
+}
+
+pub fn filter_agent_model_names_for_auth(
+    model_names: Vec<String>,
+    auth_mode: Option<AuthMode>,
+    supports_pro_only_models: bool,
+) -> Vec<String> {
+    model_names
+        .into_iter()
+        .filter(|name| {
+            if let Some(spec) = agent_model_spec(name) {
+                return agent_model_available_for_auth(spec, auth_mode, supports_pro_only_models);
+            }
+            true
+        })
         .collect()
 }
 

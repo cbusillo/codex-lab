@@ -1,8 +1,9 @@
 use super::*;
+use codex_app_server_protocol::AuthMode;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn cloud_defaults_are_empty_both_modes() {
+fn cloud_defaults_carry_model_selection_both_modes() {
     assert_eq!(
         default_params_for("cloud", /*read_only*/ true),
         vec!["--model", "gpt-5.1-codex-max"]
@@ -152,6 +153,89 @@ fn disabled_cloud_selector_is_present_but_not_enabled_by_default() {
     assert_eq!(cloud.slug, "cloud-gpt-5.1-codex-max");
     assert!(!cloud.enabled_by_default);
     assert_eq!(cloud.gating_env, Some("CODE_ENABLE_CLOUD_AGENT_MODEL"));
+}
+
+#[test]
+fn dynamic_agent_specs_include_newer_manifest_models() {
+    let base = dynamic_code_agent_spec(ManifestModel {
+        slug: "gpt-6.0".to_string(),
+        description: "Future base model.".to_string(),
+        visibility: "list".to_string(),
+        supported_in_api: true,
+    })
+    .expect("newer base manifest model should produce a dynamic spec");
+    assert_eq!(base.slug, "code-gpt-6.0");
+    assert_eq!(base.family, "code");
+    assert_eq!(base.cli, "coder");
+    assert_eq!(base.model_args, &["--model", "gpt-6.0"]);
+    assert!(base.is_frontline);
+
+    let mini = dynamic_code_agent_spec(ManifestModel {
+        slug: "gpt-6.0-mini".to_string(),
+        description: "Future mini model.".to_string(),
+        visibility: "list".to_string(),
+        supported_in_api: true,
+    })
+    .expect("newer mini manifest model should produce a dynamic spec");
+    assert_eq!(mini.slug, "code-gpt-6.0-mini");
+    assert_eq!(mini.model_args, &["--model", "gpt-6.0-mini"]);
+    assert!(!mini.is_frontline);
+}
+
+#[test]
+fn dynamic_agent_specs_skip_unsupported_hidden_and_retired_tracks() {
+    assert!(agent_model_spec("codex-auto-review").is_none());
+    assert!(agent_model_spec("gpt-5.2").is_none());
+    assert!(agent_model_spec("code-gpt-5.2").is_none());
+    assert!(agent_model_spec("gpt-5.3-codex").is_none());
+    assert!(agent_model_spec("code-gpt-5.3-codex").is_none());
+    assert!(agent_model_spec("gpt-5.3-codex-spark").is_none());
+    assert!(agent_model_spec("code-gpt-5.3-codex-spark").is_none());
+    assert!(agent_model_spec("gpt-5.4-mini").is_some());
+    assert!(agent_model_spec("code-gpt-5.4-mini").is_some());
+
+    assert!(
+        enabled_agent_model_specs()
+            .iter()
+            .all(|spec| spec.slug != "code-gpt-5.2"
+                && spec.slug != "code-gpt-5.3-codex"
+                && spec.slug != "code-gpt-5.3-codex-spark")
+    );
+}
+
+#[test]
+fn auth_filter_keeps_unknown_selectors_for_custom_config() {
+    let filtered = filter_agent_model_names_for_auth(
+        vec!["code-gpt-5.5".to_string(), "custom-agent".to_string()],
+        Some(AuthMode::ApiKey),
+        /*supports_pro_only_models*/ false,
+    );
+
+    assert_eq!(filtered, vec!["code-gpt-5.5", "custom-agent"]);
+}
+
+#[test]
+fn auth_filter_drops_pro_only_specs_without_chatgpt_pro_support() {
+    let mut spec = agent_model_spec("code-gpt-5.5")
+        .expect("static code spec should resolve")
+        .clone();
+    spec.pro_only = true;
+
+    assert!(!agent_model_available_for_auth(
+        &spec,
+        Some(AuthMode::ApiKey),
+        /*supports_pro_only_models*/ true,
+    ));
+    assert!(!agent_model_available_for_auth(
+        &spec,
+        Some(AuthMode::Chatgpt),
+        /*supports_pro_only_models*/ false,
+    ));
+    assert!(agent_model_available_for_auth(
+        &spec,
+        Some(AuthMode::Chatgpt),
+        /*supports_pro_only_models*/ true,
+    ));
 }
 
 #[test]
