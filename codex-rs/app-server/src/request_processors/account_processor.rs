@@ -106,6 +106,15 @@ impl AccountRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn switch_active_account(
+        &self,
+        params: SwitchActiveAccountParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.switch_active_account_response(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn get_account(
         &self,
         params: GetAccountParams,
@@ -165,7 +174,27 @@ impl AccountRequestProcessor {
         AccountUpdatedNotification {
             auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
             plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
+            account: self.current_account_metadata(),
         }
+    }
+
+    fn current_account_metadata(&self) -> Option<Account> {
+        Self::current_account_metadata_for(&self.config, &self.auth_manager)
+    }
+
+    fn current_account_metadata_for(
+        config: &Config,
+        auth_manager: &Arc<AuthManager>,
+    ) -> Option<Account> {
+        let provider = create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(auth_manager)),
+        );
+        provider
+            .account_state()
+            .ok()
+            .and_then(|account_state| account_state.account)
+            .map(Account::from)
     }
 
     fn auth_storage_home(config: &Config) -> &Path {
@@ -396,6 +425,7 @@ impl AccountRequestProcessor {
 
         let outgoing_clone = self.outgoing.clone();
         let config_manager = self.config_manager.clone();
+        let config = Arc::clone(&self.config);
         let thread_manager = Arc::clone(&self.thread_manager);
         let chatgpt_base_url = self.config.chatgpt_base_url.clone();
         let active_login = self.active_login.clone();
@@ -418,6 +448,7 @@ impl AccountRequestProcessor {
             Self::send_chatgpt_login_completion_notifications(
                 &outgoing_clone,
                 config_manager,
+                config,
                 thread_manager,
                 chatgpt_base_url,
                 login_id,
@@ -472,6 +503,7 @@ impl AccountRequestProcessor {
 
         let outgoing_clone = self.outgoing.clone();
         let config_manager = self.config_manager.clone();
+        let config = Arc::clone(&self.config);
         let thread_manager = Arc::clone(&self.thread_manager);
         let chatgpt_base_url = self.config.chatgpt_base_url.clone();
         let active_login = self.active_login.clone();
@@ -491,6 +523,7 @@ impl AccountRequestProcessor {
             Self::send_chatgpt_login_completion_notifications(
                 &outgoing_clone,
                 config_manager,
+                config,
                 thread_manager,
                 chatgpt_base_url,
                 login_id,
@@ -539,6 +572,50 @@ impl AccountRequestProcessor {
             Err(CancelLoginError::NotFound) => CancelLoginAccountStatus::NotFound,
         };
         Ok(CancelLoginAccountResponse { status })
+    }
+
+    async fn switch_active_account_response(
+        &self,
+        params: SwitchActiveAccountParams,
+    ) -> Result<SwitchActiveAccountResponse, JSONRPCErrorError> {
+        if self.auth_manager.is_external_chatgpt_auth_active() {
+            return Err(self.external_auth_active_error());
+        }
+
+        {
+            let mut guard = self.active_login.lock().await;
+            if let Some(active) = guard.take() {
+                drop(active);
+            }
+        }
+
+        let account_id = params.account_id;
+        codex_login::activate_account(
+            Self::auth_storage_home(&self.config),
+            &account_id,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to activate stored account: {err}")))?;
+        self.thread_manager.reload_auth_for_loaded_threads().await;
+        self.config_manager.replace_cloud_config_bundle_loader(
+            self.auth_manager.clone(),
+            self.config.chatgpt_base_url.clone(),
+        );
+        self.config_manager
+            .sync_default_client_residency_requirement()
+            .await;
+        Self::maybe_refresh_remote_installed_plugins_cache_for_current_config(
+            &self.config_manager,
+            &self.thread_manager,
+            self.auth_manager.auth_cached(),
+        )
+        .await;
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountUpdated(
+                self.current_account_updated_notification(),
+            ))
+            .await;
+        Ok(SwitchActiveAccountResponse { account_id })
     }
 
     async fn login_chatgpt_auth_tokens(
@@ -639,6 +716,7 @@ impl AccountRequestProcessor {
     async fn send_chatgpt_login_completion_notifications(
         outgoing: &OutgoingMessageSender,
         config_manager: ConfigManager,
+        config: Arc<Config>,
         thread_manager: Arc<ThreadManager>,
         chatgpt_base_url: String,
         login_id: Uuid,
@@ -673,6 +751,7 @@ impl AccountRequestProcessor {
             let payload_v2 = AccountUpdatedNotification {
                 auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
                 plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
+                account: Self::current_account_metadata_for(&config, &auth_manager),
             };
             outgoing
                 .send_server_notification(ServerNotification::AccountUpdated(payload_v2))
@@ -721,6 +800,7 @@ impl AccountRequestProcessor {
                 .map(|auth_mode| AccountUpdatedNotification {
                     auth_mode,
                     plan_type: None,
+                    account: None,
                 });
         self.outgoing
             .send_result(request_id, result.map(|_| LogoutAccountResponse {}))

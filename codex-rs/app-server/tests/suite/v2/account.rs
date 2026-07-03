@@ -30,6 +30,8 @@ use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::SwitchActiveAccountParams;
+use codex_app_server_protocol::SwitchActiveAccountResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_config::types::AuthCredentialsStoreMode;
@@ -192,7 +194,13 @@ async fn mock_device_code_oauth_token(server: &MockServer, id_token: &str) {
 #[tokio::test]
 async fn logout_account_removes_auth_and_notifies() -> Result<()> {
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            ..Default::default()
+        },
+    )?;
 
     login_with_api_key(
         codex_home.path(),
@@ -953,6 +961,84 @@ async fn login_account_api_key_succeeds_and_notifies() -> Result<()> {
     pretty_assertions::assert_eq!(payload.plan_type, None);
 
     assert!(codex_home.path().join("auth.json").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn switch_active_account_activates_stored_account_and_notifies() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            ..Default::default()
+        },
+    )?;
+
+    let first = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-first".to_string(),
+        Some("first".to_string()),
+        /*make_active*/ false,
+    )?;
+    let second = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-second".to_string(),
+        Some("second".to_string()),
+        /*make_active*/ false,
+    )?;
+    codex_login::activate_account(codex_home.path(), &first.id, AuthCredentialsStoreMode::File)?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let req_id = mcp
+        .send_switch_active_account_request(SwitchActiveAccountParams {
+            account_id: second.id.clone(),
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let switch: SwitchActiveAccountResponse = to_response(resp)?;
+    assert_eq!(switch.account_id, second.id);
+
+    let note = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = note.try_into()?;
+    let ServerNotification::AccountUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.auth_mode, Some(AuthMode::ApiKey));
+    assert_eq!(payload.plan_type, None);
+
+    let active_account_id = codex_login::get_active_account_id(codex_home.path())?;
+    assert_eq!(active_account_id.as_deref(), Some(second.id.as_str()));
+    let auth = codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?;
+    let auth = auth.expect("switch should write auth.json");
+    assert_eq!(auth.openai_api_key.as_deref(), Some("sk-second"));
+
+    let auth_status_id = mcp
+        .send_get_auth_status_request(GetAuthStatusParams {
+            include_token: Some(true),
+            refresh_token: Some(false),
+        })
+        .await?;
+    let auth_status_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(auth_status_id)),
+    )
+    .await??;
+    let auth_status: GetAuthStatusResponse = to_response(auth_status_resp)?;
+    assert_eq!(auth_status.auth_method, Some(AuthMode::ApiKey));
+    assert_eq!(auth_status.auth_token.as_deref(), Some("sk-second"));
+
     Ok(())
 }
 

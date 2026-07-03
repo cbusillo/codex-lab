@@ -1866,6 +1866,30 @@
             },
             "method": {
               "enum": [
+                "account/switchActive"
+              ],
+              "title": "Account/switchActiveRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/SwitchActiveAccountParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Account/switchActiveRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "account/logout"
               ],
               "title": "Account/logoutRequestMethod",
@@ -5933,6 +5957,16 @@
       "AccountUpdatedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/Account"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "authMode": {
             "anyOf": [
               {
@@ -16457,6 +16491,32 @@
         "required": [
           "name"
         ],
+        "type": "object"
+      },
+      "SwitchActiveAccountParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId"
+        ],
+        "title": "SwitchActiveAccountParams",
+        "type": "object"
+      },
+      "SwitchActiveAccountResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId"
+        ],
+        "title": "SwitchActiveAccountResponse",
         "type": "object"
       },
       "TerminalInteractionNotification": {

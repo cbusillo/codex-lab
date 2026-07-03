@@ -22,6 +22,7 @@ use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::UserHistoryCell;
 use crate::history_cell::new_session_info;
 use crate::multi_agents::AgentPickerThreadEntry;
+use crate::status::StatusAccountDisplay;
 use assert_matches::assert_matches;
 
 use crate::app_command::AppCommand as Op;
@@ -30,6 +31,7 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::PermissionProfileSnapshot;
 use crate::legacy_core::config::TerminalResizeReflowMaxRows;
+use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
 use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AdditionalFileSystemPermissions;
@@ -3645,6 +3647,7 @@ async fn account_update_prefetches_rate_limits_on_chatgpt_login_transition() {
             ServerNotification::AccountUpdated(AccountUpdatedNotification {
                 auth_mode: None,
                 plan_type: None,
+                account: None,
             }),
         ),
     )
@@ -3663,6 +3666,7 @@ async fn account_update_prefetches_rate_limits_on_chatgpt_login_transition() {
             ServerNotification::AccountUpdated(AccountUpdatedNotification {
                 auth_mode: Some(AuthMode::Chatgpt),
                 plan_type: None,
+                account: None,
             }),
         ),
     )
@@ -3687,6 +3691,7 @@ async fn account_update_prefetches_rate_limits_on_chatgpt_login_transition() {
             ServerNotification::AccountUpdated(AccountUpdatedNotification {
                 auth_mode: Some(AuthMode::Chatgpt),
                 plan_type: None,
+                account: None,
             }),
         ),
     )
@@ -3698,6 +3703,61 @@ async fn account_update_prefetches_rate_limits_on_chatgpt_login_transition() {
             "repeated ChatGPT account update should not prefetch rate limits"
         );
     }
+}
+
+#[test]
+fn account_update_preserves_chatgpt_email_when_only_notification_metadata_is_available() {
+    let previous = StatusAccountDisplay::ChatGpt {
+        email: Some("old@example.com".to_string()),
+        plan: Some("Plus".to_string()),
+    };
+
+    let display = App::status_account_display_from_update(
+        &AccountUpdatedNotification {
+            auth_mode: Some(AuthMode::Chatgpt),
+            plan_type: Some(codex_protocol::account::PlanType::Pro),
+            account: None,
+        },
+        Some(&previous),
+    );
+
+    assert_eq!(
+        display,
+        Some(StatusAccountDisplay::ChatGpt {
+            email: Some("old@example.com".to_string()),
+            plan: Some("Pro".to_string()),
+        })
+    );
+}
+
+#[test]
+fn account_update_uses_account_metadata_when_present() {
+    let previous = StatusAccountDisplay::ChatGpt {
+        email: Some("old@example.com".to_string()),
+        plan: Some("Plus".to_string()),
+    };
+
+    let (display, plan_type, has_chatgpt_account) = App::account_state_from_update(
+        &AccountUpdatedNotification {
+            auth_mode: Some(AuthMode::Chatgpt),
+            plan_type: Some(codex_protocol::account::PlanType::Plus),
+            account: Some(Account::Chatgpt {
+                email: "new@example.com".to_string(),
+                plan_type: codex_protocol::account::PlanType::Pro,
+            }),
+        },
+        Some(&previous),
+    );
+
+    assert_eq!(
+        display,
+        Some(StatusAccountDisplay::ChatGpt {
+            email: Some("new@example.com".to_string()),
+            plan: Some("Pro".to_string()),
+        })
+    );
+    assert_eq!(plan_type, Some(codex_protocol::account::PlanType::Pro));
+    assert!(has_chatgpt_account);
 }
 
 #[tokio::test]
@@ -3732,6 +3792,7 @@ async fn login_add_account_ignores_stale_app_server_success_update() {
             ServerNotification::AccountUpdated(AccountUpdatedNotification {
                 auth_mode: Some(AuthMode::Chatgpt),
                 plan_type: None,
+                account: None,
             }),
         ),
     )
@@ -3771,6 +3832,7 @@ async fn login_add_account_ignores_stale_app_server_success_update() {
             ServerNotification::AccountUpdated(AccountUpdatedNotification {
                 auth_mode: Some(AuthMode::Chatgpt),
                 plan_type: None,
+                account: None,
             }),
         ),
     )
@@ -3812,6 +3874,7 @@ async fn login_add_account_ignores_stale_app_server_success_update() {
             ServerNotification::AccountUpdated(AccountUpdatedNotification {
                 auth_mode: Some(AuthMode::Chatgpt),
                 plan_type: None,
+                account: None,
             }),
         ),
     )

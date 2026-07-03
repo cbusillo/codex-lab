@@ -45,6 +45,8 @@ use codex_app_server_protocol::ReviewStartTarget;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::SwitchActiveAccountParams;
+use codex_app_server_protocol::SwitchActiveAccountResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionResponse;
@@ -896,6 +898,19 @@ impl AppServerSession {
             })
             .await
             .wrap_err("account/logout failed in TUI")?;
+        Ok(())
+    }
+
+    pub(crate) async fn switch_active_account(&mut self, account_id: String) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: SwitchActiveAccountResponse = self
+            .client
+            .request_typed(ClientRequest::SwitchActiveAccount {
+                request_id,
+                params: SwitchActiveAccountParams { account_id },
+            })
+            .await
+            .wrap_err("account/switchActive failed in TUI")?;
         Ok(())
     }
 

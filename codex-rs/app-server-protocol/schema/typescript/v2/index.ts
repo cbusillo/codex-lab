@@ -376,6 +376,8 @@ export type { SkillsListResponse } from "./SkillsListResponse";
 export type { SortDirection } from "./SortDirection";
 export type { SpendControlLimitSnapshot } from "./SpendControlLimitSnapshot";
 export type { SubagentMigration } from "./SubagentMigration";
+export type { SwitchActiveAccountParams } from "./SwitchActiveAccountParams";
+export type { SwitchActiveAccountResponse } from "./SwitchActiveAccountResponse";
 export type { TerminalInteractionNotification } from "./TerminalInteractionNotification";
 export type { TextElement } from "./TextElement";
 export type { TextPosition } from "./TextPosition";

@@ -21,73 +21,9 @@ use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_cloud_config::cloud_config_bundle_loader_for_storage;
 use codex_config::CloudConfigBundleLoader;
-use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::CLIENT_ID;
 use codex_login::ServerOptions;
 use tokio_util::sync::CancellationToken;
-
-struct AuthSwitchRollback {
-    codex_home: PathBuf,
-    previous_auth: Option<codex_login::AuthDotJson>,
-    previous_active_account_id: Option<String>,
-    auth_credentials_store_mode: AuthCredentialsStoreMode,
-    armed: bool,
-}
-
-impl AuthSwitchRollback {
-    fn new(
-        codex_home: PathBuf,
-        previous_auth: Option<codex_login::AuthDotJson>,
-        previous_active_account_id: Option<String>,
-        auth_credentials_store_mode: AuthCredentialsStoreMode,
-    ) -> Self {
-        Self {
-            codex_home,
-            previous_auth,
-            previous_active_account_id,
-            auth_credentials_store_mode,
-            armed: true,
-        }
-    }
-
-    fn disarm(mut self) {
-        self.armed = false;
-    }
-
-    fn restore_now(&mut self) -> std::io::Result<()> {
-        self.restore_auth()?;
-        self.armed = false;
-        Ok(())
-    }
-
-    fn restore_auth(&self) -> std::io::Result<()> {
-        if let Some(previous_auth) = &self.previous_auth {
-            codex_login::save_auth(
-                &self.codex_home,
-                previous_auth,
-                self.auth_credentials_store_mode,
-            )?;
-        } else {
-            codex_login::delete_auth(&self.codex_home, self.auth_credentials_store_mode)
-                .map(|_| ())?;
-        }
-        codex_login::set_active_account_id(
-            &self.codex_home,
-            self.previous_active_account_id.clone(),
-        )?;
-        Ok(())
-    }
-}
-
-impl Drop for AuthSwitchRollback {
-    fn drop(&mut self) {
-        if self.armed
-            && let Err(err) = self.restore_auth()
-        {
-            tracing::warn!("failed to roll back stored account auth switch: {err}");
-        }
-    }
-}
 
 struct AppServerThreadUiSnapshot {
     chat_widget: ChatWidget,
@@ -1208,23 +1144,11 @@ impl App {
 
     pub(super) async fn switch_auth_account(
         &mut self,
-        tui: &mut tui::Tui,
+        _tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         selection: AuthAccountSelection,
     ) {
         self.pending_auth_profile_login = None;
-
-        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
-            self.chat_widget.add_error_message(
-                "/login account switching requires an embedded Codex Lab app server.".to_string(),
-            );
-            self.chat_widget.add_info_message(
-                "Use an embedded Codex Lab app server to activate stored accounts from /login."
-                    .to_string(),
-                /*hint*/ None,
-            );
-            return;
-        }
 
         if !self.pending_primary_events.is_empty() {
             self.chat_widget.add_error_message(
@@ -1234,184 +1158,27 @@ impl App {
             return;
         }
 
-        let (_account, selected_auth) =
-            match codex_login::auth_for_account(&self.config.codex_home, &selection.account_id) {
-                Ok(auth) => auth,
-                Err(err) => {
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to load stored account {}: {err}",
-                        selection.label
-                    ));
-                    return;
-                }
-            };
-        let previous_auth = match codex_login::load_auth_dot_json(
-            &self.config.codex_home,
-            self.config.cli_auth_credentials_store_mode,
-        ) {
-            Ok(previous_auth) => previous_auth,
-            Err(err) => {
-                self.chat_widget.add_error_message(format!(
-                    "Failed to read current auth before activating stored account {}: {err}",
-                    selection.label
-                ));
-                return;
-            }
-        };
-        let previous_active_account_id =
-            match codex_login::get_active_account_id(&self.config.codex_home) {
-                Ok(previous_active_account_id) => previous_active_account_id,
-                Err(err) => {
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to read active account before activating stored account {}: {err}",
-                        selection.label
-                    ));
-                    return;
-                }
-            };
-        if let Err(err) = codex_login::save_auth(
-            &self.config.codex_home,
-            &selected_auth,
-            self.config.cli_auth_credentials_store_mode,
-        ) {
-            self.chat_widget.add_error_message(format!(
-                "Failed to prepare stored account {}: {err}",
-                selection.label
-            ));
+        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            self.chat_widget.add_error_message(
+                "Switching stored accounts is only available for local sessions.".to_string(),
+            );
             return;
         }
-        let mut rollback = AuthSwitchRollback::new(
-            self.config.codex_home.to_path_buf(),
-            previous_auth,
-            previous_active_account_id,
-            self.config.cli_auth_credentials_store_mode,
-        );
 
-        match codex_login::set_active_account_id(
-            &self.config.codex_home,
-            Some(selection.account_id.clone()),
-        ) {
-            Ok(Some(_activated)) => {}
-            Ok(None) => {
-                if let Err(rollback_err) = rollback.restore_now() {
-                    tracing::warn!(
-                        "failed to restore auth after missing stored account activation: {rollback_err}"
-                    );
-                }
-                self.chat_widget.add_error_message(format!(
-                    "Failed to activate stored account {}: account disappeared before activation",
-                    selection.label
-                ));
-                return;
-            }
-            Err(err) => {
-                if let Err(rollback_err) = rollback.restore_now() {
-                    tracing::warn!(
-                        "failed to restore auth after stored account activation error: {rollback_err}"
-                    );
-                }
-                self.chat_widget.add_error_message(format!(
-                    "Failed to activate stored account {}: {err}",
-                    selection.label
-                ));
-                return;
-            }
-        }
-
-        let default_auth_home = self.config.codex_home.clone();
-        let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-            self.config.codex_home.to_path_buf(),
-            default_auth_home.to_path_buf(),
-            /*enable_codex_api_key_env*/ false,
-            self.config.cli_auth_credentials_store_mode,
-            self.config.chatgpt_base_url.clone(),
-        )
-        .await;
-        let config = match self
-            .config_for_auth_profile_switch(
-                default_auth_home,
-                replacement_cloud_config_bundle.clone(),
-            )
-            .await
-        {
-            Ok(config) => config,
-            Err(err) => {
-                self.chat_widget.add_error_message(format!(
-                    "Failed to load config for stored account {}: {err}",
-                    selection.label
-                ));
-                return;
-            }
-        };
-
-        let replacement_client = match crate::start_embedded_app_server(
-            self.arg0_paths.clone(),
-            config.clone(),
-            self.cli_kv_overrides.clone(),
-            self.loader_overrides.clone(),
-            self.strict_config,
-            replacement_cloud_config_bundle.clone(),
-            self.feedback.clone(),
-            /*log_db*/ None,
-            self.state_db.clone(),
-            self.environment_manager.clone(),
-        )
-        .await
-        {
-            Ok(client) => AppServerClient::InProcess(client),
-            Err(err) => {
-                self.chat_widget.add_error_message(format!(
-                    "Failed to start app server for stored account {}: {err}",
-                    selection.label
-                ));
-                return;
-            }
-        };
-
-        let mut replacement_session =
-            AppServerSession::new(replacement_client, app_server.thread_params_mode())
-                .with_remote_cwd_override(app_server.remote_cwd_override().map(PathBuf::from));
-        let started = match replacement_session
-            .start_thread_with_session_start_source(&config, Some(ThreadStartSource::Clear))
-            .await
-        {
-            Ok(started) => started,
-            Err(err) => {
-                self.chat_widget.add_error_message(format!(
-                    "Failed to start stored account session for {}: {err}",
-                    selection.label
-                ));
-                if let Err(shutdown_err) = replacement_session.shutdown().await {
-                    tracing::warn!(
-                        "failed to shut down replacement app server after account start failure: {shutdown_err}"
-                    );
-                }
-                return;
-            }
-        };
-
-        match self
-            .commit_replacement_app_server_thread(
-                tui,
-                app_server,
-                replacement_session,
-                started,
-                config,
-                replacement_cloud_config_bundle,
-                "failed to shut down previous app server after account switch",
-            )
+        match app_server
+            .switch_active_account(selection.account_id.clone())
             .await
         {
             Ok(()) => {
-                rollback.disarm();
                 self.chat_widget.add_info_message(
                     format!("Using stored account {} for this session.", selection.label),
-                    Some("The previous session remains resumable.".to_string()),
+                    Some("The current session will use this account for new turns.".to_string()),
                 );
             }
             Err(err) => {
                 self.chat_widget.add_error_message(format!(
-                    "Failed to attach to stored account session: {err}"
+                    "Failed to activate stored account {}: {err}",
+                    selection.label
                 ));
             }
         }
