@@ -50,7 +50,14 @@ pub(crate) fn plugin_hook_key_source(plugin_id: &str, source_relative_path: &str
 
 pub(crate) fn hook_handler_id(handler: &codex_config::HookHandlerConfig) -> Option<&str> {
     match handler {
-        codex_config::HookHandlerConfig::Command { id, .. } => id.as_deref(),
+        codex_config::HookHandlerConfig::Command {
+            id,
+            command,
+            r#async,
+            ..
+        } => (!r#async && !command.trim().is_empty())
+            .then_some(id.as_deref())
+            .flatten(),
         codex_config::HookHandlerConfig::Prompt {} | codex_config::HookHandlerConfig::Agent {} => {
             None
         }

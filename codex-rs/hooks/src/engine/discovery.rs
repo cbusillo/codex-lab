@@ -447,8 +447,8 @@ fn append_matcher_groups(
     event_name: codex_protocol::protocol::HookEventName,
     groups: Vec<MatcherGroup>,
 ) {
+    let mut seen_keys = HashSet::new();
     for (group_index, group) in groups.into_iter().enumerate() {
-        let mut seen_keys = HashSet::new();
         let matcher = matcher_pattern_for_event(event_name, group.matcher.as_deref());
         if let Some(matcher) = matcher
             && let Err(err) = validate_matcher_pattern(matcher)
@@ -853,6 +853,73 @@ mod tests {
                 env: std::collections::HashMap::new(),
             }]
         );
+    }
+
+    #[test]
+    fn command_hook_hash_converges_across_equivalent_representations() {
+        let toml_group = MatcherGroup {
+            matcher: Some("^Bash$".to_string()),
+            hooks: vec![HookHandlerConfig::Command {
+                id: Some("lint".to_string()),
+                command: "python3 /tmp/hook.py".to_string(),
+                command_windows: Some("py -3 C:\\tmp\\hook.py".to_string()),
+                timeout_sec: Some(30),
+                r#async: false,
+                status_message: Some("checking".to_string()),
+            }],
+        };
+        let json_group: MatcherGroup = serde_json::from_value(serde_json::json!({
+            "matcher": "^Bash$",
+            "hooks": [{
+                "id": "lint",
+                "type": "command",
+                "command": "python3 /tmp/hook.py",
+                "commandWindows": "py -3 C:\\tmp\\hook.py",
+                "timeout": 30,
+                "async": false,
+                "statusMessage": "checking",
+            }],
+        }))
+        .expect("JSON hook group should deserialize");
+
+        let HookHandlerConfig::Command { command, .. } = &json_group.hooks[0] else {
+            panic!("expected command hook");
+        };
+        let normalized_json_handler = HookHandlerConfig::Command {
+            id: None,
+            command: command.clone(),
+            command_windows: None,
+            timeout_sec: Some(30),
+            r#async: false,
+            status_message: Some("checking".to_string()),
+        };
+        let HookHandlerConfig::Command { command, .. } = &toml_group.hooks[0] else {
+            panic!("expected command hook");
+        };
+        let normalized_toml_handler = HookHandlerConfig::Command {
+            id: None,
+            command: command.clone(),
+            command_windows: None,
+            timeout_sec: Some(30),
+            r#async: false,
+            status_message: Some("checking".to_string()),
+        };
+
+        let toml_hash = super::command_hook_hash(
+            HookEventName::PreToolUse,
+            toml_group.matcher.as_deref(),
+            &toml_group,
+            normalized_toml_handler,
+        );
+        let json_hash = super::command_hook_hash(
+            HookEventName::PreToolUse,
+            json_group.matcher.as_deref(),
+            &json_group,
+            normalized_json_handler,
+        );
+
+        assert_eq!(toml_group, json_group);
+        assert_eq!(toml_hash, json_hash);
     }
 
     #[test]

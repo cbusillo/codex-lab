@@ -1063,6 +1063,64 @@ fn plugin_hook_sources_are_listed_before_trust_and_runnable_after_trust() {
 }
 
 #[test]
+fn plugin_hook_trust_does_not_cross_plugin_identity() {
+    let temp = tempdir().expect("create temp dir");
+    let plugin_a_root =
+        AbsolutePathBuf::try_from(temp.path().join("demo-plugin-a")).expect("plugin root");
+    let plugin_b_root =
+        AbsolutePathBuf::try_from(temp.path().join("demo-plugin-b")).expect("plugin root");
+    let plugin_data_root =
+        AbsolutePathBuf::try_from(temp.path().join("plugin-data")).expect("plugin data root");
+    let source_relative_path = "hooks/hooks.json".to_string();
+    let command = "python3 /tmp/shared-hook.py";
+    let plugin_a_hook_sources = vec![PluginHookSource {
+        plugin_id: PluginId::parse("demo-plugin-a@test-marketplace").expect("plugin id"),
+        plugin_root: plugin_a_root.clone(),
+        plugin_data_root: plugin_data_root.clone(),
+        source_path: plugin_a_root.join(&source_relative_path),
+        source_relative_path: source_relative_path.clone(),
+        hooks: pre_tool_use_hook_events(command),
+    }];
+    let plugin_b_hook_sources = vec![PluginHookSource {
+        plugin_id: PluginId::parse("demo-plugin-b@test-marketplace").expect("plugin id"),
+        plugin_root: plugin_b_root.clone(),
+        plugin_data_root,
+        source_path: plugin_b_root.join(&source_relative_path),
+        source_relative_path,
+        hooks: pre_tool_use_hook_events(command),
+    }];
+
+    let plugin_a_entry = super::discovery::discover_handlers(
+        /*config_layer_stack*/ None,
+        plugin_a_hook_sources.clone(),
+        Vec::new(),
+        /*bypass_hook_trust*/ false,
+    )
+    .hook_entries
+    .into_iter()
+    .next()
+    .expect("plugin A hook entry");
+    let trusted_plugin_a_stack = trusted_plugin_hook_stack(
+        AbsolutePathBuf::try_from(temp.path().join("config.toml")).expect("absolute config path"),
+        &plugin_a_hook_sources,
+    );
+
+    let discovered_plugin_b = super::discovery::discover_handlers(
+        Some(&trusted_plugin_a_stack),
+        plugin_b_hook_sources,
+        Vec::new(),
+        /*bypass_hook_trust*/ false,
+    );
+
+    assert_eq!(discovered_plugin_b.hook_entries.len(), 1);
+    let plugin_b_entry = &discovered_plugin_b.hook_entries[0];
+    assert_eq!(plugin_b_entry.current_hash, plugin_a_entry.current_hash);
+    assert_ne!(plugin_b_entry.key, plugin_a_entry.key);
+    assert_eq!(plugin_b_entry.trust_status, HookTrustStatus::Untrusted);
+    assert!(discovered_plugin_b.handlers.is_empty());
+}
+
+#[test]
 fn plugin_hook_ids_keep_trust_when_handlers_are_reordered() {
     let temp = tempdir().expect("create temp dir");
     let plugin_root =
@@ -1200,6 +1258,176 @@ fn duplicate_plugin_hook_ids_fall_back_to_positional_keys() {
         .map(|declaration| declaration.key)
         .collect::<Vec<_>>();
     assert_eq!(declaration_keys, discovered_keys);
+}
+
+#[test]
+fn duplicate_plugin_hook_ids_across_groups_fall_back_to_positional_keys() {
+    let temp = tempdir().expect("create temp dir");
+    let plugin_root =
+        AbsolutePathBuf::try_from(temp.path().join("demo-plugin")).expect("plugin root");
+    let plugin_data_root =
+        AbsolutePathBuf::try_from(temp.path().join("plugin-data")).expect("plugin data root");
+    let source_path = plugin_root.join("hooks/hooks.json");
+    let plugin_hook_sources = vec![PluginHookSource {
+        plugin_id: PluginId::parse("demo-plugin@test-marketplace").expect("plugin id"),
+        plugin_root,
+        plugin_data_root,
+        source_path,
+        source_relative_path: "hooks/hooks.json".to_string(),
+        hooks: HookEventsToml {
+            pre_tool_use: vec![
+                MatcherGroup {
+                    matcher: Some("^Bash$".to_string()),
+                    hooks: vec![HookHandlerConfig::Command {
+                        id: Some("lint".to_string()),
+                        command: "python3 /tmp/first.py".to_string(),
+                        command_windows: None,
+                        timeout_sec: Some(10),
+                        r#async: false,
+                        status_message: None,
+                    }],
+                },
+                MatcherGroup {
+                    matcher: Some("^Write$".to_string()),
+                    hooks: vec![HookHandlerConfig::Command {
+                        id: Some("lint".to_string()),
+                        command: "python3 /tmp/second.py".to_string(),
+                        command_windows: None,
+                        timeout_sec: Some(10),
+                        r#async: false,
+                        status_message: None,
+                    }],
+                },
+            ],
+            ..Default::default()
+        },
+    }];
+
+    let discovered = super::discovery::discover_handlers(
+        None,
+        plugin_hook_sources.clone(),
+        Vec::new(),
+        /*bypass_hook_trust*/ false,
+    );
+
+    assert_eq!(discovered.warnings.len(), 1);
+    assert!(
+        discovered.warnings[0].contains("duplicate hook id \"lint\""),
+        "unexpected warning: {:?}",
+        discovered.warnings
+    );
+    let discovered_keys = discovered
+        .hook_entries
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        discovered_keys,
+        vec![
+            "demo-plugin@test-marketplace:hooks/hooks.json:pre_tool_use:#lint".to_string(),
+            "demo-plugin@test-marketplace:hooks/hooks.json:pre_tool_use:1:0".to_string(),
+        ]
+    );
+
+    let declaration_keys = crate::plugin_hook_declarations(&plugin_hook_sources)
+        .into_iter()
+        .map(|declaration| declaration.key)
+        .collect::<Vec<_>>();
+    assert_eq!(declaration_keys, discovered_keys);
+}
+
+#[test]
+fn skipped_plugin_hook_ids_do_not_shift_discoverable_plugin_keys() {
+    let temp = tempdir().expect("create temp dir");
+    let plugin_root =
+        AbsolutePathBuf::try_from(temp.path().join("demo-plugin")).expect("plugin root");
+    let plugin_data_root =
+        AbsolutePathBuf::try_from(temp.path().join("plugin-data")).expect("plugin data root");
+    let source_path = plugin_root.join("hooks/hooks.json");
+    let plugin_hook_sources = vec![PluginHookSource {
+        plugin_id: PluginId::parse("demo-plugin@test-marketplace").expect("plugin id"),
+        plugin_root,
+        plugin_data_root,
+        source_path,
+        source_relative_path: "hooks/hooks.json".to_string(),
+        hooks: HookEventsToml {
+            pre_tool_use: vec![MatcherGroup {
+                matcher: Some("^Bash$".to_string()),
+                hooks: vec![
+                    HookHandlerConfig::Command {
+                        id: Some("lint".to_string()),
+                        command: "python3 /tmp/skipped.py".to_string(),
+                        command_windows: None,
+                        timeout_sec: Some(10),
+                        r#async: true,
+                        status_message: None,
+                    },
+                    HookHandlerConfig::Command {
+                        id: Some("blank".to_string()),
+                        command: "  ".to_string(),
+                        command_windows: None,
+                        timeout_sec: Some(10),
+                        r#async: false,
+                        status_message: None,
+                    },
+                    HookHandlerConfig::Command {
+                        id: Some("lint".to_string()),
+                        command: "python3 /tmp/lint.py".to_string(),
+                        command_windows: None,
+                        timeout_sec: Some(10),
+                        r#async: false,
+                        status_message: None,
+                    },
+                ],
+            }],
+            ..Default::default()
+        },
+    }];
+
+    let discovered = super::discovery::discover_handlers(
+        None,
+        plugin_hook_sources.clone(),
+        Vec::new(),
+        /*bypass_hook_trust*/ false,
+    );
+
+    assert_eq!(discovered.warnings.len(), 2);
+    assert!(
+        discovered.warnings[0].contains("skipping async hook"),
+        "unexpected warnings: {:?}",
+        discovered.warnings
+    );
+    assert!(
+        discovered.warnings[1].contains("skipping empty hook command"),
+        "unexpected warnings: {:?}",
+        discovered.warnings
+    );
+    let discovered_keys = discovered
+        .hook_entries
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        discovered_keys,
+        vec!["demo-plugin@test-marketplace:hooks/hooks.json:pre_tool_use:#lint".to_string()]
+    );
+
+    let declaration_keys = crate::plugin_hook_declarations(&plugin_hook_sources)
+        .into_iter()
+        .map(|declaration| declaration.key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declaration_keys,
+        vec![
+            "demo-plugin@test-marketplace:hooks/hooks.json:pre_tool_use:0:0".to_string(),
+            "demo-plugin@test-marketplace:hooks/hooks.json:pre_tool_use:0:1".to_string(),
+            "demo-plugin@test-marketplace:hooks/hooks.json:pre_tool_use:#lint".to_string(),
+        ]
+    );
+    assert_eq!(
+        declaration_keys.last().map(String::as_str),
+        discovered_keys.first().map(String::as_str)
+    );
 }
 
 #[test]
