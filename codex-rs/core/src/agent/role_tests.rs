@@ -1,6 +1,8 @@
 use super::*;
 use crate::SkillsManager;
+use crate::config::AgentRoleBackendConfig;
 use crate::config::ConfigBuilder;
+use crate::config::ExternalCommandProtocol;
 use crate::skills_load_input_from_config;
 use codex_config::ConfigLayerStackOrdering;
 use codex_core_plugins::PluginsManager;
@@ -69,6 +71,69 @@ async fn apply_role_returns_error_for_unknown_role() {
         .expect_err("unknown role should fail");
 
     assert_eq!(err, "unknown agent_type 'missing-role'");
+}
+
+#[tokio::test]
+async fn built_in_external_agent_selector_resolves_as_role() {
+    let (_home, config) = test_config_with_cli_overrides(Vec::new()).await;
+
+    let role = resolve_role_config_owned(&config, "antigravity")
+        .expect("built-in external agent selector should resolve");
+
+    assert!(
+        role.description
+            .as_deref()
+            .is_some_and(|description| description.contains("Google/Gemini"))
+    );
+    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
+        panic!("built-in external selector should use external_command backend");
+    };
+    assert_eq!(backend.command, "agy");
+    assert_eq!(backend.protocol, ExternalCommandProtocol::RawCli);
+    assert_eq!(backend.launch_family.as_deref(), Some("antigravity"));
+    assert_eq!(backend.timeout_ms, 30 * 60 * 1000);
+
+    let role = resolve_role_config_owned(&config, "code-gpt-5.5")
+        .expect("built-in code selector should resolve");
+    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
+        panic!("built-in code selector should use external_command backend");
+    };
+    assert_eq!(backend.command, "coder");
+    assert_eq!(
+        backend.args,
+        vec!["--model".to_string(), "gpt-5.5".to_string()]
+    );
+    assert!(
+        backend
+            .args_read_only
+            .ends_with(&["exec".to_string(), "--skip-git-repo-check".to_string(),])
+    );
+    assert!(
+        backend
+            .args_write
+            .ends_with(&["exec".to_string(), "--skip-git-repo-check".to_string(),])
+    );
+}
+
+#[tokio::test]
+async fn user_role_overrides_built_in_external_agent_selector() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_roles.insert(
+        "antigravity".to_string(),
+        AgentRoleConfig {
+            description: Some("Local override".to_string()),
+            config_file: None,
+            nickname_candidates: Some(vec!["Local".to_string()]),
+            backend: None,
+        },
+    );
+
+    let role = resolve_role_config_owned(&config, "antigravity")
+        .expect("overridden external agent selector should resolve");
+
+    assert_eq!(role.description.as_deref(), Some("Local override"));
+    assert_eq!(role.nickname_candidates, Some(vec!["Local".to_string()]));
+    assert_eq!(role.backend, None);
 }
 
 #[tokio::test]
@@ -466,6 +531,7 @@ fn spawn_tool_spec_build_deduplicates_user_defined_built_in_roles() {
     assert!(spec.contains("researcher: no description"));
     assert!(spec.contains("explorer: {\nuser override\n}"));
     assert!(spec.contains("default: {\nDefault agent.\n}"));
+    assert!(spec.contains("antigravity: {\nGoogle/Gemini-family agent"));
     assert!(!spec.contains("Explorers are fast and authoritative."));
 }
 

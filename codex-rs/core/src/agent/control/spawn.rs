@@ -17,22 +17,6 @@ fn default_agent_nickname_list() -> Vec<&'static str> {
         .collect()
 }
 
-fn external_command_backend_from_spec(
-    spec: &codex_config::agent_defaults::AgentModelSpec,
-) -> crate::config::ExternalCommandAgentBackendConfig {
-    let defaults = codex_config::agent_defaults::agent_config_from_spec(spec);
-    crate::config::ExternalCommandAgentBackendConfig {
-        command: defaults.command,
-        protocol: crate::config::ExternalCommandProtocol::RawCli,
-        args: defaults.args,
-        args_read_only: defaults.args_read_only.unwrap_or_default(),
-        args_write: defaults.args_write.unwrap_or_default(),
-        env: defaults.env.unwrap_or_default(),
-        timeout_ms: 30_000,
-        launch_family: Some(spec.family.to_string()),
-    }
-}
-
 fn permission_profile_is_read_only(profile: &PermissionProfile) -> bool {
     let file_system = profile.file_system_sandbox_policy();
     match file_system.kind {
@@ -46,8 +30,8 @@ fn permission_profile_is_read_only(profile: &PermissionProfile) -> bool {
 
 pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>) -> Vec<String> {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
-    if let Some(candidates) =
-        resolve_role_config(config, role_name).and_then(|role| role.nickname_candidates.clone())
+    if let Some(candidates) = crate::agent::role::resolve_role_config_owned(config, role_name)
+        .and_then(|role| role.nickname_candidates)
     {
         return candidates;
     }
@@ -316,18 +300,8 @@ impl AgentControl {
 
         let role_name = agent_metadata.agent_role.as_deref();
         let role_config =
-            role_name.and_then(|role| crate::agent::role::resolve_role_config(&config, role));
-        let mut resolved_backend = role_config.and_then(|r| r.backend.clone());
-
-        if resolved_backend.is_none()
-            && let Some(name) = role_name
-            && let Some(spec) = codex_config::agent_defaults::agent_model_spec(name)
-        {
-            let backend = external_command_backend_from_spec(spec);
-            resolved_backend = Some(crate::config::AgentRoleBackendConfig::ExternalCommand(
-                backend,
-            ));
-        }
+            role_name.and_then(|role| crate::agent::role::resolve_role_config_owned(&config, role));
+        let resolved_backend = role_config.and_then(|r| r.backend.clone());
 
         if let Some(crate::config::AgentRoleBackendConfig::ExternalCommand(backend)) =
             resolved_backend
@@ -874,33 +848,6 @@ mod external_command_backend_tests {
     use codex_protocol::models::ActivePermissionProfile;
     use codex_protocol::protocol::AskForApproval;
     use pretty_assertions::assert_eq;
-
-    #[test]
-    fn built_in_external_backend_includes_selector_model_args() {
-        let spec = codex_config::agent_defaults::agent_model_spec("code-gpt-5.5")
-            .expect("built-in selector should exist");
-        let backend = external_command_backend_from_spec(spec);
-
-        assert_eq!(backend.command, "coder");
-        assert_eq!(
-            backend.protocol,
-            crate::config::ExternalCommandProtocol::RawCli
-        );
-        assert_eq!(
-            backend.args,
-            vec!["--model".to_string(), "gpt-5.5".to_string()]
-        );
-        assert!(
-            backend
-                .args_read_only
-                .ends_with(&["exec".to_string(), "--skip-git-repo-check".to_string(),])
-        );
-        assert!(
-            backend
-                .args_write
-                .ends_with(&["exec".to_string(), "--skip-git-repo-check".to_string(),])
-        );
-    }
 
     #[test]
     fn permission_profile_mode_uses_effective_read_only_filesystem_policy() {
