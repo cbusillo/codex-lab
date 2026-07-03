@@ -25,6 +25,7 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::RequestId;
@@ -1038,6 +1039,71 @@ async fn switch_active_account_activates_stored_account_and_notifies() -> Result
     let auth_status: GetAuthStatusResponse = to_response(auth_status_resp)?;
     assert_eq!(auth_status.auth_method, Some(AuthMode::ApiKey));
     assert_eq!(auth_status.auth_token.as_deref(), Some("sk-second"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_accounts_returns_server_owned_account_entries() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+
+    let first = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-first".to_string(),
+        Some("first".to_string()),
+        /*make_active*/ false,
+    )?;
+    let second = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-second".to_string(),
+        Some("second".to_string()),
+        /*make_active*/ false,
+    )?;
+    codex_login::activate_account(
+        codex_home.path(),
+        &second.id,
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let req_id = mcp.send_list_accounts_request().await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let response: ListAccountsResponse = to_response(resp)?;
+
+    assert_eq!(
+        response.active_account_id.as_deref(),
+        Some(second.id.as_str())
+    );
+    assert_eq!(response.accounts.len(), 2);
+
+    let first_entry = response
+        .accounts
+        .iter()
+        .find(|entry| entry.account_id == first.id)
+        .expect("first account should be listed");
+    assert_eq!(first_entry.auth_mode, AuthMode::ApiKey);
+    assert_eq!(first_entry.label.as_deref(), Some("first"));
+    assert!(!first_entry.is_active);
+
+    let second_entry = response
+        .accounts
+        .iter()
+        .find(|entry| entry.account_id == second.id)
+        .expect("second account should be listed");
+    assert_eq!(second_entry.auth_mode, AuthMode::ApiKey);
+    assert_eq!(second_entry.label.as_deref(), Some("second"));
+    assert!(second_entry.is_active);
+
+    let raw = serde_json::to_string(&response)?;
+    assert!(!raw.contains("sk-first"));
+    assert!(!raw.contains("sk-second"));
 
     Ok(())
 }

@@ -65,6 +65,45 @@
         }
       ]
     },
+    "AccountListEntry": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "authMode": {
+          "$ref": "#/definitions/AuthMode"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastUsedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "authMode",
+        "isActive"
+      ],
+      "type": "object"
+    },
     "AccountLoginCompletedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -3294,6 +3333,29 @@
             "params"
           ],
           "title": "Account/switchActiveRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "account/list"
+              ],
+              "title": "Account/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "id",
+            "method"
+          ],
+          "title": "Account/listRequest",
           "type": "object"
         },
         {
@@ -7744,6 +7806,28 @@
         "turnId"
       ],
       "title": "ItemStartedNotification",
+      "type": "object"
+    },
+    "ListAccountsResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/definitions/AccountListEntry"
+          },
+          "type": "array"
+        },
+        "activeAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accounts"
+      ],
+      "title": "ListAccountsResponse",
       "type": "object"
     },
     "ListMcpServerStatusParams": {

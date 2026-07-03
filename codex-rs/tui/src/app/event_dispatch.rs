@@ -322,7 +322,7 @@ impl App {
                 }
             },
             AppEvent::ShowLoginAccounts => {
-                self.chat_widget.show_login_accounts_view();
+                self.show_login_accounts_view(app_server).await;
             }
             AppEvent::ShowLoginAddAccount => {
                 self.chat_widget.open_login_add_account_view();

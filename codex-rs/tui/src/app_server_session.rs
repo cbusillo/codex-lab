@@ -31,6 +31,7 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
@@ -912,6 +913,17 @@ impl AppServerSession {
             .await
             .wrap_err("account/switchActive failed in TUI")?;
         Ok(())
+    }
+
+    pub(crate) async fn list_accounts(&mut self) -> Result<ListAccountsResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ListAccounts {
+                request_id,
+                params: None,
+            })
+            .await
+            .wrap_err("account/list failed in TUI")
     }
 
     pub(crate) async fn thread_unsubscribe(&mut self, thread_id: ThreadId) -> Result<()> {

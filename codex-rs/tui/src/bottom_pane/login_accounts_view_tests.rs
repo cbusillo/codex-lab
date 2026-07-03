@@ -3,6 +3,8 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::terminal_hyperlinks::strip_osc8;
 use assert_matches::assert_matches;
+use codex_app_server_protocol::AccountListEntry;
+use codex_app_server_protocol::AuthMode;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -43,6 +45,98 @@ fn render_add_account_state(state: LoginAddAccountState, area: Rect) -> Buffer {
     let mut buf = Buffer::empty(area);
     view.render(area, &mut buf);
     buf
+}
+
+fn account_list_entry(
+    account_id: &str,
+    auth_mode: AuthMode,
+    label: &str,
+    is_active: bool,
+) -> AccountListEntry {
+    AccountListEntry {
+        account_id: account_id.to_string(),
+        auth_mode,
+        label: Some(label.to_string()),
+        created_at: None,
+        last_used_at: None,
+        is_active,
+    }
+}
+
+#[test]
+fn loaded_account_list_enter_switches_server_account() {
+    let (tx, mut rx) = app_event_sender_with_rx();
+    let mut view = LoginAccountsView::new_with_loaded_accounts(
+        tx,
+        vec![
+            account_list_entry("chatgpt", AuthMode::Chatgpt, "ChatGPT", true),
+            account_list_entry("api", AuthMode::ApiKey, "API key", false),
+        ],
+        /*feedback*/ None,
+    );
+
+    view.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(view.is_complete());
+    assert_eq!(view.completion(), Some(ViewCompletion::Accepted));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SwitchAuthAccount { selection })
+            if selection.account_id == "api" && selection.label == "API key"
+    );
+}
+
+#[test]
+fn loaded_account_list_refresh_reopens_accounts() {
+    let (tx, mut rx) = app_event_sender_with_rx();
+    let mut view = LoginAccountsView::new_with_loaded_accounts(
+        tx,
+        vec![account_list_entry("api", AuthMode::ApiKey, "API key", true)],
+        /*feedback*/ None,
+    );
+
+    view.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+
+    assert!(view.is_complete());
+    assert_eq!(view.completion(), Some(ViewCompletion::Accepted));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowLoginAccounts));
+}
+
+#[test]
+fn loaded_account_list_disconnect_is_disabled() {
+    let (tx, mut rx) = app_event_sender_with_rx();
+    let mut view = LoginAccountsView::new_with_loaded_accounts(
+        tx,
+        vec![account_list_entry("api", AuthMode::ApiKey, "API key", true)],
+        /*feedback*/ None,
+    );
+
+    view.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(!view.is_complete());
+    assert_matches!(rx.try_recv(), Err(_));
+}
+
+#[test]
+fn loaded_account_list_renders_without_disconnect_hint() {
+    let view = LoginAccountsView::new_with_loaded_accounts(
+        app_event_sender(),
+        vec![
+            account_list_entry("chatgpt", AuthMode::Chatgpt, "ChatGPT", true),
+            account_list_entry("api", AuthMode::ApiKey, "API key", false),
+        ],
+        /*feedback*/ None,
+    );
+    let area = Rect::new(0, 0, 56, view.desired_height(/*width*/ 56));
+    let mut buf = Buffer::empty(area);
+    view.render(area, &mut buf);
+
+    insta::assert_snapshot!(
+        "loaded_account_list_without_disconnect_hint",
+        render_snapshot(&buf, area)
+    );
 }
 
 fn assert_add_account_returns_to_accounts(

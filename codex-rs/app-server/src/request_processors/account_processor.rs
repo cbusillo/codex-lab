@@ -1,4 +1,6 @@
 use super::*;
+use codex_app_server_protocol::AccountListEntry;
+use codex_app_server_protocol::ListAccountsResponse;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -111,6 +113,14 @@ impl AccountRequestProcessor {
         params: SwitchActiveAccountParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.switch_active_account_response(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn list_accounts(
+        &self,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.list_accounts_response()
             .await
             .map(|response| Some(response.into()))
     }
@@ -616,6 +626,29 @@ impl AccountRequestProcessor {
             ))
             .await;
         Ok(SwitchActiveAccountResponse { account_id })
+    }
+
+    async fn list_accounts_response(&self) -> Result<ListAccountsResponse, JSONRPCErrorError> {
+        let active_account_id = codex_login::get_active_account_id(Self::auth_storage_home(
+            &self.config,
+        ))
+        .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
+        let accounts = codex_login::list_accounts(Self::auth_storage_home(&self.config))
+            .map_err(|err| internal_error(format!("failed to read stored accounts: {err}")))?
+            .into_iter()
+            .map(|account| AccountListEntry {
+                is_active: active_account_id.as_deref() == Some(account.id.as_str()),
+                account_id: account.id,
+                auth_mode: account.mode,
+                label: account.label,
+                created_at: account.created_at.map(|ts| ts.timestamp()),
+                last_used_at: account.last_used_at.map(|ts| ts.timestamp()),
+            })
+            .collect();
+        Ok(ListAccountsResponse {
+            active_account_id,
+            accounts,
+        })
     }
 
     async fn login_chatgpt_auth_tokens(

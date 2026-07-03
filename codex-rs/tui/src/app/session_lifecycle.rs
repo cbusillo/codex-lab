@@ -120,6 +120,32 @@ impl AppServerThreadUiSnapshot {
 }
 
 impl App {
+    pub(super) async fn show_login_accounts_view(&mut self, app_server: &mut AppServerSession) {
+        if matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            self.chat_widget.show_login_accounts_view();
+            return;
+        }
+
+        match app_server.list_accounts().await {
+            Ok(response) => {
+                self.chat_widget
+                    .show_login_accounts_view_with_loaded_accounts(
+                        response.accounts,
+                        /*feedback*/ None,
+                    );
+            }
+            Err(err) => {
+                self.chat_widget
+                    .show_login_accounts_view_with_loaded_accounts(
+                        Vec::new(),
+                        Some(LoginAccountsFeedback::Error(format!(
+                            "Failed to read accounts from app server: {err}"
+                        ))),
+                    );
+            }
+        }
+    }
+
     async fn commit_replacement_app_server_thread(
         &mut self,
         tui: &mut tui::Tui,
@@ -1154,13 +1180,6 @@ impl App {
             self.chat_widget.add_error_message(
                 "Cannot switch stored accounts while the primary thread is still attaching."
                     .to_string(),
-            );
-            return;
-        }
-
-        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
-            self.chat_widget.add_error_message(
-                "Switching stored accounts is only available for local sessions.".to_string(),
             );
             return;
         }
