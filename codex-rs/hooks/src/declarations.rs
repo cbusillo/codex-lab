@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use codex_plugin::PluginHookSource;
 use codex_protocol::protocol::HookEventName;
 
@@ -18,12 +20,22 @@ pub fn plugin_hook_declarations(hook_sources: &[PluginHookSource]) -> Vec<Plugin
             source.source_relative_path.as_str(),
         );
         for (event_name, groups) in source.hooks.clone().into_matcher_groups() {
+            let mut seen_keys = HashSet::new();
             for (group_index, group) in groups.iter().enumerate() {
-                for (handler_index, _) in group.hooks.iter().enumerate() {
-                    declarations.push(PluginHookDeclaration {
-                        key: crate::hook_key(&key_source, event_name, group_index, handler_index),
+                for (handler_index, handler) in group.hooks.iter().enumerate() {
+                    let key = crate::hook_key(
+                        &key_source,
                         event_name,
-                    });
+                        group_index,
+                        handler_index,
+                        hook_handler_id(handler),
+                    );
+                    let key = if seen_keys.insert(key.clone()) {
+                        key
+                    } else {
+                        crate::hook_key(&key_source, event_name, group_index, handler_index, None)
+                    };
+                    declarations.push(PluginHookDeclaration { key, event_name });
                 }
             }
         }
@@ -34,6 +46,15 @@ pub fn plugin_hook_declarations(hook_sources: &[PluginHookSource]) -> Vec<Plugin
 
 pub(crate) fn plugin_hook_key_source(plugin_id: &str, source_relative_path: &str) -> String {
     format!("{plugin_id}:{source_relative_path}")
+}
+
+pub(crate) fn hook_handler_id(handler: &codex_config::HookHandlerConfig) -> Option<&str> {
+    match handler {
+        codex_config::HookHandlerConfig::Command { id, .. } => id.as_deref(),
+        codex_config::HookHandlerConfig::Prompt {} | codex_config::HookHandlerConfig::Agent {} => {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -64,6 +85,7 @@ mod tests {
                     hooks: vec![
                         HookHandlerConfig::Prompt {},
                         HookHandlerConfig::Command {
+                            id: Some("shell-check".to_string()),
                             command: "echo hi".to_string(),
                             command_windows: None,
                             timeout_sec: None,
@@ -88,7 +110,7 @@ mod tests {
                     event_name: HookEventName::PreToolUse,
                 },
                 PluginHookDeclaration {
-                    key: "demo@test:hooks/hooks.json:pre_tool_use:0:1".to_string(),
+                    key: "demo@test:hooks/hooks.json:pre_tool_use:#shell-check".to_string(),
                     event_name: HookEventName::PreToolUse,
                 },
                 PluginHookDeclaration {

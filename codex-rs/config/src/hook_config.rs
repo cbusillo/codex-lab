@@ -189,6 +189,8 @@ pub struct MatcherGroup {
 pub enum HookHandlerConfig {
     #[serde(rename = "command")]
     Command {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         command: String,
         #[serde(default, rename = "commandWindows", alias = "command_windows")]
         command_windows: Option<String>,
