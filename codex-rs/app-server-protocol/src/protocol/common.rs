@@ -997,6 +997,12 @@ client_request_definitions! {
         response: v2::CancelLoginAccountResponse,
     },
 
+    SwitchActiveAccount => "account/switchActive" {
+        params: v2::SwitchActiveAccountParams,
+        serialization: global("account-auth"),
+        response: v2::SwitchActiveAccountResponse,
+    },
+
     LogoutAccount => "account/logout" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global("account-auth"),

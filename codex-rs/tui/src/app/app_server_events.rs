@@ -11,7 +11,10 @@ use crate::app_event::RateLimitRefreshOrigin;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use crate::bottom_pane::LoginAddAccountState;
+use crate::status::StatusAccountDisplay;
+use crate::status::plan_type_display_name;
 use codex_app_server_client::AppServerEvent;
+use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
 use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
@@ -93,24 +96,25 @@ impl App {
             }
             ServerNotification::AccountUpdated(notification) => {
                 let previously_had_chatgpt_account = self.chat_widget.has_chatgpt_account();
-                let has_chatgpt_account = notification
-                    .auth_mode
-                    .is_some_and(AuthMode::has_chatgpt_account);
+                let previous_account_display = self.chat_widget.status_account_display().cloned();
+                let (status_account_display, plan_type, has_chatgpt_account) =
+                    Self::account_state_from_update(
+                        notification,
+                        previous_account_display.as_ref(),
+                    );
+                let account_display_changed = previous_account_display != status_account_display;
                 self.chat_widget.update_account_state(
-                    status_account_display_from_auth_mode(
-                        notification.auth_mode,
-                        notification.plan_type,
-                    ),
-                    notification.plan_type,
+                    status_account_display,
+                    plan_type,
                     has_chatgpt_account,
                 );
-                if !previously_had_chatgpt_account
-                    && has_chatgpt_account
+                if has_chatgpt_account
                     && self
                         .chat_widget
                         .config_ref()
                         .model_provider
                         .requires_openai_auth
+                    && (!previously_had_chatgpt_account || account_display_changed)
                 {
                     self.app_event_tx.send(AppEvent::RefreshRateLimits {
                         origin: RateLimitRefreshOrigin::StartupPrefetch,
@@ -189,6 +193,69 @@ impl App {
 
         self.chat_widget
             .handle_server_notification(notification, /*replay_kind*/ None);
+    }
+
+    pub(super) fn account_state_from_update(
+        notification: &AccountUpdatedNotification,
+        previous_account_display: Option<&StatusAccountDisplay>,
+    ) -> (
+        Option<StatusAccountDisplay>,
+        Option<codex_protocol::account::PlanType>,
+        bool,
+    ) {
+        if let Some(account) = notification.account.as_ref() {
+            return Self::account_state_from_account(account);
+        }
+        let has_chatgpt_account = notification
+            .auth_mode
+            .is_some_and(AuthMode::has_chatgpt_account);
+        (
+            Self::status_account_display_from_update(notification, previous_account_display),
+            notification.plan_type,
+            has_chatgpt_account,
+        )
+    }
+
+    fn account_state_from_account(
+        account: &Account,
+    ) -> (
+        Option<StatusAccountDisplay>,
+        Option<codex_protocol::account::PlanType>,
+        bool,
+    ) {
+        match account {
+            Account::ApiKey {} => (Some(StatusAccountDisplay::ApiKey), None, false),
+            Account::Chatgpt { email, plan_type } => (
+                Some(StatusAccountDisplay::ChatGpt {
+                    email: Some(email.clone()),
+                    plan: Some(plan_type_display_name(*plan_type)),
+                }),
+                Some(*plan_type),
+                true,
+            ),
+            Account::AmazonBedrock {} => (None, None, false),
+        }
+    }
+
+    pub(super) fn status_account_display_from_update(
+        notification: &AccountUpdatedNotification,
+        previous_account_display: Option<&StatusAccountDisplay>,
+    ) -> Option<StatusAccountDisplay> {
+        let display =
+            status_account_display_from_auth_mode(notification.auth_mode, notification.plan_type);
+        match (&display, previous_account_display) {
+            (
+                Some(StatusAccountDisplay::ChatGpt { email: None, plan }),
+                Some(StatusAccountDisplay::ChatGpt {
+                    email: previous_email,
+                    plan: previous_plan,
+                }),
+            ) => Some(StatusAccountDisplay::ChatGpt {
+                email: previous_email.clone(),
+                plan: plan.clone().or_else(|| previous_plan.clone()),
+            }),
+            _ => display,
+        }
     }
 
     async fn handle_server_request_event(

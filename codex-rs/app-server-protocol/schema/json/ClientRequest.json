@@ -3272,6 +3272,17 @@
       ],
       "type": "object"
     },
+    "SwitchActiveAccountParams": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId"
+      ],
+      "type": "object"
+    },
     "TextElement": {
       "properties": {
         "byteRange": {
@@ -6192,6 +6203,30 @@
         "params"
       ],
       "title": "Account/login/cancelRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "account/switchActive"
+          ],
+          "title": "Account/switchActiveRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/SwitchActiveAccountParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Account/switchActiveRequest",
       "type": "object"
     },
     {

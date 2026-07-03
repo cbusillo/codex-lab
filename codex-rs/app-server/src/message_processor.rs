@@ -1339,6 +1339,9 @@ impl MessageProcessor {
             ClientRequest::CancelLoginAccount { params, .. } => {
                 self.account_processor.cancel_login_account(params).await
             }
+            ClientRequest::SwitchActiveAccount { params, .. } => {
+                self.account_processor.switch_active_account(params).await
+            }
             ClientRequest::GetAccount { params, .. } => {
                 self.account_processor.get_account(params).await
             }

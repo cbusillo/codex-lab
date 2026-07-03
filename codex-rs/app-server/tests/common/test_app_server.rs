@@ -80,6 +80,7 @@ use codex_app_server_protocol::SendAddCreditsNudgeEmailParams;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillsExtraRootsSetParams;
 use codex_app_server_protocol::SkillsListParams;
+use codex_app_server_protocol::SwitchActiveAccountParams;
 use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadForkParams;
@@ -1285,6 +1286,15 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("account/login/cancel", params).await
+    }
+
+    /// Send an `account/switchActive` JSON-RPC request.
+    pub async fn send_switch_active_account_request(
+        &mut self,
+        params: SwitchActiveAccountParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("account/switchActive", params).await
     }
 
     /// Send a `fuzzyFileSearch` JSON-RPC request.
