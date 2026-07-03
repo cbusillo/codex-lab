@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AccountListEntry": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "authMode": {
+          "$ref": "#/definitions/AuthMode"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastUsedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "authMode",
+        "isActive"
+      ],
+      "type": "object"
+    },
+    "AuthMode": {
+      "description": "Authentication mode for OpenAI-backed providers.",
+      "oneOf": [
+        {
+          "description": "OpenAI API key provided by the caller and stored by Codex.",
+          "enum": [
+            "apikey"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "ChatGPT OAuth managed by Codex (tokens persisted and refreshed by Codex).",
+          "enum": [
+            "chatgpt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "[UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE.\n\nChatGPT auth tokens are supplied by an external host app and are only stored in memory. Token refresh must be handled by the external host app.",
+          "enum": [
+            "chatgptAuthTokens"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Programmatic Codex auth backed by a registered Agent Identity.",
+          "enum": [
+            "agentIdentity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Programmatic Codex auth backed by a personal access token.",
+          "enum": [
+            "personalAccessToken"
+          ],
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "accounts": {
+      "items": {
+        "$ref": "#/definitions/AccountListEntry"
+      },
+      "type": "array"
+    },
+    "activeAccountId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "accounts"
+  ],
+  "title": "ListAccountsResponse",
+  "type": "object"
+}

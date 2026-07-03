@@ -1,6 +1,7 @@
 // GENERATED CODE! DO NOT MODIFY BY HAND!
 
 export type { Account } from "./Account";
+export type { AccountListEntry } from "./AccountListEntry";
 export type { AccountLoginCompletedNotification } from "./AccountLoginCompletedNotification";
 export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUpdatedNotification";
 export type { AccountTokenUsageDailyBucket } from "./AccountTokenUsageDailyBucket";
@@ -192,6 +193,7 @@ export type { ItemCompletedNotification } from "./ItemCompletedNotification";
 export type { ItemGuardianApprovalReviewCompletedNotification } from "./ItemGuardianApprovalReviewCompletedNotification";
 export type { ItemGuardianApprovalReviewStartedNotification } from "./ItemGuardianApprovalReviewStartedNotification";
 export type { ItemStartedNotification } from "./ItemStartedNotification";
+export type { ListAccountsResponse } from "./ListAccountsResponse";
 export type { ListMcpServerStatusParams } from "./ListMcpServerStatusParams";
 export type { ListMcpServerStatusResponse } from "./ListMcpServerStatusResponse";
 export type { LoginAccountParams } from "./LoginAccountParams";

@@ -1003,6 +1003,12 @@ client_request_definitions! {
         response: v2::SwitchActiveAccountResponse,
     },
 
+    ListAccounts => "account/list" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: global("account-auth"),
+        response: v2::ListAccountsResponse,
+    },
+
     LogoutAccount => "account/logout" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global("account-auth"),
@@ -2495,6 +2501,24 @@ mod tests {
             json!({
                 "method": "account/rateLimits/read",
                 "id": 1,
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_list() -> Result<()> {
+        let request = ClientRequest::ListAccounts {
+            request_id: RequestId::Integer(4),
+            params: None,
+        };
+        assert_eq!(request.id(), &RequestId::Integer(4));
+        assert_eq!(request.method(), "account/list");
+        assert_eq!(
+            json!({
+                "method": "account/list",
+                "id": 4,
             }),
             serde_json::to_value(&request)?,
         );

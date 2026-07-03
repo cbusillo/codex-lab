@@ -1,5 +1,6 @@
 use chrono::DateTime;
 use chrono::Utc;
+use codex_app_server_protocol::AccountListEntry;
 use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::StoredAccount;
@@ -46,6 +47,7 @@ pub(crate) struct LoginAccountsView {
     default_auth_home_is_current: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     accounts: Vec<AccountRow>,
+    remote_loaded: bool,
     selected: usize,
     error: Option<String>,
     feedback: Option<LoginAccountsFeedback>,
@@ -96,8 +98,40 @@ impl LoginAccountsView {
             default_auth_home_is_current,
             auth_credentials_store_mode,
             accounts: loaded.accounts,
+            remote_loaded: false,
             selected: loaded.selected,
             error: loaded.error.take(),
+            feedback,
+            mode: LoginAccountsMode::List,
+            is_complete: false,
+            completion: None,
+        }
+    }
+
+    pub(crate) fn new_with_loaded_accounts(
+        app_event_tx: AppEventSender,
+        accounts: Vec<AccountListEntry>,
+        feedback: Option<LoginAccountsFeedback>,
+    ) -> Self {
+        let mut rows = accounts
+            .into_iter()
+            .map(AccountRow::from_list_entry)
+            .collect::<Vec<_>>();
+        sort_account_rows(&mut rows);
+        let selected = rows
+            .iter()
+            .position(|account| account.is_active)
+            .unwrap_or(0);
+
+        Self {
+            app_event_tx,
+            codex_home: PathBuf::new(),
+            default_auth_home_is_current: false,
+            auth_credentials_store_mode: AuthCredentialsStoreMode::default(),
+            accounts: rows,
+            remote_loaded: true,
+            selected,
+            error: None,
             feedback,
             mode: LoginAccountsMode::List,
             is_complete: false,
@@ -172,6 +206,10 @@ impl LoginAccountsView {
     }
 
     fn handle_disconnect(&mut self) {
+        if self.remote_loaded {
+            return;
+        }
+
         let Some(account) = self.selected_account() else {
             return;
         };
@@ -182,6 +220,12 @@ impl LoginAccountsView {
     }
 
     fn reload_accounts(&mut self) {
+        if self.remote_loaded {
+            self.finish(ViewCompletion::Accepted);
+            self.app_event_tx.send(AppEvent::ShowLoginAccounts);
+            return;
+        }
+
         let previously_selected_id = self
             .accounts
             .get(self.selected)
@@ -224,10 +268,12 @@ impl LoginAccountsView {
         lines += 2;
         lines += self.accounts.len().max(1);
         lines += 3;
-        lines += Self::wrapped_line_count(
-            "up/down Navigate  Enter Select  d Disconnect  Esc Close",
-            content_width,
-        );
+        let hint = if self.remote_loaded {
+            "up/down Navigate  Enter Select  Esc Close"
+        } else {
+            "up/down Navigate  Enter Select  d Disconnect  Esc Close"
+        };
+        lines += Self::wrapped_line_count(hint, content_width);
         if let LoginAccountsMode::ConfirmRemove { label, .. } = &self.mode {
             let confirmation = format!("Disconnect {label}?");
             lines += 1;
@@ -256,7 +302,7 @@ impl BottomPaneView for LoginAccountsView {
             KeyCode::Esc | KeyCode::Char('q') => self.finish(ViewCompletion::Cancelled),
             KeyCode::Up => self.select_previous(),
             KeyCode::Down => self.select_next(),
-            KeyCode::Char('d') => self.handle_disconnect(),
+            KeyCode::Char('d') if !self.remote_loaded => self.handle_disconnect(),
             KeyCode::Char('r') => self.reload_accounts(),
             KeyCode::Enter => self.handle_enter(),
             _ => {}
@@ -819,24 +865,30 @@ impl Renderable for LoginAccountsView {
             false,
         ));
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
+        let mut hint_spans = vec![
             Span::styled("up/down", Style::default().fg(Color::Cyan)),
             Span::styled(" Navigate  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::styled(" Select  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
+        ];
+        if !self.remote_loaded {
+            hint_spans.push(Span::styled(
                 "d",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Disconnect  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "Esc",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Close", Style::default().fg(Color::DarkGray)),
-        ]));
+            ));
+            hint_spans.push(Span::styled(
+                " Disconnect  ",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        hint_spans.push(Span::styled(
+            "Esc",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+        hint_spans.push(Span::styled(" Close", Style::default().fg(Color::DarkGray)));
+        lines.push(Line::from(hint_spans));
 
         if let LoginAccountsMode::ConfirmRemove { label, .. } = &self.mode {
             lines.push(Line::from(""));
@@ -876,6 +928,19 @@ impl AccountRow {
             detail,
             mode,
             is_active,
+        }
+    }
+
+    fn from_list_entry(entry: AccountListEntry) -> Self {
+        let label = account_list_entry_label(&entry);
+        let detail = account_list_entry_detail(&entry);
+        let id = entry.account_id;
+        Self {
+            id,
+            label,
+            detail,
+            mode: entry.auth_mode,
+            is_active: entry.is_active,
         }
     }
 
@@ -996,6 +1061,64 @@ fn account_detail(account: &StoredAccount) -> Option<String> {
     (!details.is_empty()).then(|| details.join(" - "))
 }
 
+fn account_list_entry_label(entry: &AccountListEntry) -> String {
+    if let Some(label) = entry.label.as_ref() {
+        let trimmed = label.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    match entry.auth_mode {
+        AuthMode::ApiKey => "API key".to_string(),
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT".to_string(),
+        AuthMode::AgentIdentity => "Agent identity".to_string(),
+        AuthMode::PersonalAccessToken => "Personal access token".to_string(),
+    }
+}
+
+fn account_list_entry_detail(entry: &AccountListEntry) -> Option<String> {
+    let mut details = Vec::new();
+    let mode_detail = match entry.auth_mode {
+        AuthMode::ApiKey => "API key",
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT",
+        AuthMode::AgentIdentity => "agent identity",
+        AuthMode::PersonalAccessToken => "personal access token",
+    };
+    if entry
+        .label
+        .as_ref()
+        .map(|label| label.trim())
+        .is_some_and(|label| !label.is_empty() && !label.eq_ignore_ascii_case(mode_detail))
+    {
+        details.push(mode_detail.to_string());
+    }
+    if let Some(timestamp) = entry.created_at {
+        details.push(format!("connected {}", format_epoch_timestamp(timestamp)));
+    }
+    (!details.is_empty()).then(|| details.join(" - "))
+}
+
+fn format_epoch_timestamp(timestamp: i64) -> String {
+    DateTime::from_timestamp(timestamp, 0)
+        .map(format_timestamp)
+        .unwrap_or_else(|| "unknown time".to_string())
+}
+
+fn sort_account_rows(accounts: &mut [AccountRow]) {
+    accounts.sort_by(|left, right| {
+        account_mode_priority(left.mode)
+            .cmp(&account_mode_priority(right.mode))
+            .then_with(|| {
+                left.label
+                    .to_ascii_lowercase()
+                    .cmp(&right.label.to_ascii_lowercase())
+            })
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
 struct LoadedLoginAccounts {
     accounts: Vec<AccountRow>,
     selected: usize,
@@ -1033,17 +1156,7 @@ fn load_account_rows(
         }
     };
 
-    accounts.sort_by(|left, right| {
-        account_mode_priority(left.mode)
-            .cmp(&account_mode_priority(right.mode))
-            .then_with(|| {
-                left.label
-                    .to_ascii_lowercase()
-                    .cmp(&right.label.to_ascii_lowercase())
-            })
-            .then_with(|| left.label.cmp(&right.label))
-            .then_with(|| left.id.cmp(&right.id))
-    });
+    sort_account_rows(&mut accounts);
 
     let selected = previously_selected_id
         .as_ref()

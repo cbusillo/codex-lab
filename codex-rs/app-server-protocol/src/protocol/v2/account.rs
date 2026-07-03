@@ -155,6 +155,26 @@ pub struct SwitchActiveAccountResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct ListAccountsResponse {
+    pub active_account_id: Option<String>,
+    pub accounts: Vec<AccountListEntry>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountListEntry {
+    pub account_id: String,
+    pub auth_mode: AuthMode,
+    pub label: Option<String>,
+    pub created_at: Option<i64>,
+    pub last_used_at: Option<i64>,
+    pub is_active: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct AccountSessionsAddParams {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub switch_to_added_account: bool,

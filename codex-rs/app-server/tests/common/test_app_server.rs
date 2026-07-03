@@ -1297,6 +1297,11 @@ impl TestAppServer {
         self.send_request("account/switchActive", params).await
     }
 
+    /// Send an `account/list` JSON-RPC request.
+    pub async fn send_list_accounts_request(&mut self) -> anyhow::Result<i64> {
+        self.send_request("account/list", None).await
+    }
+
     /// Send a `fuzzyFileSearch` JSON-RPC request.
     pub async fn send_fuzzy_file_search_request(
         &mut self,
