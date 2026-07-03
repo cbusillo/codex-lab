@@ -3,6 +3,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::render::renderable::Renderable;
 use codex_app_server_protocol::ToolRequestUserInputParams;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use crossterm::event::KeyEvent;
 
 use super::CancellationEvent;
@@ -58,6 +59,11 @@ pub(crate) trait BottomPaneView: Renderable {
     /// Active login id for the add-account view while it is waiting on browser auth.
     fn active_login_add_account_id(&self) -> Option<&str> {
         None
+    }
+
+    /// Refresh a skill toggle row while a skills management view is active.
+    fn update_skill_enabled(&mut self, _path: &AbsolutePathBuf, _enabled: bool) -> bool {
+        false
     }
 
     /// Handle Ctrl-C while this view is active.
