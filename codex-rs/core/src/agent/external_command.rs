@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_EXTERNAL_AGENT_STDOUT_BYTES: usize = 64 * 1024;
 const MAX_EXTERNAL_AGENT_STDERR_BYTES: usize = 8 * 1024;
+const EXTERNAL_AGENT_TRUNCATED_MARKER: &[u8] = b"[external agent output truncated]\n";
 const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
 const CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_DIR";
 const CODEX_LAB_CARGO_TARGET_SCOPE_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_SCOPE";
@@ -407,19 +408,37 @@ fn split_command_and_args(command: &str) -> anyhow::Result<(String, Vec<String>)
 }
 
 async fn read_limited_output<R: AsyncRead + Unpin>(
-    reader: R,
+    mut reader: R,
     limit: usize,
     stream_name: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut reader = reader.take(limit.saturating_add(1) as u64);
-    reader.read_to_end(&mut output).await?;
-    if output.len() > limit {
-        return Err(anyhow::anyhow!(
-            "external agent {stream_name} exceeded limit"
-        ));
+    let mut tail = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut truncated = false;
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        tail.extend_from_slice(&buffer[..bytes_read]);
+        if tail.len() > limit {
+            truncated = true;
+            let overflow = tail.len() - limit;
+            tail.drain(..overflow);
+        }
     }
-    Ok(output)
+
+    if truncated {
+        tracing::warn!("external agent {stream_name} exceeded limit; truncating output");
+        let mut output = Vec::with_capacity(EXTERNAL_AGENT_TRUNCATED_MARKER.len() + tail.len());
+        output.extend_from_slice(EXTERNAL_AGENT_TRUNCATED_MARKER);
+        output.extend_from_slice(&tail);
+        return Ok(output);
+    }
+
+    Ok(tail)
 }
 
 async fn send_completion_to_parent(
@@ -476,6 +495,7 @@ mod tests {
     use codex_protocol::protocol::Op;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
+    use tokio::io::AsyncWriteExt;
 
     fn test_launch(
         temp_dir: &TempDir,
@@ -826,6 +846,56 @@ mod tests {
 
         assert_eq!(response.status, ExternalAgentResponseStatus::Completed);
         assert_eq!(response.final_message.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn oversized_output_is_truncated_instead_of_failing_wrapper() {
+        let (mut writer, reader) = tokio::io::duplex(256);
+        let payload = b"abcdefghijklmnopqrstuvwx".to_vec();
+        let writer_task = tokio::spawn(async move {
+            writer
+                .write_all(&payload)
+                .await
+                .expect("write oversized payload");
+        });
+
+        let output = read_limited_output(reader, 8, "stdout")
+            .await
+            .expect("oversized output should truncate, not fail");
+        writer_task.await.expect("writer task should finish");
+
+        assert!(output.starts_with(EXTERNAL_AGENT_TRUNCATED_MARKER));
+        assert!(output.ends_with(b"qrstuvwx"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oversized_subprocess_stdout_keeps_tail_without_sigpipe_failure() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                command: "/bin/sh".to_string(),
+                protocol: ExternalCommandProtocol::RawCli,
+                args: vec![
+                    "-c".to_string(),
+                    "python3 - <<'PY'\nimport sys\nsys.stdout.write('a' * 70000)\nsys.stdout.write('tail-marker')\nPY"
+                        .to_string(),
+                ],
+                timeout_ms: 5_000,
+                ..Default::default()
+            },
+            false,
+        );
+
+        let response = run_external_agent_inner(&launch)
+            .await
+            .expect("oversized stdout should truncate without killing the child");
+
+        assert_eq!(response.status, ExternalAgentResponseStatus::Completed);
+        let final_message = response.final_message.expect("raw cli final message");
+        assert!(final_message.starts_with("[external agent output truncated]"));
+        assert!(final_message.ends_with("tail-marker"));
     }
 
     #[cfg(unix)]

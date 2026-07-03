@@ -3,9 +3,12 @@ use crate::CodexThread;
 use crate::StateDbHandle;
 use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
+use crate::config::AgentRoleBackendConfig;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
+use crate::config::ExternalCommandAgentBackendConfig;
+use crate::config::ExternalCommandProtocol;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use crate::init_state_db;
@@ -2138,6 +2141,125 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
         panic!("expected thread-spawn sub-agent source");
     };
     assert_eq!(agent_nickname, Some("Atlas".to_string()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn configured_external_command_agent_completes_and_closes() {
+    let mut harness = AgentControlHarness::new().await;
+    let agent_path = AgentPath::try_from("/root/external").expect("agent path");
+    harness.config.agent_roles.insert(
+        "external".to_string(),
+        AgentRoleConfig {
+            description: Some("External dogfood agent".to_string()),
+            config_file: None,
+            nickname_candidates: Some(vec!["Echo".to_string()]),
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: "/bin/sh".to_string(),
+                    protocol: ExternalCommandProtocol::RawCli,
+                    args: vec!["-c".to_string(), "printf external-complete".to_string()],
+                    timeout_ms: 5_000,
+                    ..Default::default()
+                },
+            )),
+        },
+    );
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let spawned_agent = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("check third-party agent lifecycle"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(agent_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("external".to_string()),
+            })),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("external command agent should spawn");
+    assert_eq!(spawned_agent.status, AgentStatus::PendingInit);
+    assert_eq!(spawned_agent.metadata.agent_path, Some(agent_path.clone()));
+    assert_eq!(
+        spawned_agent.metadata.agent_role.as_deref(),
+        Some("external")
+    );
+    assert_eq!(
+        spawned_agent.metadata.last_task_message.as_deref(),
+        Some("check third-party agent lifecycle")
+    );
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness.control.get_status(spawned_agent.thread_id).await
+                == AgentStatus::Completed(Some("external-complete".to_string()))
+            {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("external command agent should finish");
+
+    let listed = harness
+        .control
+        .list_agents(&SessionSource::Exec, Some("/root/external"))
+        .await
+        .expect("external agent should list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].agent_name, "/root/external");
+    assert_eq!(
+        listed[0].agent_status,
+        AgentStatus::Completed(Some("external-complete".to_string()))
+    );
+    assert_eq!(
+        listed[0].last_task_message.as_deref(),
+        Some("check third-party agent lifecycle")
+    );
+
+    let expected_completion = Op::InterAgentCommunication {
+        communication: InterAgentCommunication::new(
+            agent_path,
+            AgentPath::root(),
+            Vec::new(),
+            "external-complete".to_string(),
+            /*trigger_turn*/ false,
+        ),
+    };
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .any(|(thread_id, op)| thread_id == parent_thread_id && op == expected_completion)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("external agent completion should be visible to parent");
+
+    let _ = harness
+        .control
+        .close_agent(spawned_agent.thread_id)
+        .await
+        .expect("completed external agent should close");
+    assert_eq!(
+        harness.control.get_status(spawned_agent.thread_id).await,
+        AgentStatus::NotFound
+    );
 }
 
 #[tokio::test]

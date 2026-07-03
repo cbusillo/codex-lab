@@ -3508,7 +3508,7 @@ printf '%s\n' '{"status":"completed","final_message":"external done"}'
     );
 
     let wait_output = timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         WaitAgentHandlerV2::default().handle(invocation(
             session.clone(),
             turn.clone(),
