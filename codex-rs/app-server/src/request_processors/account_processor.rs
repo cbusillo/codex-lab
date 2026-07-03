@@ -1,6 +1,8 @@
 use super::*;
 use codex_app_server_protocol::AccountListEntry;
 use codex_app_server_protocol::ListAccountsResponse;
+use codex_app_server_protocol::RemoveAccountResponse;
+use codex_app_server_protocol::RemoveAccountStatus;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -121,6 +123,15 @@ impl AccountRequestProcessor {
         &self,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.list_accounts_response()
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn remove_account(
+        &self,
+        params: RemoveAccountParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.remove_account_response(params)
             .await
             .map(|response| Some(response.into()))
     }
@@ -648,6 +659,95 @@ impl AccountRequestProcessor {
         Ok(ListAccountsResponse {
             active_account_id,
             accounts,
+        })
+    }
+
+    async fn remove_account_response(
+        &self,
+        params: RemoveAccountParams,
+    ) -> Result<RemoveAccountResponse, JSONRPCErrorError> {
+        if self.auth_manager.is_external_chatgpt_auth_active() {
+            return Err(self.external_auth_active_error());
+        }
+
+        {
+            let mut guard = self.active_login.lock().await;
+            if let Some(active) = guard.take() {
+                drop(active);
+            }
+        }
+
+        let auth_home = Self::auth_storage_home(&self.config);
+        let previous_active_account_id = codex_login::get_active_account_id(auth_home)
+            .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
+        let removed = codex_login::remove_account(auth_home, &params.account_id)
+            .map_err(|err| internal_error(format!("failed to remove stored account: {err}")))?;
+        let Some(_removed) = removed else {
+            return Ok(RemoveAccountResponse {
+                status: RemoveAccountStatus::NotFound,
+                active_account_id: previous_active_account_id,
+            });
+        };
+
+        let mut active_account_id = codex_login::get_active_account_id(auth_home)
+            .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
+        let active_account_changed = previous_active_account_id != active_account_id;
+
+        if active_account_changed {
+            match active_account_id.as_deref() {
+                Some(fallback_account_id) => {
+                    if codex_login::activate_account(
+                        auth_home,
+                        fallback_account_id,
+                        self.config.cli_auth_credentials_store_mode,
+                    )
+                    .is_err()
+                    {
+                        codex_login::clear_active_account(
+                            auth_home,
+                            self.config.cli_auth_credentials_store_mode,
+                        )
+                        .map_err(|err| {
+                            internal_error(format!(
+                                "failed to activate fallback stored account or clear active auth: {err}"
+                            ))
+                        })?;
+                        active_account_id = None;
+                    }
+                }
+                None => {
+                    codex_login::clear_active_account(
+                        auth_home,
+                        self.config.cli_auth_credentials_store_mode,
+                    )
+                    .map_err(|err| internal_error(format!("failed to clear active auth: {err}")))?;
+                }
+            }
+
+            self.thread_manager.reload_auth_for_loaded_threads().await;
+            self.config_manager.replace_cloud_config_bundle_loader(
+                self.auth_manager.clone(),
+                self.config.chatgpt_base_url.clone(),
+            );
+            self.config_manager
+                .sync_default_client_residency_requirement()
+                .await;
+            Self::maybe_refresh_remote_installed_plugins_cache_for_current_config(
+                &self.config_manager,
+                &self.thread_manager,
+                self.auth_manager.auth_cached(),
+            )
+            .await;
+            self.outgoing
+                .send_server_notification(ServerNotification::AccountUpdated(
+                    self.current_account_updated_notification(),
+                ))
+                .await;
+        }
+
+        Ok(RemoveAccountResponse {
+            status: RemoveAccountStatus::Removed,
+            active_account_id,
         })
     }
 

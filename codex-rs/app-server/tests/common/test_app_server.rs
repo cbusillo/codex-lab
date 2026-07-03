@@ -74,6 +74,7 @@ use codex_app_server_protocol::RemoteControlClientsListParams;
 use codex_app_server_protocol::RemoteControlClientsRevokeParams;
 use codex_app_server_protocol::RemoteControlPairingStartParams;
 use codex_app_server_protocol::RemoteControlPairingStatusParams;
+use codex_app_server_protocol::RemoveAccountParams;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::SendAddCreditsNudgeEmailParams;
@@ -1300,6 +1301,15 @@ impl TestAppServer {
     /// Send an `account/list` JSON-RPC request.
     pub async fn send_list_accounts_request(&mut self) -> anyhow::Result<i64> {
         self.send_request("account/list", None).await
+    }
+
+    /// Send an `account/remove` JSON-RPC request.
+    pub async fn send_remove_account_request(
+        &mut self,
+        params: RemoveAccountParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("account/remove", params).await
     }
 
     /// Send a `fuzzyFileSearch` JSON-RPC request.

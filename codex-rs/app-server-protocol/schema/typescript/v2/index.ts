@@ -343,6 +343,9 @@ export type { ReasoningSummaryTextDeltaNotification } from "./ReasoningSummaryTe
 export type { ReasoningTextDeltaNotification } from "./ReasoningTextDeltaNotification";
 export type { RemoteControlConnectionStatus } from "./RemoteControlConnectionStatus";
 export type { RemoteControlStatusChangedNotification } from "./RemoteControlStatusChangedNotification";
+export type { RemoveAccountParams } from "./RemoveAccountParams";
+export type { RemoveAccountResponse } from "./RemoveAccountResponse";
+export type { RemoveAccountStatus } from "./RemoveAccountStatus";
 export type { RequestPermissionProfile } from "./RequestPermissionProfile";
 export type { ResidencyRequirement } from "./ResidencyRequirement";
 export type { ReviewDelivery } from "./ReviewDelivery";

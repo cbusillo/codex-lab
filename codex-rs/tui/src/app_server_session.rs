@@ -38,6 +38,8 @@ use codex_app_server_protocol::Model as ApiModel;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::RateLimitSnapshot;
+use codex_app_server_protocol::RemoveAccountParams;
+use codex_app_server_protocol::RemoveAccountResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
@@ -924,6 +926,20 @@ impl AppServerSession {
             })
             .await
             .wrap_err("account/list failed in TUI")
+    }
+
+    pub(crate) async fn remove_account(
+        &mut self,
+        account_id: String,
+    ) -> Result<RemoveAccountResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::RemoveAccount {
+                request_id,
+                params: RemoveAccountParams { account_id },
+            })
+            .await
+            .wrap_err("account/remove failed in TUI")
     }
 
     pub(crate) async fn thread_unsubscribe(&mut self, thread_id: ThreadId) -> Result<()> {

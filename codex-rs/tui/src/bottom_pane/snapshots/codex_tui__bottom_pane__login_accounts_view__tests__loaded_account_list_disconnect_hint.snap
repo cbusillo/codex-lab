@@ -10,5 +10,6 @@ expression: "render_snapshot(&buf, area)"
 │                                                      │
 │ Add account...                                       │
 │                                                      │
-│ up/down Navigate  Enter Select  Esc Close            │
+│ up/down Navigate  Enter Select  d Disconnect  Esc    │
+│ Close                                                │
 └──────────────────────────────────────────────────────┘

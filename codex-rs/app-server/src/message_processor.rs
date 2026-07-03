@@ -1343,6 +1343,9 @@ impl MessageProcessor {
                 self.account_processor.switch_active_account(params).await
             }
             ClientRequest::ListAccounts { .. } => self.account_processor.list_accounts().await,
+            ClientRequest::RemoveAccount { params, .. } => {
+                self.account_processor.remove_account(params).await
+            }
             ClientRequest::GetAccount { params, .. } => {
                 self.account_processor.get_account(params).await
             }

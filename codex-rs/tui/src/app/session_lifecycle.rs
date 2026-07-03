@@ -19,6 +19,7 @@ use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
+use codex_app_server_protocol::RemoveAccountStatus;
 use codex_cloud_config::cloud_config_bundle_loader_for_storage;
 use codex_config::CloudConfigBundleLoader;
 use codex_login::CLIENT_ID;
@@ -121,18 +122,25 @@ impl AppServerThreadUiSnapshot {
 
 impl App {
     pub(super) async fn show_login_accounts_view(&mut self, app_server: &mut AppServerSession) {
+        self.show_login_accounts_view_with_feedback(app_server, /*feedback*/ None)
+            .await;
+    }
+
+    async fn show_login_accounts_view_with_feedback(
+        &mut self,
+        app_server: &mut AppServerSession,
+        feedback: Option<LoginAccountsFeedback>,
+    ) {
         if matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
-            self.chat_widget.show_login_accounts_view();
+            self.chat_widget
+                .show_login_accounts_view_with_feedback(feedback);
             return;
         }
 
         match app_server.list_accounts().await {
             Ok(response) => {
                 self.chat_widget
-                    .show_login_accounts_view_with_loaded_accounts(
-                        response.accounts,
-                        /*feedback*/ None,
-                    );
+                    .show_login_accounts_view_with_loaded_accounts(response.accounts, feedback);
             }
             Err(err) => {
                 self.chat_widget
@@ -1217,6 +1225,30 @@ impl App {
             return;
         }
 
+        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            let feedback = match app_server
+                .remove_account(selection.account_id.clone())
+                .await
+            {
+                Ok(response) => match response.status {
+                    RemoveAccountStatus::Removed => {
+                        LoginAccountsFeedback::Info(format!("Disconnected {}.", selection.label))
+                    }
+                    RemoveAccountStatus::NotFound => LoginAccountsFeedback::Error(format!(
+                        "Stored account {} no longer exists.",
+                        selection.label
+                    )),
+                },
+                Err(err) => LoginAccountsFeedback::Error(format!(
+                    "Failed to disconnect {}: {err}",
+                    selection.label
+                )),
+            };
+            self.show_login_accounts_view_with_feedback(app_server, Some(feedback))
+                .await;
+            return;
+        }
+
         let was_default_active = codex_login::get_active_account_id(&self.config.codex_home)
             .ok()
             .flatten()
@@ -1224,20 +1256,6 @@ impl App {
         let current_session_uses_default_auth_home =
             self.config.auth_home == self.config.codex_home;
         let needs_session_restart = was_default_active && current_session_uses_default_auth_home;
-        if needs_session_restart
-            && !matches!(self.app_server_target, crate::AppServerTarget::Embedded)
-        {
-            self.chat_widget.add_error_message(
-                "/login active-account disconnect requires an embedded Codex Lab app server."
-                    .to_string(),
-            );
-            self.chat_widget.add_info_message(
-                "Use an embedded Codex Lab app server to disconnect the active stored account from /login."
-                    .to_string(),
-                /*hint*/ None,
-            );
-            return;
-        }
 
         let removed =
             match codex_login::remove_account(&self.config.codex_home, &selection.account_id) {
@@ -1343,10 +1361,6 @@ impl App {
         app_server: &mut AppServerSession,
         label: &str,
     ) -> Result<(), String> {
-        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
-            return Ok(());
-        }
-
         let default_auth_home = self.config.codex_home.clone();
         let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
             self.config.codex_home.to_path_buf(),
