@@ -357,9 +357,12 @@ fn build_external_agent_invocation(
             .cloned(),
     );
     if launch.backend.protocol == ExternalCommandProtocol::RawCli {
-        if launch.backend.launch_family.as_deref() == Some("antigravity") {
+        let launch_family = launch.backend.launch_family.as_deref();
+        if launch_family == Some("antigravity") {
             args.push("--add-dir".to_string());
             args.push(launch.cwd.display().to_string());
+        }
+        if raw_cli_uses_prompt_flag(launch_family) {
             args.push("-p".to_string());
         }
         args.push(message.to_string());
@@ -368,6 +371,13 @@ fn build_external_agent_invocation(
         command: PathBuf::from(command),
         args,
     })
+}
+
+fn raw_cli_uses_prompt_flag(launch_family: Option<&str>) -> bool {
+    matches!(
+        launch_family,
+        Some("antigravity" | "claude" | "copilot" | "gemini" | "qwen")
+    )
 }
 
 fn external_agent_launch_cwd(launch: &ExternalAgentLaunch) -> PathBuf {
@@ -632,6 +642,98 @@ mod tests {
                 "inspect this repo".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn third_party_cli_families_use_prompt_flag() {
+        for (launch_family, command, mode_args) in [
+            (
+                "claude",
+                "claude",
+                vec!["--dangerously-skip-permissions".to_string()],
+            ),
+            (
+                "copilot",
+                "copilot",
+                vec![
+                    "--autopilot".to_string(),
+                    "--yolo".to_string(),
+                    "--no-ask-user".to_string(),
+                    "-s".to_string(),
+                ],
+            ),
+            ("gemini", "gemini", Vec::new()),
+            ("qwen", "qwen", vec!["-y".to_string()]),
+        ] {
+            let temp_dir = TempDir::new().expect("tempdir");
+            let launch = test_launch(
+                &temp_dir,
+                ExternalCommandAgentBackendConfig {
+                    command: command.to_string(),
+                    protocol: ExternalCommandProtocol::RawCli,
+                    args_write: mode_args.clone(),
+                    launch_family: Some(launch_family.to_string()),
+                    timeout_ms: 5_000,
+                    ..Default::default()
+                },
+                false,
+            );
+
+            let invocation = build_external_agent_invocation(&launch, "inspect this repo")
+                .expect("third-party invocation should build");
+
+            let mut expected_args = mode_args;
+            expected_args.extend(["-p".to_string(), "inspect this repo".to_string()]);
+            assert_eq!(invocation.command, PathBuf::from(command));
+            assert_eq!(invocation.args, expected_args, "family {launch_family}");
+        }
+    }
+
+    #[test]
+    fn positional_prompt_families_keep_bare_prompt() {
+        for launch_family in ["code", "codex", "cloud"] {
+            let temp_dir = TempDir::new().expect("tempdir");
+            let launch = test_launch(
+                &temp_dir,
+                ExternalCommandAgentBackendConfig {
+                    command: "coder".to_string(),
+                    protocol: ExternalCommandProtocol::RawCli,
+                    args: vec!["--model".to_string(), "gpt-5.5".to_string()],
+                    args_write: vec![
+                        "-s".to_string(),
+                        "workspace-write".to_string(),
+                        "exec".to_string(),
+                        "--skip-git-repo-check".to_string(),
+                    ],
+                    launch_family: Some(launch_family.to_string()),
+                    timeout_ms: 5_000,
+                    ..Default::default()
+                },
+                false,
+            );
+
+            let invocation = build_external_agent_invocation(&launch, "inspect this repo")
+                .expect("code-family invocation should build");
+
+            assert_eq!(invocation.command, PathBuf::from("coder"));
+            assert_eq!(
+                invocation.args,
+                vec![
+                    "--model".to_string(),
+                    "gpt-5.5".to_string(),
+                    "-s".to_string(),
+                    "workspace-write".to_string(),
+                    "exec".to_string(),
+                    "--skip-git-repo-check".to_string(),
+                    "inspect this repo".to_string(),
+                ],
+                "family {launch_family}"
+            );
+            assert!(
+                !invocation.args.iter().any(|arg| arg == "-p"),
+                "family {launch_family} should not use prompt flag"
+            );
+        }
     }
 
     #[test]
