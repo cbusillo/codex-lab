@@ -108,7 +108,16 @@ impl ChatWidget {
                 skill.enabled = enabled;
             }
         }
+        self.bottom_pane.update_active_skill_toggle(&path, enabled);
         self.set_skills(Some(enabled_skills_for_mentions(&self.skills_all)));
+    }
+
+    pub(crate) fn refresh_skill_toggle_from_current_state(&mut self, path: &AbsolutePathBuf) {
+        let Some(skill) = self.skills_all.iter().find(|skill| skill.path == *path) else {
+            return;
+        };
+        self.bottom_pane
+            .update_active_skill_toggle(path, skill.enabled);
     }
 
     pub(crate) fn handle_manage_skills_closed(&mut self) {

@@ -213,6 +213,17 @@ impl SkillsToggleView {
         });
     }
 
+    pub(crate) fn set_item_enabled(&mut self, path: &AbsolutePathBuf, enabled: bool) -> bool {
+        let Some(item) = self.items.iter_mut().find(|item| item.path == *path) else {
+            return false;
+        };
+        if item.enabled == enabled {
+            return false;
+        }
+        item.enabled = enabled;
+        true
+    }
+
     fn close(&mut self) {
         if self.complete {
             return;
@@ -294,6 +305,10 @@ impl BottomPaneView for SkillsToggleView {
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         self.close();
         CancellationEvent::Handled
+    }
+
+    fn update_skill_enabled(&mut self, path: &AbsolutePathBuf, enabled: bool) -> bool {
+        self.set_item_enabled(path, enabled)
     }
 }
 
@@ -491,5 +506,49 @@ mod tests {
         assert!(rendered.contains("ctrl + x"));
         assert!(!rendered.contains("enter"));
         assert!(!rendered.contains("esc"));
+    }
+
+    #[test]
+    fn set_item_enabled_updates_visible_skill_state_by_path() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let skill_path = test_path_buf("/tmp/skills/repo_scout/SKILL.md").abs();
+        let mut view = SkillsToggleView::new(
+            vec![SkillsToggleItem {
+                name: "Repo Scout".to_string(),
+                skill_name: "repo_scout".to_string(),
+                description: "Summarize the repo layout".to_string(),
+                enabled: true,
+                path: skill_path.clone(),
+            }],
+            tx,
+            crate::keymap::RuntimeKeymap::defaults().list,
+        );
+
+        assert!(view.set_item_enabled(&skill_path, /*enabled*/ false));
+        assert!(!view.items[0].enabled);
+        assert!(render_lines(&view, /*width*/ 72).contains("[ ] Repo Scout"));
+    }
+
+    #[test]
+    fn set_item_enabled_ignores_unknown_path() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let skill_path = test_path_buf("/tmp/skills/repo_scout/SKILL.md").abs();
+        let mut view = SkillsToggleView::new(
+            vec![SkillsToggleItem {
+                name: "Repo Scout".to_string(),
+                skill_name: "repo_scout".to_string(),
+                description: "Summarize the repo layout".to_string(),
+                enabled: true,
+                path: skill_path,
+            }],
+            tx,
+            crate::keymap::RuntimeKeymap::defaults().list,
+        );
+
+        let missing_path = test_path_buf("/tmp/skills/missing/SKILL.md").abs();
+        assert!(!view.set_item_enabled(&missing_path, /*enabled*/ false));
+        assert!(view.items[0].enabled);
     }
 }

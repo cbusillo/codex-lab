@@ -41,6 +41,7 @@ use codex_file_search::FileMatch;
 use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::ThreadId;
 use codex_protocol::user_input::TextElement;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -1165,6 +1166,21 @@ impl BottomPane {
             .last()
             .filter(|view| view.view_id() == Some(view_id))
             .and_then(|view| view.selected_index())
+    }
+
+    pub(crate) fn update_active_skill_toggle(
+        &mut self,
+        path: &AbsolutePathBuf,
+        enabled: bool,
+    ) -> bool {
+        let mut updated = false;
+        for view in &mut self.view_stack {
+            updated |= view.update_skill_enabled(path, enabled);
+        }
+        if updated {
+            self.request_redraw();
+        }
+        updated
     }
 
     pub(crate) fn active_tab_id_for_active_view(&self, view_id: &'static str) -> Option<&str> {

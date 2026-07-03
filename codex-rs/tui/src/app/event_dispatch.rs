@@ -1803,6 +1803,8 @@ impl App {
                         self.chat_widget.update_skill_enabled(path, enabled);
                     }
                     Err(err) => {
+                        self.chat_widget
+                            .refresh_skill_toggle_from_current_state(&path);
                         let path_display = path.display();
                         self.chat_widget.add_error_message(format!(
                             "Failed to update skill config for {path_display}: {err}"
