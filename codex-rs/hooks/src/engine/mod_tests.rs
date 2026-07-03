@@ -924,6 +924,119 @@ fn allow_managed_hooks_only_skips_unmanaged_plugin_hooks() {
 }
 
 #[test]
+fn plugin_hook_sources_are_listed_before_trust_and_runnable_after_trust() {
+    let temp = tempdir().expect("create temp dir");
+    let plugin_root =
+        AbsolutePathBuf::try_from(temp.path().join("demo-plugin")).expect("plugin root");
+    let plugin_data_root =
+        AbsolutePathBuf::try_from(temp.path().join("plugin-data")).expect("plugin data root");
+    let source_path = plugin_root.join("hooks/hooks.json");
+    let plugin_hook_sources = vec![PluginHookSource {
+        plugin_id: PluginId::parse("demo-plugin@test-marketplace").expect("plugin id"),
+        plugin_root: plugin_root.clone(),
+        plugin_data_root,
+        source_path: source_path.clone(),
+        source_relative_path: "hooks/hooks.json".to_string(),
+        hooks: pre_tool_use_hook_events("python3 /tmp/plugin-hook.py"),
+    }];
+
+    let untrusted_engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        /*bypass_hook_trust*/ false,
+        /*config_layer_stack*/ None,
+        plugin_hook_sources.clone(),
+        Vec::new(),
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+    );
+
+    assert!(untrusted_engine.warnings().is_empty());
+    assert!(untrusted_engine.handlers.is_empty());
+    let untrusted_listing = crate::list_hooks(crate::HooksConfig {
+        feature_enabled: true,
+        bypass_hook_trust: false,
+        config_layer_stack: None,
+        plugin_hook_sources: plugin_hook_sources.clone(),
+        ..Default::default()
+    });
+    assert_eq!(untrusted_listing.hooks.len(), 1);
+    assert_eq!(untrusted_listing.hooks[0].source, HookSource::Plugin);
+    assert_eq!(untrusted_listing.hooks[0].source_path, source_path);
+    assert_eq!(
+        untrusted_listing.hooks[0].plugin_id.as_deref(),
+        Some("demo-plugin@test-marketplace")
+    );
+    assert_eq!(
+        untrusted_listing.hooks[0].trust_status,
+        HookTrustStatus::Untrusted
+    );
+
+    let trusted_stack = trusted_plugin_hook_stack(
+        AbsolutePathBuf::try_from(temp.path().join("config.toml")).expect("absolute config path"),
+        &plugin_hook_sources,
+    );
+    let trusted_engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        /*bypass_hook_trust*/ false,
+        Some(&trusted_stack),
+        plugin_hook_sources.clone(),
+        Vec::new(),
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+    );
+
+    assert!(trusted_engine.warnings().is_empty());
+    assert_eq!(trusted_engine.handlers.len(), 1);
+    assert_eq!(trusted_engine.handlers[0].source, HookSource::Plugin);
+    assert_eq!(trusted_engine.handlers[0].source_path, source_path);
+    let trusted_listing = crate::list_hooks(crate::HooksConfig {
+        feature_enabled: true,
+        bypass_hook_trust: false,
+        config_layer_stack: Some(trusted_stack.clone()),
+        plugin_hook_sources: plugin_hook_sources.clone(),
+        ..Default::default()
+    });
+    assert_eq!(trusted_listing.hooks.len(), 1);
+    assert_eq!(
+        trusted_listing.hooks[0].trust_status,
+        HookTrustStatus::Trusted
+    );
+
+    let mut modified_plugin_hook_sources = plugin_hook_sources.clone();
+    modified_plugin_hook_sources[0].hooks = pre_tool_use_hook_events("python3 /tmp/modified.py");
+    let modified_engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        /*bypass_hook_trust*/ false,
+        Some(&trusted_stack),
+        modified_plugin_hook_sources.clone(),
+        Vec::new(),
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+    );
+
+    assert!(modified_engine.warnings().is_empty());
+    assert!(modified_engine.handlers.is_empty());
+    let modified_listing = crate::list_hooks(crate::HooksConfig {
+        feature_enabled: true,
+        bypass_hook_trust: false,
+        config_layer_stack: Some(trusted_stack),
+        plugin_hook_sources: modified_plugin_hook_sources,
+        ..Default::default()
+    });
+    assert_eq!(modified_listing.hooks.len(), 1);
+    assert_eq!(
+        modified_listing.hooks[0].trust_status,
+        HookTrustStatus::Modified
+    );
+}
+
+#[test]
 fn allow_managed_hooks_only_keeps_managed_requirement_and_config_layer_hooks() {
     let temp = tempdir().expect("create temp dir");
     let managed_dir =
