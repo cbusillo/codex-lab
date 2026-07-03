@@ -13,6 +13,8 @@ use codex_app_server_protocol::PluginListParams;
 use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SkillsChangedNotification;
+use codex_app_server_protocol::SkillsConfigWriteParams;
+use codex_app_server_protocol::SkillsConfigWriteResponse;
 use codex_app_server_protocol::SkillsExtraRootsSetParams;
 use codex_app_server_protocol::SkillsExtraRootsSetResponse;
 use codex_app_server_protocol::SkillsListParams;
@@ -843,6 +845,247 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
             .skills
             .iter()
             .any(|skill| skill.name == "demo" && skill.description == "updated")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn skills_config_write_updates_cached_skill_enablement() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+    write_skill(&codex_home, "demo")?;
+    let skill_path = AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(
+        codex_home.path().join("skills/demo/SKILL.md"),
+    )?)?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let list_request_id = mcp
+        .send_skills_list_request(SkillsListParams {
+            cwds: vec![cwd.path().to_path_buf()],
+            force_reload: true,
+        })
+        .await?;
+    let list_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_request_id)),
+    )
+    .await??;
+    let SkillsListResponse { data } = to_response(list_response)?;
+    assert_eq!(data.len(), 1);
+    assert!(
+        data[0]
+            .skills
+            .iter()
+            .any(|skill| skill.name == "demo" && skill.enabled)
+    );
+
+    let disable_request_id = mcp
+        .send_skills_config_write_request(SkillsConfigWriteParams {
+            path: Some(skill_path.clone()),
+            name: None,
+            enabled: false,
+        })
+        .await?;
+    let disable_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(disable_request_id)),
+    )
+    .await??;
+    let disable: SkillsConfigWriteResponse = to_response(disable_response)?;
+    assert_eq!(disable.effective_enabled, false);
+
+    let list_request_id = mcp
+        .send_skills_list_request(SkillsListParams {
+            cwds: vec![cwd.path().to_path_buf()],
+            force_reload: false,
+        })
+        .await?;
+    let list_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_request_id)),
+    )
+    .await??;
+    let SkillsListResponse { data } = to_response(list_response)?;
+    assert_eq!(data.len(), 1);
+    assert!(
+        data[0]
+            .skills
+            .iter()
+            .any(|skill| skill.name == "demo" && !skill.enabled)
+    );
+
+    let enable_by_path_request_id = mcp
+        .send_skills_config_write_request(SkillsConfigWriteParams {
+            path: Some(skill_path.clone()),
+            name: None,
+            enabled: true,
+        })
+        .await?;
+    let enable_by_path_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(enable_by_path_request_id)),
+    )
+    .await??;
+    let enable_by_path: SkillsConfigWriteResponse = to_response(enable_by_path_response)?;
+    assert_eq!(enable_by_path.effective_enabled, true);
+
+    let list_request_id = mcp
+        .send_skills_list_request(SkillsListParams {
+            cwds: vec![cwd.path().to_path_buf()],
+            force_reload: false,
+        })
+        .await?;
+    let list_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_request_id)),
+    )
+    .await??;
+    let SkillsListResponse { data } = to_response(list_response)?;
+    assert_eq!(data.len(), 1);
+    assert!(
+        data[0]
+            .skills
+            .iter()
+            .any(|skill| skill.name == "demo" && skill.enabled)
+    );
+
+    let disable_by_name_request_id = mcp
+        .send_skills_config_write_request(SkillsConfigWriteParams {
+            path: None,
+            name: Some("demo".to_string()),
+            enabled: false,
+        })
+        .await?;
+    let disable_by_name_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(disable_by_name_request_id)),
+    )
+    .await??;
+    let disable_by_name: SkillsConfigWriteResponse = to_response(disable_by_name_response)?;
+    assert_eq!(disable_by_name.effective_enabled, false);
+
+    let list_request_id = mcp
+        .send_skills_list_request(SkillsListParams {
+            cwds: vec![cwd.path().to_path_buf()],
+            force_reload: false,
+        })
+        .await?;
+    let list_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_request_id)),
+    )
+    .await??;
+    let SkillsListResponse { data } = to_response(list_response)?;
+    assert_eq!(data.len(), 1);
+    assert!(
+        data[0]
+            .skills
+            .iter()
+            .any(|skill| skill.name == "demo" && !skill.enabled)
+    );
+
+    let enable_by_name_request_id = mcp
+        .send_skills_config_write_request(SkillsConfigWriteParams {
+            path: None,
+            name: Some("demo".to_string()),
+            enabled: true,
+        })
+        .await?;
+    let enable_by_name_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(enable_by_name_request_id)),
+    )
+    .await??;
+    let enable_by_name: SkillsConfigWriteResponse = to_response(enable_by_name_response)?;
+    assert_eq!(enable_by_name.effective_enabled, true);
+
+    let list_request_id = mcp
+        .send_skills_list_request(SkillsListParams {
+            cwds: vec![cwd.path().to_path_buf()],
+            force_reload: false,
+        })
+        .await?;
+    let list_response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_request_id)),
+    )
+    .await??;
+    let SkillsListResponse { data } = to_response(list_response)?;
+    assert_eq!(data.len(), 1);
+    assert!(
+        data[0]
+            .skills
+            .iter()
+            .any(|skill| skill.name == "demo" && skill.enabled)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn skills_config_write_rejects_ambiguous_selectors() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_skill(&codex_home, "demo")?;
+    let skill_path = AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(
+        codex_home.path().join("skills/demo/SKILL.md"),
+    )?)?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let both_selectors_id = mcp
+        .send_skills_config_write_request(SkillsConfigWriteParams {
+            path: Some(skill_path),
+            name: Some("demo".to_string()),
+            enabled: false,
+        })
+        .await?;
+    let both_selectors_error = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(both_selectors_id)),
+    )
+    .await??;
+    assert_eq!(both_selectors_error.error.code, -32602);
+    assert_eq!(
+        both_selectors_error.error.message,
+        "skills/config/write requires exactly one of path or name"
+    );
+
+    let no_selector_id = mcp
+        .send_skills_config_write_request(SkillsConfigWriteParams {
+            path: None,
+            name: None,
+            enabled: false,
+        })
+        .await?;
+    let no_selector_error = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(no_selector_id)),
+    )
+    .await??;
+    assert_eq!(no_selector_error.error.code, -32602);
+    assert_eq!(
+        no_selector_error.error.message,
+        "skills/config/write requires exactly one of path or name"
+    );
+
+    let blank_name_id = mcp
+        .send_skills_config_write_request(SkillsConfigWriteParams {
+            path: None,
+            name: Some("  ".to_string()),
+            enabled: false,
+        })
+        .await?;
+    let blank_name_error = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(blank_name_id)),
+    )
+    .await??;
+    assert_eq!(blank_name_error.error.code, -32602);
+    assert_eq!(
+        blank_name_error.error.message,
+        "skills/config/write requires exactly one of path or name"
     );
     Ok(())
 }
