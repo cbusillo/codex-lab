@@ -159,6 +159,7 @@ async fn run_external_agent_inner(
     }
 
     let invocation = build_external_agent_invocation(launch, &message)?;
+    validate_external_agent_invocation_ready(launch, &invocation)?;
     let mut command = Command::new(&invocation.command);
     command
         .args(&invocation.args)
@@ -378,6 +379,62 @@ fn raw_cli_uses_prompt_flag(launch_family: Option<&str>) -> bool {
         launch_family,
         Some("antigravity" | "claude" | "copilot" | "gemini" | "qwen")
     )
+}
+
+fn validate_external_agent_invocation_ready(
+    launch: &ExternalAgentLaunch,
+    invocation: &ExternalAgentInvocation,
+) -> anyhow::Result<()> {
+    if launch.backend.protocol != ExternalCommandProtocol::RawCli
+        || !is_builtin_third_party_agent_family(launch.backend.launch_family.as_deref())
+    {
+        return Ok(());
+    }
+
+    if which::which(&invocation.command).is_ok() {
+        return Ok(());
+    }
+
+    let command = invocation.command.to_string_lossy();
+    let agent_name = third_party_agent_display_name(launch.backend.launch_family.as_deref());
+    let hint =
+        install_hint_for_third_party_agent(launch.backend.launch_family.as_deref(), &command);
+    Err(anyhow::anyhow!(
+        "{agent_name} command `{command}` was not found or is not executable. {hint}"
+    ))
+}
+
+fn is_builtin_third_party_agent_family(launch_family: Option<&str>) -> bool {
+    matches!(
+        launch_family,
+        Some("antigravity" | "claude" | "copilot" | "qwen")
+    )
+}
+
+fn third_party_agent_display_name(launch_family: Option<&str>) -> &'static str {
+    match launch_family {
+        Some("antigravity") => "Antigravity CLI",
+        Some("claude") => "Claude Code",
+        Some("copilot") => "GitHub Copilot CLI",
+        Some("qwen") => "Qwen Code",
+        _ => "Third-party agent CLI",
+    }
+}
+
+fn install_hint_for_third_party_agent(launch_family: Option<&str>, command: &str) -> String {
+    match launch_family {
+        Some("claude") => {
+            format!("Install claude-code and make sure `{command}` is on PATH.")
+        }
+        Some("qwen") => format!("Install qwen-code and make sure `{command}` is on PATH."),
+        Some("antigravity") => {
+            format!("Install Antigravity CLI and make sure `{command}` is on PATH.")
+        }
+        Some("copilot") => {
+            format!("Install GitHub Copilot CLI and make sure `{command}` is on PATH.")
+        }
+        _ => format!("Install `{command}` and make sure it is on PATH."),
+    }
 }
 
 fn external_agent_launch_cwd(launch: &ExternalAgentLaunch) -> PathBuf {
@@ -733,6 +790,61 @@ mod tests {
                 !invocation.args.iter().any(|arg| arg == "-p"),
                 "family {launch_family} should not use prompt flag"
             );
+        }
+    }
+
+    #[test]
+    fn missing_builtin_third_party_cli_reports_install_hint() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                command: "definitely-missing-claude-code-test-command".to_string(),
+                protocol: ExternalCommandProtocol::RawCli,
+                launch_family: Some("claude".to_string()),
+                timeout_ms: 5_000,
+                ..Default::default()
+            },
+            false,
+        );
+        let invocation = build_external_agent_invocation(&launch, "inspect this repo")
+            .expect("third-party invocation should build");
+
+        let err = validate_external_agent_invocation_ready(&launch, &invocation)
+            .expect_err("missing built-in third-party CLI should fail preflight");
+
+        let message = err.to_string();
+        assert!(message.contains("Claude Code command"), "{message}");
+        assert!(
+            message.contains("definitely-missing-claude-code-test-command"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Install claude-code") && message.contains("on PATH"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn first_party_and_custom_raw_cli_commands_skip_readiness_preflight() {
+        for launch_family in [Some("code"), Some("codex"), Some("cloud"), None] {
+            let temp_dir = TempDir::new().expect("tempdir");
+            let launch = test_launch(
+                &temp_dir,
+                ExternalCommandAgentBackendConfig {
+                    command: "definitely-missing-custom-agent-test-command".to_string(),
+                    protocol: ExternalCommandProtocol::RawCli,
+                    launch_family: launch_family.map(str::to_string),
+                    timeout_ms: 5_000,
+                    ..Default::default()
+                },
+                false,
+            );
+            let invocation = build_external_agent_invocation(&launch, "inspect this repo")
+                .expect("raw CLI invocation should build");
+
+            validate_external_agent_invocation_ready(&launch, &invocation)
+                .expect("non-third-party launch should keep subprocess spawn behavior");
         }
     }
 
