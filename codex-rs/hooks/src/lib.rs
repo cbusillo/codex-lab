@@ -102,7 +102,12 @@ pub fn hook_key(
     event_name: HookEventName,
     group_index: usize,
     handler_index: usize,
+    id: Option<&str>,
 ) -> String {
+    if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
+        return format!("{key_source}:{}:#{}", hook_event_key_label(event_name), id);
+    }
+
     format!(
         "{key_source}:{}:{group_index}:{handler_index}",
         hook_event_key_label(event_name)

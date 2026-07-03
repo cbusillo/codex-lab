@@ -40,6 +40,7 @@ fn hooks_file_deserializes_existing_json_shape() {
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
                     hooks: vec![HookHandlerConfig::Command {
+                        id: None,
                         command: "python3 /tmp/pre.py".to_string(),
                         command_windows: None,
                         timeout_sec: Some(10),
@@ -85,6 +86,7 @@ fn hooks_file_ignores_top_level_metadata() {
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
                     hooks: vec![HookHandlerConfig::Command {
+                        id: None,
                         command: "python3 /tmp/pre.py".to_string(),
                         command_windows: None,
                         timeout_sec: None,
@@ -120,6 +122,7 @@ statusMessage = "checking"
             pre_tool_use: vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
+                    id: None,
                     command: "python3 /tmp/pre.py".to_string(),
                     command_windows: None,
                     timeout_sec: Some(10),
@@ -157,6 +160,7 @@ command = "python3 /tmp/pre.py"
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
                     hooks: vec![HookHandlerConfig::Command {
+                        id: None,
                         command: "python3 /tmp/pre.py".to_string(),
                         command_windows: None,
                         timeout_sec: None,
@@ -202,6 +206,7 @@ command = "python3 /enterprise/place/pre.py"
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
                     hooks: vec![HookHandlerConfig::Command {
+                        id: None,
                         command: "python3 /enterprise/place/pre.py".to_string(),
                         command_windows: None,
                         timeout_sec: None,
@@ -236,6 +241,7 @@ command_windows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
             pre_tool_use: vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
+                    id: None,
                     command: "bash /enterprise/hooks/pre.sh".to_string(),
                     command_windows: Some(
                         r"powershell -File C:\enterprise\hooks\pre.ps1".to_string(),
@@ -271,6 +277,7 @@ commandWindows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
             pre_tool_use: vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
+                    id: None,
                     command: "bash /enterprise/hooks/pre.sh".to_string(),
                     command_windows: Some(
                         r"powershell -File C:\enterprise\hooks\pre.ps1".to_string(),

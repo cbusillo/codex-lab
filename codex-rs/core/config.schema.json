@@ -1147,6 +1147,9 @@
               "default": null,
               "type": "string"
             },
+            "id": {
+              "type": "string"
+            },
             "statusMessage": {
               "default": null,
               "type": "string"
@@ -4469,6 +4472,10 @@
       ],
       "description": "When `false`, disables analytics across Codex product surfaces in this machine. Defaults to `true`."
     },
+    "api_key_fallback_on_all_accounts_limited": {
+      "description": "When true, Codex may fall back to a saved API key account after all saved ChatGPT accounts are limited. Defaults to `false`.",
+      "type": "boolean"
+    },
     "approval_policy": {
       "allOf": [
         {
@@ -4515,6 +4522,10 @@
       ],
       "default": null,
       "description": "Optional policy instructions for the guardian auto-reviewer."
+    },
+    "auto_switch_accounts_on_rate_limit": {
+      "description": "When true, Codex may switch between saved ChatGPT accounts when the active account is rate or usage limited. Defaults to `true`.",
+      "type": "boolean"
     },
     "background_terminal_max_timeout": {
       "description": "Maximum poll window for background terminal output (`write_stdin`), in milliseconds. Default: `300000` (5 minutes).",

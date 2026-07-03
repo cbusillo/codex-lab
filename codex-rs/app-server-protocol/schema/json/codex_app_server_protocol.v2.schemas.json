@@ -5143,6 +5143,12 @@
                 "null"
               ]
             },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "statusMessage": {
               "type": [
                 "string",

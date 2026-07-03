@@ -52,6 +52,7 @@ fn command_hook_hash(
         group: codex_config::MatcherGroup {
             matcher: matcher.map(ToOwned::to_owned),
             hooks: vec![codex_config::HookHandlerConfig::Command {
+                id: None,
                 command: command.to_string(),
                 command_windows: None,
                 timeout_sec: Some(timeout_sec),
