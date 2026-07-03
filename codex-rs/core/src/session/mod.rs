@@ -1573,7 +1573,29 @@ impl Session {
             &state.session_configuration.original_config_do_not_use,
             &config,
         ) {
+            let hook_warnings: Vec<String> = {
+                let previous_hooks = self.services.hooks.load();
+                let previous_warnings: HashSet<&str> = previous_hooks
+                    .startup_warnings()
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                hooks
+                    .startup_warnings()
+                    .iter()
+                    .filter(|warning| !previous_warnings.contains(warning.as_str()))
+                    .cloned()
+                    .collect()
+            };
             self.services.hooks.store(Arc::new(hooks));
+            drop(state);
+            for message in hook_warnings {
+                self.send_event_raw(Event {
+                    id: INITIAL_SUBMIT_ID.to_owned(),
+                    msg: EventMsg::Warning(WarningEvent { message }),
+                })
+                .await;
+            }
         }
     }
 

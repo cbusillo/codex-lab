@@ -159,6 +159,7 @@ use opentelemetry_sdk::metrics::data::Metric;
 use opentelemetry_sdk::metrics::data::MetricData;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
@@ -169,7 +170,6 @@ use codex_protocol::mcp::CallToolResult as McpCallToolResult;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
@@ -1446,6 +1446,59 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
     session.refresh_runtime_config(next_config).await;
 
     assert_eq!(session.hooks().preview_session_start(&request).len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_surfaces_new_plugin_hook_load_warnings() -> anyhow::Result<()> {
+    let (session, _turn_context, rx) = make_session_and_context_with_rx().await;
+    let codex_home = session.codex_home().await;
+    let plugin_root = codex_home.join("plugins/cache/test/sample/local");
+    std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
+    std::fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{ "name": "sample" }"#,
+    )?;
+    std::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        r#"[features]
+plugins = true
+hooks = true
+
+[plugins."sample@test"]
+enabled = true
+"#,
+    )?;
+
+    let next_config = load_latest_config_for_session(&session).await;
+    session.refresh_runtime_config(next_config).await;
+    assert!(session.hooks().startup_warnings().is_empty());
+
+    std::fs::create_dir_all(plugin_root.join("hooks"))?;
+    let hooks_json_path = plugin_root.join("hooks/hooks.json");
+    std::fs::write(&hooks_json_path, "{ not-json")?;
+
+    let next_config = load_latest_config_for_session(&session).await;
+    session.refresh_runtime_config(next_config).await;
+
+    let warning_event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("warning event should arrive after plugin hook reload")
+        .expect("warning event should be readable");
+    assert!(matches!(
+        warning_event.msg,
+        EventMsg::Warning(WarningEvent { message })
+            if message.contains("failed to parse plugin hooks config")
+                && message.contains(&hooks_json_path.display().to_string())
+    ));
+
+    let next_config = load_latest_config_for_session(&session).await;
+    session.refresh_runtime_config(next_config).await;
+    let repeated_warning = timeout(StdDuration::from_millis(100), rx.recv()).await;
+    assert!(
+        repeated_warning.is_err(),
+        "unchanged plugin hook warning should not be re-emitted"
+    );
     Ok(())
 }
 
