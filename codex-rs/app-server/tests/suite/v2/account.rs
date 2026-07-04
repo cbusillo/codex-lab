@@ -969,6 +969,53 @@ async fn login_account_api_key_succeeds_and_notifies() -> Result<()> {
     Ok(())
 }
 
+async fn start_mock_model_thread(mcp: &mut TestAppServer) -> Result<String> {
+    let thread_req = mcp
+        .send_thread_start_request(codex_app_server_protocol::ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let thread = to_response::<codex_app_server_protocol::ThreadStartResponse>(thread_resp)?;
+    Ok(thread.thread.id)
+}
+
+async fn complete_text_turn(mcp: &mut TestAppServer, thread_id: &str, text: &str) -> Result<()> {
+    let turn_req = mcp
+        .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
+            thread_id: thread_id.to_string(),
+            client_user_message_id: None,
+            input: vec![codex_app_server_protocol::UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let completed_notif: JSONRPCNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let completed: TurnCompletedNotification = serde_json::from_value(
+        completed_notif
+            .params
+            .expect("turn/completed params must be present"),
+    )?;
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    Ok(())
+}
+
 #[tokio::test]
 async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> {
     let mock_server = MockServer::start().await;
@@ -997,40 +1044,8 @@ async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> 
         TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
-    let thread_req = mcp
-        .send_thread_start_request(codex_app_server_protocol::ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let thread_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
-    )
-    .await??;
-    let thread = to_response::<codex_app_server_protocol::ThreadStartResponse>(thread_resp)?;
-
-    let first_turn_req = mcp
-        .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
-            thread_id: thread.thread.id.clone(),
-            client_user_message_id: None,
-            input: vec![codex_app_server_protocol::UserInput::Text {
-                text: "Use the old key".to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-    let _first_turn_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(first_turn_req)),
-    )
-    .await??;
-    let _first_turn_completed = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
+    let thread_id = start_mock_model_thread(&mut mcp).await?;
+    complete_text_turn(&mut mcp, &thread_id, "Use the old key").await?;
 
     let login_req = mcp.send_login_account_api_key_request("sk-new").await?;
     let login_resp: JSONRPCResponse = timeout(
@@ -1051,27 +1066,7 @@ async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> 
     )
     .await??;
 
-    let second_turn_req = mcp
-        .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
-            thread_id: thread.thread.id,
-            client_user_message_id: None,
-            input: vec![codex_app_server_protocol::UserInput::Text {
-                text: "Use the new key".to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-    let _second_turn_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(second_turn_req)),
-    )
-    .await??;
-    let _second_turn_completed = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
+    complete_text_turn(&mut mcp, &thread_id, "Use the new key").await?;
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
@@ -1082,6 +1077,83 @@ async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> 
     assert_eq!(
         requests[1].header("authorization"),
         Some("Bearer sk-new".to_string())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn switch_active_account_refreshes_auth_for_loaded_thread() -> Result<()> {
+    let mock_server = MockServer::start().await;
+    let response_mock = responses::mount_sse_sequence(
+        &mock_server,
+        vec![
+            create_final_assistant_message_sse_response("First account turn")?,
+            create_final_assistant_message_sse_response("Second account turn")?,
+        ],
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            base_url: Some(format!("{}/v1", mock_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    write_models_cache(codex_home.path())?;
+
+    let first = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-first".to_string(),
+        Some("first".to_string()),
+        /*make_active*/ false,
+    )?;
+    let second = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-second".to_string(),
+        Some("second".to_string()),
+        /*make_active*/ false,
+    )?;
+    codex_login::activate_account(codex_home.path(), &first.id, AuthCredentialsStoreMode::File)?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_id = start_mock_model_thread(&mut mcp).await?;
+    complete_text_turn(&mut mcp, &thread_id, "Use the first account").await?;
+
+    let req_id = mcp
+        .send_switch_active_account_request(SwitchActiveAccountParams {
+            account_id: second.id,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let _switch: SwitchActiveAccountResponse = to_response(resp)?;
+    let _account_updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    complete_text_turn(&mut mcp, &thread_id, "Use the second account").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-first".to_string())
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some("Bearer sk-second".to_string())
     );
 
     Ok(())
@@ -1315,6 +1387,92 @@ async fn remove_account_removes_active_account_promotes_fallback_and_notifies() 
     let auth_status: GetAuthStatusResponse = to_response(auth_status_resp)?;
     assert_eq!(auth_status.auth_method, Some(AuthMode::ApiKey));
     assert_eq!(auth_status.auth_token.as_deref(), Some("sk-fallback"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn remove_active_account_refreshes_fallback_auth_for_loaded_thread() -> Result<()> {
+    let mock_server = MockServer::start().await;
+    let response_mock = responses::mount_sse_sequence(
+        &mock_server,
+        vec![
+            create_final_assistant_message_sse_response("Active account turn")?,
+            create_final_assistant_message_sse_response("Fallback account turn")?,
+        ],
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            base_url: Some(format!("{}/v1", mock_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    write_models_cache(codex_home.path())?;
+
+    let fallback = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-fallback".to_string(),
+        Some("fallback".to_string()),
+        /*make_active*/ false,
+    )?;
+    let active = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-active".to_string(),
+        Some("active".to_string()),
+        /*make_active*/ false,
+    )?;
+    codex_login::activate_account(
+        codex_home.path(),
+        &active.id,
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_id = start_mock_model_thread(&mut mcp).await?;
+    complete_text_turn(&mut mcp, &thread_id, "Use the active account").await?;
+
+    let req_id = mcp
+        .send_remove_account_request(RemoveAccountParams {
+            account_id: active.id,
+        })
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let remove: RemoveAccountResponse = to_response(resp)?;
+    assert_eq!(remove.status, RemoveAccountStatus::Removed);
+    assert_eq!(
+        remove.active_account_id.as_deref(),
+        Some(fallback.id.as_str())
+    );
+    let _account_updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    complete_text_turn(&mut mcp, &thread_id, "Use the fallback account").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-active".to_string())
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some("Bearer sk-fallback".to_string())
+    );
 
     Ok(())
 }
