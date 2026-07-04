@@ -564,6 +564,219 @@ async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
 }
 
 #[tokio::test]
+async fn chatgpt_auth_tokens_login_refreshes_auth_for_loaded_thread() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    let response_mock = responses::mount_sse_sequence(
+        &mock_server,
+        vec![
+            create_final_assistant_message_sse_response("Initial external auth turn")?,
+            create_final_assistant_message_sse_response("Updated external auth turn")?,
+        ],
+    )
+    .await;
+
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            base_url: Some(format!("{}/v1", mock_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    write_models_cache(codex_home.path())?;
+
+    let initial_access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("initial@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id(WORKSPACE_ID_INITIAL),
+    )?;
+    let updated_access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("updated@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id(WORKSPACE_ID_REFRESHED),
+    )?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let login_id = mcp
+        .send_chatgpt_auth_tokens_login_request(
+            initial_access_token.clone(),
+            WORKSPACE_ID_INITIAL.to_string(),
+            Some("pro".to_string()),
+        )
+        .await?;
+    let login_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(login_id)),
+    )
+    .await??;
+    let login: LoginAccountResponse = to_response(login_resp)?;
+    assert_eq!(login, LoginAccountResponse::ChatgptAuthTokens {});
+    let _login_completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/login/completed"),
+    )
+    .await??;
+    let _account_updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    let thread_id = start_mock_model_thread(&mut mcp).await?;
+    complete_text_turn(&mut mcp, &thread_id, "Use initial external auth").await?;
+
+    let login_id = mcp
+        .send_chatgpt_auth_tokens_login_request(
+            updated_access_token.clone(),
+            WORKSPACE_ID_REFRESHED.to_string(),
+            Some("pro".to_string()),
+        )
+        .await?;
+    let login_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(login_id)),
+    )
+    .await??;
+    let login: LoginAccountResponse = to_response(login_resp)?;
+    assert_eq!(login, LoginAccountResponse::ChatgptAuthTokens {});
+    let _login_completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/login/completed"),
+    )
+    .await??;
+    let _account_updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    complete_text_turn(&mut mcp, &thread_id, "Use updated external auth").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some(format!("Bearer {initial_access_token}"))
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some(format!("Bearer {updated_access_token}"))
+    );
+    assert_ne!(
+        requests[0].header("x-codex-window-id"),
+        requests[1].header("x-codex-window-id")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn chatgpt_device_code_login_refreshes_auth_for_loaded_thread() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    let response_mock = responses::mount_sse_sequence(
+        &mock_server,
+        vec![
+            create_final_assistant_message_sse_response("Initial external auth turn")?,
+            create_final_assistant_message_sse_response("Device code auth turn")?,
+        ],
+    )
+    .await;
+
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            base_url: Some(format!("{}/v1", mock_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    write_models_cache(codex_home.path())?;
+
+    let device_id_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("device@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id(WORKSPACE_ID_DEVICE),
+    )?;
+    mock_device_code_usercode(&mock_server, /*interval_seconds*/ 0).await;
+    mock_device_code_token_success(&mock_server).await;
+    mock_device_code_oauth_token(&mock_server, &device_id_token).await;
+
+    let initial = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-initial".to_string(),
+        Some("initial".to_string()),
+        /*make_active*/ false,
+    )?;
+    codex_login::activate_account(
+        codex_home.path(),
+        &initial.id,
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let issuer = mock_server.uri();
+    let mut mcp = TestAppServer::new_with_env(
+        codex_home.path(),
+        &[
+            ("OPENAI_API_KEY", None),
+            (LOGIN_ISSUER_ENV_VAR, Some(issuer.as_str())),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_id = start_mock_model_thread(&mut mcp).await?;
+    complete_text_turn(&mut mcp, &thread_id, "Use initial external auth").await?;
+
+    let request_id = mcp.send_login_account_chatgpt_device_code_request().await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let login: LoginAccountResponse = to_response(resp)?;
+    let LoginAccountResponse::ChatgptDeviceCode { .. } = login else {
+        bail!("unexpected login response: {login:?}");
+    };
+    let _login_completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/login/completed"),
+    )
+    .await??;
+    let _account_updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    complete_text_turn(&mut mcp, &thread_id, "Use device code auth").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-initial".to_string())
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some("Bearer access-token-123".to_string())
+    );
+    assert_ne!(
+        requests[0].header("x-codex-window-id"),
+        requests[1].header("x-codex-window-id")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 // Client returns JSON-RPC error to refresh; turn fails.
 async fn external_auth_refresh_error_fails_turn() -> Result<()> {
     let codex_home = TempDir::new()?;

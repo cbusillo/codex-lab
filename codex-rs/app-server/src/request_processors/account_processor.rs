@@ -794,14 +794,7 @@ impl AccountRequestProcessor {
             chatgpt_plan_type.as_deref(),
         )
         .map_err(|err| internal_error(format!("failed to set external auth: {err}")))?;
-        self.auth_manager.reload().await;
-        self.config_manager.replace_cloud_config_bundle_loader(
-            self.auth_manager.clone(),
-            self.config.chatgpt_base_url.clone(),
-        );
-        self.config_manager
-            .sync_default_client_residency_requirement()
-            .await;
+        self.reload_active_auth_state().await;
 
         Ok(LoginAccountResponse::ChatgptAuthTokens {})
     }
@@ -854,18 +847,9 @@ impl AccountRequestProcessor {
         success: bool,
         error_msg: Option<String>,
     ) {
-        let payload_v2 = AccountLoginCompletedNotification {
-            login_id: Some(login_id.to_string()),
-            success,
-            error: error_msg,
-        };
-        outgoing
-            .send_server_notification(ServerNotification::AccountLoginCompleted(payload_v2))
-            .await;
-
-        if success {
+        let account_updated = if success {
             let auth_manager = thread_manager.auth_manager();
-            auth_manager.reload().await;
+            thread_manager.reload_auth_for_loaded_threads().await;
             config_manager
                 .replace_cloud_config_bundle_loader(auth_manager.clone(), chatgpt_base_url);
             config_manager
@@ -884,6 +868,21 @@ impl AccountRequestProcessor {
                 plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
                 account: Self::current_account_metadata_for(&config, &auth_manager),
             };
+            Some(payload_v2)
+        } else {
+            None
+        };
+
+        let payload_v2 = AccountLoginCompletedNotification {
+            login_id: Some(login_id.to_string()),
+            success,
+            error: error_msg,
+        };
+        outgoing
+            .send_server_notification(ServerNotification::AccountLoginCompleted(payload_v2))
+            .await;
+
+        if let Some(payload_v2) = account_updated {
             outgoing
                 .send_server_notification(ServerNotification::AccountUpdated(payload_v2))
                 .await;
