@@ -1229,6 +1229,31 @@ async fn complete_text_turn(mcp: &mut TestAppServer, thread_id: &str, text: &str
     Ok(())
 }
 
+async fn run_text_turn(mcp: &mut TestAppServer, thread_id: &str, text: &str) -> Result<()> {
+    let turn_req = mcp
+        .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
+            thread_id: thread_id.to_string(),
+            client_user_message_id: None,
+            input: vec![codex_app_server_protocol::UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let _completed_notif: JSONRPCNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> {
     let mock_server = MockServer::start().await;
@@ -1290,6 +1315,70 @@ async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> 
     assert_eq!(
         requests[1].header("authorization"),
         Some("Bearer sk-new".to_string())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
+    let mock_server = MockServer::start().await;
+    let response_mock = responses::mount_sse_sequence(
+        &mock_server,
+        vec![
+            create_final_assistant_message_sse_response("Logged in turn")?,
+            create_final_assistant_message_sse_response("Logged out turn")?,
+        ],
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            base_url: Some(format!("{}/v1", mock_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    write_models_cache(codex_home.path())?;
+    login_with_api_key(codex_home.path(), "sk-old", AuthCredentialsStoreMode::File)?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_id = start_mock_model_thread(&mut mcp).await?;
+    complete_text_turn(&mut mcp, &thread_id, "Use logged in auth").await?;
+
+    let logout_req = mcp.send_logout_account_request().await?;
+    let logout_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(logout_req)),
+    )
+    .await??;
+    let _logout: LogoutAccountResponse = to_response(logout_resp)?;
+    let _account_updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    run_text_turn(&mut mcp, &thread_id, "Use logged out auth").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-old".to_string())
+    );
+    assert_ne!(
+        requests[1].header("authorization"),
+        Some("Bearer sk-old".to_string())
+    );
+    assert_ne!(
+        requests[0].header("x-codex-window-id"),
+        requests[1].header("x-codex-window-id")
     );
 
     Ok(())
