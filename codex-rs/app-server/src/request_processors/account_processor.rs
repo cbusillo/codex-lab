@@ -904,6 +904,7 @@ impl AccountRequestProcessor {
                 return Err(internal_error(format!("logout failed: {err}")));
             }
         }
+        self.reload_active_auth_state().await;
 
         Self::maybe_refresh_remote_installed_plugins_cache_for_current_config(
             &self.config_manager,
