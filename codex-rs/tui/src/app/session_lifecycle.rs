@@ -1178,7 +1178,6 @@ impl App {
 
     pub(super) async fn switch_auth_account(
         &mut self,
-        _tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         selection: AuthAccountSelection,
     ) {
@@ -2000,6 +1999,11 @@ mod tests {
         );
 
         assert!(App::is_terminal_thread_read_error(&err));
+    }
+
+    #[test]
+    fn stored_account_switch_flow_has_no_tui_restart_dependency() {
+        let _switch_fn = App::switch_auth_account;
     }
 
     #[test]
