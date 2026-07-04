@@ -37,6 +37,7 @@ pub(super) async fn create_thread(
             params.dynamic_tools,
         )
         .with_session_provenance(params.session_provenance)
+        .with_session_id(params.session_id)
         .with_multi_agent_version(params.multi_agent_version),
     )
     .await

@@ -516,6 +516,28 @@ impl Session {
             }
             InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
         };
+        let resumed_session_id = match &initial_history {
+            InitialHistory::Resumed(resumed_history) => {
+                resumed_history.history.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.session_id),
+                    _ => None,
+                })
+            }
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
+        };
+        // Legacy subagent rollouts synthesize session_id from their own thread id.
+        let resumed_session_id = resumed_session_id.filter(|session_id| {
+            !session_configuration.session_source.is_non_root_agent()
+                || *session_id != SessionId::from(thread_id)
+        });
+        let session_id = resumed_session_id.unwrap_or_else(|| {
+            if session_configuration.session_source.is_non_root_agent() {
+                agent_control.session_id()
+            } else {
+                SessionId::from(thread_id)
+            }
+        });
+        let agent_control = agent_control.with_session_id(session_id);
         let window_generation = match &initial_history {
             InitialHistory::Resumed(resumed_history) => u64::try_from(
                 resumed_history
@@ -569,6 +591,7 @@ impl Session {
                         LiveThread::create(
                             Arc::clone(&thread_store),
                             CreateThreadParams {
+                                session_id,
                                 thread_id,
                                 forked_from_id,
                                 parent_thread_id,
@@ -977,12 +1000,6 @@ impl Session {
                     config.analytics_enabled,
                 )
             });
-            let session_id = if session_configuration.session_source.is_non_root_agent() {
-                agent_control.session_id()
-            } else {
-                SessionId::from(thread_id)
-            };
-            let agent_control = agent_control.with_session_id(session_id);
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
             let thread_extension_data =

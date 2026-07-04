@@ -68,9 +68,11 @@ fn test_session_provenance(request_id: &str) -> SessionProvenance {
 }
 
 fn session_meta_with_provenance(session_provenance: SessionProvenance) -> RolloutItem {
+    let thread_id = ThreadId::new();
     RolloutItem::SessionMeta(SessionMetaLine {
         meta: SessionMeta {
-            id: ThreadId::new(),
+            session_id: thread_id.into(),
+            id: thread_id,
             session_provenance: Some(session_provenance),
             ..SessionMeta::default()
         },
