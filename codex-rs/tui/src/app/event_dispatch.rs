@@ -348,7 +348,7 @@ impl App {
                 self.switch_auth_profile(tui, app_server, selection).await;
             }
             AppEvent::SwitchAuthAccount { selection } => {
-                self.switch_auth_account(tui, app_server, selection).await;
+                self.switch_auth_account(app_server, selection).await;
             }
             AppEvent::RemoveAuthAccount { selection } => {
                 self.remove_auth_account(tui, app_server, selection).await;
