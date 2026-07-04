@@ -1324,6 +1324,7 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
         timestamp: ts.to_string(),
         item: RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
+                session_id: conversation_id.into(),
                 id: conversation_id,
                 forked_from_id: None,
                 parent_thread_id: None,

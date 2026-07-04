@@ -816,11 +816,13 @@ mod tests {
             };
             std::fs::create_dir_all(&root).expect("rollout dir");
             let path = root.join(format!("rollout-{timestamp}-{thread_id}.jsonl"));
+            let thread_id = ThreadId::from_string(thread_id).expect("thread id");
             let rollout_line = RolloutLine {
                 timestamp: timestamp.to_string(),
                 item: RolloutItem::SessionMeta(codex_protocol::protocol::SessionMetaLine {
                     meta: codex_protocol::protocol::SessionMeta {
-                        id: ThreadId::from_string(thread_id).expect("thread id"),
+                        session_id: thread_id.into(),
+                        id: thread_id,
                         timestamp: timestamp.to_string(),
                         cwd: self.codex_home.path().to_path_buf(),
                         originator: "test".to_string(),

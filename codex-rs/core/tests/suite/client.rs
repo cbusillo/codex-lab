@@ -519,12 +519,14 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
         input: "console.log('legacy image flow')".to_string(),
     };
     let legacy_image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let thread_id = ThreadId::default();
     let rollout = vec![
         RolloutLine {
             timestamp: "2024-01-01T00:00:00.000Z".to_string(),
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
-                    id: ThreadId::default(),
+                    session_id: thread_id.into(),
+                    id: thread_id,
                     parent_thread_id: None,
                     timestamp: "2024-01-01T00:00:00Z".to_string(),
                     cwd: ".".into(),
@@ -650,12 +652,14 @@ async fn resume_replays_image_tool_outputs_with_detail() {
     let image_url = "data:image/webp;base64,UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=";
     let function_call_id = "view-image-call";
     let custom_call_id = "js-repl-call";
+    let thread_id = ThreadId::default();
     let rollout = vec![
         RolloutLine {
             timestamp: "2024-01-01T00:00:00.000Z".to_string(),
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
-                    id: ThreadId::default(),
+                    session_id: thread_id.into(),
+                    id: thread_id,
                     parent_thread_id: None,
                     timestamp: "2024-01-01T00:00:00Z".to_string(),
                     cwd: ".".into(),

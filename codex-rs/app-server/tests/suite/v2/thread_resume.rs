@@ -1905,6 +1905,7 @@ stream_max_retries = 0
     let rollout_dir = rollout_path.parent().expect("rollout parent directory");
     std::fs::create_dir_all(rollout_dir)?;
     let session_meta = SessionMeta {
+        session_id: conversation_id.into(),
         id: conversation_id,
         forked_from_id: None,
         parent_thread_id: None,
