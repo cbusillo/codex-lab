@@ -1003,7 +1003,7 @@ mod tests {
                 .history
                 .expect("history")
                 .items
-                .into_iter()
+                .iter()
                 .filter(|item| matches!(item, RolloutItem::EventMsg(EventMsg::UserMessage(_))))
                 .count(),
             1

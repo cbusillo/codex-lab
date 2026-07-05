@@ -805,7 +805,7 @@ async fn load_rollout_items_for_fork(
     session.flush_rollout().await?;
     let live_thread = session.live_thread_for_persistence("guardian review fork")?;
     let history = live_thread.load_history(/*include_archived*/ true).await?;
-    Ok(Some(history.items))
+    Ok(Some(Arc::unwrap_or_clone(history.items)))
 }
 
 async fn wait_for_guardian_review(

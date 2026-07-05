@@ -203,7 +203,9 @@ impl ThreadStore for InMemoryThreadStore {
         let mut state = self.state.lock().await;
         state.calls.resume_thread += 1;
         if let Some(history) = params.history {
-            state.histories.insert(params.thread_id, history);
+            state
+                .histories
+                .insert(params.thread_id, Arc::unwrap_or_clone(history));
         } else {
             state.histories.entry(params.thread_id).or_default();
         }
@@ -257,7 +259,7 @@ impl ThreadStore for InMemoryThreadStore {
         )?;
         Ok(StoredThreadHistory {
             thread_id: params.thread_id,
-            items,
+            items: Arc::new(items),
         })
     }
 
@@ -342,10 +344,9 @@ fn stored_thread_from_state(
         .created_threads
         .get(&thread_id)
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-    let history_items = state.histories.get(&thread_id).cloned().unwrap_or_default();
     let history = include_history.then(|| StoredThreadHistory {
         thread_id,
-        items: history_items.clone(),
+        items: Arc::new(state.histories.get(&thread_id).cloned().unwrap_or_default()),
     });
     let name = state.names.get(&thread_id).cloned().flatten();
     let metadata = state.metadata_updates.get(&thread_id);

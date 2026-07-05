@@ -521,7 +521,7 @@ mod tests {
         ResumeThreadParams {
             thread_id,
             rollout_path: None,
-            history: Some(history),
+            history: Some(history.into()),
             include_archived: false,
             metadata: ThreadPersistenceMetadata {
                 cwd: None,

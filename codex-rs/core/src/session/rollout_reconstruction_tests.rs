@@ -82,7 +82,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -157,7 +157,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -720,7 +720,7 @@ async fn record_initial_history_resumed_rollback_skips_only_user_turns() {
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -800,7 +800,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -829,7 +829,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_seed_referenc
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -852,7 +852,7 @@ async fn record_initial_history_resumed_does_not_seed_reference_context_item_aft
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -1010,7 +1010,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -1146,7 +1146,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -1266,7 +1266,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -1375,7 +1375,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -1425,7 +1425,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_preserves_turn_
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
@@ -1546,7 +1546,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
-            history: rollout_items,
+            history: rollout_items.into(),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;

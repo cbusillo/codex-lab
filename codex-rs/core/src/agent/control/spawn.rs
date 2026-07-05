@@ -551,7 +551,7 @@ impl AgentControl {
                 ))
             })?;
 
-        let mut forked_rollout_items = parent_history.items;
+        let mut forked_rollout_items = Arc::unwrap_or_clone(parent_history.items);
         if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
             forked_rollout_items =
                 truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);

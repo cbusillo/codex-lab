@@ -2,6 +2,7 @@ use super::*;
 use crate::error_code::method_not_found;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+use std::sync::Arc;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -2269,7 +2270,7 @@ impl ThreadRequestProcessor {
                         "thread store did not return history for thread {thread_id}"
                     ))
                 })?;
-                return Ok(history.items);
+                return Ok(Arc::unwrap_or_clone(history.items));
             }
             Err(ThreadStoreError::InvalidRequest { message })
                 if message == format!("no rollout found for thread id {thread_id}") => {}
@@ -2303,7 +2304,7 @@ impl ThreadRequestProcessor {
         thread
             .load_history(/*include_archived*/ true)
             .await
-            .map(|history| history.items)
+            .map(|history| Arc::unwrap_or_clone(history.items))
             .map_err(|err| thread_turns_list_history_load_error(thread_id, err))
     }
 
@@ -2613,7 +2614,7 @@ impl ThreadRequestProcessor {
                 let token_usage_thread = include_turns.then(|| thread.clone());
                 let mut initial_turns_page = if let Some(params) = initial_turns_page.as_ref() {
                     match build_thread_resume_initial_turns_page(
-                        &response_history.get_rollout_items(),
+                        response_history.get_rollout_items(),
                         thread.status.clone(),
                         /*has_live_running_thread*/ false,
                         /*active_turn*/ None,
@@ -2657,7 +2658,7 @@ impl ThreadRequestProcessor {
                 // rebuilding history only to attribute a replayed usage update.
                 if let Some(token_usage_thread) = token_usage_thread {
                     let token_usage_turn_id = latest_token_usage_turn_id_from_rollout_items(
-                        &response_history.get_rollout_items(),
+                        response_history.get_rollout_items(),
                         token_usage_thread.turns.as_slice(),
                     );
                     // The client needs restored usage before it starts another turn.
@@ -2863,7 +2864,7 @@ impl ThreadRequestProcessor {
             let command = crate::thread_state::ThreadListenerCommand::SendThreadResumeResponse(
                 Box::new(crate::thread_state::PendingThreadResumeRequest {
                     request_id: request_id.clone(),
-                    history_items,
+                    history_items: Arc::unwrap_or_clone(history_items),
                     config_snapshot,
                     instruction_sources,
                     thread_summary,
@@ -2986,7 +2987,7 @@ impl ThreadRequestProcessor {
         if include_turns && let Some(history) = history {
             populate_thread_turns_from_history(
                 &mut thread,
-                &history.items,
+                history.items.as_ref(),
                 /*active_turn*/ None,
             );
         }
@@ -3099,7 +3100,7 @@ impl ThreadRequestProcessor {
             let history_items = thread_history.get_rollout_items();
             populate_thread_turns_from_history(
                 &mut thread,
-                &history_items,
+                history_items,
                 /*active_turn*/ None,
             );
         }
