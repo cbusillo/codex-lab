@@ -293,7 +293,7 @@ impl Session {
         };
 
         RolloutReconstruction {
-            history: history.raw_items().to_vec(),
+            history: history.into_raw_items(),
             previous_turn_settings,
             reference_context_item,
         }

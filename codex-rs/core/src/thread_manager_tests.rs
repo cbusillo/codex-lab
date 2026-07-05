@@ -942,7 +942,7 @@ async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
             config.clone(),
             InitialHistory::Resumed(ResumedHistory {
                 conversation_id: source.thread_id,
-                history: vec![RolloutItem::ResponseItem(user_msg("hello"))],
+                history: vec![RolloutItem::ResponseItem(user_msg("hello"))].into(),
                 rollout_path: Some(rollout_path.clone()),
             }),
             auth_manager.clone(),

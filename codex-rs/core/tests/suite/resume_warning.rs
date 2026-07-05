@@ -73,7 +73,8 @@ fn resume_history(
                 duration_ms: None,
                 time_to_first_token_ms: None,
             })),
-        ],
+        ]
+        .into(),
         rollout_path: Some(rollout_path.to_path_buf()),
     })
 }

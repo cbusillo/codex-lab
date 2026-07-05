@@ -11,6 +11,7 @@ use codex_rollout::find_thread_path_by_id_str;
 use codex_rollout::read_session_meta_line;
 use codex_rollout::read_thread_item_from_rollout;
 use codex_state::ThreadMetadata;
+use std::sync::Arc;
 
 use super::LocalThreadStore;
 use super::helpers::distinct_thread_metadata_title;
@@ -189,7 +190,10 @@ async fn attach_history_if_requested(
         });
     };
     let items = load_history_items(&path).await?;
-    thread.history = Some(StoredThreadHistory { thread_id, items });
+    thread.history = Some(StoredThreadHistory {
+        thread_id,
+        items: Arc::new(items),
+    });
     Ok(())
 }
 

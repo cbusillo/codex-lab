@@ -2221,7 +2221,7 @@ mod tests {
             first_user_message: Some("before rollback".to_string()),
             history: Some(StoredThreadHistory {
                 thread_id,
-                items: history_items,
+                items: std::sync::Arc::new(history_items),
             }),
         };
         let fallback_cwd = test_path_buf("/tmp").abs();
