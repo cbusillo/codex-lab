@@ -781,6 +781,11 @@ impl Session {
             .lock()
             .await
             .clear_turn(&turn_context.sub_id);
+        // Regular items were flushed before this terminal event was appended; buffering
+        // thread writers may not flush it without another explicit barrier.
+        if let Err(err) = self.flush_rollout().await {
+            warn!("failed to flush rollout after emitting terminal turn event: {err}");
+        }
 
         let cleared_active_turn = {
             let mut active = self.active_turn.lock().await;
@@ -794,17 +799,16 @@ impl Session {
                 false
             }
         };
-        if !cleared_active_turn {
-            return;
+        if cleared_active_turn {
+            if background_review_trigger_eligible {
+                self.maybe_schedule_background_auto_review(
+                    Arc::clone(&turn_context),
+                    completed_turn_diff,
+                )
+                .await;
+            }
+            self.emit_thread_idle_lifecycle_if_idle().await;
         }
-        if background_review_trigger_eligible {
-            self.maybe_schedule_background_auto_review(
-                Arc::clone(&turn_context),
-                completed_turn_diff,
-            )
-            .await;
-        }
-        self.emit_thread_idle_lifecycle_if_idle().await;
     }
 
     async fn take_active_turn(&self) -> Option<ActiveTurn> {
@@ -896,6 +900,11 @@ impl Session {
             .lock()
             .await
             .clear_turn(&task.turn_context.sub_id);
+        // Regular items were flushed before this terminal event was appended; buffering
+        // thread writers may not flush it without another explicit barrier.
+        if let Err(err) = self.flush_rollout().await {
+            warn!("failed to flush rollout after emitting terminal turn event: {err}");
+        }
     }
 }
 
