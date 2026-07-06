@@ -378,6 +378,7 @@ mod tests {
     use codex_protocol::protocol::ThreadGoal;
     use codex_protocol::protocol::ThreadGoalStatus;
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use codex_protocol::protocol::UserMessageEvent;
     use pretty_assertions::assert_eq;
 
@@ -526,6 +527,7 @@ mod tests {
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
                 model_provider: "test-provider".to_string(),
+                history_mode: ThreadHistoryMode::Legacy,
                 memory_mode: ThreadMemoryMode::Enabled,
             },
         }

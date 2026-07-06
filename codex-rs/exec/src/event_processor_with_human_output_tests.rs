@@ -13,6 +13,7 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_absolute_path::test_support::test_path_buf;
 use codex_utils_sandbox_summary::summarize_permission_profile;
@@ -226,6 +227,7 @@ async fn config_summary_entries_include_runtime_workspace_roots() {
         initial_messages: None,
         network_proxy: None,
         rollout_path: None,
+        history_mode: ThreadHistoryMode::Legacy,
     };
 
     let summary_entries = config_summary_entries(&config, &session_configured_event);

@@ -15,6 +15,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode as MemoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
@@ -57,6 +58,8 @@ pub struct ThreadPersistenceMetadata {
     pub model_provider: String,
     /// Memory mode associated with the live thread.
     pub memory_mode: MemoryMode,
+    /// Persisted thread history contract selected when this thread was created.
+    pub history_mode: ThreadHistoryMode,
 }
 
 /// Parameters required to create a persisted thread.
@@ -82,6 +85,8 @@ pub struct CreateThreadParams {
     pub dynamic_tools: Vec<DynamicToolSpec>,
     /// Multi-agent runtime selected when the thread was created.
     pub multi_agent_version: Option<MultiAgentVersion>,
+    /// Persisted thread history contract to use for this new thread.
+    pub history_mode: ThreadHistoryMode,
     /// Metadata captured for the newly created thread.
     pub metadata: ThreadPersistenceMetadata,
 }
@@ -384,6 +389,8 @@ pub struct StoredThread {
     pub cli_version: String,
     /// Runtime source for the thread.
     pub source: SessionSource,
+    /// Persisted thread history contract selected when this thread was created.
+    pub history_mode: ThreadHistoryMode,
     /// Optional external launch provenance supplied by an orchestrator.
     pub session_provenance: Option<SessionProvenance>,
     /// Optional analytics source classification for this thread.

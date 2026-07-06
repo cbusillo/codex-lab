@@ -56,6 +56,7 @@ mod tests {
     use codex_app_server_protocol::McpToolCallStatus;
     use codex_app_server_protocol::SessionSource;
     use codex_app_server_protocol::Thread;
+    use codex_app_server_protocol::ThreadHistoryMode;
     use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::TurnItemsView;
     use codex_app_server_protocol::TurnStatus;
@@ -175,6 +176,7 @@ mod tests {
             parent_thread_id: None,
             preview: "preview".to_string(),
             ephemeral: false,
+            history_mode: ThreadHistoryMode::Legacy,
             model_provider: "mock_provider".to_string(),
             created_at: 0,
             updated_at: 0,

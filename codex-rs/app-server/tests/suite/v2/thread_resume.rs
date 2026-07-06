@@ -69,6 +69,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource as RolloutSessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
@@ -1924,6 +1925,7 @@ stream_max_retries = 0
         dynamic_tools: None,
         memory_mode: None,
         multi_agent_version: None,
+        history_mode: ThreadHistoryMode::Legacy,
     };
     std::fs::write(
         &rollout_path,

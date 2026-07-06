@@ -4,6 +4,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::find_archived_thread_path_by_id_str;
 use codex_rollout::find_thread_name_by_id;
@@ -65,6 +66,13 @@ pub(super) async fn read_thread(
                 rollout_thread.cwd.as_path(),
             );
             thread = rollout_thread;
+        }
+        if params.include_history
+            && let Some(rollout_path) = thread.rollout_path.clone()
+            && let Ok(rollout_thread) = read_thread_from_rollout_path(store, rollout_path).await
+            && rollout_thread.thread_id == thread_id
+        {
+            thread.history_mode = rollout_thread.history_mode;
         }
         attach_history_if_requested(&mut thread, params.include_history).await?;
         return Ok(thread);
@@ -184,6 +192,13 @@ async fn attach_history_if_requested(
         return Ok(());
     }
     let thread_id = thread.thread_id;
+    if thread.history_mode != ThreadHistoryMode::Legacy {
+        return Err(ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode: thread.history_mode,
+            operation: "read_thread(include_history)",
+        });
+    }
     let Some(path) = thread.rollout_path.clone() else {
         return Err(ThreadStoreError::Internal {
             message: format!("failed to load thread history for thread {thread_id}"),
@@ -266,6 +281,7 @@ async fn read_thread_from_rollout_path(
     if let Ok(meta_line) = read_session_meta_line(path.as_path()).await {
         thread.forked_from_id = meta_line.meta.forked_from_id;
         thread.parent_thread_id = meta_line.meta.parent_thread_id;
+        thread.history_mode = meta_line.meta.history_mode;
         if let Some(model_provider) = meta_line
             .meta
             .model_provider
@@ -323,6 +339,7 @@ async fn stored_thread_from_sqlite_metadata(
     let session_provenance = session_meta
         .as_ref()
         .and_then(|meta| meta.session_provenance.clone());
+    let history_mode = metadata.history_mode;
     let preview = metadata
         .preview
         .clone()
@@ -350,6 +367,7 @@ async fn stored_thread_from_sqlite_metadata(
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
         source: parse_session_source(&metadata.source),
+        history_mode,
         session_provenance,
         thread_source: metadata.thread_source,
         agent_nickname: metadata.agent_nickname,
@@ -416,6 +434,7 @@ fn stored_thread_from_meta_line(
         cwd: meta_line.meta.cwd,
         cli_version: meta_line.meta.cli_version,
         source: meta_line.meta.source,
+        history_mode: meta_line.meta.history_mode,
         session_provenance: meta_line.meta.session_provenance,
         thread_source: meta_line.meta.thread_source,
         agent_nickname: meta_line.meta.agent_nickname,
@@ -976,6 +995,65 @@ mod tests {
         let history = thread.history.expect("history should load");
         assert_eq!(history.thread_id, thread_id);
         assert_eq!(history.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_thread_include_history_rejects_paginated_rollout_when_sqlite_row_is_legacy() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let uuid = Uuid::from_u128(224);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let day_dir = home.path().join("sessions/2025/01/03");
+        std::fs::create_dir_all(&day_dir).expect("sessions dir");
+        let rollout_path = day_dir.join(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"));
+        let mut file = std::fs::File::create(&rollout_path).expect("session file");
+        let meta = serde_json::json!({
+            "timestamp": "2025-01-03T12-00-00",
+            "type": "session_meta",
+            "payload": {
+                "id": uuid,
+                "timestamp": "2025-01-03T12-00-00",
+                "cwd": home.path(),
+                "originator": "test_originator",
+                "cli_version": "test_version",
+                "source": "cli",
+                "model_provider": "test-provider",
+                "history_mode": "paginated"
+            },
+        });
+        writeln!(file, "{meta}").expect("write session meta");
+
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite_home.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        let builder =
+            ThreadMetadataBuilder::new(thread_id, rollout_path, Utc::now(), SessionSource::Cli);
+        runtime
+            .upsert_thread(&builder.build(config.default_model_provider_id.as_str()))
+            .await
+            .expect("state db upsert should succeed");
+
+        let err = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect_err("paginated rollout should reject legacy full-history read");
+
+        assert!(matches!(
+            err,
+            ThreadStoreError::UnsupportedHistoryMode {
+                thread_id: actual_thread_id,
+                history_mode: ThreadHistoryMode::Paginated,
+                operation: "read_thread(include_history)",
+            } if actual_thread_id == thread_id
+        ));
     }
 
     #[tokio::test]

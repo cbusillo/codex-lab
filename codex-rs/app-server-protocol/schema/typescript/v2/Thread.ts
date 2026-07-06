@@ -5,6 +5,7 @@ import type { AbsolutePathBuf } from "../AbsolutePathBuf";
 import type { GitInfo } from "./GitInfo";
 import type { SessionProvenance } from "./SessionProvenance";
 import type { SessionSource } from "./SessionSource";
+import type { ThreadHistoryMode } from "./ThreadHistoryMode";
 import type { ThreadSource } from "./ThreadSource";
 import type { ThreadStatus } from "./ThreadStatus";
 import type { Turn } from "./Turn";
@@ -30,6 +31,10 @@ preview: string,
  * Whether the thread is ephemeral and should not be materialized on disk.
  */
 ephemeral: boolean,
+/**
+ * Persisted history contract selected when this thread was created.
+ */
+historyMode: ThreadHistoryMode,
 /**
  * Model provider used for this thread (for example, 'openai').
  */

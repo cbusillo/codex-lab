@@ -839,10 +839,19 @@ impl ThreadRequestProcessor {
             personality,
             ephemeral,
             session_start_source,
+            history_mode,
             thread_source,
             session_provenance,
             environments,
         } = params;
+        if matches!(
+            history_mode,
+            Some(codex_app_server_protocol::ThreadHistoryMode::Paginated)
+        ) {
+            return Err(invalid_request(
+                "thread/start.historyMode=paginated is not supported by this binary yet",
+            ));
+        }
         if sandbox.is_some() && permissions.is_some() {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandbox`",
@@ -2151,6 +2160,13 @@ impl ThreadRequestProcessor {
             Err(ThreadStoreError::InvalidRequest { message }) => {
                 Err(ThreadReadViewError::InvalidRequest(message))
             }
+            Err(ThreadStoreError::UnsupportedHistoryMode {
+                thread_id,
+                history_mode,
+                operation,
+            }) => Err(ThreadReadViewError::InvalidRequest(
+                unsupported_history_mode_message(thread_id, history_mode, operation),
+            )),
             Err(err) => Err(ThreadReadViewError::Internal(format!(
                 "failed to read thread: {err}"
             ))),
@@ -2290,6 +2306,15 @@ impl ThreadRequestProcessor {
             }) if missing_thread_id == thread_id => {}
             Err(ThreadStoreError::InvalidRequest { message }) => {
                 return Err(ThreadReadViewError::InvalidRequest(message));
+            }
+            Err(ThreadStoreError::UnsupportedHistoryMode {
+                thread_id,
+                history_mode,
+                operation,
+            }) => {
+                return Err(ThreadReadViewError::InvalidRequest(
+                    unsupported_history_mode_message(thread_id, history_mode, operation),
+                ));
             }
             Err(err) => {
                 return Err(ThreadReadViewError::Internal(format!(
@@ -3845,9 +3870,29 @@ fn unsupported_thread_store_operation(operation: &'static str) -> JSONRPCErrorEr
     method_not_found(format!("{operation} is not supported yet"))
 }
 
+fn unsupported_history_mode_message(
+    thread_id: ThreadId,
+    history_mode: codex_protocol::protocol::ThreadHistoryMode,
+    operation: &'static str,
+) -> String {
+    format!(
+        "thread {thread_id} uses {} history; {operation} is unavailable in this binary",
+        history_mode.as_str()
+    )
+}
+
 fn thread_store_list_error(err: ThreadStoreError) -> JSONRPCErrorError {
     match err {
         ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => invalid_request(unsupported_history_mode_message(
+            thread_id,
+            history_mode,
+            operation,
+        )),
         ThreadStoreError::Unsupported { operation } => {
             unsupported_thread_store_operation(operation)
         }
@@ -3858,6 +3903,15 @@ fn thread_store_list_error(err: ThreadStoreError) -> JSONRPCErrorError {
 fn thread_store_resume_read_error(err: ThreadStoreError) -> JSONRPCErrorError {
     match err {
         ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => invalid_request(unsupported_history_mode_message(
+            thread_id,
+            history_mode,
+            operation,
+        )),
         ThreadStoreError::Unsupported { operation } => {
             unsupported_thread_store_operation(operation)
         }
@@ -3883,6 +3937,15 @@ fn thread_turns_list_history_load_error(
         ThreadStoreError::InvalidRequest { message } => {
             ThreadReadViewError::InvalidRequest(message)
         }
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => ThreadReadViewError::InvalidRequest(unsupported_history_mode_message(
+            thread_id,
+            history_mode,
+            operation,
+        )),
         ThreadStoreError::Unsupported { operation } => ThreadReadViewError::Unsupported(operation),
         err => ThreadReadViewError::Internal(format!(
             "failed to load thread history for thread {thread_id}: {err}"
@@ -3910,6 +3973,15 @@ fn thread_read_history_load_error(
         ThreadStoreError::InvalidRequest { message } => {
             ThreadReadViewError::InvalidRequest(message)
         }
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => ThreadReadViewError::InvalidRequest(unsupported_history_mode_message(
+            thread_id,
+            history_mode,
+            operation,
+        )),
         ThreadStoreError::Unsupported { operation } => ThreadReadViewError::Unsupported(operation),
         err => ThreadReadViewError::Internal(format!(
             "failed to load thread history for thread {thread_id}: {err}"
@@ -3926,6 +3998,15 @@ fn conversation_summary_thread_id_read_error(
         ThreadStoreError::InvalidRequest { message } if message == no_rollout_message => {
             conversation_summary_not_found_error(conversation_id)
         }
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => invalid_request(unsupported_history_mode_message(
+            thread_id,
+            history_mode,
+            operation,
+        )),
         ThreadStoreError::Unsupported { operation } => {
             unsupported_thread_store_operation(operation)
         }
@@ -3951,6 +4032,15 @@ fn conversation_summary_rollout_path_read_error(
 ) -> JSONRPCErrorError {
     match err {
         ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => invalid_request(unsupported_history_mode_message(
+            thread_id,
+            history_mode,
+            operation,
+        )),
         ThreadStoreError::Unsupported { operation } => {
             unsupported_thread_store_operation(operation)
         }
@@ -3976,6 +4066,15 @@ fn core_thread_write_error(operation: &str, err: CodexErr) -> JSONRPCErrorError 
 fn thread_store_archive_error(operation: &str, err: ThreadStoreError) -> JSONRPCErrorError {
     match err {
         ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => invalid_request(unsupported_history_mode_message(
+            thread_id,
+            history_mode,
+            operation,
+        )),
         ThreadStoreError::Unsupported {
             operation: unsupported_operation,
         } => unsupported_thread_store_operation(unsupported_operation),
@@ -4022,6 +4121,7 @@ pub(crate) fn thread_from_stored_thread(
         parent_thread_id: thread.parent_thread_id.map(|id| id.to_string()),
         preview: thread.preview,
         ephemeral: false,
+        history_mode: thread.history_mode.into(),
         model_provider: if thread.model_provider.is_empty() {
             fallback_provider.to_string()
         } else {
@@ -4232,6 +4332,7 @@ fn build_thread_from_snapshot(
         parent_thread_id: config_snapshot.parent_thread_id.map(|id| id.to_string()),
         preview: String::new(),
         ephemeral: config_snapshot.ephemeral,
+        history_mode: config_snapshot.history_mode.into(),
         model_provider: config_snapshot.model_provider_id.clone(),
         created_at: now,
         updated_at: now,

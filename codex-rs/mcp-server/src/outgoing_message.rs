@@ -236,6 +236,7 @@ mod tests {
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::SessionConfiguredEvent;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
@@ -314,6 +315,7 @@ mod tests {
                 initial_messages: None,
                 network_proxy: None,
                 rollout_path: Some(rollout_file.path().to_path_buf()),
+                history_mode: ThreadHistoryMode::Legacy,
             }),
         };
 
@@ -360,6 +362,7 @@ mod tests {
             initial_messages: None,
             network_proxy: None,
             rollout_path: Some(rollout_file.path().to_path_buf()),
+            history_mode: ThreadHistoryMode::Legacy,
         };
         let event = Event {
             id: "1".to_string(),
@@ -428,6 +431,7 @@ mod tests {
             initial_messages: None,
             network_proxy: None,
             rollout_path: Some(rollout_file.path().to_path_buf()),
+            history_mode: ThreadHistoryMode::Legacy,
         };
         let event = Event {
             id: "1".to_string(),

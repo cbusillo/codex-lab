@@ -5,6 +5,7 @@ use super::TurnStatus;
 use codex_protocol::protocol::SessionProvenance as CoreSessionProvenance;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
+use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource as CoreThreadSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use schemars::JsonSchema;
@@ -44,6 +45,33 @@ impl From<CoreSessionSource> for SessionSource {
             CoreSessionSource::Internal(_) => SessionSource::Unknown,
             CoreSessionSource::SubAgent(sub) => SessionSource::SubAgent(sub),
             CoreSessionSource::Unknown => SessionSource::Unknown,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS, Default)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase", export_to = "v2/")]
+pub enum ThreadHistoryMode {
+    #[default]
+    Legacy,
+    Paginated,
+}
+
+impl From<CoreThreadHistoryMode> for ThreadHistoryMode {
+    fn from(value: CoreThreadHistoryMode) -> Self {
+        match value {
+            CoreThreadHistoryMode::Legacy => Self::Legacy,
+            CoreThreadHistoryMode::Paginated => Self::Paginated,
+        }
+    }
+}
+
+impl From<ThreadHistoryMode> for CoreThreadHistoryMode {
+    fn from(value: ThreadHistoryMode) -> Self {
+        match value {
+            ThreadHistoryMode::Legacy => Self::Legacy,
+            ThreadHistoryMode::Paginated => Self::Paginated,
         }
     }
 }
@@ -239,6 +267,9 @@ pub struct Thread {
     pub preview: String,
     /// Whether the thread is ephemeral and should not be materialized on disk.
     pub ephemeral: bool,
+    /// Persisted history contract selected when this thread was created.
+    #[serde(default)]
+    pub history_mode: ThreadHistoryMode,
     /// Model provider used for this thread (for example, 'openai').
     pub model_provider: String,
     /// Unix timestamp (in seconds) when the thread was created.

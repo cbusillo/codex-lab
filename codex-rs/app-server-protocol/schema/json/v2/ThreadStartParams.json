@@ -150,6 +150,13 @@
       },
       "type": "object"
     },
+    "ThreadHistoryMode": {
+      "enum": [
+        "legacy",
+        "paginated"
+      ],
+      "type": "string"
+    },
     "ThreadSource": {
       "enum": [
         "user",

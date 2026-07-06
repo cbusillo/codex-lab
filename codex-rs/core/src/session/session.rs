@@ -10,6 +10,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use std::sync::OnceLock;
@@ -106,6 +107,8 @@ pub(crate) struct SessionConfiguration {
     pub(super) parent_thread_id: Option<ThreadId>,
     /// Optional analytics source classification for this thread.
     pub(super) thread_source: Option<ThreadSource>,
+    /// Persisted thread history contract selected when this thread was created.
+    pub(super) history_mode: ThreadHistoryMode,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
     pub(super) inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
     pub(super) user_shell_override: Option<shell::Shell>,
@@ -191,6 +194,7 @@ impl SessionConfiguration {
             forked_from_thread_id: self.forked_from_thread_id,
             parent_thread_id: self.parent_thread_id,
             thread_source: self.thread_source,
+            history_mode: self.history_mode,
         }
     }
 
@@ -509,6 +513,8 @@ impl Session {
         session_configuration.parent_thread_id = parent_thread_id;
         let multi_agent_version = multi_agent_version.map(OnceLock::from).unwrap_or_default();
         let initial_multi_agent_version = multi_agent_version.get().copied();
+        let history_mode = initial_history.get_history_mode(ThreadHistoryMode::Legacy);
+        session_configuration.history_mode = history_mode;
 
         let thread_id = match &initial_history {
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
@@ -605,9 +611,11 @@ impl Session {
                                 },
                                 dynamic_tools: session_configuration.dynamic_tools.clone(),
                                 multi_agent_version: initial_multi_agent_version,
+                                history_mode,
                                 metadata: ThreadPersistenceMetadata {
                                     cwd: Some(config.cwd.to_path_buf()),
                                     model_provider: config.model_provider_id.clone(),
+                                    history_mode,
                                     memory_mode: if config.memories.generate_memories {
                                         ThreadMemoryMode::Enabled
                                     } else {
@@ -629,6 +637,7 @@ impl Session {
                                 metadata: ThreadPersistenceMetadata {
                                     cwd: Some(config.cwd.to_path_buf()),
                                     model_provider: config.model_provider_id.clone(),
+                                    history_mode,
                                     memory_mode: if config.memories.generate_memories {
                                         ThreadMemoryMode::Enabled
                                     } else {
@@ -1129,6 +1138,7 @@ impl Session {
                     parent_thread_id,
                     thread_source: session_configuration.thread_source,
                     thread_name: session_configuration.thread_name.clone(),
+                    history_mode,
                     model: session_configuration.collaboration_mode.model().to_string(),
                     model_provider_id: config.model_provider_id.clone(),
                     service_tier: session_configuration.service_tier.clone(),

@@ -55,6 +55,7 @@ fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &Sessi
     metadata.agent_nickname = meta_line.meta.agent_nickname.clone();
     metadata.agent_role = meta_line.meta.agent_role.clone();
     metadata.agent_path = meta_line.meta.agent_path.clone();
+    metadata.history_mode = meta_line.meta.history_mode;
     if let Some(provider) = meta_line.meta.model_provider.as_deref() {
         metadata.model_provider = provider.to_string();
     }
@@ -172,6 +173,7 @@ mod tests {
     use codex_protocol::protocol::ThreadGoal;
     use codex_protocol::protocol::ThreadGoalStatus;
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use codex_protocol::protocol::TurnContextItem;
     use codex_protocol::protocol::USER_MESSAGE_BEGIN;
     use codex_protocol::protocol::UserMessageEvent;
@@ -340,6 +342,7 @@ mod tests {
                     dynamic_tools: None,
                     memory_mode: None,
                     multi_agent_version: None,
+                    history_mode: ThreadHistoryMode::Legacy,
                 },
                 git: None,
             }),
@@ -505,6 +508,7 @@ mod tests {
                     dynamic_tools: None,
                     memory_mode: None,
                     multi_agent_version: None,
+                    history_mode: ThreadHistoryMode::Legacy,
                 },
                 git: None,
             }),
@@ -513,6 +517,28 @@ mod tests {
 
         assert_eq!(metadata.model, None);
         assert_eq!(metadata.reasoning_effort, None);
+    }
+
+    #[test]
+    fn session_meta_sets_history_mode() {
+        let mut metadata = metadata_for_test();
+        let thread_id = metadata.id;
+
+        apply_rollout_item(
+            &mut metadata,
+            &RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    session_id: thread_id.into(),
+                    id: thread_id,
+                    history_mode: ThreadHistoryMode::Paginated,
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }),
+            "test-provider",
+        );
+
+        assert_eq!(metadata.history_mode, ThreadHistoryMode::Paginated);
     }
 
     fn metadata_for_test() -> ThreadMetadata {
@@ -544,6 +570,7 @@ mod tests {
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
+            history_mode: ThreadHistoryMode::Legacy,
         }
     }
 

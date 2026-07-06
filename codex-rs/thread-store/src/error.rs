@@ -1,4 +1,5 @@
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::ThreadHistoryMode;
 
 /// Result type returned by thread-store operations.
 pub type ThreadStoreResult<T> = Result<T, ThreadStoreError>;
@@ -30,6 +31,17 @@ pub enum ThreadStoreError {
     /// The store implementation does not support this operation yet.
     #[error("thread-store unsupported operation: {operation}")]
     Unsupported {
+        /// Stable operation name for callers that need to map unsupported operations.
+        operation: &'static str,
+    },
+
+    /// The requested operation requires a history contract this binary cannot handle.
+    #[error("thread {thread_id} uses unsupported history mode {history_mode:?} for {operation}")]
+    UnsupportedHistoryMode {
+        /// Thread id requested by the caller.
+        thread_id: ThreadId,
+        /// Persisted history mode on the thread.
+        history_mode: ThreadHistoryMode,
         /// Stable operation name for callers that need to map unsupported operations.
         operation: &'static str,
     },

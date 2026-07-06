@@ -3522,6 +3522,13 @@
       ],
       "type": "string"
     },
+    "ThreadHistoryMode": {
+      "enum": [
+        "legacy",
+        "paginated"
+      ],
+      "type": "string"
+    },
     "ThreadInjectItemsParams": {
       "properties": {
         "items": {

@@ -16817,6 +16817,15 @@
             ],
             "description": "Optional Git metadata captured when the thread was created."
           },
+          "historyMode": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadHistoryMode"
+              }
+            ],
+            "default": "legacy",
+            "description": "Persisted history contract selected when this thread was created."
+          },
           "id": {
             "type": "string"
           },
@@ -17383,6 +17392,13 @@
         ],
         "title": "ThreadGoalUpdatedNotification",
         "type": "object"
+      },
+      "ThreadHistoryMode": {
+        "enum": [
+          "legacy",
+          "paginated"
+        ],
+        "type": "string"
       },
       "ThreadId": {
         "type": "string"
