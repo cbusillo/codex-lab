@@ -346,40 +346,25 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_item_started(&mut self, payload: &ItemStartedEvent) {
-        match &payload.item {
-            codex_protocol::items::TurnItem::Plan(plan) => {
-                if plan.text.is_empty() {
-                    return;
-                }
-                self.upsert_item_in_turn_id(
-                    &payload.turn_id,
-                    ThreadItem::from(payload.item.clone()),
-                );
-            }
-            codex_protocol::items::TurnItem::UserMessage(_)
-            | codex_protocol::items::TurnItem::HookPrompt(_)
-            | codex_protocol::items::TurnItem::AgentMessage(_)
-            | codex_protocol::items::TurnItem::Reasoning(_)
-            | codex_protocol::items::TurnItem::WebSearch(_)
-            | codex_protocol::items::TurnItem::ImageView(_)
-            | codex_protocol::items::TurnItem::ImageGeneration(_)
-            | codex_protocol::items::TurnItem::FileChange(_)
-            | codex_protocol::items::TurnItem::McpToolCall(_)
-            | codex_protocol::items::TurnItem::ContextCompaction(_) => {}
-        }
+        self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
     }
 
     fn handle_item_completed(&mut self, payload: &ItemCompletedEvent) {
-        match &payload.item {
-            codex_protocol::items::TurnItem::Plan(plan) => {
-                if plan.text.is_empty() {
-                    return;
-                }
-                self.upsert_item_in_turn_id(
-                    &payload.turn_id,
-                    ThreadItem::from(payload.item.clone()),
-                );
-            }
+        self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
+    }
+
+    fn handle_materialized_item_lifecycle(
+        &mut self,
+        turn_id: &str,
+        item: &codex_protocol::items::TurnItem,
+    ) {
+        let should_upsert = match item {
+            codex_protocol::items::TurnItem::Plan(plan) => !plan.text.is_empty(),
+            codex_protocol::items::TurnItem::Sleep(_)
+            | codex_protocol::items::TurnItem::CommandExecution(_)
+            | codex_protocol::items::TurnItem::DynamicToolCall(_)
+            | codex_protocol::items::TurnItem::CollabAgentToolCall(_)
+            | codex_protocol::items::TurnItem::SubAgentActivity(_) => true,
             codex_protocol::items::TurnItem::UserMessage(_)
             | codex_protocol::items::TurnItem::HookPrompt(_)
             | codex_protocol::items::TurnItem::AgentMessage(_)
@@ -389,7 +374,11 @@ impl ThreadHistoryBuilder {
             | codex_protocol::items::TurnItem::ImageGeneration(_)
             | codex_protocol::items::TurnItem::FileChange(_)
             | codex_protocol::items::TurnItem::McpToolCall(_)
-            | codex_protocol::items::TurnItem::ContextCompaction(_) => {}
+            | codex_protocol::items::TurnItem::ContextCompaction(_) => false,
+        };
+
+        if should_upsert {
+            self.upsert_item_in_turn_id(turn_id, ThreadItem::from(item.clone()));
         }
     }
 
@@ -484,6 +473,7 @@ impl ThreadHistoryBuilder {
             status: DynamicToolCallStatus::InProgress,
             content_items: None,
             success: None,
+            error: None,
             duration_ms: None,
         };
         if payload.turn_id.is_empty() {
@@ -508,6 +498,7 @@ impl ThreadHistoryBuilder {
             status,
             content_items: Some(convert_dynamic_tool_content_items(&payload.content_items)),
             success: Some(payload.success),
+            error: payload.error.clone(),
             duration_ms,
         };
         if payload.turn_id.is_empty() {
@@ -1208,9 +1199,12 @@ impl From<&PendingTurn> for Turn {
 mod tests {
     use super::*;
     use crate::protocol::v2::CommandExecutionSource;
+    use codex_protocol::AgentPath;
     use codex_protocol::ThreadId;
     use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
     use codex_protocol::items::HookPromptFragment as CoreHookPromptFragment;
+    use codex_protocol::items::SleepItem as CoreSleepItem;
+    use codex_protocol::items::SubAgentActivityItem as CoreSubAgentActivityItem;
     use codex_protocol::items::TurnItem as CoreTurnItem;
     use codex_protocol::items::UserMessageItem as CoreUserMessageItem;
     use codex_protocol::items::build_hook_prompt_message;
@@ -1228,10 +1222,12 @@ mod tests {
     use codex_protocol::protocol::DynamicToolCallResponseEvent;
     use codex_protocol::protocol::ExecCommandEndEvent;
     use codex_protocol::protocol::ExecCommandSource;
+    use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::McpToolCallEndEvent;
     use codex_protocol::protocol::PatchApplyBeginEvent;
+    use codex_protocol::protocol::SubAgentActivityKind as CoreSubAgentActivityKind;
     use codex_protocol::protocol::ThreadRolledBackEvent;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
@@ -1452,6 +1448,73 @@ mod tests {
                     text_elements: Vec::new(),
                 }],
             }
+        );
+    }
+
+    #[test]
+    fn replays_materialized_item_lifecycle_events_without_legacy_counterparts() {
+        let turn_id = "turn-1";
+        let thread_id = ThreadId::new();
+        let agent_thread_id = ThreadId::new();
+        let agent_path = AgentPath::try_from("/root/reviewer").expect("agent path");
+        let events = vec![
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::ItemStarted(ItemStartedEvent {
+                thread_id,
+                turn_id: turn_id.to_string(),
+                item: CoreTurnItem::Sleep(CoreSleepItem {
+                    id: "sleep-1".to_string(),
+                    duration_ms: 250,
+                }),
+                started_at_ms: 10,
+            }),
+            EventMsg::ItemCompleted(ItemCompletedEvent {
+                thread_id,
+                turn_id: turn_id.to_string(),
+                item: CoreTurnItem::SubAgentActivity(CoreSubAgentActivityItem {
+                    id: "activity-1".to_string(),
+                    kind: CoreSubAgentActivityKind::Interacted,
+                    agent_thread_id,
+                    agent_path: agent_path.clone(),
+                }),
+                completed_at_ms: 20,
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: turn_id.to_string(),
+                last_agent_message: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![
+                ThreadItem::Sleep {
+                    id: "sleep-1".to_string(),
+                    duration_ms: 250,
+                },
+                ThreadItem::SubAgentActivity {
+                    id: "activity-1".to_string(),
+                    kind: crate::protocol::v2::SubAgentActivityKind::Interacted,
+                    agent_thread_id: agent_thread_id.to_string(),
+                    agent_path: String::from(agent_path),
+                },
+            ]
         );
     }
 
@@ -2199,6 +2262,7 @@ mod tests {
                     text: "Ticket is open".into(),
                 }]),
                 success: Some(true),
+                error: None,
                 duration_ms: Some(42),
             }
         );

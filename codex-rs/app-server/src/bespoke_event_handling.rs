@@ -809,6 +809,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 status: DynamicToolCallStatus::InProgress,
                 content_items: None,
                 success: None,
+                error: None,
                 duration_ms: None,
             };
             let notification = ItemStartedNotification {
