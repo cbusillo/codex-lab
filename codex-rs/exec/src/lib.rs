@@ -93,6 +93,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
@@ -1255,6 +1256,7 @@ fn session_configured_from_thread_response(
         initial_messages: None,
         network_proxy: None,
         rollout_path,
+        history_mode: ThreadHistoryMode::Legacy,
     })
 }
 

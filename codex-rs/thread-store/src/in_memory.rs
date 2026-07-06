@@ -13,6 +13,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 
 use crate::AppendThreadItemsParams;
@@ -166,6 +167,7 @@ impl ThreadStore for InMemoryThreadStore {
     }
 
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
+        reject_paginated_history_mode(params.thread_id, params.history_mode, "create_thread")?;
         let mut state = self.state.lock().await;
         state.calls.create_thread += 1;
         let session_meta = SessionMeta {
@@ -186,6 +188,7 @@ impl ThreadStore for InMemoryThreadStore {
             memory_mode: matches!(params.metadata.memory_mode, ThreadMemoryMode::Disabled)
                 .then_some("disabled".to_string()),
             multi_agent_version: params.multi_agent_version,
+            history_mode: params.history_mode,
             ..SessionMeta::default()
         };
         state
@@ -201,6 +204,11 @@ impl ThreadStore for InMemoryThreadStore {
     }
 
     async fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreResult<()> {
+        if let Some(history) = params.history.as_deref() {
+            reject_paginated_history_items(params.thread_id, history, "resume_thread")?;
+        } else if let Some(items) = self.state.lock().await.histories.get(&params.thread_id) {
+            reject_paginated_history_items(params.thread_id, items, "resume_thread")?;
+        }
         let mut state = self.state.lock().await;
         state.calls.resume_thread += 1;
         if let Some(history) = params.history {
@@ -258,6 +266,7 @@ impl ThreadStore for InMemoryThreadStore {
                 thread_id: params.thread_id,
             },
         )?;
+        reject_paginated_history_items(params.thread_id, &items, "load_history")?;
         Ok(StoredThreadHistory {
             thread_id: params.thread_id,
             items: Arc::new(items),
@@ -348,6 +357,15 @@ fn stored_thread_from_state(
         .created_threads
         .get(&thread_id)
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    let history_mode = state
+        .histories
+        .get(&thread_id)
+        .map(Vec::as_slice)
+        .and_then(canonical_history_mode_from_items)
+        .unwrap_or(ThreadHistoryMode::Legacy);
+    if include_history {
+        reject_paginated_history_mode(thread_id, history_mode, "read_thread(include_history)")?;
+    }
     let history = include_history.then(|| StoredThreadHistory {
         thread_id,
         items: Arc::new(state.histories.get(&thread_id).cloned().unwrap_or_default()),
@@ -393,6 +411,7 @@ fn stored_thread_from_state(
         source: metadata
             .and_then(|metadata| metadata.source.clone())
             .unwrap_or_else(|| created.source.clone()),
+        history_mode,
         session_provenance: created.session_provenance.clone(),
         thread_source: metadata
             .and_then(|metadata| metadata.thread_source)
@@ -411,6 +430,42 @@ fn stored_thread_from_state(
         first_user_message: metadata.and_then(|metadata| metadata.first_user_message.clone()),
         history,
     })
+}
+
+fn canonical_history_mode_from_items(items: &[RolloutItem]) -> Option<ThreadHistoryMode> {
+    items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.history_mode),
+        RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => None,
+    })
+}
+
+fn reject_paginated_history_items(
+    thread_id: ThreadId,
+    items: &[RolloutItem],
+    operation: &'static str,
+) -> ThreadStoreResult<()> {
+    let history_mode =
+        canonical_history_mode_from_items(items).unwrap_or(ThreadHistoryMode::Legacy);
+    reject_paginated_history_mode(thread_id, history_mode, operation)
+}
+
+fn reject_paginated_history_mode(
+    thread_id: ThreadId,
+    history_mode: ThreadHistoryMode,
+    operation: &'static str,
+) -> ThreadStoreResult<()> {
+    if history_mode == ThreadHistoryMode::Legacy {
+        Ok(())
+    } else {
+        Err(ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        })
+    }
 }
 
 fn git_info_from_patch(patch: &ThreadMetadataPatch) -> Option<codex_protocol::protocol::GitInfo> {

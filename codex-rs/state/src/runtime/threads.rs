@@ -32,7 +32,8 @@ SELECT
     threads.archived_at,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.history_mode
 FROM threads
 WHERE threads.id = ?
             "#,
@@ -513,8 +514,9 @@ INSERT INTO threads (
     git_sha,
     git_branch,
     git_origin_url,
-    memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    memory_mode,
+    history_mode
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -556,6 +558,7 @@ ON CONFLICT(id) DO NOTHING
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
         .bind("enabled")
+        .bind(metadata.history_mode.as_str())
         .execute(self.pool.as_ref())
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
@@ -726,8 +729,9 @@ INSERT INTO threads (
     git_sha,
     git_branch,
     git_origin_url,
-    memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    memory_mode,
+    history_mode
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -755,7 +759,11 @@ ON CONFLICT(id) DO UPDATE SET
     archived_at = excluded.archived_at,
     git_sha = COALESCE(threads.git_sha, excluded.git_sha),
     git_branch = COALESCE(threads.git_branch, excluded.git_branch),
-    git_origin_url = COALESCE(threads.git_origin_url, excluded.git_origin_url)
+    git_origin_url = COALESCE(threads.git_origin_url, excluded.git_origin_url),
+    history_mode = CASE
+        WHEN excluded.history_mode != 'legacy' THEN excluded.history_mode
+        ELSE threads.history_mode
+    END
             "#,
         )
         .bind(metadata.id.to_string())
@@ -796,6 +804,7 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
         .bind(creation_memory_mode.unwrap_or("enabled"))
+        .bind(metadata.history_mode.as_str())
         .execute(self.pool.as_ref())
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
@@ -959,7 +968,8 @@ SELECT
     threads.archived_at,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.history_mode
 "#,
     );
 }
@@ -1115,6 +1125,7 @@ mod tests {
     use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionProvenance;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -1186,6 +1197,83 @@ mod tests {
             .expect("thread should exist");
 
         assert_eq!(persisted, metadata);
+    }
+
+    #[tokio::test]
+    async fn apply_rollout_items_updates_history_mode_for_existing_rows() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000459").expect("valid thread id");
+        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("initial legacy insert should succeed");
+
+        let builder = ThreadMetadataBuilder::new(
+            thread_id,
+            metadata.rollout_path.clone(),
+            metadata.created_at,
+            SessionSource::Cli,
+        );
+        runtime
+            .apply_rollout_items(
+                &builder,
+                &[RolloutItem::SessionMeta(SessionMetaLine {
+                    meta: SessionMeta {
+                        session_id: thread_id.into(),
+                        id: thread_id,
+                        history_mode: ThreadHistoryMode::Paginated,
+                        ..SessionMeta::default()
+                    },
+                    git: None,
+                })],
+                /*new_thread_memory_mode*/ None,
+                Some(metadata.updated_at),
+            )
+            .await
+            .expect("rollout reconciliation should succeed");
+
+        let persisted = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert_eq!(persisted.history_mode, ThreadHistoryMode::Paginated);
+    }
+
+    #[tokio::test]
+    async fn upsert_thread_does_not_downgrade_paginated_history_mode() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000460").expect("valid thread id");
+        let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+        metadata.history_mode = ThreadHistoryMode::Paginated;
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("initial paginated insert should succeed");
+
+        metadata.history_mode = ThreadHistoryMode::Legacy;
+        metadata.title = "updated title".to_string();
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("legacy default upsert should succeed");
+
+        let persisted = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert_eq!(persisted.history_mode, ThreadHistoryMode::Paginated);
+        assert_eq!(persisted.title, "updated title");
     }
 
     #[tokio::test]
@@ -1385,6 +1473,7 @@ mod tests {
                 dynamic_tools: None,
                 memory_mode: Some("polluted".to_string()),
                 multi_agent_version: None,
+                history_mode: ThreadHistoryMode::Legacy,
             },
             git: None,
         })];
@@ -1448,6 +1537,7 @@ mod tests {
                 dynamic_tools: None,
                 memory_mode: None,
                 multi_agent_version: None,
+                history_mode: ThreadHistoryMode::Legacy,
             },
             git: Some(GitInfo {
                 commit_hash: Some(codex_git_utils::GitSha::new("rollout-sha")),

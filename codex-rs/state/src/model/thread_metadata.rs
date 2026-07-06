@@ -7,6 +7,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
@@ -110,6 +111,8 @@ pub struct ThreadMetadata {
     pub git_branch: Option<String>,
     /// The git origin URL, if known.
     pub git_origin_url: Option<String>,
+    /// Persisted thread history contract selected when this thread was created.
+    pub history_mode: ThreadHistoryMode,
 }
 
 /// Builder data required to construct [`ThreadMetadata`] without parsing filenames.
@@ -153,6 +156,8 @@ pub struct ThreadMetadataBuilder {
     pub git_branch: Option<String>,
     /// The git origin URL, if known.
     pub git_origin_url: Option<String>,
+    /// Persisted thread history contract selected when this thread was created.
+    pub history_mode: ThreadHistoryMode,
 }
 
 impl ThreadMetadataBuilder {
@@ -183,6 +188,7 @@ impl ThreadMetadataBuilder {
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
+            history_mode: ThreadHistoryMode::Legacy,
         }
     }
 
@@ -228,6 +234,7 @@ impl ThreadMetadataBuilder {
             git_sha: self.git_sha.clone(),
             git_branch: self.git_branch.clone(),
             git_origin_url: self.git_origin_url.clone(),
+            history_mode: self.history_mode,
         }
     }
 }
@@ -336,6 +343,9 @@ impl ThreadMetadata {
         if self.git_origin_url != other.git_origin_url {
             diffs.push("git_origin_url");
         }
+        if self.history_mode != other.history_mode {
+            diffs.push("history_mode");
+        }
         diffs
     }
 }
@@ -371,6 +381,7 @@ pub(crate) struct ThreadRow {
     git_sha: Option<String>,
     git_branch: Option<String>,
     git_origin_url: Option<String>,
+    history_mode: String,
 }
 
 impl ThreadRow {
@@ -401,6 +412,7 @@ impl ThreadRow {
             git_sha: row.try_get("git_sha")?,
             git_branch: row.try_get("git_branch")?,
             git_origin_url: row.try_get("git_origin_url")?,
+            history_mode: row.try_get("history_mode")?,
         })
     }
 }
@@ -435,6 +447,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             git_sha,
             git_branch,
             git_origin_url,
+            history_mode,
         } = row;
         let thread_source = thread_source
             .map(|thread_source| thread_source.parse())
@@ -471,6 +484,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             git_sha,
             git_branch,
             git_origin_url,
+            history_mode: history_mode.parse().map_err(anyhow::Error::msg)?,
         })
     }
 }
@@ -528,6 +542,7 @@ mod tests {
     use chrono::Utc;
     use codex_protocol::ThreadId;
     use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -558,6 +573,7 @@ mod tests {
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
+            history_mode: "legacy".to_string(),
         }
     }
 
@@ -589,6 +605,7 @@ mod tests {
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
+            history_mode: ThreadHistoryMode::Legacy,
         }
     }
 

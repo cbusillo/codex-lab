@@ -5,6 +5,7 @@ use super::SandboxMode;
 use super::SandboxPolicy;
 use super::SessionProvenanceParams;
 use super::Thread;
+use super::ThreadHistoryMode;
 use super::ThreadItem;
 use super::ThreadSource;
 use super::Turn;
@@ -139,6 +140,10 @@ pub struct ThreadStartParams {
     pub ephemeral: Option<bool>,
     #[ts(optional = nullable)]
     pub session_start_source: Option<ThreadStartSource>,
+    /// Optional history contract requested for a newly-created thread.
+    #[experimental("thread/start.historyMode")]
+    #[ts(optional = nullable)]
+    pub history_mode: Option<ThreadHistoryMode>,
     /// Optional client-supplied analytics source classification for this thread.
     #[ts(optional = nullable)]
     pub thread_source: Option<ThreadSource>,

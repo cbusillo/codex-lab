@@ -1550,6 +1550,14 @@ fn thread_store_rollout_read_error(err: ThreadStoreError) -> CodexErr {
     match err {
         ThreadStoreError::ThreadNotFound { thread_id } => CodexErr::ThreadNotFound(thread_id),
         ThreadStoreError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => CodexErr::InvalidRequest(format!(
+            "thread {thread_id} uses {} history; {operation} is unavailable in this binary",
+            history_mode.as_str()
+        )),
         err => CodexErr::Fatal(format!("failed to read thread by rollout path: {err}")),
     }
 }
@@ -1558,6 +1566,14 @@ fn thread_store_metadata_update_error(thread_id: ThreadId, err: ThreadStoreError
     match err {
         ThreadStoreError::ThreadNotFound { thread_id } => CodexErr::ThreadNotFound(thread_id),
         ThreadStoreError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+        ThreadStoreError::UnsupportedHistoryMode {
+            thread_id,
+            history_mode,
+            operation,
+        } => CodexErr::InvalidRequest(format!(
+            "thread {thread_id} uses {} history; {operation} is unavailable in this binary",
+            history_mode.as_str()
+        )),
         ThreadStoreError::Unsupported { operation } => CodexErr::UnsupportedOperation(format!(
             "thread metadata update is not supported by this store: {operation}"
         )),

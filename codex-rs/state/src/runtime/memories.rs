@@ -172,6 +172,7 @@ SELECT
     threads.created_at_ms AS created_at,
     threads.updated_at_ms AS updated_at,
     threads.source,
+    threads.session_provenance,
     threads.thread_source,
     threads.agent_path,
     threads.agent_nickname,
@@ -190,7 +191,8 @@ SELECT
     threads.archived_at,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.history_mode
 FROM threads
             "#,
         );
@@ -542,6 +544,7 @@ SELECT
     threads.created_at_ms AS created_at,
     threads.updated_at_ms AS updated_at,
     threads.source,
+    threads.session_provenance,
     threads.thread_source,
     threads.agent_nickname,
     threads.agent_role,
@@ -560,7 +563,8 @@ SELECT
     threads.archived_at,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.history_mode
 FROM threads
 WHERE threads.id = ? AND threads.memory_mode = 'enabled'
             "#,

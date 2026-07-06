@@ -33,6 +33,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::WebSearchAction;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_absolute_path::test_support::test_path_buf;
 use pretty_assertions::assert_eq;
@@ -126,6 +127,7 @@ fn session_configured_produces_thread_started_event() {
         initial_messages: None,
         network_proxy: None,
         rollout_path: None,
+        history_mode: ThreadHistoryMode::Legacy,
     };
 
     assert_eq!(

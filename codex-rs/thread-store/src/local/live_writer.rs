@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
@@ -30,6 +31,13 @@ pub(super) async fn resume_thread(
     store: &LocalThreadStore,
     params: ResumeThreadParams,
 ) -> ThreadStoreResult<()> {
+    if params.metadata.history_mode != ThreadHistoryMode::Legacy {
+        return Err(ThreadStoreError::UnsupportedHistoryMode {
+            thread_id: params.thread_id,
+            history_mode: params.metadata.history_mode,
+            operation: "resume_thread",
+        });
+    }
     store.ensure_live_recorder_absent(params.thread_id).await?;
     let rollout_path = match (params.rollout_path, params.history) {
         (Some(rollout_path), _history) => rollout_path,

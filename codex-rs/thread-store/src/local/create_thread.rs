@@ -2,6 +2,7 @@ use super::LocalThreadStore;
 use crate::CreateThreadParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
@@ -11,6 +12,13 @@ pub(super) async fn create_thread(
     store: &LocalThreadStore,
     params: CreateThreadParams,
 ) -> ThreadStoreResult<RolloutRecorder> {
+    if params.history_mode != ThreadHistoryMode::Legacy {
+        return Err(ThreadStoreError::UnsupportedHistoryMode {
+            thread_id: params.thread_id,
+            history_mode: params.history_mode,
+            operation: "create_thread",
+        });
+    }
     let cwd = params
         .metadata
         .cwd
@@ -38,7 +46,8 @@ pub(super) async fn create_thread(
         )
         .with_session_provenance(params.session_provenance)
         .with_session_id(params.session_id)
-        .with_multi_agent_version(params.multi_agent_version),
+        .with_multi_agent_version(params.multi_agent_version)
+        .with_history_mode(params.history_mode),
     )
     .await
     .map_err(|err| ThreadStoreError::Internal {

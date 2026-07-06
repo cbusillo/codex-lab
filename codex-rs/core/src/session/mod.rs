@@ -116,6 +116,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
@@ -625,6 +626,7 @@ impl Codex {
             forked_from_thread_id,
             parent_thread_id,
             thread_source,
+            history_mode: ThreadHistoryMode::Legacy,
             dynamic_tools,
             inherited_shell_snapshot,
             user_shell_override,

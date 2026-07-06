@@ -299,6 +299,7 @@ mod tests {
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::RolloutItem;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use codex_protocol::protocol::ThreadMemoryMode;
     use codex_protocol::protocol::UserMessageEvent;
     use tempfile::TempDir;
@@ -536,6 +537,7 @@ mod tests {
                 metadata: ThreadPersistenceMetadata {
                     cwd: Some(home.path().to_path_buf()),
                     model_provider: "different-provider".to_string(),
+                    history_mode: ThreadHistoryMode::Legacy,
                     memory_mode: ThreadMemoryMode::Enabled,
                 },
             },
@@ -590,6 +592,7 @@ mod tests {
                 metadata: ThreadPersistenceMetadata {
                     cwd: Some(home.path().to_path_buf()),
                     model_provider: "different-provider".to_string(),
+                    history_mode: ThreadHistoryMode::Legacy,
                     memory_mode: ThreadMemoryMode::Enabled,
                 },
             },
@@ -801,6 +804,7 @@ mod tests {
                 metadata: ThreadPersistenceMetadata {
                     cwd: None,
                     model_provider: "test-provider".to_string(),
+                    history_mode: ThreadHistoryMode::Legacy,
                     memory_mode: ThreadMemoryMode::Enabled,
                 },
             })
@@ -1022,6 +1026,7 @@ mod tests {
             base_instructions: BaseInstructions::default(),
             dynamic_tools: Vec::new(),
             multi_agent_version: None,
+            history_mode: ThreadHistoryMode::Legacy,
             metadata: thread_metadata(),
         }
     }
@@ -1030,6 +1035,7 @@ mod tests {
         ThreadPersistenceMetadata {
             cwd: Some(std::env::current_dir().expect("cwd")),
             model_provider: "test-provider".to_string(),
+            history_mode: ThreadHistoryMode::Legacy,
             memory_mode: ThreadMemoryMode::Enabled,
         }
     }

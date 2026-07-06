@@ -622,6 +622,36 @@ pub enum ThreadMemoryMode {
     Disabled,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase")]
+pub enum ThreadHistoryMode {
+    #[default]
+    Legacy,
+    Paginated,
+}
+
+impl ThreadHistoryMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Paginated => "paginated",
+        }
+    }
+}
+
+impl FromStr for ThreadHistoryMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "legacy" => Ok(Self::Legacy),
+            "paginated" => Ok(Self::Paginated),
+            _ => Err(format!("unknown thread history mode `{value}`")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
@@ -2488,6 +2518,18 @@ impl InitialHistory {
         }
     }
 
+    pub fn get_history_mode(&self, default_history_mode: ThreadHistoryMode) -> ThreadHistoryMode {
+        match self {
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+                default_history_mode
+            }
+            InitialHistory::Resumed(_) => self
+                .get_resumed_session_meta()
+                .map(|meta| meta.history_mode)
+                .unwrap_or(default_history_mode),
+        }
+    }
+
     pub fn get_resumed_session_sources(&self) -> Option<(SessionSource, Option<ThreadSource>)> {
         let meta = self.get_resumed_session_meta()?;
         Some((meta.source.clone(), meta.thread_source))
@@ -2897,6 +2939,8 @@ pub struct SessionMeta {
     pub memory_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_agent_version: Option<MultiAgentVersion>,
+    #[serde(default)]
+    pub history_mode: ThreadHistoryMode,
 }
 
 impl Default for SessionMeta {
@@ -2922,6 +2966,7 @@ impl Default for SessionMeta {
             dynamic_tools: None,
             memory_mode: None,
             multi_agent_version: None,
+            history_mode: ThreadHistoryMode::Legacy,
         }
     }
 }
@@ -3657,6 +3702,10 @@ pub struct SessionConfiguredEvent {
     #[ts(optional)]
     pub thread_name: Option<String>,
 
+    /// Persisted thread history contract selected when this thread was created.
+    #[serde(default)]
+    pub history_mode: ThreadHistoryMode,
+
     /// Tell the client what model is being queried.
     pub model: String,
 
@@ -3722,6 +3771,8 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             thread_source: Option<ThreadSource>,
             #[serde(default)]
             thread_name: Option<String>,
+            #[serde(default)]
+            history_mode: ThreadHistoryMode,
             model: String,
             model_provider_id: String,
             service_tier: Option<String>,
@@ -3761,6 +3812,7 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             parent_thread_id: wire.parent_thread_id,
             thread_source: wire.thread_source,
             thread_name: wire.thread_name,
+            history_mode: wire.history_mode,
             model: wire.model,
             model_provider_id: wire.model_provider_id,
             service_tier: wire.service_tier,

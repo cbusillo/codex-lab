@@ -126,6 +126,7 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SkillScope;
 use codex_protocol::protocol::Submission;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TokenCountEvent;
@@ -3232,6 +3233,7 @@ async fn set_rate_limits_retains_previous_credits() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        history_mode: ThreadHistoryMode::Legacy,
         dynamic_tools: Vec::new(),
         inherited_shell_snapshot: None,
         user_shell_override: None,
@@ -3554,6 +3556,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        history_mode: ThreadHistoryMode::Legacy,
         dynamic_tools: Vec::new(),
         inherited_shell_snapshot: None,
         user_shell_override: None,
@@ -4126,6 +4129,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        history_mode: ThreadHistoryMode::Legacy,
         dynamic_tools: Vec::new(),
         inherited_shell_snapshot: None,
         user_shell_override: None,
@@ -4953,6 +4957,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        history_mode: ThreadHistoryMode::Legacy,
         dynamic_tools: Vec::new(),
         inherited_shell_snapshot: None,
         user_shell_override: None,
@@ -5065,6 +5070,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        history_mode: ThreadHistoryMode::Legacy,
         dynamic_tools: Vec::new(),
         inherited_shell_snapshot: None,
         user_shell_override: None,
@@ -5302,6 +5308,7 @@ async fn make_session_with_config_and_rx(
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        history_mode: ThreadHistoryMode::Legacy,
         dynamic_tools: Vec::new(),
         inherited_shell_snapshot: None,
         user_shell_override: None,
@@ -5408,6 +5415,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        history_mode: ThreadHistoryMode::Legacy,
         dynamic_tools: Vec::new(),
         inherited_shell_snapshot: None,
         user_shell_override: None,
@@ -7179,6 +7187,7 @@ where
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        history_mode: ThreadHistoryMode::Legacy,
         dynamic_tools,
         inherited_shell_snapshot: None,
         user_shell_override: None,

@@ -45,6 +45,7 @@ use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::ReadThreadParams;
@@ -248,6 +249,7 @@ async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
                 cwd: Some(codex_home.path().to_path_buf()),
                 model_provider: "mock_provider".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
+                history_mode: ThreadHistoryMode::Legacy,
             },
         })
         .await?;

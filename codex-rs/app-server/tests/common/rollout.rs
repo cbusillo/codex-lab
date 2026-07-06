@@ -5,6 +5,7 @@ use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
@@ -197,6 +198,7 @@ fn create_fake_rollout_with_source_and_parent_thread_id(
         dynamic_tools: None,
         memory_mode: None,
         multi_agent_version: None,
+        history_mode: ThreadHistoryMode::Legacy,
     };
     let payload = serde_json::to_value(SessionMetaLine {
         meta,
@@ -285,6 +287,7 @@ pub fn create_fake_rollout_with_text_elements(
         dynamic_tools: None,
         memory_mode: None,
         multi_agent_version: None,
+        history_mode: ThreadHistoryMode::Legacy,
     };
     let payload = serde_json::to_value(SessionMetaLine {
         meta,

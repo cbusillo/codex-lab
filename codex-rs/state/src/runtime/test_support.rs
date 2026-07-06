@@ -11,6 +11,8 @@ use codex_protocol::protocol::AskForApproval;
 #[cfg(test)]
 use codex_protocol::protocol::SandboxPolicy;
 #[cfg(test)]
+use codex_protocol::protocol::ThreadHistoryMode;
+#[cfg(test)]
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -68,5 +70,6 @@ pub(super) fn test_thread_metadata(
         git_sha: None,
         git_branch: None,
         git_origin_url: None,
+        history_mode: ThreadHistoryMode::Legacy,
     }
 }
