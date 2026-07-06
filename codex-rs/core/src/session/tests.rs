@@ -3814,9 +3814,12 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
             dynamic_tools: Vec::new(),
             multi_agent_version: None,
             session_provenance: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
+            initial_window_id: "019b0000-0000-7000-8000-000000000001".to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
                 model_provider: config.model_provider_id.clone(),
+                history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
                 memory_mode: if config.memories.generate_memories {
                     ThreadMemoryMode::Enabled
                 } else {
@@ -3859,9 +3862,12 @@ async fn attach_in_memory_thread_store(
             dynamic_tools: Vec::new(),
             multi_agent_version: None,
             session_provenance: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
+            initial_window_id: "019b0000-0000-7000-8000-000000000002".to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
                 model_provider: config.model_provider_id.clone(),
+                history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
                 memory_mode: if config.memories.generate_memories {
                     ThreadMemoryMode::Enabled
                 } else {

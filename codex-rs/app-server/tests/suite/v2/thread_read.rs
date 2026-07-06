@@ -1445,6 +1445,7 @@ async fn seed_pathless_store_thread(
             dynamic_tools: Vec::new(),
             multi_agent_version: None,
             history_mode: ThreadHistoryMode::Legacy,
+            initial_window_id: "019b0000-0000-7000-8000-000000001436".to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
                 model_provider: "test-provider".to_string(),

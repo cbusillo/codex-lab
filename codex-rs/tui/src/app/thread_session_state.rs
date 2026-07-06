@@ -414,6 +414,7 @@ mod tests {
             parent_thread_id: None,
             preview: "read thread".to_string(),
             ephemeral: false,
+            history_mode: codex_app_server_protocol::ThreadHistoryMode::Legacy,
             model_provider: "read-provider".to_string(),
             created_at: 1,
             updated_at: 2,

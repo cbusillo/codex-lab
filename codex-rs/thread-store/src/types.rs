@@ -87,6 +87,8 @@ pub struct CreateThreadParams {
     pub multi_agent_version: Option<MultiAgentVersion>,
     /// Persisted thread history contract to use for this new thread.
     pub history_mode: ThreadHistoryMode,
+    /// Initial context-window identity captured when this thread was created.
+    pub initial_window_id: String,
     /// Metadata captured for the newly created thread.
     pub metadata: ThreadPersistenceMetadata,
 }

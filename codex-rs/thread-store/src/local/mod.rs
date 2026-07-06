@@ -1027,6 +1027,7 @@ mod tests {
             dynamic_tools: Vec::new(),
             multi_agent_version: None,
             history_mode: ThreadHistoryMode::Legacy,
+            initial_window_id: "019b0000-0000-7000-8000-000000000000".to_string(),
             metadata: thread_metadata(),
         }
     }

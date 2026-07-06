@@ -78,6 +78,8 @@ async fn write_rollout_with_user_event(dir: &Path, thread_id: ThreadId) -> io::R
             memory_mode: None,
             multi_agent_version: None,
             session_provenance: None,
+            context_window: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
         },
         git: None,
     };
@@ -130,6 +132,8 @@ async fn write_rollout_with_meta_only(dir: &Path, thread_id: ThreadId) -> io::Re
             memory_mode: None,
             multi_agent_version: None,
             session_provenance: None,
+            context_window: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
         },
         git: None,
     };

@@ -102,6 +102,8 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             dynamic_tools: None,
             memory_mode: None,
             multi_agent_version: None,
+            context_window: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
         },
         git: None,
     };
@@ -439,6 +441,59 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
     );
     let text_after_second_persist = std::fs::read_to_string(&rollout_path)?;
     assert_eq!(text_after_second_persist, text);
+
+    recorder.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recorder_writes_initial_context_window_metadata() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let thread_id = ThreadId::new();
+    let initial_window_id = "019b0000-0000-7000-8000-000000000003".to_string();
+    let recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::new(
+            thread_id,
+            /*forked_from_id*/ None,
+            /*parent_thread_id*/ None,
+            SessionSource::Exec,
+            /*thread_source*/ None,
+            BaseInstructions::default(),
+            Vec::new(),
+        )
+        .with_initial_window_id(initial_window_id.clone()),
+    )
+    .await?;
+
+    let rollout_path = recorder.rollout_path().to_path_buf();
+    recorder
+        .record_canonical_items(&[RolloutItem::EventMsg(EventMsg::AgentMessage(
+            AgentMessageEvent {
+                message: "materialize-rollout".to_string(),
+                phase: None,
+                memory_citation: None,
+            },
+        ))])
+        .await?;
+    recorder.flush().await?;
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 0);
+    let RolloutItem::SessionMeta(session_meta) = &items[0] else {
+        panic!("expected session metadata as first rollout item");
+    };
+    assert_eq!(
+        session_meta
+            .meta
+            .context_window
+            .as_ref()
+            .map(|context_window| context_window.window_id.as_str()),
+        Some(initial_window_id.as_str())
+    );
 
     recorder.shutdown().await?;
     Ok(())

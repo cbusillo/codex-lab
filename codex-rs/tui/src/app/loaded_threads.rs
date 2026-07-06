@@ -123,6 +123,7 @@ mod tests {
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
+            history_mode: codex_app_server_protocol::ThreadHistoryMode::Legacy,
             model_provider: "openai".to_string(),
             created_at: 0,
             updated_at: 0,
