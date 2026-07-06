@@ -380,6 +380,7 @@ export type { SkillsListParams } from "./SkillsListParams";
 export type { SkillsListResponse } from "./SkillsListResponse";
 export type { SortDirection } from "./SortDirection";
 export type { SpendControlLimitSnapshot } from "./SpendControlLimitSnapshot";
+export type { SubAgentActivityKind } from "./SubAgentActivityKind";
 export type { SubagentMigration } from "./SubagentMigration";
 export type { SwitchActiveAccountParams } from "./SwitchActiveAccountParams";
 export type { SwitchActiveAccountResponse } from "./SwitchActiveAccountResponse";

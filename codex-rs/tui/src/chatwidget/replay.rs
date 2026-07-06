@@ -190,6 +190,8 @@ impl ChatWidget {
                 reasoning_effort,
                 agents_states,
             }),
+            ThreadItem::SubAgentActivity { .. } => {}
+            ThreadItem::Sleep { .. } => {}
             ThreadItem::DynamicToolCall { .. } => {}
         }
 

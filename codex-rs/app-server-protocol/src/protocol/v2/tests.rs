@@ -1,12 +1,24 @@
 use super::*;
+use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
 use codex_protocol::approvals::ElicitationRequest as CoreElicitationRequest;
+use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
+use codex_protocol::items::CollabAgentToolCallItem;
+use codex_protocol::items::CollabAgentToolCallStatus as CoreCollabAgentToolCallStatus;
+use codex_protocol::items::CommandExecutionItem;
+use codex_protocol::items::CommandExecutionStatus as CoreCommandExecutionStatus;
+use codex_protocol::items::DynamicToolCallItem;
+use codex_protocol::items::DynamicToolCallStatus as CoreDynamicToolCallStatus;
 use codex_protocol::items::FileChangeItem;
 use codex_protocol::items::ImageViewItem;
 use codex_protocol::items::McpToolCallItem;
 use codex_protocol::items::McpToolCallStatus as CoreMcpToolCallStatus;
 use codex_protocol::items::ReasoningItem;
+use codex_protocol::items::SleepItem;
+use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::WebSearchItem;
@@ -21,14 +33,19 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::NetworkPermissions as CoreNetworkPermissions;
 use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::permissions::FileSystemAccessMode as CoreFileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath as CoreFileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry as CoreFileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSpecialPath as CoreFileSystemSpecialPath;
 use codex_protocol::protocol::AgentStatus as CoreAgentStatus;
 use codex_protocol::protocol::AskForApproval as CoreAskForApproval;
+use codex_protocol::protocol::CollabAgentRef;
+use codex_protocol::protocol::ExecCommandSource as CoreExecCommandSource;
 use codex_protocol::protocol::GranularApprovalConfig as CoreGranularApprovalConfig;
 use codex_protocol::protocol::NetworkAccess as CoreNetworkAccess;
+use codex_protocol::protocol::SubAgentActivityKind as CoreSubAgentActivityKind;
 use codex_protocol::request_permissions::RequestPermissionProfile as CoreRequestPermissionProfile;
 use codex_protocol::user_input::UserInput as CoreUserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -2447,6 +2464,148 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             id: "reasoning-1".to_string(),
             summary: vec!["line one".to_string(), "line two".to_string()],
             content: vec![],
+        }
+    );
+
+    let command_item = TurnItem::CommandExecution(CommandExecutionItem {
+        id: "exec-1".to_string(),
+        process_id: Some("proc-1".to_string()),
+        command: vec!["echo".to_string(), "hello world".to_string()],
+        cwd: test_path_buf("/tmp").abs(),
+        parsed_cmd: vec![ParsedCommand::Unknown {
+            cmd: "echo hello world".to_string(),
+        }],
+        source: CoreExecCommandSource::Agent,
+        interaction_input: None,
+        status: CoreCommandExecutionStatus::Completed,
+        stdout: Some("hello world\n".to_string()),
+        stderr: Some(String::new()),
+        aggregated_output: None,
+        exit_code: Some(0),
+        duration: Some(Duration::from_millis(12)),
+        formatted_output: Some("hello world\n".to_string()),
+    });
+
+    assert_eq!(
+        ThreadItem::from(command_item),
+        ThreadItem::CommandExecution {
+            id: "exec-1".to_string(),
+            command: "echo 'hello world'".to_string(),
+            cwd: test_path_buf("/tmp").abs(),
+            process_id: Some("proc-1".to_string()),
+            source: CommandExecutionSource::Agent,
+            status: CommandExecutionStatus::Completed,
+            command_actions: vec![CommandAction::Unknown {
+                command: "echo hello world".to_string(),
+            }],
+            aggregated_output: Some("hello world\n".to_string()),
+            exit_code: Some(0),
+            duration_ms: Some(12),
+        }
+    );
+
+    let dynamic_tool_item = TurnItem::DynamicToolCall(DynamicToolCallItem {
+        id: "dynamic-1".to_string(),
+        namespace: Some("workspace".to_string()),
+        tool: "lookup".to_string(),
+        arguments: json!({"query": "hello"}),
+        status: CoreDynamicToolCallStatus::Failed,
+        content_items: Some(vec![CoreDynamicToolCallOutputContentItem::InputText {
+            text: "result".to_string(),
+        }]),
+        success: Some(false),
+        error: Some("lookup failed".to_string()),
+        duration: Some(Duration::from_millis(7)),
+    });
+
+    assert_eq!(
+        ThreadItem::from(dynamic_tool_item),
+        ThreadItem::DynamicToolCall {
+            id: "dynamic-1".to_string(),
+            namespace: Some("workspace".to_string()),
+            tool: "lookup".to_string(),
+            arguments: json!({"query": "hello"}),
+            status: DynamicToolCallStatus::Failed,
+            content_items: Some(vec![DynamicToolCallOutputContentItem::InputText {
+                text: "result".to_string(),
+            }]),
+            success: Some(false),
+            error: Some("lookup failed".to_string()),
+            duration_ms: Some(7),
+        }
+    );
+
+    let sender_thread_id = ThreadId::new();
+    let receiver_thread_id = ThreadId::new();
+    let collab_item = TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+        id: "collab-1".to_string(),
+        tool: CoreCollabAgentTool::SpawnAgent,
+        status: CoreCollabAgentToolCallStatus::Completed,
+        sender_thread_id,
+        receiver_thread_ids: vec![receiver_thread_id],
+        receiver_agents: vec![CollabAgentRef {
+            thread_id: receiver_thread_id,
+            agent_nickname: Some("reviewer".to_string()),
+            agent_role: Some("review".to_string()),
+        }],
+        prompt: Some("check this".to_string()),
+        model: Some("gpt-test".to_string()),
+        reasoning_effort: Some(ReasoningEffort::High),
+        agents_states: [(receiver_thread_id, CoreAgentStatus::Running)]
+            .into_iter()
+            .collect(),
+    });
+
+    assert_eq!(
+        ThreadItem::from(collab_item),
+        ThreadItem::CollabAgentToolCall {
+            id: "collab-1".to_string(),
+            tool: CollabAgentTool::SpawnAgent,
+            status: CollabAgentToolCallStatus::Completed,
+            sender_thread_id: sender_thread_id.to_string(),
+            receiver_thread_ids: vec![receiver_thread_id.to_string()],
+            prompt: Some("check this".to_string()),
+            model: Some("gpt-test".to_string()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            agents_states: [(
+                receiver_thread_id.to_string(),
+                CollabAgentState {
+                    status: CollabAgentStatus::Running,
+                    message: None,
+                }
+            )]
+            .into_iter()
+            .collect(),
+        }
+    );
+
+    let sub_agent_item = TurnItem::SubAgentActivity(SubAgentActivityItem {
+        id: "activity-1".to_string(),
+        kind: CoreSubAgentActivityKind::Interacted,
+        agent_thread_id: receiver_thread_id,
+        agent_path: AgentPath::try_from("/root/reviewer").expect("agent path"),
+    });
+
+    assert_eq!(
+        ThreadItem::from(sub_agent_item),
+        ThreadItem::SubAgentActivity {
+            id: "activity-1".to_string(),
+            kind: SubAgentActivityKind::Interacted,
+            agent_thread_id: receiver_thread_id.to_string(),
+            agent_path: "/root/reviewer".to_string(),
+        }
+    );
+
+    let sleep_item = TurnItem::Sleep(SleepItem {
+        id: "sleep-1".to_string(),
+        duration_ms: 500,
+    });
+
+    assert_eq!(
+        ThreadItem::from(sleep_item),
+        ThreadItem::Sleep {
+            id: "sleep-1".to_string(),
+            duration_ms: 500,
         }
     );
 

@@ -29,6 +29,8 @@ use codex_protocol::protocol::GuardianRiskLevel as CoreGuardianRiskLevel;
 use codex_protocol::protocol::GuardianUserAuthorization as CoreGuardianUserAuthorization;
 use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatus;
 use codex_protocol::protocol::ReviewDecision as CoreReviewDecision;
+use codex_protocol::protocol::SubAgentActivityKind as CoreSubAgentActivityKind;
+use codex_shell_command::parse_command::shlex_join;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -307,6 +309,7 @@ pub enum ThreadItem {
         status: DynamicToolCallStatus,
         content_items: Option<Vec<DynamicToolCallOutputContentItem>>,
         success: Option<bool>,
+        error: Option<String>,
         /// The duration of the dynamic tool call in milliseconds.
         #[ts(type = "number | null")]
         duration_ms: Option<i64>,
@@ -336,6 +339,14 @@ pub enum ThreadItem {
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
+    SubAgentActivity {
+        id: String,
+        kind: SubAgentActivityKind,
+        agent_thread_id: String,
+        agent_path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
     WebSearch {
         id: String,
         query: String,
@@ -344,6 +355,13 @@ pub enum ThreadItem {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     ImageView { id: String, path: AbsolutePathBuf },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Sleep {
+        id: String,
+        #[ts(type = "number")]
+        duration_ms: u64,
+    },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     ImageGeneration {
@@ -387,8 +405,10 @@ impl ThreadItem {
             | ThreadItem::McpToolCall { id, .. }
             | ThreadItem::DynamicToolCall { id, .. }
             | ThreadItem::CollabAgentToolCall { id, .. }
+            | ThreadItem::SubAgentActivity { id, .. }
             | ThreadItem::WebSearch { id, .. }
             | ThreadItem::ImageView { id, .. }
+            | ThreadItem::Sleep { id, .. }
             | ThreadItem::ImageGeneration { id, .. }
             | ThreadItem::EnteredReviewMode { id, .. }
             | ThreadItem::ExitedReviewMode { id, .. }
@@ -815,6 +835,72 @@ impl From<CoreTurnItem> for ThreadItem {
                 summary: reasoning.summary_text,
                 content: reasoning.raw_content,
             },
+            CoreTurnItem::CommandExecution(command) => ThreadItem::CommandExecution {
+                id: command.id,
+                command: shlex_join(&command.command),
+                cwd: command.cwd.clone(),
+                process_id: command.process_id,
+                source: command.source.into(),
+                status: command.status.into(),
+                command_actions: command
+                    .parsed_cmd
+                    .into_iter()
+                    .map(|parsed| CommandAction::from_core_with_cwd(parsed, &command.cwd))
+                    .collect(),
+                aggregated_output: command_output_text(
+                    command.aggregated_output,
+                    command.stdout,
+                    command.stderr,
+                    command.formatted_output,
+                ),
+                exit_code: command.exit_code,
+                duration_ms: command
+                    .duration
+                    .and_then(|duration| i64::try_from(duration.as_millis()).ok()),
+            },
+            CoreTurnItem::DynamicToolCall(call) => ThreadItem::DynamicToolCall {
+                id: call.id,
+                namespace: call.namespace,
+                tool: call.tool,
+                arguments: call.arguments,
+                status: call.status.into(),
+                content_items: call.content_items.map(|items| {
+                    items
+                        .into_iter()
+                        .map(DynamicToolCallOutputContentItem::from)
+                        .collect()
+                }),
+                success: call.success,
+                error: call.error,
+                duration_ms: call
+                    .duration
+                    .and_then(|duration| i64::try_from(duration.as_millis()).ok()),
+            },
+            CoreTurnItem::CollabAgentToolCall(call) => ThreadItem::CollabAgentToolCall {
+                id: call.id,
+                tool: call.tool.into(),
+                status: call.status.into(),
+                sender_thread_id: call.sender_thread_id.to_string(),
+                receiver_thread_ids: call
+                    .receiver_thread_ids
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                prompt: call.prompt,
+                model: call.model,
+                reasoning_effort: call.reasoning_effort,
+                agents_states: call
+                    .agents_states
+                    .into_iter()
+                    .map(|(thread_id, status)| (thread_id.to_string(), status.into()))
+                    .collect(),
+            },
+            CoreTurnItem::SubAgentActivity(activity) => ThreadItem::SubAgentActivity {
+                id: activity.id,
+                kind: activity.kind.into(),
+                agent_thread_id: activity.agent_thread_id.to_string(),
+                agent_path: String::from(activity.agent_path),
+            },
             CoreTurnItem::WebSearch(search) => ThreadItem::WebSearch {
                 id: search.id,
                 query: search.query,
@@ -823,6 +909,10 @@ impl From<CoreTurnItem> for ThreadItem {
             CoreTurnItem::ImageView(image) => ThreadItem::ImageView {
                 id: image.id,
                 path: image.path,
+            },
+            CoreTurnItem::Sleep(sleep) => ThreadItem::Sleep {
+                id: sleep.id,
+                duration_ms: sleep.duration_ms,
             },
             CoreTurnItem::ImageGeneration(image) => ThreadItem::ImageGeneration {
                 id: image.id,
@@ -865,6 +955,28 @@ impl From<CoreTurnItem> for ThreadItem {
     }
 }
 
+fn command_output_text(
+    aggregated_output: Option<String>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    formatted_output: Option<String>,
+) -> Option<String> {
+    let combined_output = match (
+        stdout.filter(|output| !output.is_empty()),
+        stderr.filter(|output| !output.is_empty()),
+    ) {
+        (Some(stdout), Some(stderr)) => Some(format!("{stdout}{stderr}")),
+        (Some(stdout), None) => Some(stdout),
+        (None, Some(stderr)) => Some(stderr),
+        (None, None) => None,
+    };
+
+    [aggregated_output, combined_output, formatted_output]
+        .into_iter()
+        .flatten()
+        .find(|output| !output.is_empty())
+}
+
 impl From<codex_protocol::items::HookPromptFragment> for HookPromptFragment {
     fn from(value: codex_protocol::items::HookPromptFragment) -> Self {
         Self {
@@ -900,6 +1012,17 @@ impl From<&CoreExecCommandStatus> for CommandExecutionStatus {
     }
 }
 
+impl From<codex_protocol::items::CommandExecutionStatus> for CommandExecutionStatus {
+    fn from(value: codex_protocol::items::CommandExecutionStatus) -> Self {
+        match value {
+            codex_protocol::items::CommandExecutionStatus::InProgress => Self::InProgress,
+            codex_protocol::items::CommandExecutionStatus::Completed => Self::Completed,
+            codex_protocol::items::CommandExecutionStatus::Failed => Self::Failed,
+            codex_protocol::items::CommandExecutionStatus::Declined => Self::Declined,
+        }
+    }
+}
+
 v2_enum_from_core! {
     #[derive(Default)]
     pub enum CommandExecutionSource from CoreExecCommandSource {
@@ -920,6 +1043,18 @@ pub enum CollabAgentTool {
     ResumeAgent,
     Wait,
     CloseAgent,
+}
+
+impl From<codex_protocol::items::CollabAgentTool> for CollabAgentTool {
+    fn from(value: codex_protocol::items::CollabAgentTool) -> Self {
+        match value {
+            codex_protocol::items::CollabAgentTool::SpawnAgent => Self::SpawnAgent,
+            codex_protocol::items::CollabAgentTool::SendInput => Self::SendInput,
+            codex_protocol::items::CollabAgentTool::ResumeAgent => Self::ResumeAgent,
+            codex_protocol::items::CollabAgentTool::Wait => Self::Wait,
+            codex_protocol::items::CollabAgentTool::CloseAgent => Self::CloseAgent,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -995,6 +1130,16 @@ pub enum DynamicToolCallStatus {
     Failed,
 }
 
+impl From<codex_protocol::items::DynamicToolCallStatus> for DynamicToolCallStatus {
+    fn from(value: codex_protocol::items::DynamicToolCallStatus) -> Self {
+        match value {
+            codex_protocol::items::DynamicToolCallStatus::InProgress => Self::InProgress,
+            codex_protocol::items::DynamicToolCallStatus::Completed => Self::Completed,
+            codex_protocol::items::DynamicToolCallStatus::Failed => Self::Failed,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -1002,6 +1147,35 @@ pub enum CollabAgentToolCallStatus {
     InProgress,
     Completed,
     Failed,
+}
+
+impl From<codex_protocol::items::CollabAgentToolCallStatus> for CollabAgentToolCallStatus {
+    fn from(value: codex_protocol::items::CollabAgentToolCallStatus) -> Self {
+        match value {
+            codex_protocol::items::CollabAgentToolCallStatus::InProgress => Self::InProgress,
+            codex_protocol::items::CollabAgentToolCallStatus::Completed => Self::Completed,
+            codex_protocol::items::CollabAgentToolCallStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum SubAgentActivityKind {
+    Started,
+    Interacted,
+    Interrupted,
+}
+
+impl From<CoreSubAgentActivityKind> for SubAgentActivityKind {
+    fn from(value: CoreSubAgentActivityKind) -> Self {
+        match value {
+            CoreSubAgentActivityKind::Started => Self::Started,
+            CoreSubAgentActivityKind::Interacted => Self::Interacted,
+            CoreSubAgentActivityKind::Interrupted => Self::Interrupted,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1387,6 +1561,21 @@ pub enum DynamicToolCallOutputContentItem {
     InputText { text: String },
     #[serde(rename_all = "camelCase")]
     InputImage { image_url: String },
+}
+
+impl From<codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem>
+    for DynamicToolCallOutputContentItem
+{
+    fn from(item: codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem) -> Self {
+        match item {
+            codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText { text } => {
+                Self::InputText { text }
+            }
+            codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputImage {
+                image_url,
+            } => Self::InputImage { image_url },
+        }
+    }
 }
 
 impl From<DynamicToolCallOutputContentItem>
