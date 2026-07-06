@@ -1826,6 +1826,7 @@ fn thread_list_params(
         cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().into_owned())),
         use_state_db_only: false,
         search_term: None,
+        descendant_of_thread_id: None,
     }
 }
 

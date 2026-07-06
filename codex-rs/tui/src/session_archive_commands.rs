@@ -147,6 +147,7 @@ async fn lookup_session_by_exact_name(
                 cwd: None,
                 use_state_db_only: false,
                 search_term: Some(name.to_string()),
+                descendant_of_thread_id: None,
             })
             .await
             .wrap_err("failed to list sessions while resolving session name")?;

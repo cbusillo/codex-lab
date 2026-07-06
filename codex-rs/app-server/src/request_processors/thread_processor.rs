@@ -13,6 +13,7 @@ struct ThreadListFilters {
     archived: bool,
     cwd_filters: Option<Vec<PathBuf>>,
     search_term: Option<String>,
+    descendant_thread_ids: Option<HashSet<ThreadId>>,
     use_state_db_only: bool,
 }
 
@@ -1795,8 +1796,12 @@ impl ThreadRequestProcessor {
             cwd,
             use_state_db_only,
             search_term,
+            descendant_of_thread_id,
         } = params;
         let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
+        let descendant_thread_ids = self
+            .resolve_descendant_thread_filter(descendant_of_thread_id)
+            .await?;
 
         let requested_page_size = limit
             .map(|value| value as usize)
@@ -1819,6 +1824,7 @@ impl ThreadRequestProcessor {
                     archived: archived.unwrap_or(false),
                     cwd_filters,
                     search_term,
+                    descendant_thread_ids,
                     use_state_db_only,
                 },
             )
@@ -3497,8 +3503,15 @@ impl ThreadRequestProcessor {
             archived,
             cwd_filters,
             search_term,
+            descendant_thread_ids,
             use_state_db_only,
         } = filters;
+        if descendant_thread_ids
+            .as_ref()
+            .is_some_and(HashSet::is_empty)
+        {
+            return Ok((Vec::new(), None));
+        }
         let mut cursor_obj = cursor;
         let mut last_cursor = cursor_obj.clone();
         let mut remaining = requested_page_size;
@@ -3515,7 +3528,12 @@ impl ThreadRequestProcessor {
             }
             None => Some(vec![self.config.model_provider_id.clone()]),
         };
-        let (allowed_sources_vec, source_kind_filter) = compute_source_filters(source_kinds);
+        let (allowed_sources_vec, source_kind_filter) =
+            if source_kinds.is_none() && descendant_thread_ids.is_some() {
+                (Vec::new(), None)
+            } else {
+                compute_source_filters(source_kinds)
+            };
         let allowed_sources = allowed_sources_vec.as_slice();
         let store_sort_direction = match sort_direction {
             SortDirection::Asc => StoreSortDirection::Asc,
@@ -3551,6 +3569,9 @@ impl ThreadRequestProcessor {
                 if source_kind_filter
                     .as_ref()
                     .is_none_or(|filter| source_kind_matches(&source, filter))
+                    && descendant_thread_ids
+                        .as_ref()
+                        .is_none_or(|thread_ids| thread_ids.contains(&it.thread_id))
                     && cwd_filters.as_ref().is_none_or(|expected_cwds| {
                         expected_cwds.iter().any(|expected_cwd| {
                             path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
@@ -3585,6 +3606,31 @@ impl ThreadRequestProcessor {
         }
 
         Ok((items, next_cursor))
+    }
+
+    async fn resolve_descendant_thread_filter(
+        &self,
+        descendant_of_thread_id: Option<String>,
+    ) -> Result<Option<HashSet<ThreadId>>, JSONRPCErrorError> {
+        let Some(descendant_of_thread_id) = descendant_of_thread_id else {
+            return Ok(None);
+        };
+        let root_thread_id = ThreadId::from_string(&descendant_of_thread_id)
+            .map_err(|err| invalid_request(format!("invalid descendantOfThreadId: {err}")))?;
+        let Some(state_db_ctx) = self.state_db.as_ref() else {
+            return Err(invalid_request(
+                "descendantOfThreadId requires local state DB thread graph support",
+            ));
+        };
+        let descendants = state_db_ctx
+            .list_thread_spawn_descendants(root_thread_id)
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to list spawned descendants for session {root_thread_id}: {err}"
+                ))
+            })?;
+        Ok(Some(descendants.into_iter().collect()))
     }
 }
 
