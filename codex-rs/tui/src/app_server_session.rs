@@ -2407,6 +2407,7 @@ mod tests {
                 parent_thread_id: None,
                 preview: "hello".to_string(),
                 ephemeral: false,
+                history_mode: codex_app_server_protocol::ThreadHistoryMode::Legacy,
                 model_provider: "openai".to_string(),
                 created_at: 1,
                 updated_at: 2,

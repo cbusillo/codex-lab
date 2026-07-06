@@ -544,6 +544,7 @@ impl Session {
             }
         });
         let agent_control = agent_control.with_session_id(session_id);
+        let initial_window_id = format!("{thread_id}:0");
         let window_generation = match &initial_history {
             InitialHistory::Resumed(resumed_history) => u64::try_from(
                 resumed_history
@@ -612,6 +613,7 @@ impl Session {
                                 dynamic_tools: session_configuration.dynamic_tools.clone(),
                                 multi_agent_version: initial_multi_agent_version,
                                 history_mode,
+                                initial_window_id: initial_window_id.clone(),
                                 metadata: ThreadPersistenceMetadata {
                                     cwd: Some(config.cwd.to_path_buf()),
                                     model_provider: config.model_provider_id.clone(),

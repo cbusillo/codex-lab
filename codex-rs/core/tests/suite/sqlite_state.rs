@@ -15,6 +15,7 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::RolloutRecorder;
 use core_test_support::responses;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -89,6 +90,23 @@ async fn new_thread_is_recorded_in_state_db() -> Result<()> {
     assert!(
         rollout_path.exists(),
         "rollout should be materialized after first user message"
+    );
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 0);
+    let RolloutItem::SessionMeta(session_meta) = &items[0] else {
+        panic!("expected session metadata as first rollout item");
+    };
+    let expected_initial_window_id = format!("{thread_id}:0");
+    assert_eq!(
+        session_meta
+            .meta
+            .context_window
+            .as_ref()
+            .map(|context_window| context_window.window_id.as_str()),
+        Some(expected_initial_window_id.as_str())
     );
 
     Ok(())
@@ -225,6 +243,8 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                     memory_mode: None,
                     multi_agent_version: None,
                     session_provenance: None,
+                    context_window: None,
+                    history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
                 },
                 git: None,
             };

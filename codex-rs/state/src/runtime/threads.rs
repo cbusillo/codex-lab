@@ -1473,6 +1473,7 @@ mod tests {
                 dynamic_tools: None,
                 memory_mode: Some("polluted".to_string()),
                 multi_agent_version: None,
+                context_window: None,
                 history_mode: ThreadHistoryMode::Legacy,
             },
             git: None,
@@ -1537,6 +1538,7 @@ mod tests {
                 dynamic_tools: None,
                 memory_mode: None,
                 multi_agent_version: None,
+                context_window: None,
                 history_mode: ThreadHistoryMode::Legacy,
             },
             git: Some(GitInfo {

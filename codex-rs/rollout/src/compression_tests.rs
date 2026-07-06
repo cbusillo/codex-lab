@@ -476,6 +476,8 @@ fn write_rollout(path: &std::path::Path, thread_id: ThreadId, message: &str) -> 
             dynamic_tools: None,
             memory_mode: None,
             multi_agent_version: None,
+            context_window: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
         },
         git: None,
     };
