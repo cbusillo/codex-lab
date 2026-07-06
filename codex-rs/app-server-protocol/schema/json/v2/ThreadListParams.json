@@ -70,6 +70,13 @@
       ],
       "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
     },
+    "descendantOfThreadId": {
+      "description": "Optional root thread id; when set, only persisted spawned descendants of this thread are returned.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "limit": {
       "description": "Optional page size; defaults to a reasonable server-side value.",
       "format": "uint32",

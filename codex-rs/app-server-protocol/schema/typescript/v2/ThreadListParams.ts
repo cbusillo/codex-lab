@@ -51,4 +51,9 @@ useStateDbOnly?: boolean,
 /**
  * Optional substring filter for the extracted thread title.
  */
-searchTerm?: string | null, };
+searchTerm?: string | null,
+/**
+ * Optional root thread id; when set, only persisted spawned descendants
+ * of this thread are returned.
+ */
+descendantOfThreadId?: string | null, };

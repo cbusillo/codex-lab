@@ -1003,6 +1003,10 @@ pub struct ThreadListParams {
     /// Optional substring filter for the extracted thread title.
     #[ts(optional = nullable)]
     pub search_term: Option<String>,
+    /// Optional root thread id; when set, only persisted spawned descendants
+    /// of this thread are returned.
+    #[ts(optional = nullable)]
+    pub descendant_of_thread_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
