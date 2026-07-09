@@ -6430,6 +6430,65 @@ async fn turn_environments_set_primary_environment() {
 }
 
 #[tokio::test]
+async fn new_turn_caps_stored_thread_environments_without_explicit_update() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let session_cwd = session.get_config().await.cwd.clone();
+    for idx in 1..crate::environment_selection::MAX_TURN_ENVIRONMENTS {
+        session
+            .services
+            .environment_manager
+            .upsert_environment(
+                format!("remote-{idx}"),
+                format!("ws://127.0.0.1:{}", 8765 + idx),
+            )
+            .expect("register environment");
+    }
+
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.environments = std::iter::once(TurnEnvironmentSelection {
+            environment_id: "local".to_string(),
+            cwd: session_cwd.clone(),
+        })
+        .chain(
+            (1..crate::environment_selection::MAX_TURN_ENVIRONMENTS).map(|idx| {
+                TurnEnvironmentSelection {
+                    environment_id: format!("remote-{idx}"),
+                    cwd: session_cwd.clone(),
+                }
+            }),
+        )
+        .chain(std::iter::once(TurnEnvironmentSelection {
+            environment_id: "unknown-after-cap".to_string(),
+            cwd: session_cwd.clone(),
+        }))
+        .collect();
+    }
+
+    let turn_context = session
+        .new_turn_with_sub_id("sub-1".to_string(), SessionSettingsUpdate::default())
+        .await
+        .expect("stored over-cap environments should be capped");
+
+    assert_eq!(
+        turn_context.environments.turn_environments.len(),
+        crate::environment_selection::MAX_TURN_ENVIRONMENTS
+    );
+    assert_eq!(
+        turn_context
+            .environments
+            .turn_environments
+            .last()
+            .expect("last capped environment")
+            .environment_id,
+        format!(
+            "remote-{}",
+            crate::environment_selection::MAX_TURN_ENVIRONMENTS - 1
+        )
+    );
+}
+
+#[tokio::test]
 async fn turn_context_item_persists_resolved_turn_environments() {
     let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
     let selected_cwd =

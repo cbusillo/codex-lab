@@ -38,7 +38,7 @@ const SIDE_STARTING_CONTEXT_LABEL: &str = "Side starting...";
 const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
-const LOGIN_USAGE: &str = "Usage: /login [default|<profile>|add <profile>]";
+const LOGIN_USAGE: &str = "Usage: /login [add|default|<profile>|add <profile>]";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 
 impl ChatWidget {
@@ -73,6 +73,11 @@ impl ChatWidget {
     }
 
     fn handle_login_command_args(&mut self, trimmed: &str) {
+        if trimmed.eq_ignore_ascii_case("add") {
+            self.app_event_tx.send(AppEvent::ShowLoginAddAccount);
+            return;
+        }
+
         if trimmed.eq_ignore_ascii_case("default") {
             self.app_event_tx.send(AppEvent::SwitchAuthProfile {
                 selection: AuthProfileSelection::Default,

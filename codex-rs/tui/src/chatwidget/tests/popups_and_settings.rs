@@ -2241,11 +2241,23 @@ async fn settings_popup_includes_accounts() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert!(popup.contains("Settings"));
-    assert!(popup.contains("Accounts"));
+    assert!(popup.contains("Manage accounts"));
+    assert!(popup.contains("Add, switch, or disconnect stored accounts."));
+    assert!(popup.contains("Account switching"));
     assert!(popup.contains("Configure automatic account switching."));
     assert!(popup.contains("Agents"));
     assert!(popup.contains("Check third-party agent CLIs used by spawn_agent."));
 
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowLoginAccounts));
+
+    chat.open_settings_popup();
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAccountSwitchSettings));
+
+    chat.open_settings_popup();
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAgentsSettings));
