@@ -370,6 +370,7 @@ use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::AuthManager;
 use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
+use codex_login::PreviousAuthHandling;
 use codex_login::ServerOptions as LoginServerOptions;
 use codex_login::ShutdownHandle;
 use codex_login::auth::login_with_chatgpt_auth_tokens;

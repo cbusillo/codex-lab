@@ -2708,11 +2708,12 @@ mod tests {
     }
 
     #[test]
-    fn serialize_account_login_chatgpt() -> Result<()> {
+    fn serialize_account_login_chatgpt_preserves_existing_account() -> Result<()> {
         let request = ClientRequest::LoginAccount {
             request_id: RequestId::Integer(3),
             params: v2::LoginAccountParams::Chatgpt {
                 codex_streamlined_login: false,
+                preserve_existing_account: true,
             },
         };
         assert_eq!(
@@ -2720,7 +2721,8 @@ mod tests {
                 "method": "account/login/start",
                 "id": 3,
                 "params": {
-                    "type": "chatgpt"
+                    "type": "chatgpt",
+                    "preserveExistingAccount": true
                 }
             }),
             serde_json::to_value(&request)?,
@@ -2734,6 +2736,7 @@ mod tests {
             request_id: RequestId::Integer(3),
             params: v2::LoginAccountParams::Chatgpt {
                 codex_streamlined_login: true,
+                preserve_existing_account: false,
             },
         };
         assert_eq!(
@@ -2754,7 +2757,9 @@ mod tests {
     fn serialize_account_login_chatgpt_device_code() -> Result<()> {
         let request = ClientRequest::LoginAccount {
             request_id: RequestId::Integer(4),
-            params: v2::LoginAccountParams::ChatgptDeviceCode,
+            params: v2::LoginAccountParams::ChatgptDeviceCode {
+                preserve_existing_account: false,
+            },
         };
         assert_eq!(
             json!({

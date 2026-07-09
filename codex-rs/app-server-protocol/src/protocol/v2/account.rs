@@ -58,10 +58,17 @@ pub enum LoginAccountParams {
     Chatgpt {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         codex_streamlined_login: bool,
+        /// Preserve the previously stored ChatGPT account instead of revoking and removing it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        preserve_existing_account: bool,
     },
-    #[serde(rename = "chatgptDeviceCode")]
-    #[ts(rename = "chatgptDeviceCode")]
-    ChatgptDeviceCode,
+    #[serde(rename = "chatgptDeviceCode", rename_all = "camelCase")]
+    #[ts(rename = "chatgptDeviceCode", rename_all = "camelCase")]
+    ChatgptDeviceCode {
+        /// Preserve the previously stored ChatGPT account instead of revoking and removing it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        preserve_existing_account: bool,
+    },
     /// [UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE.
     /// The access token must contain the same scopes that Codex-managed ChatGPT auth tokens have.
     #[experimental("account/login/start.chatgptAuthTokens")]

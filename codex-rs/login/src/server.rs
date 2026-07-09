@@ -74,7 +74,18 @@ pub struct ServerOptions {
     pub force_state: Option<String>,
     pub forced_chatgpt_workspace_id: Option<Vec<String>>,
     pub codex_streamlined_login: bool,
+    pub previous_auth_handling: PreviousAuthHandling,
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+}
+
+/// Controls what happens to an existing ChatGPT login when a new one is saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviousAuthHandling {
+    /// Revoke superseded credentials and remove a different previous account from local storage.
+    RevokeAndRemoveStoredAccount,
+    /// Keep a different previous account stored, while still revoking superseded credentials when
+    /// re-authenticating the same account.
+    PreserveStoredAccount,
 }
 
 impl ServerOptions {
@@ -94,7 +105,26 @@ impl ServerOptions {
             force_state: None,
             forced_chatgpt_workspace_id,
             codex_streamlined_login: false,
+            previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
             cli_auth_credentials_store_mode,
+        }
+    }
+
+    /// Creates a server configuration that preserves the previously stored account.
+    pub fn new_for_add_account(
+        codex_home: PathBuf,
+        client_id: String,
+        forced_chatgpt_workspace_id: Option<Vec<String>>,
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+    ) -> Self {
+        Self {
+            previous_auth_handling: PreviousAuthHandling::PreserveStoredAccount,
+            ..Self::new(
+                codex_home,
+                client_id,
+                forced_chatgpt_workspace_id,
+                cli_auth_credentials_store_mode,
+            )
         }
     }
 }
@@ -365,6 +395,7 @@ async fn process_request(
                         tokens.access_token.clone(),
                         tokens.refresh_token.clone(),
                         opts.cli_auth_credentials_store_mode,
+                        opts.previous_auth_handling,
                     )
                     .await
                     {
@@ -796,6 +827,7 @@ pub(crate) async fn persist_tokens_async(
     access_token: String,
     refresh_token: String,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    previous_auth_handling: PreviousAuthHandling,
 ) -> io::Result<()> {
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
@@ -836,9 +868,15 @@ pub(crate) async fn persist_tokens_async(
     .await
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))??;
 
-    if should_revoke_auth_tokens(previous_auth.as_ref(), &auth) {
+    let previous_account_matches = login_account_matches_auth(previous_auth.as_ref(), &auth);
+    let should_revoke_previous = should_revoke_auth_tokens(previous_auth.as_ref(), &auth)
+        && (previous_auth_handling == PreviousAuthHandling::RevokeAndRemoveStoredAccount
+            || previous_account_matches);
+    if should_revoke_previous {
         let revoke_result = revoke_auth_tokens(previous_auth.as_ref()).await;
-        if !login_account_matches_auth(previous_auth.as_ref(), &auth) {
+        if previous_auth_handling == PreviousAuthHandling::RevokeAndRemoveStoredAccount
+            && !previous_account_matches
+        {
             remove_login_account_best_effort(
                 &codex_home,
                 previous_auth.as_ref(),
@@ -1211,6 +1249,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::DEFAULT_ISSUER;
+    use super::PreviousAuthHandling;
     use super::TokenEndpointErrorDetail;
     use super::compose_success_url;
     use super::html_escape;
@@ -1271,6 +1310,7 @@ mod tests {
             "new-access".to_string(),
             "new-refresh".to_string(),
             AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         )
         .await?;
 
@@ -1351,6 +1391,7 @@ mod tests {
             "new-access".to_string(),
             "new-refresh".to_string(),
             AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         )
         .await?;
 
@@ -1361,6 +1402,147 @@ mod tests {
         assert_eq!(tokens.account_id.as_deref(), Some("new-account"));
         assert_eq!(tokens.access_token, "new-access");
 
+        server.verify().await;
+        Ok(())
+    }
+
+    #[serial_test::serial(logout_revoke)]
+    #[tokio::test]
+    async fn persist_tokens_async_preserves_previous_account_when_adding_account()
+    -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let _env_guard = EnvGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            format!("{}/oauth/revoke", server.uri()),
+        );
+
+        let codex_home = tempdir()?;
+        let old_auth = chatgpt_auth("old-access", "old-refresh", "old-account");
+        save_auth(codex_home.path(), &old_auth, AuthCredentialsStoreMode::File)?;
+        let old_tokens = old_auth
+            .tokens
+            .as_ref()
+            .context("old tokens should exist")?;
+        upsert_chatgpt_account(
+            codex_home.path(),
+            old_tokens.clone(),
+            chrono::Utc::now(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )?;
+
+        persist_tokens_async(
+            codex_home.path(),
+            /*api_key*/ None,
+            jwt_for_account("new-account"),
+            "new-access".to_string(),
+            "new-refresh".to_string(),
+            AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::PreserveStoredAccount,
+        )
+        .await?;
+
+        let accounts = list_accounts(codex_home.path())?;
+        assert_eq!(accounts.len(), 2);
+        let account_ids = accounts
+            .iter()
+            .map(|account| {
+                account
+                    .tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.account_id.as_deref())
+            })
+            .collect::<Vec<_>>();
+        assert!(account_ids.contains(&Some("old-account")));
+        assert!(account_ids.contains(&Some("new-account")));
+        let active_account_id = crate::auth_accounts::get_active_account_id(codex_home.path())?
+            .context("active account should be set")?;
+        let active_account = accounts
+            .iter()
+            .find(|account| account.id == active_account_id)
+            .context("active account should be listed")?;
+        let active_tokens = active_account
+            .tokens
+            .as_ref()
+            .context("active account tokens")?;
+        assert_eq!(active_tokens.account_id.as_deref(), Some("new-account"));
+
+        let requests = server
+            .received_requests()
+            .await
+            .context("failed to fetch revoke requests")?;
+        assert_eq!(requests.len(), 0);
+        Ok(())
+    }
+
+    #[serial_test::serial(logout_revoke)]
+    #[tokio::test]
+    async fn persist_tokens_async_revokes_superseded_token_when_readding_same_account()
+    -> anyhow::Result<()> {
+        skip_if_no_network!(Ok(()));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env_guard = EnvGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            format!("{}/oauth/revoke", server.uri()),
+        );
+
+        let codex_home = tempdir()?;
+        let old_auth = chatgpt_auth("old-access", "old-refresh", "same-account");
+        save_auth(codex_home.path(), &old_auth, AuthCredentialsStoreMode::File)?;
+        let old_tokens = old_auth
+            .tokens
+            .as_ref()
+            .context("old tokens should exist")?;
+        upsert_chatgpt_account(
+            codex_home.path(),
+            old_tokens.clone(),
+            chrono::Utc::now(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )?;
+
+        persist_tokens_async(
+            codex_home.path(),
+            /*api_key*/ None,
+            jwt_for_account("same-account"),
+            "new-access".to_string(),
+            "new-refresh".to_string(),
+            AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::PreserveStoredAccount,
+        )
+        .await?;
+
+        let accounts = list_accounts(codex_home.path())?;
+        assert_eq!(accounts.len(), 1);
+        let tokens = accounts[0]
+            .tokens
+            .as_ref()
+            .context("updated account tokens")?;
+        assert_eq!(tokens.account_id.as_deref(), Some("same-account"));
+        assert_eq!(tokens.refresh_token, "new-refresh");
+
+        let requests = server
+            .received_requests()
+            .await
+            .context("failed to fetch revoke requests")?;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .body_json::<Value>()
+                .context("revoke request should be JSON")?,
+            json!({
+                "token": "old-refresh",
+                "token_type_hint": "refresh_token",
+                "client_id": crate::auth::CLIENT_ID,
+            })
+        );
         server.verify().await;
         Ok(())
     }
@@ -1390,6 +1572,7 @@ mod tests {
             "new-access".to_string(),
             "shared-refresh".to_string(),
             AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         )
         .await?;
 
