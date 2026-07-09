@@ -357,6 +357,15 @@ async fn login_slash_command_add_selection_opens_add_account_flow() {
 }
 
 #[tokio::test]
+async fn login_slash_command_add_arg_opens_add_account_flow() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Login, "add".to_string(), Vec::new());
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowLoginAddAccount));
+}
+
+#[tokio::test]
 async fn login_slash_command_stored_account_selection_switches_account() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let account = codex_login::upsert_api_key_account(

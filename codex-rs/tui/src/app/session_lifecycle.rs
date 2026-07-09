@@ -1178,6 +1178,7 @@ impl App {
 
     pub(super) async fn switch_auth_account(
         &mut self,
+        tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         selection: AuthAccountSelection,
     ) {
@@ -1188,6 +1189,94 @@ impl App {
                 "Cannot switch stored accounts while the primary thread is still attaching."
                     .to_string(),
             );
+            return;
+        }
+
+        if matches!(self.app_server_target, crate::AppServerTarget::Embedded)
+            && self.config.auth_home != self.config.codex_home
+        {
+            let previous_auth = match codex_login::load_auth_dot_json(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            ) {
+                Ok(previous_auth) => previous_auth,
+                Err(err) => {
+                    self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(
+                            LoginAccountsFeedback::Error(format!(
+                                "Failed to read current default account before selecting {}: {err}",
+                                selection.label
+                            )),
+                        ));
+                    return;
+                }
+            };
+            let previous_active_account_id =
+                match codex_login::get_active_account_id(&self.config.codex_home) {
+                    Ok(previous_active_account_id) => previous_active_account_id,
+                    Err(err) => {
+                        self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(
+                            LoginAccountsFeedback::Error(format!(
+                                "Failed to read current active account before selecting {}: {err}",
+                                selection.label
+                            )),
+                        ));
+                        return;
+                    }
+                };
+
+            match codex_login::activate_account(
+                &self.config.codex_home,
+                &selection.account_id,
+                self.config.cli_auth_credentials_store_mode,
+            ) {
+                Ok(_account) => {}
+                Err(err) => {
+                    self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(
+                            LoginAccountsFeedback::Error(format!(
+                                "Failed to activate stored account {}: {err}",
+                                selection.label
+                            )),
+                        ));
+                    return;
+                }
+            }
+
+            match self
+                .restart_default_auth_session_after_account_switch(
+                    tui,
+                    app_server,
+                    &selection.label,
+                )
+                .await
+            {
+                Ok(()) => {
+                    self.chat_widget.add_info_message(
+                        format!("Using stored account {} for this session.", selection.label),
+                        Some("The session switched from the auth profile to the default account store.".to_string()),
+                    );
+                    self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(LoginAccountsFeedback::Info(
+                            format!("Using stored account {}.", selection.label),
+                        )));
+                }
+                Err(err) => {
+                    if let Err(restore_err) = self
+                        .restore_default_auth_activation(previous_auth, previous_active_account_id)
+                    {
+                        tracing::warn!(
+                            "failed to restore previous default auth after account switch failure: {restore_err}"
+                        );
+                        self.chat_widget.add_error_message(format!(
+                            "{err}\n\nAlso failed to restore the previous default account: {restore_err}"
+                        ));
+                        return;
+                    }
+                    self.chat_widget.add_error_message(err);
+                }
+            }
             return;
         }
 
@@ -1208,6 +1297,103 @@ impl App {
                 ));
             }
         }
+    }
+
+    fn restore_default_auth_activation(
+        &self,
+        previous_auth: Option<codex_login::AuthDotJson>,
+        previous_active_account_id: Option<String>,
+    ) -> Result<(), String> {
+        match previous_auth {
+            Some(previous_auth) => codex_login::save_auth(
+                &self.config.codex_home,
+                &previous_auth,
+                self.config.cli_auth_credentials_store_mode,
+            )
+            .map_err(|err| format!("failed to restore previous auth credentials: {err}"))?,
+            None => codex_login::delete_auth(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            )
+            .map(|_| ())
+            .map_err(|err| format!("failed to clear selected auth credentials: {err}"))?,
+        }
+
+        codex_login::set_active_account_id(&self.config.codex_home, previous_active_account_id)
+            .map(|_| ())
+            .map_err(|err| format!("failed to restore previous active account: {err}"))
+    }
+
+    async fn restart_default_auth_session_after_account_switch(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        label: &str,
+    ) -> Result<(), String> {
+        let default_auth_home = self.config.codex_home.clone();
+        let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            self.config.codex_home.to_path_buf(),
+            default_auth_home.to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.chatgpt_base_url.clone(),
+        )
+        .await;
+        let config = self
+            .config_for_auth_profile_switch(
+                default_auth_home,
+                replacement_cloud_config_bundle.clone(),
+            )
+            .await
+            .map_err(|err| format!("Failed to load config after selecting {label}: {err}"))?;
+
+        let replacement_client = crate::start_embedded_app_server(
+            self.arg0_paths.clone(),
+            config.clone(),
+            self.cli_kv_overrides.clone(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            replacement_cloud_config_bundle.clone(),
+            self.feedback.clone(),
+            /*log_db*/ None,
+            self.state_db.clone(),
+            self.environment_manager.clone(),
+        )
+        .await
+        .map(AppServerClient::InProcess)
+        .map_err(|err| format!("Failed to restart app server after selecting {label}: {err}"))?;
+
+        let mut replacement_session =
+            AppServerSession::new(replacement_client, app_server.thread_params_mode())
+                .with_remote_cwd_override(app_server.remote_cwd_override().map(PathBuf::from));
+        let started = match replacement_session
+            .start_thread_with_session_start_source(&config, Some(ThreadStartSource::Clear))
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                if let Err(shutdown_err) = replacement_session.shutdown().await {
+                    tracing::warn!(
+                        "failed to shut down replacement app server after account switch start failure: {shutdown_err}"
+                    );
+                }
+                return Err(format!(
+                    "Failed to start session after selecting {label}: {err}"
+                ));
+            }
+        };
+
+        self.commit_replacement_app_server_thread(
+            tui,
+            app_server,
+            replacement_session,
+            started,
+            config,
+            replacement_cloud_config_bundle,
+            "failed to shut down previous app server after account switch",
+        )
+        .await
+        .map_err(|err| format!("Failed to attach to selected account session: {err}"))
     }
 
     pub(super) async fn remove_auth_account(
@@ -2002,7 +2188,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_account_switch_flow_has_no_tui_restart_dependency() {
+    fn stored_account_switch_flow_accepts_tui_for_embedded_restart() {
         let _switch_fn = App::switch_auth_account;
     }
 

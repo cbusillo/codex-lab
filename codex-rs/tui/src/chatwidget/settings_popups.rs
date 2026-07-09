@@ -96,7 +96,16 @@ impl ChatWidget {
     pub(crate) fn open_settings_popup(&mut self) {
         let mut items = Vec::new();
         items.push(SelectionItem {
-            name: "Accounts".to_string(),
+            name: "Manage accounts".to_string(),
+            description: Some("Add, switch, or disconnect stored accounts.".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::ShowLoginAccounts);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: "Account switching".to_string(),
             description: Some("Configure automatic account switching.".to_string()),
             actions: vec![Box::new(|tx| {
                 tx.send(AppEvent::OpenAccountSwitchSettings);

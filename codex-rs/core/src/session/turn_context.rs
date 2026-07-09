@@ -613,8 +613,11 @@ impl Session {
                             &next.cwd,
                         );
                     }
-                    let turn_environments =
-                        self.resolve_turn_environments(&effective_environments)?;
+                    let turn_environments = if updates.environments.is_some() {
+                        self.resolve_turn_environments(&effective_environments)?
+                    } else {
+                        self.resolve_stored_turn_environments(&effective_environments)?
+                    };
                     let previous_cwd = state.session_configuration.cwd.clone();
                     let previous_permission_profile =
                         state.session_configuration.permission_profile();
