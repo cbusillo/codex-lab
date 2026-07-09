@@ -1,0 +1,45 @@
+{
+  "name": "gpt-5-6-luna-low-request-shape",
+  "model": "gpt-5.6-luna",
+  "prompt": "Reply with exactly: ok. GPT_5_6_LUNA_LOW_MARKER",
+  "files": {
+    "README.md": "# GPT-5.6 Luna request-shape fixture\n"
+  },
+  "config_toml": "model_provider = \"local-fixture\"\nmodel_reasoning_effort = \"low\"\n\n[model_providers.local-fixture]\nname = \"Local Fixture\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-gpt-5-6-luna-low"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 1,
+    "turn_count": 1,
+    "thread_id": "required",
+    "event_types": {
+      "thread.started": 1,
+      "turn.started": 1,
+      "turn.completed": 1
+    },
+    "responses": [
+      {
+        "request": 0,
+        "scope": "model",
+        "contains": "gpt-5.6-luna"
+      },
+      {
+        "request": 0,
+        "scope": "reasoning",
+        "contains": "low"
+      },
+      {
+        "request": 0,
+        "scope": "input",
+        "contains": "GPT_5_6_LUNA_LOW_MARKER"
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}

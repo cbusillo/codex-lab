@@ -61,6 +61,10 @@ with `inherit_auth` for opt-in live model checks when the question depends on
 model behavior rather than prompt assembly. Mark those scenarios
 `skip_run_all: true` unless they are safe for unauthenticated CI.
 
+`gpt-5-6-luna-low-request-shape.json` is the deterministic catalog smoke test
+for the lowest-cost GPT-5.6 variant. It proves the local binary sends
+`gpt-5.6-luna` with low reasoning effort without making a paid model call.
+
 ## Auto Review Proof Loop
 
 Issue #35 uses this harness as the first Codex-native Auto Review proof loop.
