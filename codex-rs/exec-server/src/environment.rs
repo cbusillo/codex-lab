@@ -47,6 +47,7 @@ pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
 pub struct EnvironmentManager {
     default_environment: Option<String>,
     environments: RwLock<HashMap<String, Arc<Environment>>>,
+    environment_order: RwLock<Vec<String>>,
     local_environment: Option<Arc<Environment>>,
     local_runtime_paths: Option<ExecServerRuntimePaths>,
 }
@@ -63,6 +64,7 @@ impl EnvironmentManager {
                 LOCAL_ENVIRONMENT_ID.to_string(),
                 Arc::new(Environment::default_for_tests()),
             )])),
+            environment_order: RwLock::new(vec![LOCAL_ENVIRONMENT_ID.to_string()]),
             local_environment: Some(Arc::new(Environment::default_for_tests())),
             local_runtime_paths: None,
         }
@@ -73,6 +75,7 @@ impl EnvironmentManager {
         Self {
             default_environment: None,
             environments: RwLock::new(HashMap::new()),
+            environment_order: RwLock::new(Vec::new()),
             local_environment: None,
             local_runtime_paths: None,
         }
@@ -145,6 +148,8 @@ impl EnvironmentManager {
         } = snapshot;
         let mut environment_map =
             HashMap::with_capacity(environments.len() + usize::from(include_local));
+        let mut environment_order =
+            Vec::with_capacity(environments.len() + usize::from(include_local));
         let local_environment = if include_local {
             let local_runtime_paths = local_runtime_paths.clone().ok_or_else(|| {
                 ExecServerError::Protocol(
@@ -156,6 +161,7 @@ impl EnvironmentManager {
                 LOCAL_ENVIRONMENT_ID.to_string(),
                 Arc::clone(&local_environment),
             );
+            environment_order.push(LOCAL_ENVIRONMENT_ID.to_string());
             Some(local_environment)
         } else {
             None
@@ -179,6 +185,7 @@ impl EnvironmentManager {
                     "environment id `{id}` is duplicated"
                 )));
             }
+            environment_order.push(id);
         }
         let default_environment = match default {
             EnvironmentDefault::Disabled => None,
@@ -194,6 +201,7 @@ impl EnvironmentManager {
         Ok(Self {
             default_environment,
             environments: RwLock::new(environment_map),
+            environment_order: RwLock::new(environment_order),
             local_environment,
             local_runtime_paths,
         })
@@ -217,14 +225,14 @@ impl EnvironmentManager {
             return Vec::new();
         };
         let environments = self
-            .environments
+            .environment_order
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut environment_ids = Vec::with_capacity(environments.len());
         environment_ids.push(default_environment_id.clone());
         environment_ids.extend(
             environments
-                .keys()
+                .iter()
                 .filter(|environment_id| *environment_id != default_environment_id)
                 .cloned(),
         );
@@ -276,10 +284,21 @@ impl EnvironmentManager {
         };
         let environment =
             Environment::remote_inner(exec_server_url, self.local_runtime_paths.clone());
-        self.environments
+        let mut environments = self
+            .environments
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(environment_id, Arc::new(environment));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let is_new = environments
+            .insert(environment_id.clone(), Arc::new(environment))
+            .is_none();
+        drop(environments);
+
+        if is_new {
+            self.environment_order
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(environment_id);
+        }
         Ok(())
     }
 }
@@ -678,6 +697,43 @@ mod tests {
             vec!["devbox".to_string(), LOCAL_ENVIRONMENT_ID.to_string()]
         );
         assert!(manager.default_environment().expect("default").is_remote());
+    }
+
+    #[tokio::test]
+    async fn environment_manager_default_environment_ids_preserve_provider_order() {
+        let snapshot = EnvironmentProviderSnapshot {
+            environments: vec![
+                (
+                    "gamma".to_string(),
+                    Environment::create_for_tests(Some("ws://127.0.0.1:8765".to_string()))
+                        .expect("remote environment"),
+                ),
+                (
+                    "alpha".to_string(),
+                    Environment::create_for_tests(Some("ws://127.0.0.1:8766".to_string()))
+                        .expect("remote environment"),
+                ),
+                (
+                    "beta".to_string(),
+                    Environment::create_for_tests(Some("ws://127.0.0.1:8767".to_string()))
+                        .expect("remote environment"),
+                ),
+            ],
+            default: EnvironmentDefault::EnvironmentId("beta".to_string()),
+            include_local: true,
+        };
+        let manager = EnvironmentManager::from_snapshot(snapshot, Some(test_runtime_paths()))
+            .expect("manager");
+
+        assert_eq!(
+            manager.default_environment_ids(),
+            vec![
+                "beta".to_string(),
+                LOCAL_ENVIRONMENT_ID.to_string(),
+                "gamma".to_string(),
+                "alpha".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

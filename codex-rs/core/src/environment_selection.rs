@@ -193,9 +193,9 @@ url = "ws://127.0.0.1:8765"
     }
 
     #[tokio::test]
-    async fn default_thread_environment_selections_caps_configured_defaults() {
+    async fn default_thread_environment_selections_caps_configured_defaults_in_order() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let environments_toml = (0..MAX_TURN_ENVIRONMENTS)
+        let environments_toml = (0..=MAX_TURN_ENVIRONMENTS)
             .map(|idx| {
                 format!(
                     r#"[[environments]]
@@ -220,10 +220,19 @@ url = "ws://127.0.0.1:{}"
         assert_eq!(selections.len(), MAX_TURN_ENVIRONMENTS);
         assert_eq!(
             selections
-                .first()
-                .expect("first environment")
-                .environment_id,
-            LOCAL_ENVIRONMENT_ID
+                .iter()
+                .map(|selection| selection.environment_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                LOCAL_ENVIRONMENT_ID,
+                "remote-0",
+                "remote-1",
+                "remote-2",
+                "remote-3",
+                "remote-4",
+                "remote-5",
+                "remote-6",
+            ]
         );
     }
 
