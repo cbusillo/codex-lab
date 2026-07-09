@@ -183,6 +183,22 @@ fn dynamic_agent_specs_include_newer_manifest_models() {
 }
 
 #[test]
+fn dynamic_agent_specs_include_gpt_5_6_variants() {
+    for (model, expected_frontline) in [
+        ("gpt-5.6-sol", true),
+        ("gpt-5.6-terra", true),
+        ("gpt-5.6-luna", true),
+    ] {
+        let spec = agent_model_spec(model)
+            .unwrap_or_else(|| panic!("{model} should resolve from the bundled model manifest"));
+        assert_eq!(spec.slug, format!("code-{model}"));
+        assert_eq!(spec.model_args, &["--model", model]);
+        assert_eq!(spec.is_frontline, expected_frontline);
+        assert!(spec.enabled_by_default);
+    }
+}
+
+#[test]
 fn dynamic_agent_specs_skip_unsupported_hidden_and_retired_tracks() {
     assert!(agent_model_spec("codex-auto-review").is_none());
     assert!(agent_model_spec("gpt-5.2").is_none());
