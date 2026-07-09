@@ -1192,7 +1192,7 @@ impl Session {
                 cancel_guard.cancel();
                 *cancel_guard = CancellationToken::new();
             }
-            let turn_environment = crate::environment_selection::resolve_environment_selections(
+            let turn_environment = crate::environment_selection::resolve_stored_environment_selections(
                 sess.services.environment_manager.as_ref(),
                 &session_configuration.environments,
             )

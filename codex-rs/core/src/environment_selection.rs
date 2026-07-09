@@ -10,6 +10,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::session::turn_context::TurnEnvironment;
 
+pub(crate) const MAX_TURN_ENVIRONMENTS: usize = 8;
+
 pub(crate) fn default_thread_environment_selections(
     environment_manager: &EnvironmentManager,
     cwd: &AbsolutePathBuf,
@@ -17,6 +19,7 @@ pub(crate) fn default_thread_environment_selections(
     environment_manager
         .default_environment_ids()
         .into_iter()
+        .take(MAX_TURN_ENVIRONMENTS)
         .map(|environment_id| TurnEnvironmentSelection {
             environment_id,
             cwd: cwd.clone(),
@@ -64,6 +67,12 @@ pub(crate) fn resolve_environment_selections(
     environment_manager: &EnvironmentManager,
     environments: &[TurnEnvironmentSelection],
 ) -> CodexResult<ResolvedTurnEnvironments> {
+    if environments.len() > MAX_TURN_ENVIRONMENTS {
+        return Err(CodexErr::InvalidRequest(format!(
+            "turn environments must be at most {MAX_TURN_ENVIRONMENTS}"
+        )));
+    }
+
     let mut seen_environment_ids = HashSet::with_capacity(environments.len());
     let mut turn_environments = Vec::with_capacity(environments.len());
     for selected_environment in environments {
@@ -88,6 +97,18 @@ pub(crate) fn resolve_environment_selections(
     }
 
     Ok(ResolvedTurnEnvironments { turn_environments })
+}
+
+pub(crate) fn resolve_stored_environment_selections(
+    environment_manager: &EnvironmentManager,
+    environments: &[TurnEnvironmentSelection],
+) -> CodexResult<ResolvedTurnEnvironments> {
+    let bounded_environments: Vec<_> = environments
+        .iter()
+        .take(MAX_TURN_ENVIRONMENTS)
+        .cloned()
+        .collect();
+    resolve_environment_selections(environment_manager, &bounded_environments)
 }
 
 #[cfg(test)]
@@ -172,6 +193,41 @@ url = "ws://127.0.0.1:8765"
     }
 
     #[tokio::test]
+    async fn default_thread_environment_selections_caps_configured_defaults() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let environments_toml = (0..MAX_TURN_ENVIRONMENTS)
+            .map(|idx| {
+                format!(
+                    r#"[[environments]]
+id = "remote-{idx}"
+url = "ws://127.0.0.1:{}"
+"#,
+                    8765 + idx
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(temp_dir.path().join("environments.toml"), environments_toml)
+            .expect("write environments.toml");
+        let cwd = AbsolutePathBuf::current_dir().expect("cwd");
+        let manager =
+            EnvironmentManager::from_codex_home(temp_dir.path(), Some(test_runtime_paths()))
+                .await
+                .expect("environment manager");
+
+        let selections = default_thread_environment_selections(&manager, &cwd);
+
+        assert_eq!(selections.len(), MAX_TURN_ENVIRONMENTS);
+        assert_eq!(
+            selections
+                .first()
+                .expect("first environment")
+                .environment_id,
+            LOCAL_ENVIRONMENT_ID
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_environment_selections_rejects_duplicate_ids() {
         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
         let manager = EnvironmentManager::default_for_tests();
@@ -190,6 +246,89 @@ url = "ws://127.0.0.1:8765"
             ],
         )
         .expect_err("duplicate environment id should fail");
+
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[tokio::test]
+    async fn resolve_environment_selections_rejects_too_many_environments() {
+        let cwd = AbsolutePathBuf::current_dir().expect("cwd");
+        let manager = EnvironmentManager::default_for_tests();
+        let selections: Vec<_> = (0..=MAX_TURN_ENVIRONMENTS)
+            .map(|idx| TurnEnvironmentSelection {
+                environment_id: format!("environment-{idx}"),
+                cwd: cwd.clone(),
+            })
+            .collect();
+
+        let err = resolve_environment_selections(&manager, &selections)
+            .expect_err("too many environments should fail before lookup");
+
+        assert!(
+            err.to_string()
+                .contains("turn environments must be at most")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_stored_environment_selections_caps_before_lookup() {
+        let cwd = AbsolutePathBuf::current_dir().expect("cwd");
+        let manager = EnvironmentManager::default_for_tests();
+        for idx in 1..MAX_TURN_ENVIRONMENTS {
+            manager
+                .upsert_environment(
+                    format!("remote-{idx}"),
+                    format!("ws://127.0.0.1:{}", 8765 + idx),
+                )
+                .expect("register environment");
+        }
+        let mut selections: Vec<_> = std::iter::once(TurnEnvironmentSelection {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            cwd: cwd.clone(),
+        })
+        .chain(
+            (1..MAX_TURN_ENVIRONMENTS).map(|idx| TurnEnvironmentSelection {
+                environment_id: format!("remote-{idx}"),
+                cwd: cwd.clone(),
+            }),
+        )
+        .collect();
+        selections.push(TurnEnvironmentSelection {
+            environment_id: "unknown-after-cap".to_string(),
+            cwd,
+        });
+
+        let resolved = resolve_stored_environment_selections(&manager, &selections)
+            .expect("stored environments should be capped before lookup");
+
+        assert_eq!(resolved.turn_environments.len(), MAX_TURN_ENVIRONMENTS);
+        assert_eq!(
+            resolved
+                .turn_environments
+                .last()
+                .expect("last resolved environment")
+                .environment_id,
+            format!("remote-{}", MAX_TURN_ENVIRONMENTS - 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_stored_environment_selections_keeps_duplicate_validation_within_cap() {
+        let cwd = AbsolutePathBuf::current_dir().expect("cwd");
+        let manager = EnvironmentManager::default_for_tests();
+        let selections = vec![
+            TurnEnvironmentSelection {
+                environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+                cwd: cwd.clone(),
+            },
+            TurnEnvironmentSelection {
+                environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+                cwd,
+            },
+        ];
+
+        let err = resolve_stored_environment_selections(&manager, &selections)
+            .expect_err("duplicate environment id should fail within cap");
 
         assert!(err.to_string().contains("duplicate"));
     }
