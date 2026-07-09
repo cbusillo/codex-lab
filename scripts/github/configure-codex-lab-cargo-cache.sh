@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-workflow_leaf="${1:?usage: configure-codex-lab-cargo-cache.sh <workflow-cache-leaf>}"
+workflow_leaf="${1:?usage: configure-codex-lab-cargo-cache.sh <workflow-cache-leaf> [bin-name] [cargo-profile]}"
 bin_name="${2:-codex-lab}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-profile="release"
+profile="${3:-release}"
 cache_mode="default"
+
+if [[ ! "$profile" =~ ^[[:alnum:]_-]+$ ]]; then
+	echo "invalid Cargo profile: $profile" >&2
+	exit 2
+fi
 
 host="unknown-host"
 if command -v rustc >/dev/null 2>&1; then
@@ -31,7 +36,11 @@ else
 	echo "Using default Cargo target directory"
 fi
 
-bin_path="$target_dir/release/$bin_name"
+profile_dir="$profile"
+if [[ "$profile" == "dev" ]]; then
+	profile_dir="debug"
+fi
+bin_path="$target_dir/$profile_dir/$bin_name"
 
 {
 	echo "CARGO_TARGET_DIR=$target_dir"

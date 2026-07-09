@@ -46,7 +46,7 @@ jobs:
         shell: bash
         env:
           CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT: ${{ vars.CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT }}
-        run: scripts/github/configure-codex-lab-cargo-cache.sh codex-lab-app
+        run: scripts/github/configure-codex-lab-cargo-cache.sh codex-lab-app codex-lab ci-app
 
       - name: Report Cargo cache before build
         shell: bash
@@ -70,7 +70,7 @@ jobs:
       - name: Build Codex Lab CLI
         working-directory: codex-rs
         shell: bash
-        run: cargo build --timings --release -p codex-cli --bin codex-lab
+        run: cargo build --timings --profile ci-app -p codex-cli --bin codex-lab
 
       - name: Report Cargo cache after build
         if: always()

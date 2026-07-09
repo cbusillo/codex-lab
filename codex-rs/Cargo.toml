@@ -530,6 +530,11 @@ codegen-units = 1
 # resolved.
 strip = "none"
 
+[profile.ci-app]
+inherits = "release"
+codegen-units = 16
+lto = "off"
+
 [profile.profiling]
 inherits = "release"
 debug = "full"
