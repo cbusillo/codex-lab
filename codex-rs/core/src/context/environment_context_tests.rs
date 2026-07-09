@@ -11,6 +11,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::permissions::project_roots_glob_pattern;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::TurnContextEnvironmentItem;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use core_test_support::test_path_buf;
@@ -169,6 +170,7 @@ fn turn_context_item_filesystem_uses_workspace_roots_instead_of_cwd() {
     let item = TurnContextItem {
         turn_id: None,
         cwd: test_path_buf("/not-the-workspace"),
+        environments: None,
         workspace_roots: Some(vec![repo.clone(), other_repo.clone()]),
         current_date: None,
         timezone: None,
@@ -209,6 +211,156 @@ fn turn_context_item_filesystem_uses_workspace_roots_instead_of_cwd() {
         ),
         "{context}"
     );
+}
+
+#[test]
+fn turn_context_item_reconstructs_persisted_environments() {
+    let local_cwd = test_abs_path("/repo/local");
+    let remote_cwd = test_abs_path("/repo/remote");
+    let item = TurnContextItem {
+        turn_id: None,
+        cwd: test_path_buf("/legacy-cwd"),
+        environments: Some(vec![
+            TurnContextEnvironmentItem {
+                environment_id: "local".to_string(),
+                cwd: local_cwd.clone(),
+                shell: Some("zsh".to_string()),
+            },
+            TurnContextEnvironmentItem {
+                environment_id: "remote".to_string(),
+                cwd: remote_cwd.clone(),
+                shell: None,
+            },
+        ]),
+        workspace_roots: None,
+        current_date: None,
+        timezone: None,
+        approval_policy: AskForApproval::Never,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        permission_profile: None,
+        network: None,
+        file_system_sandbox_policy: None,
+        model: "gpt-5".to_string(),
+        personality: None,
+        collaboration_mode: None,
+        multi_agent_version: None,
+        realtime_active: None,
+        effort: None,
+        summary: codex_protocol::config_types::ReasoningSummary::Auto,
+    };
+
+    let context = EnvironmentContext::from_turn_context_item(&item, fake_shell_name()).render();
+
+    assert!(context.contains("<environment id=\"local\">"), "{context}");
+    assert!(context.contains("<environment id=\"remote\">"), "{context}");
+    assert!(
+        context.contains(&format!("<cwd>{}</cwd>", local_cwd.to_string_lossy())),
+        "{context}"
+    );
+    assert!(
+        context.contains(&format!("<cwd>{}</cwd>", remote_cwd.to_string_lossy())),
+        "{context}"
+    );
+    assert!(context.contains("<shell>zsh</shell>"), "{context}");
+    assert!(!context.contains("<cwd>/legacy-cwd</cwd>"), "{context}");
+}
+
+#[test]
+fn turn_context_item_reconstruction_caps_persisted_environments() {
+    let environments: Vec<_> = (0..=crate::environment_selection::MAX_TURN_ENVIRONMENTS)
+        .map(|idx| TurnContextEnvironmentItem {
+            environment_id: format!("env-{idx}"),
+            cwd: test_abs_path(&format!("/repo/env-{idx}")),
+            shell: None,
+        })
+        .collect();
+    let item = TurnContextItem {
+        turn_id: None,
+        cwd: test_path_buf("/legacy-cwd"),
+        environments: Some(environments),
+        workspace_roots: None,
+        current_date: None,
+        timezone: None,
+        approval_policy: AskForApproval::Never,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        permission_profile: None,
+        network: None,
+        file_system_sandbox_policy: None,
+        model: "gpt-5".to_string(),
+        personality: None,
+        collaboration_mode: None,
+        multi_agent_version: None,
+        realtime_active: None,
+        effort: None,
+        summary: codex_protocol::config_types::ReasoningSummary::Auto,
+    };
+
+    let context = EnvironmentContext::from_turn_context_item(&item, fake_shell_name()).render();
+
+    assert_eq!(
+        context.matches("<environment id=").count(),
+        crate::environment_selection::MAX_TURN_ENVIRONMENTS
+    );
+    assert!(!context.contains("env-8"), "{context}");
+}
+
+#[test]
+fn diff_from_turn_context_item_uses_persisted_environment_baseline() {
+    let local_cwd = test_abs_path("/repo/local");
+    let remote_cwd = test_abs_path("/repo/remote");
+    let previous_item = TurnContextItem {
+        turn_id: None,
+        cwd: test_path_buf("/legacy-cwd"),
+        environments: Some(vec![
+            TurnContextEnvironmentItem {
+                environment_id: "local".to_string(),
+                cwd: local_cwd.clone(),
+                shell: None,
+            },
+            TurnContextEnvironmentItem {
+                environment_id: "remote".to_string(),
+                cwd: remote_cwd.clone(),
+                shell: None,
+            },
+        ]),
+        workspace_roots: None,
+        current_date: None,
+        timezone: None,
+        approval_policy: AskForApproval::Never,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        permission_profile: None,
+        network: None,
+        file_system_sandbox_policy: None,
+        model: "gpt-5".to_string(),
+        personality: None,
+        collaboration_mode: None,
+        multi_agent_version: None,
+        realtime_active: None,
+        effort: None,
+        summary: codex_protocol::config_types::ReasoningSummary::Auto,
+    };
+    let after = EnvironmentContext::new(
+        vec![
+            EnvironmentContextEnvironment {
+                id: "local".to_string(),
+                cwd: local_cwd,
+                shell: "bash".to_string(),
+            },
+            EnvironmentContextEnvironment {
+                id: "remote".to_string(),
+                cwd: remote_cwd,
+                shell: "bash".to_string(),
+            },
+        ],
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    );
+
+    let diff = EnvironmentContext::diff_from_turn_context_item(&previous_item, &after);
+
+    assert_eq!(diff.environments, EnvironmentContextEnvironments::None);
 }
 
 #[test]

@@ -13,6 +13,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadSource;
+use codex_protocol::protocol::TurnContextEnvironmentItem;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_sandboxing::compatibility_sandbox_policy_for_permission_profile;
 use codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy;
@@ -346,6 +347,7 @@ impl TurnContext {
             turn_id: Some(self.sub_id.clone()),
             #[allow(deprecated)]
             cwd: self.cwd.to_path_buf(),
+            environments: self.turn_context_environment_items(),
             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
@@ -362,6 +364,20 @@ impl TurnContext {
             effort: self.reasoning_effort.clone(),
             summary: ReasoningSummaryConfig::Auto,
         }
+    }
+
+    fn turn_context_environment_items(&self) -> Option<Vec<TurnContextEnvironmentItem>> {
+        let environments: Vec<_> = self
+            .environments
+            .turn_environments
+            .iter()
+            .map(|environment| TurnContextEnvironmentItem {
+                environment_id: environment.environment_id.clone(),
+                cwd: environment.cwd.clone(),
+                shell: environment.shell.clone(),
+            })
+            .collect();
+        (!environments.is_empty()).then_some(environments)
     }
 
     fn turn_context_network_item(&self) -> Option<TurnContextNetworkItem> {
@@ -686,6 +702,16 @@ impl Session {
         )
     }
 
+    fn resolve_stored_turn_environments(
+        &self,
+        environments: &[TurnEnvironmentSelection],
+    ) -> CodexResult<ResolvedTurnEnvironments> {
+        crate::environment_selection::resolve_stored_environment_selections(
+            self.services.environment_manager.as_ref(),
+            environments,
+        )
+    }
+
     async fn new_turn_from_configuration(
         &self,
         sub_id: String,
@@ -876,7 +902,8 @@ impl Session {
             &mut effective_environments,
             &session_configuration.cwd,
         );
-        let turn_environments = match self.resolve_turn_environments(&effective_environments) {
+        let turn_environments = match self.resolve_stored_turn_environments(&effective_environments)
+        {
             Ok(turn_environments) => turn_environments,
             Err(err) => {
                 warn!("failed to resolve stored session environments: {err}");

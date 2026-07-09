@@ -638,6 +638,117 @@ async fn apply_patch_freeform_routes_to_selected_remote_environment() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_reconstructs_persisted_multi_environment_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let Some(_remote_env) = get_remote_test_env() else {
+        return Ok(());
+    };
+
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-initial"),
+                ev_assistant_message("msg-initial", "recorded before resume"),
+                ev_completed("resp-initial"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-resumed"),
+                ev_assistant_message("msg-resumed", "recorded after resume"),
+                ev_completed("resp-resumed"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex();
+    let test = builder.build_with_remote_and_local_env(&server).await?;
+    let local_cwd = TempDir::new()?;
+    let remote_cwd = PathBuf::from(format!(
+        "/tmp/codex-remote-resume-env-context-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
+    ))
+    .abs();
+    test.fs()
+        .create_directory(
+            &remote_cwd,
+            CreateDirectoryOptions { recursive: true },
+            /*sandbox*/ None,
+        )
+        .await?;
+
+    test.submit_turn_with_environments(
+        "remember selected environments before resume",
+        Some(vec![
+            TurnEnvironmentSelection {
+                environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+                cwd: local_cwd.path().abs(),
+            },
+            TurnEnvironmentSelection {
+                environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+                cwd: remote_cwd.clone(),
+            },
+        ]),
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let rollout_path = test.codex.rollout_path().expect("rollout path");
+    let home = test.home.clone();
+    drop(test);
+
+    let mut resume_builder = test_codex();
+    let resumed = resume_builder
+        .resume_with_remote_and_local_env(&server, home, rollout_path)
+        .await?;
+    resumed
+        .submit_turn("resume with persisted environment context")
+        .await?;
+    wait_for_event(&resumed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let resumed_user_text = requests[1].message_input_texts("user").join("\n");
+    assert!(
+        resumed_user_text.contains("<environment id=\"local\">"),
+        "expected resumed request to include persisted local environment context: {resumed_user_text}"
+    );
+    assert!(
+        resumed_user_text.contains(&format!("<cwd>{}</cwd>", local_cwd.path().display())),
+        "expected resumed request to include persisted local cwd: {resumed_user_text}"
+    );
+    assert!(
+        resumed_user_text.contains("<environment id=\"remote\">"),
+        "expected resumed request to include persisted remote environment context: {resumed_user_text}"
+    );
+    assert!(
+        resumed_user_text.contains(&format!("<cwd>{}</cwd>", remote_cwd.display())),
+        "expected resumed request to include persisted remote cwd: {resumed_user_text}"
+    );
+
+    resumed
+        .fs()
+        .remove(
+            &remote_cwd,
+            RemoveOptions {
+                recursive: true,
+                force: true,
+            },
+            /*sandbox*/ None,
+        )
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {

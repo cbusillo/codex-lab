@@ -115,6 +115,14 @@ pub struct TurnEnvironmentSelection {
     pub cwd: AbsolutePathBuf,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnContextEnvironmentItem {
+    pub environment_id: String,
+    pub cwd: AbsolutePathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
 #[serde(transparent)]
 #[ts(type = "string")]
@@ -3069,6 +3077,11 @@ pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub cwd: PathBuf,
+    /// Resolved environment selections for this turn. This is persisted as
+    /// turn-context metadata so resume/fork replay can recover the durable
+    /// world-state baseline without re-resolving historical selections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<TurnContextEnvironmentItem>>,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5334,8 +5347,48 @@ mod tests {
             "summary": "auto",
         }))?;
 
+        assert_eq!(item.environments, None);
         assert_eq!(item.network, None);
         assert_eq!(item.file_system_sandbox_policy, None);
+        Ok(())
+    }
+
+    #[test]
+    fn turn_context_item_serializes_environments_when_present() -> Result<()> {
+        let item = TurnContextItem {
+            turn_id: None,
+            cwd: test_path_buf("/tmp"),
+            environments: Some(vec![TurnContextEnvironmentItem {
+                environment_id: "local".to_string(),
+                cwd: test_path_buf("/workspace").abs(),
+                shell: Some("bash".to_string()),
+            }]),
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "gpt-5".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            realtime_active: None,
+            effort: None,
+            summary: ReasoningSummaryConfig::Auto,
+        };
+
+        let value = serde_json::to_value(item)?;
+        assert_eq!(
+            value["environments"],
+            json!([{
+                "environment_id": "local",
+                "cwd": test_path_buf("/workspace"),
+                "shell": "bash",
+            }])
+        );
         Ok(())
     }
 
@@ -5397,6 +5450,7 @@ mod tests {
         let item = TurnContextItem {
             turn_id: None,
             cwd: test_path_buf("/tmp"),
+            environments: None,
             workspace_roots: None,
             current_date: None,
             timezone: None,
@@ -5490,6 +5544,7 @@ mod tests {
                 "thread_id": "67e55044-10b1-426f-9247-bb680e5fe0c8",
                 "model": "codex-mini-latest",
                 "model_provider_id": "openai",
+                "history_mode": "legacy",
                 "approval_policy": "never",
                 "approvals_reviewer": "user",
                 "permission_profile": permission_profile,

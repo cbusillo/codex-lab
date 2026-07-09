@@ -2593,6 +2593,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.to_path_buf(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -6426,6 +6427,88 @@ async fn turn_environments_set_primary_environment() {
     let turn_cwd = turn_context.cwd.clone();
     assert_eq!(turn_cwd.as_path(), selected_cwd.as_path());
     assert_eq!(turn_context.config.cwd.as_path(), selected_cwd.as_path());
+}
+
+#[tokio::test]
+async fn turn_context_item_persists_resolved_turn_environments() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let selected_cwd =
+        AbsolutePathBuf::try_from(session.get_config().await.cwd.as_path().join("selected"))
+            .expect("absolute path");
+
+    let turn_context = session
+        .new_turn_with_sub_id(
+            "sub-1".to_string(),
+            SessionSettingsUpdate {
+                environments: Some(vec![TurnEnvironmentSelection {
+                    environment_id: "local".to_string(),
+                    cwd: selected_cwd.clone(),
+                }]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("turn should start");
+
+    let item = turn_context.to_turn_context_item();
+    let environments = item
+        .environments
+        .expect("turn context item should persist environments");
+    assert_eq!(environments.len(), 1);
+    assert_eq!(environments[0].environment_id, "local");
+    assert_eq!(environments[0].cwd, selected_cwd);
+}
+
+#[tokio::test]
+async fn record_context_updates_persists_resolved_turn_environments() {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    let selected_cwd =
+        AbsolutePathBuf::try_from(session.get_config().await.cwd.as_path().join("selected"))
+            .expect("absolute path");
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    let turn_context = session
+        .new_turn_with_sub_id(
+            "sub-1".to_string(),
+            SessionSettingsUpdate {
+                environments: Some(vec![TurnEnvironmentSelection {
+                    environment_id: "local".to_string(),
+                    cwd: selected_cwd.clone(),
+                }]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("turn should start");
+
+    session
+        .record_context_updates_and_set_reference_context_item(&turn_context)
+        .await;
+
+    let reference_context_item = session
+        .reference_context_item()
+        .await
+        .expect("reference context item should be stored");
+    let reference_environments = reference_context_item
+        .environments
+        .expect("reference context item should persist environments");
+    assert_eq!(reference_environments.len(), 1);
+    assert_eq!(reference_environments[0].environment_id, "local");
+    assert_eq!(reference_environments[0].cwd, selected_cwd);
+
+    session.ensure_rollout_materialized().await;
+    session.flush_rollout().await.expect("rollout should flush");
+
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let persisted_environments = resumed.history.iter().find_map(|item| match item {
+        RolloutItem::TurnContext(ctx) => ctx.environments.clone(),
+        _ => None,
+    });
+    assert_eq!(persisted_environments, Some(reference_environments));
 }
 
 #[tokio::test]
