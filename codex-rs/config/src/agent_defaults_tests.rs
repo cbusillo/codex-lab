@@ -199,6 +199,22 @@ fn dynamic_agent_specs_include_gpt_5_6_variants() {
 }
 
 #[test]
+fn default_agent_order_prioritizes_gpt_5_6_and_diverse_families() {
+    assert_eq!(
+        &DEFAULT_AGENT_NAMES[..7],
+        &[
+            "code-gpt-5.6-sol",
+            "code-gpt-5.5",
+            "code-gpt-5.4",
+            "claude-opus-4.8",
+            "antigravity",
+            "code-gpt-5.6-terra",
+            "code-gpt-5.6-luna",
+        ]
+    );
+}
+
+#[test]
 fn dynamic_agent_specs_skip_unsupported_hidden_and_retired_tracks() {
     assert!(agent_model_spec("codex-auto-review").is_none());
     assert!(agent_model_spec("gpt-5.2").is_none());

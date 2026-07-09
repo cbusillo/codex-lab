@@ -16,6 +16,8 @@ const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
     "Service tier override for the new agent. Omit unless explicitly requested.";
+const VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE: &str = "When the user asks which agents, models, or delegation capabilities are available, answer from this tool's current schema and descriptions rather than from generic harness assumptions. Enumerate exposed `agent_type` choices and model overrides. Do not claim that every agent uses the same model, that arbitrary models or tools are available, or that a concurrency limit exists unless it is explicitly stated here.";
+const HIDDEN_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE: &str = "When the user asks which agents, models, or delegation capabilities are available, answer only from this tool's current schema and descriptions rather than from generic harness assumptions. Agent type and model override metadata are intentionally not exposed here; do not infer or enumerate hidden choices.";
 const MAX_MODEL_OVERRIDES_IN_SPAWN_AGENT_DESCRIPTION: usize = 5;
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 
@@ -651,11 +653,17 @@ fn spawn_agent_tool_description(
 ) -> String {
     let agent_role_guidance = available_models_description.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
+    let capability_self_report_guidance = if available_models_description.is_some() {
+        VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE
+    } else {
+        HIDDEN_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE
+    };
 
     let tool_description = format!(
         r#"
         {agent_role_guidance}
-        Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}"#
+        Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}
+{capability_self_report_guidance}"#
     );
 
     if !include_usage_hint {
@@ -722,6 +730,11 @@ fn spawn_agent_tool_description_v2(
 ) -> String {
     let agent_role_guidance = available_models_description.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
+    let capability_self_report_guidance = if available_models_description.is_some() {
+        VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE
+    } else {
+        HIDDEN_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE
+    };
     let concurrency_guidance = max_concurrent_threads_per_session
         .map(|limit| {
             format!(
@@ -735,11 +748,12 @@ fn spawn_agent_tool_description_v2(
         {agent_role_guidance}
         Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
-The spawned agent will have the same tools as you and the ability to spawn its own subagents.
+Native child agents receive the same tools as you and can spawn subagents. Configured agent types may instead route to external CLIs with their own capabilities.
 {inherited_model_guidance}
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
-{concurrency_guidance}"#
+{concurrency_guidance}
+{capability_self_report_guidance}"#
     );
 
     if !include_usage_hint {

@@ -199,7 +199,7 @@ const DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT: &str = r#"You are `/roo
 
 At the start of your turn, you are the active agent.
 You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
-All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+Native child agents inherit the current model and tool surface by default. Configured agent types may instead route to different models or external CLIs with their own capabilities.
 
 You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent without triggering a turn.
 Child agents can also spawn their own sub-agents.
@@ -217,7 +217,7 @@ They may be addressed as to=/root
 "#;
 const DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT: &str = r#"You are an agent in a team of agents collaborating to complete a task.
 
-You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents. All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents. Native child agents inherit the current model and tool surface by default. Configured agent types may instead route to different models or external CLIs with their own capabilities.
 
 You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent.
 Child agents can also spawn their own sub-agents.

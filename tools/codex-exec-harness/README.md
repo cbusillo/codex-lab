@@ -65,6 +65,11 @@ model behavior rather than prompt assembly. Mark those scenarios
 for the lowest-cost GPT-5.6 variant. It proves the local binary sends
 `gpt-5.6-luna` with low reasoning effort without making a paid model call.
 
+`agent-capability-self-report.json` protects capability questions from generic
+harness answers. With agent metadata explicitly enabled, it proves GPT-5.6 Sol
+receives the configured third-party roles, model overrides, concurrency limit,
+and self-report guidance without adding that catalog to every default session.
+
 ## Auto Review Proof Loop
 
 Issue #35 uses this harness as the first Codex-native Auto Review proof loop.
