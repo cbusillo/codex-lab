@@ -1637,6 +1637,7 @@ impl App {
                 request_id: app_server.next_request_id(),
                 params: LoginAccountParams::Chatgpt {
                     codex_streamlined_login: false,
+                    preserve_existing_account: true,
                 },
             })
             .await;
@@ -1759,7 +1760,9 @@ impl App {
             .request_handle()
             .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                 request_id: app_server.next_request_id(),
-                params: LoginAccountParams::ChatgptDeviceCode,
+                params: LoginAccountParams::ChatgptDeviceCode {
+                    preserve_existing_account: true,
+                },
             })
             .await;
 
@@ -1812,7 +1815,7 @@ impl App {
     }
 
     async fn start_default_store_login_add_account_device_code(&mut self) {
-        let opts = ServerOptions::new(
+        let opts = ServerOptions::new_for_add_account(
             self.config.codex_home.to_path_buf(),
             CLIENT_ID.to_string(),
             self.config.forced_chatgpt_workspace_id.clone(),
@@ -1895,7 +1898,7 @@ impl App {
     async fn start_default_store_login_add_account_chatgpt(&mut self) {
         let opts = ServerOptions {
             open_browser: false,
-            ..ServerOptions::new(
+            ..ServerOptions::new_for_add_account(
                 self.config.codex_home.to_path_buf(),
                 CLIENT_ID.to_string(),
                 self.config.forced_chatgpt_workspace_id.clone(),
@@ -2006,6 +2009,7 @@ impl App {
                 request_id: app_server.next_request_id(),
                 params: LoginAccountParams::Chatgpt {
                     codex_streamlined_login: false,
+                    preserve_existing_account: false,
                 },
             })
             .await;

@@ -1885,6 +1885,8 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `mcpServer/oauthLogin/completed` (notify) — emitted after a `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, success, error? }`.
 - `mcpServer/startupStatus/updated` (notify) — emitted when a configured MCP server's startup status changes for a loaded thread; payload includes `{ name, status, error }` where `status` is `starting`, `ready`, `failed`, or `cancelled`.
 
+For `chatgpt` and `chatgptDeviceCode`, the optional `preserveExistingAccount` boolean defaults to `false`, preserving the historical replacement-login behavior that revokes and removes superseded managed ChatGPT credentials. Set it to `true` for an Add Account flow so the previous stored account remains available for account switching.
+
 ### 1) Check auth state
 
 Request:
