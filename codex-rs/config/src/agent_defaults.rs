@@ -50,10 +50,13 @@ const MODELS_MANIFEST: &str = include_str!("../../models-manager/models.json");
 /// Canonical built-in external agent selectors used when no custom selector
 /// list is configured. Ordering controls default presentation priority.
 pub const DEFAULT_AGENT_NAMES: &[&str] = &[
+    "code-gpt-5.6-sol",
     "code-gpt-5.5",
     "code-gpt-5.4",
     "claude-opus-4.8",
     "antigravity",
+    "code-gpt-5.6-terra",
+    "code-gpt-5.6-luna",
     "code-gpt-5.4-mini",
     "claude-sonnet-4.6",
     "github-copilot",

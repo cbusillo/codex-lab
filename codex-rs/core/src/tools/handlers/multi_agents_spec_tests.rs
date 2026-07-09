@@ -68,7 +68,8 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .as_ref()
         .expect("spawn_agent should use object params");
     assert!(description.contains("Spawns an agent to work on the specified task."));
-    assert!(description.contains("The spawned agent will have the same tools as you"));
+    assert!(description.contains("Native child agents receive the same tools as you"));
+    assert!(description.contains(VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE));
     assert!(description.contains("`max_concurrent_threads_per_session = 4`"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(
@@ -131,8 +132,11 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         panic!("spawn_agent v1 should be a namespace tool");
     };
     assert_eq!(namespace.name, MULTI_AGENT_V1_NAMESPACE);
-    let Some(ResponsesApiNamespaceTool::Function(ResponsesApiTool { parameters, .. })) =
-        namespace.tools.first()
+    let Some(ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+        description,
+        parameters,
+        ..
+    })) = namespace.tools.first()
     else {
         panic!("spawn_agent should be a namespace function tool");
     };
@@ -140,6 +144,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         parameters.schema_type.clone(),
         Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object))
     );
+    assert!(description.contains(VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE));
     let properties = parameters
         .properties
         .as_ref()
@@ -249,6 +254,8 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
     assert!(!properties.contains_key("service_tier"));
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(!description.contains("Available model overrides"));
+    assert!(!description.contains(VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE));
+    assert!(description.contains(HIDDEN_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE));
 }
 
 #[test]
