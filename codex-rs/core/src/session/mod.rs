@@ -3255,28 +3255,31 @@ impl Session {
         Option<codex_protocol::account::PlanType>,
     )> {
         let auth = self.services.auth_manager.auth_cached()?;
-        let account_id = match auth.get_account_id() {
-            Some(account_id) => account_id,
-            None => self.saved_api_key_account_id(&auth).await?,
-        };
+        let account_id = self
+            .saved_account_id(&auth)
+            .await
+            .or_else(|| auth.get_account_id())?;
         let plan_type = auth.account_plan_type();
         Some((self.codex_home().await, account_id, plan_type))
     }
 
-    async fn saved_api_key_account_id(&self, auth: &CodexAuth) -> Option<String> {
-        let api_key = auth.api_key()?;
+    async fn saved_account_id(&self, auth: &CodexAuth) -> Option<String> {
         let auth_home = self.auth_home().await;
-        let account_id = codex_login::get_active_account_id(auth_home.as_path())
-            .ok()
-            .flatten()?;
-        let account = codex_login::find_account(auth_home.as_path(), &account_id)
-            .ok()
-            .flatten()?;
-        if account.mode == AuthMode::ApiKey && account.openai_api_key.as_deref() == Some(api_key) {
-            Some(account_id)
-        } else {
-            None
+        let account = match auth.auth_mode() {
+            AuthMode::ApiKey => {
+                codex_login::find_api_key_account_by_key(auth_home.as_path(), auth.api_key()?)
+            }
+            AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
+                codex_login::find_chatgpt_account_by_tokens(
+                    auth_home.as_path(),
+                    &auth.get_token_data().ok()?,
+                )
+            }
+            AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => return None,
         }
+        .ok()
+        .flatten()?;
+        Some(account.id)
     }
 
     pub(crate) async fn mcp_dependency_prompted(&self) -> HashSet<String> {
