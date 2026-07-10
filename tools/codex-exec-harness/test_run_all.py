@@ -92,7 +92,7 @@ class RunAllReportTest(unittest.TestCase):
         self.assertEqual(0, returncode)
         self.assertTrue(report["passed"])
         self.assertFalse(report["partial"])
-        self.assertEqual(8, report["scenario_total"])
+        self.assertEqual(9, report["scenario_total"])
         self.assertEqual("abc123", report["git_revision"])
         self.assertEqual(
             {

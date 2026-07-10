@@ -1071,13 +1071,13 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
             )
         return requests
 
-    def test_pending_scenario_expresses_bounded_feedback_contract(self) -> None:
-        self.assertTrue(self.scenario["skip_run_all"])
+    def test_runtime_scenario_expresses_bounded_feedback_contract(self) -> None:
+        self.assertNotIn("skip_run_all", self.scenario)
         self.assertEqual(
             {
                 "issue": 284,
                 "source_revision": "4339c3743917725b3b685864b3384af259a35964",
-                "status": "pending-runtime",
+                "status": "runtime-covered",
             },
             self.scenario["characterization"],
         )
@@ -1088,7 +1088,7 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
 
         self.assertEqual([], failures)
 
-    def test_pending_scenario_rejects_unbounded_feedback(self) -> None:
+    def test_runtime_scenario_rejects_unbounded_feedback(self) -> None:
         failures = HARNESS.evaluate_expectations(
             self.scenario, self._run(), self._requests(surfaced_findings=13)
         )
@@ -1097,7 +1097,7 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
         self.assertTrue(any("bad-" in failure for failure in failures))
         self.assertTrue(any("truncated" in failure for failure in failures))
 
-    def test_pending_scenario_rejects_misplaced_validation_feedback(self) -> None:
+    def test_runtime_scenario_rejects_misplaced_validation_feedback(self) -> None:
         failures = HARNESS.evaluate_expectations(
             self.scenario,
             self._run(),

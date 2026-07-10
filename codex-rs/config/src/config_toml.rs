@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::HooksToml;
+use crate::ValidationConfig;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
 use crate::types::AnalyticsConfigToml;
@@ -166,6 +167,10 @@ pub struct ConfigToml {
     /// Optional policy instructions for the guardian auto-reviewer.
     #[serde(default)]
     pub auto_review: Option<AutoReviewToml>,
+
+    /// Patch-local validation policy.
+    #[serde(default)]
+    pub validation: Option<ValidationConfig>,
 
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,

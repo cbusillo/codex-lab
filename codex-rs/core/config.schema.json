@@ -4352,6 +4352,42 @@
         }
       ]
     },
+    "ValidationConfig": {
+      "additionalProperties": false,
+      "description": "Patch-local validation settings.",
+      "properties": {
+        "groups": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ValidationGroups"
+            }
+          ],
+          "default": {
+            "functional": false,
+            "stylistic": false
+          },
+          "description": "Validation categories enabled for patch-local checks."
+        }
+      },
+      "type": "object"
+    },
+    "ValidationGroups": {
+      "additionalProperties": false,
+      "description": "Category toggles for patch-local validation.",
+      "properties": {
+        "functional": {
+          "default": true,
+          "description": "Structural and correctness checks.",
+          "type": "boolean"
+        },
+        "stylistic": {
+          "default": false,
+          "description": "Formatting and style checks. Reserved for a later runtime slice.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "Verbosity": {
       "description": "Controls output length/detail on GPT-5 models via the Responses API. Serialized with lowercase values to match the OpenAI API.",
       "enum": [
@@ -5303,6 +5339,15 @@
         }
       ],
       "description": "Collection of settings that are specific to the TUI."
+    },
+    "validation": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ValidationConfig"
+        }
+      ],
+      "default": null,
+      "description": "Patch-local validation policy."
     },
     "web_search": {
       "allOf": [

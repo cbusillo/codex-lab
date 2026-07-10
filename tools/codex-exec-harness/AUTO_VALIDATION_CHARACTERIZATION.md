@@ -16,8 +16,9 @@ The authoritative source was audited at
 `apply_patch` tool call, before safety assessment and the actual write. Findings
 are advisory and never block the patch.
 
-Codex Lab will keep this patch-local trigger as the first runtime slice.
-Turn-finish orchestration comes later.
+Codex Lab keeps the patch-local trigger but adapts execution to the current
+runtime boundary: safe in-memory checks run after approval and a successful
+write, using the committed patch delta. Turn-finish orchestration comes later.
 
 ### Command Selection
 
@@ -116,10 +117,10 @@ consume them.
 - Live session updates cover only the older subset of tool toggles. Some newer
   tool settings persist but do not update the current session immediately.
 
-The current Codex Lab `codex-rs` tree has no `ValidationConfig`,
-`run_patch_harness`, validation settings operation, or validation tool-output
-payload. The first scenario is therefore a pending-runtime characterization,
-not a green claim about current behavior.
+The current Codex Lab runtime implements the first safe subset: configurable
+functional validation for committed JSON, TOML, and YAML patch results. It does
+not execute external validation tools, persist a validation ledger, or provide
+TUI controls.
 
 ## First Contract
 
@@ -139,10 +140,8 @@ Responses turn:
    scenario parses the final output line and does not pass if equivalent text
    appears in another message or in malformed JSON.
 
-The scenario has `skip_run_all: true` and
-`characterization.status = "pending-runtime"`. Once the runtime slice lands,
-remove that skip, run the scenario directly against the built Codex binary,
-and then include it in the all-scenario gate.
+The scenario has `characterization.status = "runtime-covered"` and runs in the
+default all-scenario gate.
 
 ## Deferred Contracts
 

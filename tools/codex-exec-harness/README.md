@@ -61,15 +61,13 @@ with `inherit_auth` for opt-in live model checks when the question depends on
 model behavior rather than prompt assembly. Mark those scenarios
 `skip_run_all: true` unless they are safe for unauthenticated CI.
 
-## Pending Runtime Characterizations
+## Auto-Validation Characterization
 
 Issue #284's first auto-validation contract is documented in
 `AUTO_VALIDATION_CHARACTERIZATION.md`. The corresponding
-`auto-validation-bounded-apply-patch-feedback.json` scenario is intentionally
-marked `skip_run_all: true` and `characterization.status = "pending-runtime"`:
-it defines the fake-Responses request contract before the missing runtime port
-lands. Remove the skip only when the targeted scenario passes against the built
-Codex binary.
+`auto-validation-bounded-apply-patch-feedback.json` scenario runs in the default
+suite with `characterization.status = "runtime-covered"`. It protects bounded,
+call-id-scoped validation feedback on successful `apply_patch` calls.
 
 `gpt-5-6-luna-low-request-shape.json` is the deterministic catalog smoke test
 for the lowest-cost GPT-5.6 variant. It proves the local binary sends
