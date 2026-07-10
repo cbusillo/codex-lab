@@ -1,0 +1,39 @@
+{
+  "name": "auto-validation-project-command-failure",
+  "characterization": {
+    "issue": 284,
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.5",
+  "prompt": "Finish the requested work. PROJECT_VALIDATION_COMMAND_MARKER",
+  "config_toml": "model_provider = \"harness\"\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n\n[validation.project_command]\ncommand = [\"/bin/sh\", \"-c\", \"printf 'project validation failed\\n' >&2; exit 7\"]\ntimeout_ms = 5000\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-project-validation-complete"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 1,
+    "turn_count": 1,
+    "thread_id": "required",
+    "event_types": {
+      "validation.completed": 1,
+      "turn.completed": 1
+    },
+    "events": [
+      {
+        "type": "validation.completed",
+        "contains_all": [
+          "\"status\":\"actionable_failure\"",
+          "\"exit_code\":7",
+          "project validation failed",
+          "\"output_truncated\":false"
+        ]
+      }
+    ]
+  },
+  "timeout_seconds": 30
+}

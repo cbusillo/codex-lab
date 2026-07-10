@@ -2383,6 +2383,28 @@
       },
       "type": "object"
     },
+    "ProjectValidationCommand": {
+      "additionalProperties": false,
+      "description": "One project-defined command that runs automatically after agent work.",
+      "properties": {
+        "command": {
+          "default": [],
+          "description": "Executable and arguments. Shell syntax is not interpreted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout_ms": {
+          "default": 60000,
+          "description": "Maximum execution time in milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "RawMcpServerConfig": {
       "additionalProperties": false,
       "description": "Raw MCP config shape used for deserialization and supported-field JSON Schema generation.\n\nFields that are accepted only to produce targeted validation errors should be skipped in the generated schema.\n\nKeep `TryFrom<RawMcpServerConfig> for McpServerConfig` exhaustively destructuring this struct so new TOML fields cannot be added here without updating the validation/mapping logic that produces [`McpServerConfig`].",
@@ -4367,6 +4389,15 @@
             "stylistic": false
           },
           "description": "Validation categories enabled for patch-local checks."
+        },
+        "project_command": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProjectValidationCommand"
+            }
+          ],
+          "default": null,
+          "description": "Optional project command to run after a root turn finishes agent work. Repository-local config cannot set this executable field."
         }
       },
       "type": "object"

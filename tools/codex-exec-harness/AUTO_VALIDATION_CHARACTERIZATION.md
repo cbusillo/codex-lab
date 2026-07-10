@@ -117,10 +117,11 @@ consume them.
 - Live session updates cover only the older subset of tool toggles. Some newer
   tool settings persist but do not update the current session immediately.
 
-The current Codex Lab runtime implements the first safe subset: configurable
-functional validation for committed JSON, TOML, and YAML patch results. It does
-not execute external validation tools, persist a validation ledger, or provide
-TUI controls.
+The current Codex Lab runtime implements two safe subsets: configurable
+functional validation for committed JSON, TOML, and YAML patch results, plus
+one user-owned project validation command at the terminal root-turn boundary.
+It does not persist a validation ledger, feed command failures back into a
+correction turn, or provide TUI controls.
 
 ## First Contract
 
@@ -143,11 +144,34 @@ Responses turn:
 The scenario has `characterization.status = "runtime-covered"` and runs in the
 default all-scenario gate.
 
+## Project Command Contract
+
+`scenarios/auto-validation-project-command-failure.json` drives one fake
+Responses turn with a user-configured `[validation.project_command]`:
+
+1. The model reaches terminal completion without requesting a tool or a second
+   response.
+2. The configured direct-argv command runs once after stop and legacy
+   after-agent hooks have allowed completion and before `turn.completed`.
+3. A nonzero exit produces one bounded `validation.completed` event with
+   `actionable_failure`, exit code `7`, and captured output.
+4. The command result remains advisory for this slice: the turn and `codex
+exec` process still complete successfully, and no correction request is
+   issued.
+
+Executable validation configuration is ignored in repository-local
+`.codex/config.toml`; it must come from user, system, managed, or runtime
+configuration. Safe `[validation.groups]` project configuration remains
+supported. The runtime uses the active permission profile, requires exactly
+one local turn environment, caps retained output at 8 KiB, and classifies pass,
+actionable failure, configuration error, timeout, and infrastructure failure.
+Turn cancellation aborts the turn rather than emitting a potentially
+misclassified validation result.
+
 ## Deferred Contracts
 
 - clean-run silence and status/history presentation;
-- project-defined validation commands and configuration errors;
-- timeout, cancellation, and infrastructure-failure result classes;
+- typed cancellation results distinct from turn abortion;
 - debounce, unchanged-tree deduplication, and concurrent-run suppression;
 - resumed-turn and third-party-agent behavior;
 - bounded turn-finish correction policy and retry limits;

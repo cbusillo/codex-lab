@@ -10775,6 +10775,75 @@
       ],
       "type": "object"
     },
+    "ProjectValidationCompletedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "exitCode": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output": {
+          "type": "string"
+        },
+        "outputTruncated": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/definitions/ProjectValidationStatus"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "durationMs",
+        "output",
+        "outputTruncated",
+        "status",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ProjectValidationCompletedNotification",
+      "type": "object"
+    },
+    "ProjectValidationStatus": {
+      "enum": [
+        "passed",
+        "actionableFailure",
+        "configurationError",
+        "timedOut",
+        "infrastructureFailure"
+      ],
+      "type": "string"
+    },
     "RateLimitReachedType": {
       "enum": [
         "rate_limit_reached",
@@ -12739,6 +12808,26 @@
             "params"
           ],
           "title": "Review/backgroundStatus/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "validation/completed"
+              ],
+              "title": "Validation/completedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ProjectValidationCompletedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Validation/completedNotification",
           "type": "object"
         },
         {

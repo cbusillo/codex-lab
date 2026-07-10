@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AbsolutePathBuf": {
+      "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
+      "type": "string"
+    },
+    "ProjectValidationStatus": {
+      "enum": [
+        "passed",
+        "actionableFailure",
+        "configurationError",
+        "timedOut",
+        "infrastructureFailure"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "command": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "cwd": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "durationMs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "exitCode": {
+      "format": "int32",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "output": {
+      "type": "string"
+    },
+    "outputTruncated": {
+      "type": "boolean"
+    },
+    "status": {
+      "$ref": "#/definitions/ProjectValidationStatus"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "command",
+    "durationMs",
+    "output",
+    "outputTruncated",
+    "status",
+    "threadId",
+    "turnId"
+  ],
+  "title": "ProjectValidationCompletedNotification",
+  "type": "object"
+}

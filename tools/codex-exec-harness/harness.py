@@ -1101,6 +1101,41 @@ def evaluate_expectations(
                 f"expected event type {event_type!r} {expected} times, found {actual}"
             )
 
+    event_assertions = expect.get("events", [])
+    if not isinstance(event_assertions, list):
+        raise HarnessError("expect.events must be a list")
+    actual_events = run.get("events", [])
+    if not isinstance(actual_events, list):
+        actual_events = []
+    for index, assertion in enumerate(event_assertions):
+        if not isinstance(assertion, dict):
+            raise HarnessError("event assertions must be objects")
+        event_type = assertion.get("type")
+        if not isinstance(event_type, str) or not event_type:
+            raise HarnessError(f"expect.events[{index}].type must be a non-empty string")
+        matching_events = [
+            event
+            for event in actual_events
+            if isinstance(event, dict) and event.get("type") == event_type
+        ]
+        occurrence = scenario_int(
+            assertion.get("occurrence", 0), f"expect.events[{index}].occurrence"
+        )
+        if occurrence < 0 or occurrence >= len(matching_events):
+            failures.append(
+                f"event assertion {index}: missing occurrence {occurrence} of {event_type!r}"
+            )
+            continue
+        subject = json.dumps(
+            matching_events[occurrence], sort_keys=True, separators=(",", ":")
+        )
+        add_text_assertion_failures(
+            failures,
+            subject,
+            assertion,
+            f"events[{event_type!r}][{occurrence}]",
+        )
+
     token_usage_assertion = expect.get("token_usage")
     if token_usage_assertion is not None:
         add_token_usage_assertion_failures(

@@ -137,6 +137,7 @@ pub fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::TurnDiff(_)
         | EventMsg::RealtimeConversationListVoicesResponse(_)
         | EventMsg::BackgroundAutoReviewStatus(_)
+        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::McpStartupUpdate(_)
         | EventMsg::McpStartupComplete(_)
         | EventMsg::WebSearchBegin(_)

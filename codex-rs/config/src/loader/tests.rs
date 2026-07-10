@@ -13,6 +13,24 @@ use tempfile::tempdir;
 
 struct TestFileSystem;
 
+#[test]
+fn project_config_cannot_enable_automatic_commands() {
+    let mut config: TomlValue = toml::from_str(
+        "[validation.groups]\nfunctional = true\n\n[validation.project_command]\ncommand = [\"just\", \"test\"]\n",
+    )
+    .expect("project config should parse");
+
+    assert_eq!(
+        sanitize_project_config(&mut config),
+        vec!["validation.project_command".to_string()]
+    );
+    assert_eq!(
+        config,
+        toml::from_str::<TomlValue>("[validation.groups]\nfunctional = true\n")
+            .expect("sanitized project config should parse")
+    );
+}
+
 #[async_trait]
 impl ExecutorFileSystem for TestFileSystem {
     async fn canonicalize(

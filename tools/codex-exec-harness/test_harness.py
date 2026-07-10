@@ -675,6 +675,38 @@ class HarnessSafetyTest(unittest.TestCase):
                 [],
             )
 
+    def test_event_payload_expectations_select_type_and_assert_text(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "events": [
+                        {
+                            "type": "validation.completed",
+                            "contains_all": [
+                                '"status":"actionable_failure"',
+                                '"exit_code":7',
+                            ],
+                        }
+                    ]
+                }
+            },
+            {
+                "returncode": 0,
+                "events": [
+                    {
+                        "type": "validation.completed",
+                        "status": "actionable_failure",
+                        "exit_code": 7,
+                    }
+                ],
+                "event_types": {"validation.completed": 1},
+                "turns": [],
+            },
+            [],
+        )
+
+        self.assertEqual([], failures)
+
     def test_response_prefix_assertion_compares_captured_requests(self) -> None:
         failures = HARNESS.evaluate_expectations(
             {

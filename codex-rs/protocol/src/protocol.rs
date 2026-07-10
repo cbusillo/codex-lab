@@ -1362,6 +1362,9 @@ pub enum EventMsg {
     /// Automatic background review lifecycle status changed.
     BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent),
 
+    /// A configured project validation command reached a terminal state.
+    ProjectValidationCompleted(ProjectValidationCompletedEvent),
+
     /// Exited review mode with an optional final result to apply.
     ExitedReviewMode(ExitedReviewModeEvent),
 
@@ -1397,6 +1400,32 @@ pub enum EventMsg {
     CollabResumeBegin(CollabResumeBeginEvent),
     /// Collab interaction: resume end.
     CollabResumeEnd(CollabResumeEndEvent),
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectValidationStatus {
+    Passed,
+    ActionableFailure,
+    ConfigurationError,
+    TimedOut,
+    InfrastructureFailure,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ProjectValidationCompletedEvent {
+    pub turn_id: String,
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<AbsolutePathBuf>,
+    pub status: ProjectValidationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_code: Option<i32>,
+    pub output: String,
+    pub output_truncated: bool,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS, EnumIter)]

@@ -1590,6 +1590,7 @@ server_notification_definitions! {
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
     TurnStarted => "turn/started" (v2::TurnStartedNotification),
     BackgroundAutoReviewStatusChanged => "review/backgroundStatus/changed" (v2::BackgroundAutoReviewStatusChangedNotification),
+    ProjectValidationCompleted => "validation/completed" (v2::ProjectValidationCompletedNotification),
     HookStarted => "hook/started" (v2::HookStartedNotification),
     TurnCompleted => "turn/completed" (v2::TurnCompletedNotification),
     HookCompleted => "hook/completed" (v2::HookCompletedNotification),
