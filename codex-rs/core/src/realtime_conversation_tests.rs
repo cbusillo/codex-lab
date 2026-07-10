@@ -142,10 +142,14 @@ async fn clears_active_handoff_explicitly() {
 
 #[test]
 fn uses_quicksilver_alpha_header_for_realtime_v1() {
-    let headers =
-        realtime_request_headers(Some("session_1"), Some("sk-test"), RealtimeWsVersion::V1)
-            .expect("headers")
-            .expect("headers");
+    let headers = realtime_request_headers(
+        Some("session_1"),
+        Some("sk-test"),
+        RealtimeWsVersion::V1,
+        /*model*/ None,
+    )
+    .expect("headers")
+    .expect("headers");
 
     assert_eq!(
         headers
@@ -157,10 +161,39 @@ fn uses_quicksilver_alpha_header_for_realtime_v1() {
 
 #[test]
 fn omits_quicksilver_alpha_header_for_realtime_v2() {
-    let headers =
-        realtime_request_headers(Some("session_1"), Some("sk-test"), RealtimeWsVersion::V2)
-            .expect("headers")
-            .expect("headers");
+    let headers = realtime_request_headers(
+        Some("session_1"),
+        Some("sk-test"),
+        RealtimeWsVersion::V2,
+        /*model*/ None,
+    )
+    .expect("headers")
+    .expect("headers");
 
     assert!(headers.get("openai-alpha").is_none());
+}
+
+#[test]
+fn uses_model_compatible_headers_for_realtime_requests() {
+    let expected_user_agent =
+        codex_login::default_client::get_codex_user_agent_for_model("gpt-5.6-luna");
+    let headers = realtime_request_headers(
+        Some("session_1"),
+        Some("sk-test"),
+        RealtimeWsVersion::V2,
+        Some("gpt-5.6-luna"),
+    )
+    .expect("headers")
+    .expect("headers");
+
+    assert_eq!(
+        headers.get("version").and_then(|value| value.to_str().ok()),
+        Some("0.144.0")
+    );
+    assert_eq!(
+        headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_user_agent.as_str())
+    );
 }

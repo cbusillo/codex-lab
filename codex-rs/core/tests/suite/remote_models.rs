@@ -319,29 +319,28 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result<()> {
+async fn gpt_5_6_luna_uses_compatible_headers_and_maps_ultra_to_max() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
     let server = MockServer::start().await;
-    let requested_model = "gpt-5.3-codex-test";
-    let prefix_model = "gpt-5.3-codex";
+    let requested_model = "gpt-5.6-luna";
+    let prefix_model = requested_model;
     let mut remote_model = test_remote_model_with_policy(
         prefix_model,
         ModelVisibility::List,
         /*priority*/ 1_000,
         TruncationPolicyConfig::bytes(/*limit*/ 10_000),
     );
-    let custom_reasoning_effort = ReasoningEffort::Custom("max".to_string());
-    remote_model.default_reasoning_level = Some(custom_reasoning_effort.clone());
+    remote_model.default_reasoning_level = Some(ReasoningEffort::Ultra);
     remote_model.supported_reasoning_levels = vec![
         ReasoningEffortPreset {
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         },
         ReasoningEffortPreset {
-            effort: custom_reasoning_effort.clone(),
-            description: custom_reasoning_effort.to_string(),
+            effort: ReasoningEffort::Ultra,
+            description: ReasoningEffort::Ultra.to_string(),
         },
     ];
     remote_model.supports_reasoning_summaries = true;
@@ -397,6 +396,13 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
     assert_eq!(body["model"].as_str(), Some(requested_model));
     assert_eq!(reasoning_effort, Some("max"));
     assert_eq!(reasoning_summary, Some("detailed"));
+    assert_eq!(request.header("version"), Some("0.144.0".to_string()));
+    assert_eq!(
+        request.header("user-agent"),
+        Some(codex_login::default_client::get_codex_user_agent_for_model(
+            requested_model
+        ))
+    );
 
     Ok(())
 }

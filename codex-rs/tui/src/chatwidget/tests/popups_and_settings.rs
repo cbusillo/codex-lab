@@ -2681,6 +2681,22 @@ async fn reasoning_popup_shows_extra_high_with_space() {
     );
 }
 
+#[test]
+fn reasoning_effort_labels_include_max_and_ultra() {
+    assert_eq!(
+        ChatWidget::reasoning_effort_label(&ReasoningEffortConfig::Max),
+        "Max"
+    );
+    assert_eq!(
+        ChatWidget::reasoning_effort_label(&ReasoningEffortConfig::Ultra),
+        "Ultra"
+    );
+    assert_eq!(
+        ChatWidget::reasoning_effort_sentence_label(&ReasoningEffortConfig::Ultra),
+        "ultra"
+    );
+}
+
 #[tokio::test]
 async fn single_reasoning_option_skips_selection() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;

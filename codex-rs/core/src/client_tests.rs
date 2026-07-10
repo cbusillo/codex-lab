@@ -7,10 +7,13 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::reasoning_effort_for_request;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
 use codex_api::ApiError;
+use codex_api::RawMemory;
+use codex_api::RawMemoryMetadata;
 use codex_api::ResponseEvent;
 use codex_app_server_protocol::AuthMode;
 use codex_login::AuthManager;
@@ -26,6 +29,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -59,6 +63,11 @@ use tracing_subscriber::layer::Context as LayerContext;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 fn test_model_client(session_source: SessionSource) -> ModelClient {
     test_model_client_with_parent(session_source, /*parent_thread_id*/ None)
@@ -68,7 +77,15 @@ fn test_model_client_with_parent(
     session_source: SessionSource,
     parent_thread_id: Option<ThreadId>,
 ) -> ModelClient {
-    let provider = create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
+    test_model_client_with_base_url(session_source, parent_thread_id, "https://example.com/v1")
+}
+
+fn test_model_client_with_base_url(
+    session_source: SessionSource,
+    parent_thread_id: Option<ThreadId>,
+    base_url: &str,
+) -> ModelClient {
+    let provider = create_oss_provider_with_base_url(base_url, WireApi::Responses);
     let thread_id = ThreadId::new();
     ModelClient::new(
         /*auth_manager*/ None,
@@ -344,6 +361,75 @@ async fn summarize_memories_returns_empty_for_empty_input() {
 }
 
 #[tokio::test]
+async fn summarize_memories_maps_ultra_and_uses_model_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/memories/trace_summarize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output": []})))
+        .mount(&server)
+        .await;
+    let client = test_model_client_with_base_url(
+        SessionSource::Cli,
+        /*parent_thread_id*/ None,
+        &format!("{}/v1", server.uri()),
+    );
+    let mut model_info = test_model_info();
+    model_info.slug = "gpt-5.6-luna".to_string();
+    let expected_user_agent =
+        codex_login::default_client::get_codex_user_agent_for_model(&model_info.slug);
+
+    let output = client
+        .summarize_memories(
+            vec![RawMemory {
+                id: "memory-1".to_string(),
+                metadata: RawMemoryMetadata {
+                    source_path: "rollout.jsonl".to_string(),
+                },
+                items: vec![json!({"type": "message"})],
+            }],
+            &model_info,
+            Some(ReasoningEffortConfig::Ultra),
+            &test_session_telemetry(),
+        )
+        .await
+        .expect("memory summarize request should succeed");
+
+    assert_eq!(output, Vec::new());
+    let requests = server
+        .received_requests()
+        .await
+        .expect("memory summarize request should be captured");
+    let request = requests.first().expect("missing memory summarize request");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&request.body)
+            .expect("memory summarize body should be JSON"),
+        json!({
+            "model": "gpt-5.6-luna",
+            "traces": [{
+                "id": "memory-1",
+                "metadata": {"source_path": "rollout.jsonl"},
+                "items": [{"type": "message"}]
+            }],
+            "reasoning": {"effort": "max"}
+        })
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("version")
+            .and_then(|value| value.to_str().ok()),
+        Some("0.144.0")
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_user_agent.as_str())
+    );
+}
+
+#[tokio::test]
 async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let attempt = started_inference_attempt(&temp)?;
@@ -552,7 +638,11 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() 
         model_client_with_counting_attestation(/*include_attestation*/ true);
 
     let headers = model_client
-        .build_websocket_headers(/*turn_state*/ None, /*turn_metadata_header*/ None)
+        .build_websocket_headers(
+            "gpt-5.6-luna",
+            /*turn_state*/ None,
+            /*turn_metadata_header*/ None,
+        )
         .await;
 
     assert_eq!(
@@ -562,6 +652,22 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() 
         Some("v1.header-1"),
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        headers.get("version").and_then(|value| value.to_str().ok()),
+        Some("0.144.0")
+    );
+}
+
+#[test]
+fn ultra_reasoning_uses_max_for_requests() {
+    assert_eq!(
+        reasoning_effort_for_request(ReasoningEffortConfig::Ultra),
+        ReasoningEffortConfig::Max
+    );
+    assert_eq!(
+        reasoning_effort_for_request(ReasoningEffortConfig::Max),
+        ReasoningEffortConfig::Max
+    );
 }
 
 #[tokio::test]

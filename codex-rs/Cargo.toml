@@ -118,6 +118,7 @@ members = [
     "thread-manager-sample",
     "thread-store",
     "uds",
+    "version",
     "codex-experimental-api-macros",
     "plugin",
     "model-provider",
@@ -230,6 +231,7 @@ codex-thread-store = { path = "thread-store" }
 codex-tools = { path = "tools" }
 codex-tui = { path = "tui" }
 codex-uds = { path = "uds" }
+codex-version = { path = "version" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }
 codex-utils-approval-presets = { path = "utils/approval-presets" }
 codex-utils-cache = { path = "utils/cache" }

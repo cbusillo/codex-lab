@@ -291,7 +291,9 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(
-        test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+        test_codex()
+            .with_model("gpt-5.6-luna")
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
     )
     .await?;
     let codex = harness.test().codex.clone();
@@ -372,6 +374,16 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
     assert_eq!(
         compact_request.header("thread-id").as_deref(),
         Some(thread_id.as_str())
+    );
+    assert_eq!(
+        compact_request.header("version").as_deref(),
+        Some("0.144.0")
+    );
+    assert_eq!(
+        compact_request.header("user-agent"),
+        Some(codex_login::default_client::get_codex_user_agent_for_model(
+            "gpt-5.6-luna"
+        ))
     );
     let compact_metadata: Value = serde_json::from_str(
         &compact_request

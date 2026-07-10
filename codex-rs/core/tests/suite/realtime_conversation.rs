@@ -66,6 +66,7 @@ const MEMORY_PROMPT_PHRASE: &str =
     "You have access to a memory folder with guidance from prior runs.";
 const REALTIME_CONVERSATION_TEST_SUBPROCESS_ENV_VAR: &str =
     "CODEX_REALTIME_CONVERSATION_TEST_SUBPROCESS";
+const GPT_5_6_REALTIME_MODEL: &str = "gpt-5.6-luna";
 
 #[derive(Debug, Clone)]
 struct RealtimeCallRequestCapture {
@@ -273,7 +274,9 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
     ])
     .await;
 
-    let mut builder = test_codex();
+    let mut builder = test_codex().with_config(|config| {
+        config.experimental_realtime_ws_model = Some(GPT_5_6_REALTIME_MODEL.to_string());
+    });
     let test = builder.build_with_websocket_server(&server).await?;
     assert!(
         server
@@ -355,8 +358,9 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
     let initial_instructions = websocket_request_instructions(&connection[0])
         .expect("initial session update instructions");
     assert!(initial_instructions.starts_with("backend prompt"));
+    let handshake = &server.handshakes()[1];
     assert_eq!(
-        server.handshakes()[1]
+        handshake
             .header("x-session-id")
             .expect("session.update x-session-id header"),
         started
@@ -365,12 +369,19 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
             .expect("started session id should be present")
     );
     assert_eq!(
-        server.handshakes()[1].header("authorization").as_deref(),
+        handshake.header("authorization").as_deref(),
         Some("Bearer dummy")
     );
+    assert_eq!(handshake.header("version").as_deref(), Some("0.144.0"));
     assert_eq!(
-        server.handshakes()[1].uri(),
-        "/v1/realtime?intent=quicksilver&model=realtime-test-model"
+        handshake.header("user-agent"),
+        Some(codex_login::default_client::get_codex_user_agent_for_model(
+            GPT_5_6_REALTIME_MODEL
+        ))
+    );
+    assert_eq!(
+        handshake.uri(),
+        "/v1/realtime?intent=quicksilver&model=gpt-5.6-luna"
     );
     let mut request_types = [
         connection[1].body_json()["type"]
@@ -500,7 +511,7 @@ async fn conversation_webrtc_start_posts_generated_session() -> Result<()> {
     let realtime_ws_base_url = realtime_server.uri().to_string();
     let mut builder = test_codex().with_config(move |config| {
         config.experimental_realtime_ws_backend_prompt = Some("backend prompt".to_string());
-        config.experimental_realtime_ws_model = Some("realtime-test-model".to_string());
+        config.experimental_realtime_ws_model = Some(GPT_5_6_REALTIME_MODEL.to_string());
         config.experimental_realtime_ws_startup_context = Some("startup context".to_string());
         config.experimental_realtime_ws_base_url = Some(realtime_ws_base_url);
         config.realtime.version = RealtimeWsVersion::V1;
@@ -568,12 +579,29 @@ async fn conversation_webrtc_start_posts_generated_session() -> Result<()> {
     assert_eq!(
         request
             .headers
+            .get("version")
+            .and_then(|value| value.to_str().ok()),
+        Some("0.144.0")
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok()),
+        Some(
+            codex_login::default_client::get_codex_user_agent_for_model(GPT_5_6_REALTIME_MODEL)
+                .as_str()
+        )
+    );
+    assert_eq!(
+        request
+            .headers
             .get("content-type")
             .and_then(|value| value.to_str().ok()),
         Some("multipart/form-data; boundary=codex-realtime-call-boundary")
     );
     let body = String::from_utf8(request.body).context("multipart body should be utf-8")?;
-    let session = r#"{"audio":{"input":{"format":{"type":"audio/pcm","rate":24000}},"output":{"voice":"cove"}},"type":"quicksilver","model":"realtime-test-model","instructions":"backend prompt\n\nstartup context"}"#;
+    let session = r#"{"audio":{"input":{"format":{"type":"audio/pcm","rate":24000}},"output":{"voice":"cove"}},"type":"quicksilver","model":"gpt-5.6-luna","instructions":"backend prompt\n\nstartup context"}"#;
     let session = normalized_json_string(session)?;
     assert_eq!(
         body,
@@ -628,6 +656,13 @@ async fn conversation_webrtc_start_posts_generated_session() -> Result<()> {
     assert_eq!(
         handshake.header("authorization").as_deref(),
         Some("Bearer dummy")
+    );
+    assert_eq!(handshake.header("version").as_deref(), Some("0.144.0"));
+    assert_eq!(
+        handshake.header("user-agent"),
+        Some(codex_login::default_client::get_codex_user_agent_for_model(
+            GPT_5_6_REALTIME_MODEL
+        ))
     );
 
     test.codex.submit(Op::RealtimeConversationClose).await?;

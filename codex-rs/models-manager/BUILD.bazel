@@ -1,5 +1,7 @@
 load("//:defs.bzl", "codex_rust_crate")
 
+exports_files(["models.json"])
+
 codex_rust_crate(
     name = "models-manager",
     crate_name = "codex_models_manager",
