@@ -77,6 +77,53 @@ class ConfigureCodexLabCargoCacheTest(unittest.TestCase):
             self.assertNotIn(str(artifact_root), completed.stdout)
             self.assertNotIn(str(artifact_root), summary_file.read_text())
 
+    def test_uses_requested_cargo_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "github-env"
+            bin_dir = write_fake_rustc(Path(tmp), "aarch64-apple-darwin")
+            artifact_root = Path(tmp) / "artifact-root"
+            artifact_root.mkdir()
+
+            completed = run_helper(
+                env_file,
+                script_args=("codex-lab-app", "codex-lab", "ci-app"),
+                PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                RUNNER_ENVIRONMENT="self-hosted",
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
+                GITHUB_REPOSITORY="owner/repo",
+            )
+
+            target_dir = (
+                artifact_root
+                / "github-actions"
+                / "cache"
+                / "owner/repo"
+                / "codex-lab-app"
+                / "cargo-target-aarch64-apple-darwin-ci-app"
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual(
+                f"CARGO_TARGET_DIR={target_dir}\n"
+                f"CODEX_LAB_BIN={target_dir / 'ci-app' / 'codex-lab'}\n"
+                "CODEX_LAB_CARGO_HOST=aarch64-apple-darwin\n"
+                "CODEX_LAB_CARGO_PROFILE=ci-app\n"
+                "CODEX_LAB_CARGO_CACHE_MODE=persistent\n",
+                env_file.read_text(),
+            )
+
+    def test_rejects_invalid_cargo_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "github-env"
+
+            completed = run_helper(
+                env_file,
+                script_args=("codex-lab-app", "codex-lab", "bad/profile"),
+            )
+
+            self.assertEqual(2, completed.returncode)
+            self.assertIn("invalid Cargo profile", completed.stderr)
+            self.assertFalse(env_file.exists())
+
     def test_falls_back_to_default_target_dir_without_artifact_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "github-env"
@@ -97,7 +144,10 @@ class ConfigureCodexLabCargoCacheTest(unittest.TestCase):
 
 
 def run_helper(
-    env_file: Path, cwd: Path | None = None, **overrides: str
+    env_file: Path,
+    cwd: Path | None = None,
+    script_args: tuple[str, ...] = ("codex-lab-app",),
+    **overrides: str,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("CARGO_TARGET_DIR", None)
@@ -111,7 +161,7 @@ def run_helper(
     )
     env.update(overrides)
     return subprocess.run(
-        [str(SCRIPT), "codex-lab-app"],
+        [str(SCRIPT), *script_args],
         check=False,
         cwd=cwd,
         env=env,

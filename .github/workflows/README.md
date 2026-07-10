@@ -14,8 +14,9 @@ runner groups, secrets, and release infrastructure that this fork does not own.
   files in the job summary.
 - `codex-lab-app.yml` builds the macOS ARM64 `Codex Lab.app` artifact on the
   self-hosted macOS runner when packaging files, Rust CLI code, or the workflow
-  change. The self-hosted job is guarded so it runs automatically only for
-  branches in this repository or manual dispatches.
+  change. PR builds use the faster `ci-app` Cargo profile; the release workflow
+  retains the full release profile. The self-hosted job is guarded so it runs
+  automatically only for branches in this repository or manual dispatches.
 - `exec-harness.yml` runs Codex exec-harness scenarios on the self-hosted Linux
   runner when harness files, local harness helpers, Rust code, or the workflow
   change. The self-hosted job is guarded so it runs automatically only for
