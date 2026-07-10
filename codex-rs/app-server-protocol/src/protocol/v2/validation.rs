@@ -19,6 +19,8 @@ v2_enum_from_core!(
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+/// One completed project-validation command execution. An actionable first execution may be
+/// followed by one bounded correction cycle and a second completion notification.
 pub struct ProjectValidationCompletedNotification {
     pub thread_id: String,
     pub turn_id: String,

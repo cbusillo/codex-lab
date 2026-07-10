@@ -146,11 +146,40 @@ pub(crate) enum ProjectValidationEligibility {
     Ineligible,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunTurnMode {
+    Initial,
+    Continuation,
+}
+
+pub(crate) struct RunTurnState {
+    turn_diff_tracker: SharedTurnDiffTracker,
+    mode: RunTurnMode,
+}
+
+impl RunTurnState {
+    pub(crate) async fn new(turn_context: &TurnContext) -> Self {
+        Self {
+            turn_diff_tracker: Arc::new(tokio::sync::Mutex::new(
+                TurnDiffTracker::with_environment_display_roots(
+                    turn_diff_display_roots(turn_context).await,
+                ),
+            )),
+            mode: RunTurnMode::Initial,
+        }
+    }
+
+    pub(crate) fn continue_turn(&mut self) {
+        self.mode = RunTurnMode::Continuation;
+    }
+}
+
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
     input: Vec<TurnInput>,
+    run_state: &RunTurnState,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> Option<TurnRunResult> {
@@ -171,40 +200,38 @@ pub(crate) async fn run_turn(
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
 
-    let (injection_items, explicitly_enabled_connectors) =
-        build_skills_and_plugins(&sess, turn_context.as_ref(), &input, &cancellation_token).await?;
-
-    if run_pending_session_start_hooks(&sess, &turn_context).await {
-        return None;
-    }
     let mut can_drain_pending_input = input.is_empty();
-    if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+    if run_state.mode == RunTurnMode::Initial {
+        let (injection_items, explicitly_enabled_connectors) =
+            build_skills_and_plugins(&sess, turn_context.as_ref(), &input, &cancellation_token)
+                .await?;
+
+        if run_pending_session_start_hooks(&sess, &turn_context).await {
+            return None;
+        }
+        if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+            return None;
+        }
+
+        sess.merge_connector_selection(explicitly_enabled_connectors.clone())
+            .await;
+        sess.set_previous_turn_settings(Some(PreviousTurnSettings {
+            model: turn_context.model_info.slug.clone(),
+            realtime_active: Some(turn_context.realtime_active),
+        }))
+        .await;
+        for response_item in injection_items {
+            sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
+                .await;
+        }
+
+        track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
+    } else if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
         return None;
     }
-
-    sess.merge_connector_selection(explicitly_enabled_connectors.clone())
-        .await;
-    sess.set_previous_turn_settings(Some(PreviousTurnSettings {
-        model: turn_context.model_info.slug.clone(),
-        realtime_active: Some(turn_context.realtime_active),
-    }))
-    .await;
-    for response_item in injection_items {
-        sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-            .await;
-    }
-
-    track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
 
     let mut last_agent_message: Option<String> = None;
     let mut stop_hook_active = false;
-    // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
-    // many turns, from the perspective of the user, it is a single turn.
-    let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
-        TurnDiffTracker::with_environment_display_roots(
-            turn_diff_display_roots(turn_context.as_ref()).await,
-        ),
-    ));
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
@@ -249,7 +276,7 @@ pub(crate) async fn run_turn(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
             Arc::clone(&turn_extension_data),
-            Arc::clone(&turn_diff_tracker),
+            Arc::clone(&run_state.turn_diff_tracker),
             &mut client_session,
             turn_metadata_header.as_deref(),
             sampling_request_input.clone(),
