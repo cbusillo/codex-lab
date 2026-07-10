@@ -3,7 +3,7 @@
   "characterization": {
     "issue": 284,
     "source_revision": "4339c3743917725b3b685864b3384af259a35964",
-    "status": "pending-runtime"
+    "status": "runtime-covered"
   },
   "model": "gpt-5.5",
   "prompt": "Apply the requested fixture patch. AUTO_VALIDATION_CHARACTERIZATION_MARKER",
@@ -28,7 +28,6 @@
       }
     ]
   },
-  "skip_run_all": true,
   "expect": {
     "returncode": 0,
     "responses_request_count": 2,

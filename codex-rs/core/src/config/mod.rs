@@ -24,6 +24,7 @@ use codex_config::ResidencyRequirement;
 use codex_config::SandboxModeRequirement;
 use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
+use codex_config::ValidationConfig;
 use codex_config::config_toml::AgentRoleBackendToml;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
@@ -608,6 +609,9 @@ pub struct Config {
     /// launched. Corresponds to `[auto_review] background_max_diff_bytes` in
     /// config.toml.
     pub background_auto_review_max_diff_bytes: Option<usize>,
+
+    /// Patch-local validation policy.
+    pub validation: ValidationConfig,
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
@@ -3542,6 +3546,7 @@ impl Config {
                 .as_ref()
                 .and_then(|ar| ar.background_max_diff_bytes)
                 .or(Some(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES)),
+            validation: cfg.validation.unwrap_or_default(),
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_auto_compact_token_limit_scope: cfg

@@ -251,6 +251,153 @@ fn apply_patch_responses(
     ]
 }
 
+async fn structural_validation_harness() -> Result<TestCodexHarness> {
+    apply_patch_harness_with(|builder| {
+        builder.with_config(|config| {
+            config.validation.groups.functional = true;
+        })
+    })
+    .await
+}
+
+fn final_output_json(output: &str) -> Option<serde_json::Value> {
+    output
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .and_then(|line| serde_json::from_str(line).ok())
+}
+
+fn invalid_json_message() -> String {
+    format!(
+        "invalid JSON: {}",
+        serde_json::from_str::<serde_json::Value>("{ invalid")
+            .expect_err("fixture should be invalid JSON")
+    )
+}
+
+fn json_validation_issue(file: impl Into<String>) -> serde_json::Value {
+    json!({
+        "tool": "json-parse",
+        "file": file.into(),
+        "msg": invalid_json_message(),
+    })
+}
+
+fn validation_result(
+    issues: Vec<serde_json::Value>,
+    issue_count: usize,
+    truncated: bool,
+) -> serde_json::Value {
+    json!({
+        "validation": {
+            "issues": issues,
+            "checks": ["json-parse"],
+            "issue_count": issue_count,
+            "truncated": truncated,
+        }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_patch_cli_reports_bounded_structural_validation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = structural_validation_harness().await?;
+    let patch_body = (1..=13)
+        .map(|index| format!("*** Add File: bad-{index:02}.json\n+{{ invalid\n"))
+        .collect::<String>();
+    let patch = format!("*** Begin Patch\n{patch_body}*** End Patch");
+    let call_id = "apply-with-structural-validation";
+    mount_apply_patch(&harness, call_id, &patch, "done").await;
+
+    harness.submit("apply invalid JSON fixtures").await?;
+
+    let output = harness.apply_patch_output(call_id).await;
+    let expected_issues = (1..=12)
+        .map(|index| json_validation_issue(format!("bad-{index:02}.json")))
+        .collect::<Vec<_>>();
+
+    assert!(output.contains("Success. Updated the following files:"));
+    assert_eq!(
+        final_output_json(&output).expect("validation summary should be valid JSON"),
+        validation_result(expected_issues, 13, true)
+    );
+    assert_eq!(harness.read_file_text("bad-13.json").await?, "{ invalid\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn intercepted_apply_patch_reports_structural_validation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = structural_validation_harness().await?;
+    let patch = "*** Begin Patch\n*** Add File: invalid.json\n+{ invalid\n*** End Patch";
+    let call_id = "intercepted-apply-with-validation";
+    mount_apply_patch_model_output(
+        &harness,
+        call_id,
+        patch,
+        "done",
+        ApplyPatchModelOutput::ShellCommandViaHeredoc,
+    )
+    .await;
+
+    harness
+        .submit("apply invalid JSON via shell heredoc")
+        .await?;
+
+    let output = harness.function_call_stdout(call_id).await;
+    assert_eq!(
+        final_output_json(&output).expect("validation summary should be valid JSON"),
+        validation_result(vec![json_validation_issue("invalid.json")], 1, false)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_patch_validation_is_disabled_by_default() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = apply_patch_harness().await?;
+    let patch = "*** Begin Patch\n*** Add File: invalid.json\n+{ invalid\n*** End Patch";
+    let call_id = "apply-with-default-validation";
+    mount_apply_patch(&harness, call_id, patch, "done").await;
+
+    harness
+        .submit("apply invalid JSON with default config")
+        .await?;
+
+    let output = harness.apply_patch_output(call_id).await;
+    assert_eq!(final_output_json(&output), None);
+    assert_eq!(harness.read_file_text("invalid.json").await?, "{ invalid\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_patch_validation_uses_committed_move_and_delete_state() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = structural_validation_harness().await?;
+    harness.write_file("deleted.json", "{ invalid\n").await?;
+    harness.write_file("source.txt", "plain\n").await?;
+    let patch = "*** Begin Patch\n*** Delete File: deleted.json\n*** Update File: source.txt\n*** Move to: moved.json\n@@\n-plain\n+{ invalid\n*** End Patch";
+    let call_id = "apply-with-final-validation-state";
+    mount_apply_patch(&harness, call_id, patch, "done").await;
+
+    harness.submit("delete and move structural files").await?;
+
+    let output = harness.apply_patch_output(call_id).await;
+    assert_eq!(
+        final_output_json(&output).expect("validation summary should be valid JSON"),
+        validation_result(vec![json_validation_issue("moved.json")], 1, false)
+    );
+    assert!(!harness.path_exists("deleted.json").await?);
+    assert!(!harness.path_exists("source.txt").await?);
+    assert_eq!(harness.read_file_text("moved.json").await?, "{ invalid\n");
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apply_patch_cli_uses_codex_self_exe_with_linux_sandbox_helper_alias() -> Result<()> {
