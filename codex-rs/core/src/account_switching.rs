@@ -160,12 +160,37 @@ fn usage_preferred_reset_at(
     secondary_reset.or(primary_reset)
 }
 
+fn legacy_usage_account_id(account: &StoredAccount) -> Option<&str> {
+    account.tokens.as_ref().and_then(|tokens| {
+        tokens
+            .account_id
+            .as_deref()
+            .filter(|account_id| !account_id.is_empty())
+            .or_else(|| {
+                tokens
+                    .id_token
+                    .chatgpt_account_id
+                    .as_deref()
+                    .filter(|account_id| !account_id.is_empty())
+            })
+    })
+}
+
+fn usage_snapshot_for_account<'a>(
+    snapshot_map: &'a HashMap<String, account_usage::StoredRateLimitSnapshot>,
+    account: &StoredAccount,
+) -> Option<&'a account_usage::StoredRateLimitSnapshot> {
+    snapshot_map.get(&account.id).or_else(|| {
+        legacy_usage_account_id(account).and_then(|account_id| snapshot_map.get(account_id))
+    })
+}
+
 fn candidate_score(
     snapshot_map: &HashMap<String, account_usage::StoredRateLimitSnapshot>,
-    account_id: &str,
+    account: &StoredAccount,
     now: DateTime<Utc>,
 ) -> CandidateScore {
-    let snapshot = snapshot_map.get(account_id);
+    let snapshot = usage_snapshot_for_account(snapshot_map, account);
     CandidateScore {
         reset_at: snapshot.and_then(|snapshot| usage_preferred_reset_at(snapshot, now)),
         used_percent: snapshot.and_then(usage_used_percent).unwrap_or_default(),
@@ -186,15 +211,13 @@ fn score_is_better(score: CandidateScore, best_score: CandidateScore) -> bool {
 fn blocked_until_for(
     state: &RateLimitSwitchState,
     snapshot_map: &HashMap<String, account_usage::StoredRateLimitSnapshot>,
-    account_id: &str,
+    account: &StoredAccount,
 ) -> Option<DateTime<Utc>> {
     state
-        .blocked_until(account_id)
+        .blocked_until(&account.id)
         .into_iter()
         .chain(
-            snapshot_map
-                .get(account_id)
-                .and_then(usage_reset_blocked_until),
+            usage_snapshot_for_account(snapshot_map, account).and_then(usage_reset_blocked_until),
         )
         .max()
 }
@@ -261,11 +284,11 @@ pub fn select_next_account_id(
         if has_unexpired_tried_marker(state, &account.id, now) {
             continue;
         }
-        if is_blocked(now, blocked_until_for(state, &snapshot_map, &account.id)) {
+        if is_blocked(now, blocked_until_for(state, &snapshot_map, account)) {
             continue;
         }
 
-        let score = candidate_score(&snapshot_map, &account.id, now);
+        let score = candidate_score(&snapshot_map, account, now);
         match best_chatgpt {
             None => best_chatgpt = Some((*account, score)),
             Some((_, best_score)) if score_is_better(score, best_score) => {
@@ -284,7 +307,7 @@ pub fn select_next_account_id(
     }
 
     let all_chatgpt_unavailable = chatgpt_accounts.iter().all(|account| {
-        let blocked_until = blocked_until_for(state, &snapshot_map, &account.id);
+        let blocked_until = blocked_until_for(state, &snapshot_map, account);
         let blocked = is_blocked(now, blocked_until);
         let exhausted = state.is_chatgpt_limited(&account.id);
         let tried = state.has_tried(&account.id);
@@ -338,14 +361,13 @@ pub fn switch_active_account_to_preferred_for_new_session(
     chatgpt_accounts.sort_by(|left, right| left.id.cmp(&right.id));
 
     for account in chatgpt_accounts {
-        let blocked_until = snapshot_map
-            .get(&account.id)
-            .and_then(usage_reset_blocked_until);
+        let blocked_until =
+            usage_snapshot_for_account(&snapshot_map, account).and_then(usage_reset_blocked_until);
         if is_blocked(now, blocked_until) {
             continue;
         }
 
-        let score = candidate_score(&snapshot_map, &account.id, now);
+        let score = candidate_score(&snapshot_map, account, now);
         match best_chatgpt {
             None => best_chatgpt = Some((account, score)),
             Some((_, best_score)) if score_is_better(score, best_score) => {
@@ -463,6 +485,14 @@ mod tests {
         .id
     }
 
+    fn upsert_claim_only_chatgpt(codex_home: &Path, account_id: &str) -> String {
+        let mut tokens = token_data(account_id, "user@example.com");
+        tokens.account_id = None;
+        codex_login::upsert_chatgpt_account(codex_home, tokens, Utc::now(), None, false)
+            .expect("upsert claim-only chatgpt")
+            .id
+    }
+
     fn upsert_api_key(codex_home: &Path, key: &str) -> String {
         codex_login::upsert_api_key_account(codex_home, key.to_string(), None, false)
             .expect("upsert api key")
@@ -492,7 +522,7 @@ mod tests {
         let now = Utc::now();
         let current = upsert_chatgpt(temp.path(), "current");
         let slower = upsert_chatgpt(temp.path(), "slower");
-        let faster = upsert_chatgpt(temp.path(), "faster");
+        let faster = upsert_claim_only_chatgpt(temp.path(), "faster");
         codex_login::set_active_account_id(temp.path(), Some(current.clone())).expect("set active");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
@@ -503,7 +533,7 @@ mod tests {
         .expect("record slower");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
-            &faster,
+            "faster",
             rate_limit_snapshot(now.timestamp() + 60 * 60, 80.0),
             now,
         )
@@ -520,6 +550,53 @@ mod tests {
         .expect("select");
 
         assert_eq!(selected, Some(faster));
+    }
+
+    #[test]
+    fn stored_usage_key_precedes_legacy_chatgpt_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        let current = upsert_chatgpt(temp.path(), "current");
+        let preferred = upsert_chatgpt(temp.path(), "preferred");
+        let alternate = upsert_chatgpt(temp.path(), "alternate");
+        account_usage::record_usage_limit_hint(
+            temp.path(),
+            "preferred",
+            None,
+            Some(now + Duration::hours(2)),
+            now,
+            Some(RateLimitReachedType::RateLimitReached),
+        )
+        .expect("record legacy snapshot");
+        account_usage::record_rate_limit_snapshot(
+            temp.path(),
+            &preferred,
+            rate_limit_snapshot(now.timestamp() + 60 * 60, 10.0),
+            now,
+        )
+        .expect("record stored snapshot");
+        account_usage::record_rate_limit_snapshot(
+            temp.path(),
+            &alternate,
+            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, 10.0),
+            now,
+        )
+        .expect("record alternate snapshot");
+
+        let selected = select_next_account_id(
+            temp.path(),
+            temp.path(),
+            &RateLimitSwitchState::default(),
+            false,
+            now,
+            Some(&current),
+        )
+        .expect("select");
+        assert_eq!(
+            selected,
+            Some(preferred),
+            "stored-key snapshot should take precedence over blocked legacy history"
+        );
     }
 
     #[test]
@@ -548,11 +625,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
         let current = upsert_chatgpt(temp.path(), "current");
-        let blocked = upsert_chatgpt(temp.path(), "blocked");
+        let _blocked = upsert_chatgpt(temp.path(), "blocked");
         let api_key = upsert_api_key(temp.path(), "sk-test");
         account_usage::record_usage_limit_hint(
             temp.path(),
-            &blocked,
+            "blocked",
             None,
             Some(now + Duration::hours(2)),
             now,
@@ -763,7 +840,7 @@ mod tests {
         .expect("record slower");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
-            &faster,
+            "faster",
             rate_limit_snapshot(now.timestamp() + 60 * 60, 80.0),
             now,
         )
