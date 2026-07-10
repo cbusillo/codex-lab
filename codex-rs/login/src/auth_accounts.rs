@@ -374,6 +374,47 @@ pub fn find_account(codex_home: &Path, account_id: &str) -> io::Result<Option<St
     Ok(data.accounts.into_iter().find(|acc| acc.id == account_id))
 }
 
+fn find_preferred_matching_account(
+    data: &AccountsFile,
+    matches: impl Fn(&StoredAccount) -> bool,
+) -> Option<StoredAccount> {
+    if let Some(active_account_id) = data.active_account_id.as_deref()
+        && let Some(account) = data
+            .accounts
+            .iter()
+            .find(|account| account.id == active_account_id && matches(account))
+    {
+        return Some(account.clone());
+    }
+
+    data.accounts
+        .iter()
+        .find(|account| matches(account))
+        .cloned()
+}
+
+pub fn find_chatgpt_account_by_tokens(
+    codex_home: &Path,
+    tokens: &TokenData,
+) -> io::Result<Option<StoredAccount>> {
+    let path = accounts_file_path(codex_home);
+    let data = read_accounts_file(&path)?;
+    Ok(find_preferred_matching_account(&data, |account| {
+        match_chatgpt_account(account, tokens)
+    }))
+}
+
+pub fn find_api_key_account_by_key(
+    codex_home: &Path,
+    api_key: &str,
+) -> io::Result<Option<StoredAccount>> {
+    let path = accounts_file_path(codex_home);
+    let data = read_accounts_file(&path)?;
+    Ok(find_preferred_matching_account(&data, |account| {
+        match_api_key_account(account, api_key)
+    }))
+}
+
 pub fn auth_for_account(
     codex_home: &Path,
     account_id: &str,

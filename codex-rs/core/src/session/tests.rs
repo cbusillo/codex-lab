@@ -26,6 +26,8 @@ use codex_config::types::ToolSuggestDisabledTool;
 
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_login::TokenData;
+use codex_login::token_data::IdTokenInfo;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::model_info;
@@ -201,6 +203,37 @@ fn assistant_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
+    }
+}
+
+fn fake_chatgpt_token_data(account_id: &str) -> TokenData {
+    use base64::Engine as _;
+
+    let header = json!({ "alg": "none", "typ": "JWT" });
+    let payload = json!({
+        "email": "user@example.com",
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_user_id": format!("user-{account_id}")
+        }
+    });
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let header_b64 = encode(&serde_json::to_vec(&header).unwrap());
+    let payload_b64 = encode(&serde_json::to_vec(&payload).unwrap());
+    let signature_b64 = encode(b"sig");
+
+    TokenData {
+        id_token: IdTokenInfo {
+            email: Some("user@example.com".to_string()),
+            chatgpt_plan_type: None,
+            chatgpt_user_id: Some(format!("user-{account_id}")),
+            chatgpt_account_id: Some(account_id.to_string()),
+            chatgpt_account_is_fedramp: false,
+            raw_jwt: format!("{header_b64}.{payload_b64}.{signature_b64}"),
+        },
+        access_token: format!("access-{account_id}"),
+        refresh_token: format!("refresh-{account_id}"),
+        account_id: Some(account_id.to_string()),
     }
 }
 
@@ -3392,6 +3425,69 @@ async fn usage_limit_hint_uses_active_saved_api_key_account_id() {
     session
         .record_usage_limit_hint_for_active_account(
             None,
+            None,
+            Some(RateLimitReachedType::RateLimitReached),
+        )
+        .await;
+
+    let snapshots = account_usage::list_rate_limit_snapshots(codex_home.path())
+        .expect("list account usage snapshots");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].account_id, account.id);
+}
+
+#[tokio::test]
+async fn usage_limit_hint_uses_matching_saved_chatgpt_account_id() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    codex_login::upsert_api_key_account(
+        codex_home.path(),
+        "sk-stale".to_string(),
+        Some("stale".to_string()),
+        true,
+    )
+    .expect("upsert stale active account");
+    let tokens = fake_chatgpt_token_data("account_id");
+    codex_login::save_auth(
+        codex_home.path(),
+        &codex_login::AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(tokens.clone()),
+            last_refresh: Some(Utc::now()),
+            agent_identity: None,
+            personal_access_token: None,
+        },
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("save chatgpt auth");
+    let auth = CodexAuth::from_auth_storage(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await
+    .expect("load chatgpt auth")
+    .expect("chatgpt auth");
+    let account = codex_login::upsert_chatgpt_account(
+        codex_home.path(),
+        tokens,
+        Utc::now(),
+        Some("active".to_string()),
+        false,
+    )
+    .expect("upsert chatgpt account");
+    assert_ne!(account.id, "account_id");
+    let (session, _turn_context, _rx) = make_session_and_context_with_auth_config_home_and_rx(
+        auth,
+        Vec::new(),
+        codex_home.path(),
+        |_| {},
+    )
+    .await;
+
+    session
+        .record_usage_limit_hint_for_active_account(
+            Some(PlanType::Pro),
             None,
             Some(RateLimitReachedType::RateLimitReached),
         )

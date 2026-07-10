@@ -62,6 +62,8 @@ pub use auth_accounts::auth_for_account;
 pub use auth_accounts::clear_active_account;
 pub use auth_accounts::commit_active_account;
 pub use auth_accounts::find_account;
+pub use auth_accounts::find_api_key_account_by_key;
+pub use auth_accounts::find_chatgpt_account_by_tokens;
 pub use auth_accounts::get_active_account_id;
 pub use auth_accounts::list_accounts;
 pub use auth_accounts::remove_account;

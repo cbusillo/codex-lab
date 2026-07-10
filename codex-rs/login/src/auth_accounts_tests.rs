@@ -152,6 +152,57 @@ fn upsert_chatgpt_dedupes_by_account_id_and_email() {
 }
 
 #[test]
+fn find_chatgpt_account_by_tokens_finds_matching_non_active_account() {
+    let temp = TempDir::new().expect("tempdir");
+    upsert_api_key_account(
+        temp.path(),
+        "sk-active".to_string(),
+        Some("Active".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("insert active api key");
+    let tokens = make_chatgpt_tokens(Some("acct-1"), Some("user@example.com"));
+    let chatgpt = upsert_chatgpt_account(
+        temp.path(),
+        tokens.clone(),
+        Utc::now(),
+        Some("ChatGPT".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("insert chatgpt");
+
+    assert_eq!(
+        Some(chatgpt),
+        find_chatgpt_account_by_tokens(temp.path(), &tokens).expect("find chatgpt")
+    );
+}
+
+#[test]
+fn find_api_key_account_by_key_finds_matching_non_active_account() {
+    let temp = TempDir::new().expect("tempdir");
+    upsert_chatgpt_account(
+        temp.path(),
+        make_chatgpt_tokens(Some("acct-active"), Some("user@example.com")),
+        Utc::now(),
+        Some("Active".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("insert active chatgpt");
+    let api_key = upsert_api_key_account(
+        temp.path(),
+        "sk-saved".to_string(),
+        Some("API".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("insert api key");
+
+    assert_eq!(
+        Some(api_key),
+        find_api_key_account_by_key(temp.path(), "sk-saved").expect("find api key")
+    );
+}
+
+#[test]
 fn upsert_chatgpt_dedupes_by_id_token_account_id_without_email() {
     let temp = TempDir::new().expect("tempdir");
     let first = upsert_chatgpt_account(
