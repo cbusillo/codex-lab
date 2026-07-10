@@ -11,6 +11,7 @@ use super::InternalModelContextFragment;
 use super::LegacyApplyPatchExecCommandWarning;
 use super::LegacyModelMismatchWarning;
 use super::LegacyUnifiedExecProcessLimitWarning;
+use super::ProjectValidationFailure;
 use super::SkillInstructions;
 use super::SubagentNotification;
 use super::TurnAborted;
@@ -45,6 +46,9 @@ static LEGACY_APPLY_PATCH_EXEC_COMMAND_WARNING_REGISTRATION: FragmentRegistratio
 static LEGACY_MODEL_MISMATCH_WARNING_REGISTRATION: FragmentRegistrationProxy<
     LegacyModelMismatchWarning,
 > = FragmentRegistrationProxy::new();
+static PROJECT_VALIDATION_FAILURE_REGISTRATION: FragmentRegistrationProxy<
+    ProjectValidationFailure,
+> = FragmentRegistrationProxy::new();
 
 static CONTEXTUAL_USER_FRAGMENTS: &[&dyn FragmentRegistration] = &[
     &USER_INSTRUCTIONS_REGISTRATION,
@@ -59,6 +63,7 @@ static CONTEXTUAL_USER_FRAGMENTS: &[&dyn FragmentRegistration] = &[
     &LEGACY_UNIFIED_EXEC_PROCESS_LIMIT_WARNING_REGISTRATION,
     &LEGACY_APPLY_PATCH_EXEC_COMMAND_WARNING_REGISTRATION,
     &LEGACY_MODEL_MISMATCH_WARNING_REGISTRATION,
+    &PROJECT_VALIDATION_FAILURE_REGISTRATION,
 ];
 
 fn is_standard_contextual_user_text(text: &str) -> bool {

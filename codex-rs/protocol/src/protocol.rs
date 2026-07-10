@@ -1362,7 +1362,8 @@ pub enum EventMsg {
     /// Automatic background review lifecycle status changed.
     BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent),
 
-    /// A configured project validation command reached a terminal state.
+    /// A configured project validation command execution completed. An actionable first attempt
+    /// may be followed by one bounded correction cycle and one final completion event.
     ProjectValidationCompleted(ProjectValidationCompletedEvent),
 
     /// Exited review mode with an optional final result to apply.

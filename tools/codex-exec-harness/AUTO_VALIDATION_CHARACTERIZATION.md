@@ -119,9 +119,9 @@ consume them.
 
 The current Codex Lab runtime implements two safe subsets: configurable
 functional validation for committed JSON, TOML, and YAML patch results, plus
-one user-owned project validation command at the terminal root-turn boundary.
-It does not persist a validation ledger, feed command failures back into a
-correction turn, or provide TUI controls.
+one user-owned project validation command at the terminal root-turn boundary
+with a single bounded correction-and-rerun cycle for actionable failures. It
+does not persist a validation ledger or provide TUI controls.
 
 ## First Contract
 
@@ -146,18 +146,16 @@ default all-scenario gate.
 
 ## Project Command Contract
 
-`scenarios/auto-validation-project-command-failure.json` drives one fake
-Responses turn with a user-configured `[validation.project_command]`:
+`scenarios/auto-validation-project-command-failure.json` drives one fake root
+turn with a user-configured `[validation.project_command]`:
 
-1. The model reaches terminal completion without requesting a tool or a second
-   response.
+1. The model reaches initial terminal completion without requesting a tool.
 2. The configured direct-argv command runs once after stop and legacy
    after-agent hooks have allowed completion and before `turn.completed`.
 3. A nonzero exit produces one bounded `validation.completed` event with
    `actionable_failure`, exit code `7`, and captured output.
-4. The command result remains advisory for this slice: the turn and `codex
-exec` process still complete successfully, and no correction request is
-   issued.
+4. The failure remains advisory but triggers the bounded correction contract
+   below before the turn and `codex exec` process complete successfully.
 
 Executable validation configuration is ignored in repository-local
 `.codex/config.toml`; it must come from user, system, managed, or runtime
@@ -168,11 +166,38 @@ actionable failure, configuration error, timeout, and infrastructure failure.
 Turn cancellation aborts the turn rather than emitting a potentially
 misclassified validation result.
 
+## Bounded Correction Contract
+
+An actionable project-command failure now remains advisory but receives one
+runtime-owned correction cycle:
+
+1. The first `actionable_failure` event is emitted before correction begins.
+2. One marked `<project_validation_failure>` user-context fragment is recorded.
+   Its fully rendered payload is hard-capped at 960 bytes, conservatively below
+   1K tokens, and includes only a fixed instruction, command, exit code,
+   truncation state, and bounded head/tail output.
+3. The active root turn runs one additional model correction cycle. Pending
+   steering is recorded after the failure fragment and joins this same cycle.
+4. The configured project command runs one final time after the correction
+   cycle becomes quiescent. Its result is terminal even when it is another
+   actionable failure.
+5. The runtime therefore permits at most one correction cycle and two automatic
+   project-command executions per root turn. Cancellation before or during the
+   correction cycle prevents the final rerun.
+6. Once recorded, the fragment follows normal incremental history and rollout
+   semantics. Cancellation does not rewrite already recorded model context.
+
+`scenarios/auto-validation-project-command-failure.json` characterizes the
+headless success path: the first command run fails, the second Responses request
+contains exactly one marked correction fragment, the single rerun passes, two
+`validation.completed` events are emitted, and one `turn.completed` closes the
+turn.
+
 ## Deferred Contracts
 
 - clean-run silence and status/history presentation;
 - typed cancellation results distinct from turn abortion;
 - debounce, unchanged-tree deduplication, and concurrent-run suppression;
-- resumed-turn and third-party-agent behavior;
-- bounded turn-finish correction policy and retry limits;
+- steering that arrives after the final rerun starts;
+- resumed-turn cleanup/consumed-state and third-party-agent behavior;
 - TUI settings and active/terminal status rendering.
