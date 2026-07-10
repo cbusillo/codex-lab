@@ -799,6 +799,20 @@ def scoped_request_body(request: dict[str, Any], scope: str) -> Any:
     return None
 
 
+def request_tool_outputs(request: dict[str, Any], call_id: str) -> list[Any]:
+    input_items = scoped_request_body(request, "input")
+    if not isinstance(input_items, list):
+        return []
+    output_types = {"custom_tool_call_output", "function_call_output"}
+    return [
+        item.get("output")
+        for item in input_items
+        if isinstance(item, dict)
+        and item.get("type") in output_types
+        and item.get("call_id") == call_id
+    ]
+
+
 def canonical_text(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -830,6 +844,34 @@ def add_text_assertion_failures(
                 failures.append(
                     f"{label}: expected {needle!r} {expected} times, found {actual}"
                 )
+
+
+def add_json_suffix_assertion_failures(
+    failures: list[str], subject: Any, assertion: dict[str, Any], label: str
+) -> None:
+    json_suffix = assertion.get("json_suffix")
+    if json_suffix is None:
+        return
+    if not isinstance(json_suffix, dict):
+        raise HarnessError(f"{label}.json_suffix must be an object")
+    if not isinstance(subject, str):
+        failures.append(f"{label}.json_suffix: tool output is not text")
+        return
+    lines = [line for line in subject.splitlines() if line.strip()]
+    if not lines:
+        failures.append(f"{label}.json_suffix: tool output is empty")
+        return
+    try:
+        parsed = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        failures.append(f"{label}.json_suffix: invalid JSON: {exc}")
+        return
+    add_text_assertion_failures(
+        failures,
+        canonical_text(parsed),
+        json_suffix,
+        f"{label}.json_suffix",
+    )
 
 
 def add_token_usage_assertion_failures(
@@ -1163,6 +1205,34 @@ def evaluate_expectations(
             request_index,
             f"responses[{request_index}]",
         )
+
+    tool_output_assertions = expect.get("tool_outputs", [])
+    if not isinstance(tool_output_assertions, list):
+        raise HarnessError("expect.tool_outputs must be a list")
+    for index, assertion in enumerate(tool_output_assertions):
+        if not isinstance(assertion, dict):
+            raise HarnessError("tool output assertions must be objects")
+        request_index = scenario_int(
+            assertion.get("request", index), f"tool_outputs[{index}].request"
+        )
+        if request_index < 0 or request_index >= len(requests):
+            failures.append(
+                f"tool output assertion {index}: missing request {request_index}"
+            )
+            continue
+        call_id = assertion.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            raise HarnessError(f"tool_outputs[{index}].call_id must be a non-empty string")
+        outputs = request_tool_outputs(requests[request_index], call_id)
+        label = f"tool_outputs[{index}] request {request_index} call_id {call_id!r}"
+        if not outputs:
+            failures.append(f"{label}: missing tool output")
+            continue
+        if len(outputs) > 1:
+            failures.append(f"{label}: expected one tool output, found {len(outputs)}")
+            continue
+        add_text_assertion_failures(failures, outputs[0], assertion, label)
+        add_json_suffix_assertion_failures(failures, outputs[0], assertion, label)
 
     return failures
 

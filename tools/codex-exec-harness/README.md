@@ -61,6 +61,16 @@ with `inherit_auth` for opt-in live model checks when the question depends on
 model behavior rather than prompt assembly. Mark those scenarios
 `skip_run_all: true` unless they are safe for unauthenticated CI.
 
+## Pending Runtime Characterizations
+
+Issue #284's first auto-validation contract is documented in
+`AUTO_VALIDATION_CHARACTERIZATION.md`. The corresponding
+`auto-validation-bounded-apply-patch-feedback.json` scenario is intentionally
+marked `skip_run_all: true` and `characterization.status = "pending-runtime"`:
+it defines the fake-Responses request contract before the missing runtime port
+lands. Remove the skip only when the targeted scenario passes against the built
+Codex binary.
+
 `gpt-5-6-luna-low-request-shape.json` is the deterministic catalog smoke test
 for the lowest-cost GPT-5.6 variant. It proves the local binary sends
 `gpt-5.6-luna` with low reasoning effort without making a paid model call.
@@ -133,6 +143,12 @@ Use `expect.turns` to assert per-turn metadata such as `returncode`,
 Use `expect.agent_messages` and `expect.commands` to assert text in captured
 assistant messages or shell commands from `codex exec --json` events. The same
 assertions are available per turn under `expect.turns[]`.
+
+Use `expect.tool_outputs[]` with `request` and `call_id` to assert against one
+matching `function_call_output` or `custom_tool_call_output`. This is stricter
+than flattening the whole request input when a result must remain attached to
+the tool call that produced it. Add a `json_suffix` text assertion object when
+the final non-empty output line must also parse as JSON.
 
 Fake Responses fixtures may include per-response `usage` values. The harness
 forwards them through `response.completed` so scenarios can make deterministic

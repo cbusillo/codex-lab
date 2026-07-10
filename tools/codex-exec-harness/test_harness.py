@@ -997,6 +997,148 @@ class HarnessSafetyTest(unittest.TestCase):
         )
 
 
+class AutoValidationCharacterizationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        scenario_path = (
+            Path(__file__).with_name("scenarios")
+            / "auto-validation-bounded-apply-patch-feedback.json"
+        )
+        self.scenario = HARNESS.load_json(scenario_path)
+
+    def _run(self) -> dict:
+        return {
+            "returncode": 0,
+            "thread_id": "thread-auto-validation",
+            "turns": [{"thread_id": "thread-auto-validation"}],
+            "events": [],
+            "agent_messages": [],
+            "commands": [],
+            "event_types": {},
+        }
+
+    def _requests(
+        self, surfaced_findings: int, *, validation_in_tool_output: bool = True
+    ) -> list[dict]:
+        responses_api = self.scenario["responses_api"]
+        first_response = responses_api["responses"][0]
+        first_event = first_response["events"][0]
+        patch_call = first_event["item"]
+        issues = [
+            {
+                "tool": "json-parse",
+                "file": f"bad-{index:02}.json",
+                "msg": "invalid JSON: expected value",
+            }
+            for index in range(1, surfaced_findings + 1)
+        ]
+        summary = json.dumps(
+            {
+                "validation": {
+                    "issues": issues,
+                    "checks": ["json-parse"],
+                    "issue_count": 13,
+                    "truncated": surfaced_findings < 13,
+                }
+            },
+            separators=(",", ":"),
+        )
+        patch_summary = "Success. Updated the following files:\n" + "".join(
+            f"A bad-{index:02}.json\n" for index in range(1, 14)
+        )
+        tool_output = patch_summary
+        if validation_in_tool_output:
+            tool_output = f"{patch_summary}\n{summary}"
+        marker = "AUTO_VALIDATION_CHARACTERIZATION_MARKER"
+        requests = [
+            {"body": {"input": [{"role": "user", "content": marker}]}},
+            {
+                "body": {
+                    "input": [
+                        {"role": "user", "content": marker},
+                        patch_call,
+                        {
+                            "type": "custom_tool_call_output",
+                            "call_id": patch_call["call_id"],
+                            "output": tool_output,
+                        },
+                    ]
+                }
+            },
+        ]
+        if not validation_in_tool_output:
+            requests[1]["body"]["input"].append(
+                {"role": "user", "content": summary}
+            )
+        return requests
+
+    def test_pending_scenario_expresses_bounded_feedback_contract(self) -> None:
+        self.assertTrue(self.scenario["skip_run_all"])
+        self.assertEqual(
+            {
+                "issue": 284,
+                "source_revision": "4339c3743917725b3b685864b3384af259a35964",
+                "status": "pending-runtime",
+            },
+            self.scenario["characterization"],
+        )
+
+        failures = HARNESS.evaluate_expectations(
+            self.scenario, self._run(), self._requests(surfaced_findings=12)
+        )
+
+        self.assertEqual([], failures)
+
+    def test_pending_scenario_rejects_unbounded_feedback(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            self.scenario, self._run(), self._requests(surfaced_findings=13)
+        )
+
+        self.assertTrue(any("json-parse" in failure for failure in failures))
+        self.assertTrue(any("bad-" in failure for failure in failures))
+        self.assertTrue(any("truncated" in failure for failure in failures))
+
+    def test_pending_scenario_rejects_misplaced_validation_feedback(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            self.scenario,
+            self._run(),
+            self._requests(surfaced_findings=12, validation_in_tool_output=False),
+        )
+
+        self.assertTrue(any("tool_outputs[0]" in failure for failure in failures))
+
+    def test_tool_output_assertion_accepts_function_output(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "tool_outputs": [
+                        {
+                            "request": 0,
+                            "call_id": "call-function",
+                            "contains": "prefix",
+                            "json_suffix": {"contains": "\"ok\":true"},
+                        }
+                    ]
+                }
+            },
+            self._run(),
+            [
+                {
+                    "body": {
+                        "input": [
+                            {
+                                "type": "function_call_output",
+                                "call_id": "call-function",
+                                "output": "prefix\n{\"ok\":true}",
+                            }
+                        ]
+                    }
+                }
+            ],
+        )
+
+        self.assertEqual([], failures)
+
+
 def sse_payload(body: str, event_type: str) -> dict:
     for chunk in body.strip().split("\n\n"):
         lines = chunk.splitlines()
