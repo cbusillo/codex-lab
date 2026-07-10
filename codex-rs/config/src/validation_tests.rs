@@ -10,6 +10,15 @@ fn groups(input: &str) -> ValidationGroups {
         .groups
 }
 
+fn project_command(input: &str) -> ProjectValidationCommand {
+    toml::from_str::<ConfigToml>(input)
+        .expect("validation config should deserialize")
+        .validation
+        .expect("validation config should be present")
+        .project_command
+        .expect("project command should be present")
+}
+
 #[test]
 fn validation_groups_deserialize_explicit_values() {
     assert_eq!(
@@ -52,5 +61,37 @@ fn serialized_defaults_do_not_disable_partial_validation_overrides() {
             functional: true,
             stylistic: true,
         }
+    );
+}
+
+#[test]
+fn project_command_deserializes_argv_and_timeout() {
+    assert_eq!(
+        project_command(
+            "[validation.project_command]\ncommand = [\"just\", \"test\"]\ntimeout_ms = 120000\n"
+        ),
+        ProjectValidationCommand {
+            command: vec!["just".to_string(), "test".to_string()],
+            timeout_ms: 120_000,
+        }
+    );
+}
+
+#[test]
+fn project_command_defaults_timeout() {
+    assert_eq!(
+        project_command("[validation.project_command]\ncommand = [\"just\", \"test\"]\n"),
+        ProjectValidationCommand {
+            command: vec!["just".to_string(), "test".to_string()],
+            timeout_ms: DEFAULT_PROJECT_VALIDATION_TIMEOUT_MS,
+        }
+    );
+}
+
+#[test]
+fn empty_project_command_table_is_preserved_for_runtime_error_reporting() {
+    assert_eq!(
+        project_command("[validation.project_command]\n"),
+        ProjectValidationCommand::default()
     );
 }

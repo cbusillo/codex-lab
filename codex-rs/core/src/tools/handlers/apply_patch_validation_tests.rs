@@ -12,6 +12,7 @@ fn functional_validation() -> ValidationConfig {
             functional: true,
             ..Default::default()
         },
+        ..Default::default()
     }
 }
 

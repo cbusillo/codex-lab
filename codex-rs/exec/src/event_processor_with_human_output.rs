@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
+use codex_app_server_protocol::ProjectValidationStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
@@ -273,6 +274,35 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     format!("{:?}", notification.run.event_name).style(self.dimmed),
                     notification.run.status
                 );
+                CodexStatus::Running
+            }
+            ServerNotification::ProjectValidationCompleted(notification) => {
+                if notification.status != ProjectValidationStatus::Passed {
+                    let command = notification.command.join(" ");
+                    let status = match notification.status {
+                        ProjectValidationStatus::Passed => unreachable!(),
+                        ProjectValidationStatus::ActionableFailure => {
+                            let exit_code = notification.exit_code.unwrap_or(1);
+                            format!("failed with exit code {exit_code}")
+                        }
+                        ProjectValidationStatus::ConfigurationError => {
+                            "configuration error".to_string()
+                        }
+                        ProjectValidationStatus::TimedOut => "timed out".to_string(),
+                        ProjectValidationStatus::InfrastructureFailure => {
+                            "infrastructure failure".to_string()
+                        }
+                    };
+                    eprintln!(
+                        "{} {} {}",
+                        "validation:".style(self.bold),
+                        status.style(self.red),
+                        command.style(self.dimmed)
+                    );
+                    if !notification.output.trim().is_empty() {
+                        eprintln!("{}", notification.output);
+                    }
+                }
                 CodexStatus::Running
             }
             ServerNotification::ItemStarted(notification) => {

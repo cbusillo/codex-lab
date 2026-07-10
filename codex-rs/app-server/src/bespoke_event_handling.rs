@@ -47,6 +47,7 @@ use codex_app_server_protocol::NetworkPolicyAmendment as V2NetworkPolicyAmendmen
 use codex_app_server_protocol::NetworkPolicyRuleAction as V2NetworkPolicyRuleAction;
 use codex_app_server_protocol::PermissionsRequestApprovalParams;
 use codex_app_server_protocol::PermissionsRequestApprovalResponse;
+use codex_app_server_protocol::ProjectValidationCompletedNotification;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -994,6 +995,24 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::BackgroundAutoReviewStatusChanged(
+                    notification,
+                ))
+                .await;
+        }
+        EventMsg::ProjectValidationCompleted(event) => {
+            let notification = ProjectValidationCompletedNotification {
+                thread_id: conversation_id.to_string(),
+                turn_id: event.turn_id,
+                command: event.command,
+                cwd: event.cwd,
+                status: event.status.into(),
+                exit_code: event.exit_code,
+                output: event.output,
+                output_truncated: event.output_truncated,
+                duration_ms: event.duration_ms,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::ProjectValidationCompleted(
                     notification,
                 ))
                 .await;

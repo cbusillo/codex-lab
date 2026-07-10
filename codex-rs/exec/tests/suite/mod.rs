@@ -8,6 +8,7 @@ mod ephemeral;
 mod mcp_required_exit;
 mod originator;
 mod output_schema;
+mod project_validation_event;
 mod prompt_stdin;
 mod resume;
 mod sandbox;

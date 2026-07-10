@@ -9,6 +9,7 @@ use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
+use codex_app_server_protocol::ProjectValidationStatus as AppProjectValidationStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
@@ -41,6 +42,8 @@ use crate::exec_events::McpToolCallItemResult;
 use crate::exec_events::McpToolCallStatus as ExecMcpToolCallStatus;
 use crate::exec_events::PatchApplyStatus as ExecPatchApplyStatus;
 use crate::exec_events::PatchChangeKind as ExecPatchChangeKind;
+use crate::exec_events::ProjectValidationCompletedEvent;
+use crate::exec_events::ProjectValidationStatus;
 use crate::exec_events::ReasoningItem;
 use crate::exec_events::ThreadErrorEvent;
 use crate::exec_events::ThreadEvent;
@@ -458,6 +461,36 @@ impl EventProcessorWithJsonOutput {
                 CodexStatus::Running
             }
             ServerNotification::HookStarted(_) | ServerNotification::HookCompleted(_) => {
+                CodexStatus::Running
+            }
+            ServerNotification::ProjectValidationCompleted(notification) => {
+                events.push(ThreadEvent::ProjectValidationCompleted(
+                    ProjectValidationCompletedEvent {
+                        command: notification.command,
+                        cwd: notification
+                            .cwd
+                            .map(|cwd| cwd.as_path().display().to_string()),
+                        status: match notification.status {
+                            AppProjectValidationStatus::Passed => ProjectValidationStatus::Passed,
+                            AppProjectValidationStatus::ActionableFailure => {
+                                ProjectValidationStatus::ActionableFailure
+                            }
+                            AppProjectValidationStatus::ConfigurationError => {
+                                ProjectValidationStatus::ConfigurationError
+                            }
+                            AppProjectValidationStatus::TimedOut => {
+                                ProjectValidationStatus::TimedOut
+                            }
+                            AppProjectValidationStatus::InfrastructureFailure => {
+                                ProjectValidationStatus::InfrastructureFailure
+                            }
+                        },
+                        exit_code: notification.exit_code,
+                        output: notification.output,
+                        output_truncated: notification.output_truncated,
+                        duration_ms: notification.duration_ms,
+                    },
+                ));
                 CodexStatus::Running
             }
             ServerNotification::ItemStarted(notification) => {

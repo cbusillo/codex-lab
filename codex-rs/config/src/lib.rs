@@ -155,5 +155,8 @@ pub use thread_config::ThreadConfigLoader;
 pub use thread_config::ThreadConfigSource;
 pub use thread_config::UserThreadConfig;
 pub use toml::Value as TomlValue;
+pub use validation::DEFAULT_PROJECT_VALIDATION_TIMEOUT_MS;
+pub use validation::MAX_PROJECT_VALIDATION_TIMEOUT_MS;
+pub use validation::ProjectValidationCommand;
 pub use validation::ValidationConfig;
 pub use validation::ValidationGroups;

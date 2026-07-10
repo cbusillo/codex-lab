@@ -135,6 +135,17 @@ use tracing::warn;
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the turn complete.
 ///
+pub(crate) struct TurnRunResult {
+    pub(crate) last_agent_message: Option<String>,
+    pub(crate) project_validation_eligibility: ProjectValidationEligibility,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectValidationEligibility {
+    Eligible,
+    Ineligible,
+}
+
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
@@ -142,7 +153,7 @@ pub(crate) async fn run_turn(
     input: Vec<TurnInput>,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
-) -> Option<String> {
+) -> Option<TurnRunResult> {
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
@@ -345,7 +356,10 @@ pub(crate) async fn run_turn(
                     {
                         return None;
                     }
-                    break;
+                    return Some(TurnRunResult {
+                        last_agent_message,
+                        project_validation_eligibility: ProjectValidationEligibility::Eligible,
+                    });
                 }
                 continue;
             }
@@ -390,7 +404,10 @@ pub(crate) async fn run_turn(
         }
     }
 
-    last_agent_message
+    Some(TurnRunResult {
+        last_agent_message,
+        project_validation_eligibility: ProjectValidationEligibility::Ineligible,
+    })
 }
 
 async fn turn_diff_display_roots(turn_context: &TurnContext) -> Vec<(String, PathBuf)> {
@@ -1544,6 +1561,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::ShutdownComplete
         | EventMsg::EnteredReviewMode(_)
         | EventMsg::BackgroundAutoReviewStatus(_)
+        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::ItemStarted(_)

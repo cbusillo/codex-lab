@@ -3,6 +3,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::session::TurnInput;
+use crate::session::project_validation::ProjectValidationRun;
+use crate::session::project_validation::run_project_validation;
+use crate::session::turn::ProjectValidationEligibility;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
 use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
@@ -70,8 +73,9 @@ impl SessionTask for RegularTask {
         };
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
+        let mut project_validation_has_run = false;
         loop {
-            let last_agent_message = run_turn(
+            let turn_result = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
                 Arc::clone(&turn_extension_data),
@@ -81,10 +85,32 @@ impl SessionTask for RegularTask {
             )
             .instrument(run_turn_span.clone())
             .await;
-            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
-                return last_agent_message;
+            let last_agent_message = turn_result
+                .as_ref()
+                .and_then(|result| result.last_agent_message.clone());
+            let validation_eligible = turn_result.as_ref().is_some_and(|result| {
+                result.project_validation_eligibility == ProjectValidationEligibility::Eligible
+            });
+            if sess.input_queue.has_pending_input(&sess.active_turn).await {
+                next_input = Vec::new();
+                continue;
             }
-            next_input = Vec::new();
+            if validation_eligible && !project_validation_has_run {
+                project_validation_has_run = true;
+                match run_project_validation(&sess, &ctx, cancellation_token.child_token()).await {
+                    ProjectValidationRun::Skipped => {}
+                    ProjectValidationRun::Completed(event) => {
+                        sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
+                            .await;
+                    }
+                    ProjectValidationRun::Cancelled => return None,
+                }
+                if sess.input_queue.has_pending_input(&sess.active_turn).await {
+                    next_input = Vec::new();
+                    continue;
+                }
+            }
+            return last_agent_message;
         }
     }
 }

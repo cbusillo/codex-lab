@@ -69,6 +69,11 @@ Issue #284's first auto-validation contract is documented in
 suite with `characterization.status = "runtime-covered"`. It protects bounded,
 call-id-scoped validation feedback on successful `apply_patch` calls.
 
+`auto-validation-project-command-failure.json` protects the next headless
+contract: one user-owned direct-argv validation command runs at root-turn
+completion and emits a typed, bounded `validation.completed` event before
+`turn.completed`.
+
 `gpt-5-6-luna-low-request-shape.json` is the deterministic catalog smoke test
 for the lowest-cost GPT-5.6 variant. It proves the local binary sends
 `gpt-5.6-luna` with low reasoning effort without making a paid model call.
