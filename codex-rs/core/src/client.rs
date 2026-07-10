@@ -264,6 +264,7 @@ struct LastResponse {
 #[derive(Debug, Default)]
 struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
+    model_slug: Option<String>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
     last_response_from_untraced_warmup: bool,
@@ -523,6 +524,9 @@ impl ModelClient {
             parse_turn_metadata_header(turn_metadata_header).as_ref(),
         ));
         extra_headers.extend(self.build_responses_identity_headers());
+        extra_headers.extend(codex_login::default_client::requested_model_headers(
+            &model_info.slug,
+        ));
         extra_headers.extend(build_session_headers(
             Some(self.state.session_id.to_string()),
             Some(self.state.thread_id.to_string()),
@@ -613,14 +617,19 @@ impl ModelClient {
             model: model_info.slug.clone(),
             raw_memories,
             reasoning: effort.map(|effort| Reasoning {
-                effort: Some(effort),
+                effort: Some(reasoning_effort_for_request(effort)),
                 summary: None,
                 context: None,
             }),
         };
 
+        let mut extra_headers = self.build_subagent_headers();
+        extra_headers.extend(codex_login::default_client::requested_model_headers(
+            &model_info.slug,
+        ));
+
         client
-            .summarize_input(&payload, self.build_subagent_headers())
+            .summarize_input(&payload, extra_headers)
             .await
             .map_err(map_api_error)
     }
@@ -735,7 +744,9 @@ impl ModelClient {
     ) -> Option<Reasoning> {
         if model_info.supports_reasoning_summaries {
             Some(Reasoning {
-                effort: effort.or_else(|| model_info.default_reasoning_level.clone()),
+                effort: effort
+                    .or_else(|| model_info.default_reasoning_level.clone())
+                    .map(reasoning_effort_for_request),
                 summary: if summary == ReasoningSummaryConfig::None {
                     None
                 } else {
@@ -848,13 +859,14 @@ impl ModelClient {
         session_telemetry: &SessionTelemetry,
         api_provider: codex_api::Provider,
         api_auth: SharedAuthProvider,
+        model_slug: &str,
         turn_state: Option<Arc<OnceLock<String>>>,
         turn_metadata_header: Option<&str>,
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
         let headers = self
-            .build_websocket_headers(turn_state.as_ref(), turn_metadata_header)
+            .build_websocket_headers(model_slug, turn_state.as_ref(), turn_metadata_header)
             .await;
         let websocket_telemetry = ModelClientSession::build_websocket_telemetry(
             session_telemetry,
@@ -934,6 +946,7 @@ impl ModelClient {
     /// replayed on reconnect within the same turn.
     async fn build_websocket_headers(
         &self,
+        model_slug: &str,
         turn_state: Option<&Arc<OnceLock<String>>>,
         turn_metadata_header: Option<&str>,
     ) -> ApiHeaderMap {
@@ -950,6 +963,9 @@ impl ModelClient {
         }
         headers.extend(build_session_headers(Some(session_id), Some(thread_id)));
         headers.extend(self.build_responses_identity_headers());
+        headers.extend(codex_login::default_client::requested_model_headers(
+            model_slug,
+        ));
         if let Some(header_value) = self.generate_attestation_header_for().await {
             headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
@@ -978,6 +994,7 @@ impl Drop for ModelClientSession {
 impl ModelClientSession {
     fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
+        self.websocket_session.model_slug = None;
         self.websocket_session.last_request = None;
         self.websocket_session.last_response_rx = None;
         self.websocket_session.last_response_from_untraced_warmup = false;
@@ -992,6 +1009,7 @@ impl ModelClientSession {
     /// regardless of transport choice.
     async fn build_responses_options(
         &self,
+        model_slug: &str,
         turn_metadata_header: Option<&str>,
         compression: Compression,
         use_responses_lite: bool,
@@ -1010,6 +1028,9 @@ impl ModelClientSession {
                     turn_metadata_header.as_ref(),
                 );
                 headers.extend(self.client.build_responses_identity_headers());
+                headers.extend(codex_login::default_client::requested_model_headers(
+                    model_slug,
+                ));
                 if let Some(header_value) = self.client.generate_attestation_header_for().await {
                     headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
                 }
@@ -1109,13 +1130,18 @@ impl ModelClientSession {
     pub async fn preconnect_websocket(
         &mut self,
         session_telemetry: &SessionTelemetry,
-        _model_info: &ModelInfo,
+        model_info: &ModelInfo,
     ) -> std::result::Result<(), ApiError> {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
-        if self.websocket_session.connection.is_some() {
+        if self.websocket_session.connection.is_some()
+            && self.websocket_session.model_slug.as_deref() == Some(model_info.slug.as_str())
+        {
             return Ok(());
+        }
+        if self.websocket_session.connection.is_some() {
+            self.reset_websocket_session();
         }
 
         let client_setup = self.client.current_client_setup().await.map_err(|err| {
@@ -1134,6 +1160,7 @@ impl ModelClientSession {
                 session_telemetry,
                 client_setup.api_provider,
                 client_setup.api_auth,
+                &model_info.slug,
                 Some(Arc::clone(&self.turn_state)),
                 /*turn_metadata_header*/ None,
                 auth_context,
@@ -1141,6 +1168,7 @@ impl ModelClientSession {
             )
             .await?;
         self.websocket_session.connection = Some(connection);
+        self.websocket_session.model_slug = Some(model_info.slug.clone());
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
         Ok(())
@@ -1166,13 +1194,17 @@ impl ModelClientSession {
             session_telemetry,
             api_provider,
             api_auth,
+            model_slug,
             turn_metadata_header,
             options,
             auth_context,
             request_route_telemetry,
         } = params;
         let needs_new = match self.websocket_session.connection.as_ref() {
-            Some(conn) => conn.is_closed().await,
+            Some(conn) => {
+                conn.is_closed().await
+                    || self.websocket_session.model_slug.as_deref() != Some(model_slug)
+            }
             None => true,
         };
 
@@ -1190,6 +1222,7 @@ impl ModelClientSession {
                     session_telemetry,
                     api_provider,
                     api_auth,
+                    model_slug,
                     Some(turn_state),
                     turn_metadata_header,
                     auth_context,
@@ -1206,6 +1239,7 @@ impl ModelClientSession {
                 }
             };
             self.websocket_session.connection = Some(new_conn);
+            self.websocket_session.model_slug = Some(model_slug.to_string());
             self.websocket_session
                 .set_connection_reused(/*connection_reused*/ false);
         } else {
@@ -1282,6 +1316,7 @@ impl ModelClientSession {
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let mut options = self
                 .build_responses_options(
+                    &model_info.slug,
                     turn_metadata_header,
                     compression,
                     model_info.use_responses_lite,
@@ -1396,6 +1431,7 @@ impl ModelClientSession {
 
             let options = self
                 .build_responses_options(
+                    &model_info.slug,
                     turn_metadata_header,
                     compression,
                     model_info.use_responses_lite,
@@ -1428,6 +1464,7 @@ impl ModelClientSession {
                     session_telemetry,
                     api_provider: client_setup.api_provider,
                     api_auth: client_setup.api_auth,
+                    model_slug: &model_info.slug,
                     turn_metadata_header,
                     options: &options,
                     auth_context: request_auth_context,
@@ -1558,7 +1595,9 @@ impl ModelClientSession {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
-        if self.websocket_session.last_request.is_some() {
+        if self.websocket_session.last_request.is_some()
+            && self.websocket_session.model_slug.as_deref() == Some(model_info.slug.as_str())
+        {
             return Ok(());
         }
 
@@ -2002,10 +2041,18 @@ struct WebsocketConnectParams<'a> {
     session_telemetry: &'a SessionTelemetry,
     api_provider: codex_api::Provider,
     api_auth: SharedAuthProvider,
+    model_slug: &'a str,
     turn_metadata_header: Option<&'a str>,
     options: &'a ApiResponsesOptions,
     auth_context: AuthRequestTelemetryContext,
     request_route_telemetry: RequestRouteTelemetry,
+}
+
+fn reasoning_effort_for_request(effort: ReasoningEffortConfig) -> ReasoningEffortConfig {
+    match effort {
+        ReasoningEffortConfig::Ultra => ReasoningEffortConfig::Max,
+        effort => effort,
+    }
 }
 
 async fn handle_unauthorized(

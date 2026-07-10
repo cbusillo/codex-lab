@@ -12,6 +12,23 @@ fn test_get_codex_user_agent() {
 }
 
 #[test]
+fn requested_model_headers_use_the_model_wire_minimum() {
+    let headers = requested_model_headers("gpt-5.6-luna");
+    let expected_user_agent = get_codex_user_agent_for_model("gpt-5.6-luna");
+
+    assert_eq!(
+        headers.get("version").and_then(|value| value.to_str().ok()),
+        Some("0.144.0")
+    );
+    assert_eq!(
+        headers
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_user_agent.as_str())
+    );
+}
+
+#[test]
 fn is_first_party_originator_matches_known_values() {
     assert_eq!(is_first_party_originator(DEFAULT_ORIGINATOR), true);
     assert_eq!(is_first_party_originator("codex-tui"), true);

@@ -642,6 +642,7 @@ async fn prepare_realtime_start(
                 requested_realtime_session_id.as_deref(),
                 Some(realtime_api_key.as_str()),
                 version,
+                session_config.model.as_deref(),
             )?
         }
         ConversationStartTransport::Webrtc { .. } => {
@@ -649,6 +650,7 @@ async fn prepare_realtime_start(
                 requested_realtime_session_id.as_deref(),
                 /*api_key*/ None,
                 version,
+                session_config.model.as_deref(),
             )?
         }
     };
@@ -976,6 +978,7 @@ fn realtime_request_headers(
     realtime_session_id: Option<&str>,
     api_key: Option<&str>,
     version: RealtimeWsVersion,
+    model: Option<&str>,
 ) -> CodexResult<Option<HeaderMap>> {
     let mut headers = HeaderMap::new();
 
@@ -994,6 +997,9 @@ fn realtime_request_headers(
             CodexErr::InvalidRequest(format!("invalid realtime api key header: {err}"))
         })?;
         headers.insert(AUTHORIZATION, auth_value);
+    }
+    if let Some(model) = model {
+        headers.extend(codex_login::default_client::requested_model_headers(model));
     }
 
     Ok(Some(headers))

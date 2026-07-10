@@ -415,7 +415,9 @@ impl TestCodexBuilder {
         self.config_mutators.push(Box::new(move |config| {
             config.model_provider.base_url = Some(base_url_clone);
             config.model_provider.supports_websockets = true;
-            config.experimental_realtime_ws_model = Some("realtime-test-model".to_string());
+            if config.experimental_realtime_ws_model.is_none() {
+                config.experimental_realtime_ws_model = Some("realtime-test-model".to_string());
+            }
             config.realtime.version = RealtimeWsVersion::V1;
         }));
         let test_env = TestEnv::local().await?;

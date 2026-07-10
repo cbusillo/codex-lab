@@ -45,6 +45,8 @@ pub enum ReasoningEffort {
     Medium,
     High,
     XHigh,
+    Max,
+    Ultra,
     /// A model-defined effort value that this client does not know yet.
     Custom(String),
 }
@@ -59,6 +61,8 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
             Self::Custom(effort) => effort,
         }
     }
@@ -123,6 +127,8 @@ impl FromStr for ReasoningEffort {
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            "ultra" => Ok(Self::Ultra),
             "" => Err("reasoning_effort must not be empty".to_string()),
             effort => Ok(Self::Custom(effort.to_string())),
         }
@@ -693,8 +699,8 @@ mod tests {
 
     #[test]
     fn reasoning_effort_accepts_known_and_custom_values() {
-        let custom = ReasoningEffort::Custom("max".to_string());
-        let deserialized = from_str::<ReasoningEffort>(r#""max""#)
+        let custom = ReasoningEffort::Custom("future".to_string());
+        let deserialized = from_str::<ReasoningEffort>(r#""future""#)
             .expect("custom reasoning effort should deserialize");
         let serialized = to_string(&custom).expect("custom reasoning effort should serialize");
 
@@ -702,16 +708,18 @@ mod tests {
             (
                 "high".parse(),
                 "max".parse(),
+                "ultra".parse(),
                 deserialized,
                 serialized,
                 custom.to_string(),
             ),
             (
                 Ok(ReasoningEffort::High),
-                Ok(custom.clone()),
+                Ok(ReasoningEffort::Max),
+                Ok(ReasoningEffort::Ultra),
                 custom,
-                r#""max""#.to_string(),
-                "max".to_string(),
+                r#""future""#.to_string(),
+                "future".to_string(),
             )
         );
     }

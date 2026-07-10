@@ -166,6 +166,79 @@ async fn responses_websocket_streams_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_reconnects_with_gpt_5_6_compatible_headers() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server(vec![
+        vec![vec![ev_response_created("resp-1"), ev_completed("resp-1")]],
+        vec![
+            vec![ev_response_created("resp-warm"), ev_completed("resp-warm")],
+            vec![ev_response_created("resp-2"), ev_completed("resp-2")],
+        ],
+    ])
+    .await;
+    let harness = websocket_harness(&server).await;
+    let mut luna_model_info = harness.model_info.clone();
+    luna_model_info.slug = "gpt-5.6-luna".to_string();
+    let mut client_session = harness.client.new_session();
+
+    stream_until_complete_with_model_info(
+        &mut client_session,
+        &harness,
+        &prompt_with_input(vec![message_item("first model")]),
+        &harness.model_info,
+        "resp-1",
+    )
+    .await;
+    let luna_prompt = prompt_with_input(vec![message_item("second model")]);
+    client_session
+        .prewarm_websocket(
+            &luna_prompt,
+            &luna_model_info,
+            &harness.session_telemetry,
+            harness.effort.clone(),
+            harness.summary,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+        )
+        .await
+        .expect("Luna prewarm should reconnect");
+    stream_until_complete_with_model_info(
+        &mut client_session,
+        &harness,
+        &luna_prompt,
+        &luna_model_info,
+        "resp-2",
+    )
+    .await;
+
+    let handshakes = server.handshakes();
+    assert_eq!(handshakes.len(), 2);
+    let luna_handshake = handshakes.get(1).expect("missing Luna handshake");
+    assert_eq!(
+        luna_handshake.header("version"),
+        Some("0.144.0".to_string())
+    );
+    assert_eq!(
+        luna_handshake.header(USER_AGENT_HEADER),
+        Some(codex_login::default_client::get_codex_user_agent_for_model(
+            "gpt-5.6-luna"
+        ))
+    );
+    let connections = server.connections();
+    assert_eq!(connections.get(1).map(Vec::len), Some(2));
+    assert_eq!(
+        connections
+            .get(1)
+            .and_then(|connection| connection.first())
+            .map(|request| request.body_json()["generate"].clone()),
+        Some(serde_json::Value::Bool(false))
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_websocket_streams_without_feature_flag_when_provider_supports_websockets() {
     skip_if_no_network!();
 

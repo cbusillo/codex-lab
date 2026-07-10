@@ -3325,6 +3325,7 @@ dependencies = [
  "codex-protocol",
  "codex-terminal-detection",
  "codex-utils-template",
+ "codex-version",
  "core_test_support",
  "jsonwebtoken",
  "keyring",
@@ -4387,6 +4388,14 @@ version = "0.0.0"
 dependencies = [
  "pretty_assertions",
  "v8",
+]
+
+[[package]]
+name = "codex-version"
+version = "0.0.0"
+dependencies = [
+ "pretty_assertions",
+ "serde_json",
 ]
 
 [[package]]

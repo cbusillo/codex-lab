@@ -183,14 +183,14 @@ fn dynamic_agent_specs_include_newer_manifest_models() {
 }
 
 #[test]
-fn dynamic_agent_specs_include_gpt_5_6_variants() {
+fn gpt_5_6_agent_specs_use_product_tiers() {
     for (model, expected_frontline) in [
         ("gpt-5.6-sol", true),
-        ("gpt-5.6-terra", true),
-        ("gpt-5.6-luna", true),
+        ("gpt-5.6-terra", false),
+        ("gpt-5.6-luna", false),
     ] {
         let spec = agent_model_spec(model)
-            .unwrap_or_else(|| panic!("{model} should resolve from the bundled model manifest"));
+            .unwrap_or_else(|| panic!("{model} should resolve from the built-in agent catalog"));
         assert_eq!(spec.slug, format!("code-{model}"));
         assert_eq!(spec.model_args, &["--model", model]);
         assert_eq!(spec.is_frontline, expected_frontline);
