@@ -514,6 +514,51 @@ pub(crate) async fn handle_output_item_done(
     Ok(output)
 }
 
+fn response_item_id(item: &ResponseItem) -> Option<&str> {
+    let id = match item {
+        ResponseItem::Message { id, .. }
+        | ResponseItem::LocalShellCall { id, .. }
+        | ResponseItem::FunctionCall { id, .. }
+        | ResponseItem::ToolSearchCall { id, .. }
+        | ResponseItem::CustomToolCall { id, .. }
+        | ResponseItem::WebSearchCall { id, .. } => id.as_deref(),
+        ResponseItem::Reasoning { id, .. } | ResponseItem::ImageGenerationCall { id, .. } => {
+            Some(id.as_str())
+        }
+        ResponseItem::AgentMessage { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => None,
+    };
+    id.filter(|id| !id.is_empty())
+}
+
+fn log_response_item(item: &ResponseItem) {
+    let item_type = match item {
+        ResponseItem::Message { .. } => "message",
+        ResponseItem::AgentMessage { .. } => "agent_message",
+        ResponseItem::Reasoning { .. } => "reasoning",
+        ResponseItem::LocalShellCall { .. } => "local_shell_call",
+        ResponseItem::FunctionCall { .. } => "function_call",
+        ResponseItem::ToolSearchCall { .. } => "tool_search_call",
+        ResponseItem::FunctionCallOutput { .. } => "function_call_output",
+        ResponseItem::CustomToolCall { .. } => "custom_tool_call",
+        ResponseItem::CustomToolCallOutput { .. } => "custom_tool_call_output",
+        ResponseItem::ToolSearchOutput { .. } => "tool_search_output",
+        ResponseItem::WebSearchCall { .. } => "web_search_call",
+        ResponseItem::ImageGenerationCall { .. } => "image_generation_call",
+        ResponseItem::Compaction { .. } => "compaction",
+        ResponseItem::CompactionTrigger => "compaction_trigger",
+        ResponseItem::ContextCompaction { .. } => "context_compaction",
+        ResponseItem::Other => "other",
+    };
+    debug!(item_type, item_id = response_item_id(item), "Output item");
+}
+
 pub(crate) async fn handle_non_tool_response_item(
     sess: &Session,
     turn_context: &TurnContext,
@@ -521,7 +566,7 @@ pub(crate) async fn handle_non_tool_response_item(
     item: &ResponseItem,
     plan_mode: bool,
 ) -> Option<TurnItem> {
-    debug!(?item, "Output item");
+    log_response_item(item);
 
     match item {
         ResponseItem::Message { .. }

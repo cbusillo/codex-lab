@@ -6,6 +6,7 @@ use super::handle_non_tool_response_item;
 use super::handle_output_item_done;
 use super::image_generation_artifact_path;
 use super::last_assistant_message_from_item;
+use super::log_response_item;
 use super::response_item_may_include_external_context;
 use super::save_image_generation_result;
 use crate::session::tests::make_session_and_context;
@@ -29,6 +30,7 @@ use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tracing_test::traced_test;
 
 fn assistant_output_text(text: &str) -> ResponseItem {
     assistant_output_text_with_phase(text, /*phase*/ None)
@@ -43,6 +45,21 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) -> 
         }],
         phase,
     }
+}
+
+#[test]
+#[traced_test]
+fn response_item_logging_omits_payload_and_keeps_bounded_metadata() {
+    let sensitive_payload = "sensitive-response-payload-7f3c9a";
+    log_response_item(&assistant_output_text(sensitive_payload));
+
+    let logs = tracing_test::internal::global_buf()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let logs = String::from_utf8_lossy(&logs);
+    assert!(logs.contains("item_type"));
+    assert!(logs.contains("msg-1"));
+    assert!(!logs.contains(sensitive_payload));
 }
 
 #[test]

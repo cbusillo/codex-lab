@@ -78,12 +78,13 @@ fn rollout_file_from_path_hides_compressed_sibling_when_plain_exists() -> anyhow
 }
 
 #[tokio::test]
-async fn append_rollout_item_materializes_compressed_rollout() -> anyhow::Result<()> {
+async fn append_rollout_item_repairs_truncated_compressed_rollout() -> anyhow::Result<()> {
     let home = TempDir::new()?;
     let uuid = Uuid::from_u128(2);
     let thread_id = ThreadId::from_string(&uuid.to_string())?;
     let rollout_path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
     write_rollout(&rollout_path, thread_id, "hello before append")?;
+    remove_final_newline(&rollout_path)?;
     compress_now(&rollout_path)?;
 
     append_rollout_item_to_path(
@@ -177,7 +178,7 @@ async fn worker_compresses_old_archived_rollouts_only() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn resume_materializes_compressed_rollout_path() -> anyhow::Result<()> {
+async fn resume_repairs_truncated_compressed_rollout_path() -> anyhow::Result<()> {
     let home = TempDir::new()?;
     let config = RolloutConfig {
         codex_home: home.path().to_path_buf(),
@@ -190,6 +191,7 @@ async fn resume_materializes_compressed_rollout_path() -> anyhow::Result<()> {
     let thread_id = ThreadId::from_string(&uuid.to_string())?;
     let rollout_path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
     write_rollout(&rollout_path, thread_id, "hello before resume")?;
+    remove_final_newline(&rollout_path)?;
     compress_now(&rollout_path)?;
     let compressed_path = compressed_rollout_path(&rollout_path);
 
@@ -500,6 +502,13 @@ fn write_rollout(path: &std::path::Path, thread_id: ThreadId, message: &str) -> 
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     fs::write(path, format!("{jsonl}\n"))?;
+    Ok(())
+}
+
+fn remove_final_newline(path: &std::path::Path) -> anyhow::Result<()> {
+    let mut bytes = fs::read(path)?;
+    assert_eq!(bytes.pop(), Some(b'\n'));
+    fs::write(path, bytes)?;
     Ok(())
 }
 
