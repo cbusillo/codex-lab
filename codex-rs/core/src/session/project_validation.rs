@@ -8,6 +8,7 @@ use codex_config::MAX_PROJECT_VALIDATION_TIMEOUT_MS;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_head_commit_hash;
 use codex_git_utils::get_worktree_diff_fingerprint;
+use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
@@ -149,7 +150,7 @@ pub(crate) async fn run_project_validation(
         None => return ProjectValidationRun::Cancelled,
     }
 
-    let _lease = if let Some(repo_root) = project_validation_repo_root(&cwd) {
+    let _lease = if let Some(repo_root) = project_validation_lease_root(turn_context, &cwd).await {
         let Some(lease) = sess
             .services
             .project_validation_coordinator
@@ -293,6 +294,20 @@ async fn capture_worktree_fingerprint(
 fn project_validation_repo_root(cwd: &AbsolutePathBuf) -> Option<PathBuf> {
     let repo_root = get_git_repo_root(cwd.as_ref())?;
     Some(dunce::canonicalize(&repo_root).unwrap_or(repo_root))
+}
+
+async fn project_validation_lease_root(
+    turn_context: &TurnContext,
+    cwd: &AbsolutePathBuf,
+) -> Option<PathBuf> {
+    if let Some(filesystem) = turn_context.environments.primary_filesystem()
+        && let Some(repo_root) = resolve_root_git_project_for_trust(filesystem.as_ref(), cwd).await
+    {
+        let repo_root = repo_root.into_path_buf();
+        return Some(dunce::canonicalize(&repo_root).unwrap_or(repo_root));
+    }
+
+    project_validation_repo_root(cwd)
 }
 
 fn is_configuration_io_error(error: &io::Error) -> bool {

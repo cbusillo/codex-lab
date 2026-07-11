@@ -430,6 +430,115 @@ async fn project_validation_serializes_concurrent_root_sessions() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[traced_test]
+async fn project_validation_serializes_linked_worktrees_from_same_repository() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let gate_dir = tempdir()?;
+    let count = gate_dir.path().join("validation-count");
+    let active = gate_dir.path().join("validation-active");
+    let overlap = gate_dir.path().join("validation-overlap");
+    let first_started = gate_dir.path().join("first-validation-started");
+    let first_release = gate_dir.path().join("first-validation-release");
+    let second_started = gate_dir.path().join("second-validation-started");
+    let command = shell_command_with_args(
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; owner=0; if mkdir \"$2\"; then owner=1; else touch \"$3\"; fi; if [ \"$count\" -eq 1 ]; then touch \"$4\"; while [ ! -f \"$5\" ]; do sleep 0.01; done; else touch \"$6\"; fi; if [ \"$owner\" -eq 1 ]; then rmdir \"$2\"; fi; printf 'validation-pass-%s' \"$count\"",
+        &[
+            "project-validation",
+            count.to_str().context("count path should be UTF-8")?,
+            active.to_str().context("active path should be UTF-8")?,
+            overlap.to_str().context("overlap path should be UTF-8")?,
+            first_started
+                .to_str()
+                .context("first started path should be UTF-8")?,
+            first_release
+                .to_str()
+                .context("first release path should be UTF-8")?,
+            second_started
+                .to_str()
+                .context("second started path should be UTF-8")?,
+        ],
+        /*timeout_ms*/ 10_000,
+    );
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-a1")),
+            streaming_chunk(ev_shell_command_call("shell-a1", "true")),
+            streaming_chunk(ev_completed("resp-a1")),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-a2")),
+            streaming_chunk(ev_assistant_message("msg-a1", "first complete")),
+            streaming_chunk(ev_completed("resp-a2")),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-b1")),
+            streaming_chunk(ev_shell_command_call("shell-b1", "true")),
+            streaming_chunk(ev_completed("resp-b1")),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-b2")),
+            streaming_chunk(ev_assistant_message("msg-b1", "second complete")),
+            streaming_chunk(ev_completed("resp-b2")),
+        ],
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, command.clone()).await?;
+    init_git_repo(test.cwd_path())?;
+    let linked_worktree_parent = tempdir()?;
+    let linked_worktree = linked_worktree_parent.path().join("linked-worktree");
+    let linked_worktree_arg = linked_worktree
+        .to_str()
+        .context("linked worktree path should be UTF-8")?;
+    run_git(
+        test.cwd_path(),
+        &["worktree", "add", "--detach", linked_worktree_arg, "HEAD"],
+    )?;
+
+    submit_user_input(&test.codex, &test, "run the first change").await?;
+    wait_for_path(&first_started).await?;
+
+    let second =
+        start_root_thread_with_cwd_and_validation_command(&test, &linked_worktree, command).await?;
+    let linked_cwd = AbsolutePathBuf::from_absolute_path(&linked_worktree)
+        .context("linked worktree path should be absolute")?;
+    submit_user_input_at_cwd(&second, &test, "run the second change", linked_cwd).await?;
+    server.wait_for_request_count(/*count*/ 4).await;
+    let contention = wait_for_repo_lease_contention(test.cwd_path()).await;
+    if contention.is_err() {
+        std::fs::write(&first_release, "release")?;
+        let _ = collect_events_until_terminal(&test.codex).await;
+        let _ = collect_events_until_terminal(&second).await;
+        server.shutdown().await;
+        return contention;
+    }
+    assert!(!second_started.exists());
+    assert!(!overlap.exists());
+
+    std::fs::write(&first_release, "release")?;
+    let first_events = collect_events_until_terminal(&test.codex).await?;
+    wait_for_path(&second_started).await?;
+    let second_events = collect_events_until_terminal(&second).await?;
+
+    let first_validation = validation_events(&first_events);
+    assert_eq!(first_validation.len(), 1);
+    assert_eq!(first_validation[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(first_validation[0].output, "validation-pass-1");
+    let second_validation = validation_events(&second_events);
+    assert_eq!(second_validation.len(), 1);
+    assert_eq!(second_validation[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(second_validation[0].output, "validation-pass-2");
+    assert_eq!(std::fs::read_to_string(count)?, "2");
+    assert!(!overlap.exists());
+    run_git(
+        test.cwd_path(),
+        &["worktree", "remove", "--force", linked_worktree_arg],
+    )?;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn project_validation_unchanged_turn_skips_without_waiting_for_repo_lease() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
