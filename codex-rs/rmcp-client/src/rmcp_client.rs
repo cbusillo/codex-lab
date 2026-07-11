@@ -79,7 +79,7 @@ enum PendingTransport {
         transport: tokio::io::DuplexStream,
     },
     Stdio {
-        transport: StdioServerTransport,
+        transport: Box<StdioServerTransport>,
     },
     StreamableHttp {
         transport: StreamableHttpClientTransport<StreamableHttpClientAdapter>,
@@ -718,7 +718,9 @@ impl RmcpClient {
             }
             TransportRecipe::Stdio { command, launcher } => {
                 let transport = launcher.launch(command.clone()).await?;
-                Ok(PendingTransport::Stdio { transport })
+                Ok(PendingTransport::Stdio {
+                    transport: Box::new(transport),
+                })
             }
             TransportRecipe::StreamableHttp {
                 server_name,
@@ -829,7 +831,7 @@ impl RmcpClient {
                 None,
             ),
             PendingTransport::Stdio { transport } => (
-                service::serve_client(client_service, transport).boxed(),
+                service::serve_client(client_service, *transport).boxed(),
                 None,
             ),
             PendingTransport::StreamableHttp { transport } => (
