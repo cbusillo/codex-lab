@@ -26,7 +26,10 @@ pub struct ValidationConfig {
     /// preserve the existing fail-open behavior and run the command. An
     /// actionable failure sends a bounded command/output fragment to the model,
     /// permits one correction cycle, and reruns the command once. The command
-    /// should therefore tolerate up to two executions per root turn.
+    /// should therefore tolerate up to two executions per root turn. Commands
+    /// targeting the same Git repository are serialized across root sessions
+    /// in one runtime; non-Git workspaces remain uncoordinated. A waiting turn
+    /// can be cancelled and correction reruns reacquire the repository lease.
     /// Repository-local config cannot set this executable field.
     #[serde(default)]
     pub project_command: Option<ProjectValidationCommand>,

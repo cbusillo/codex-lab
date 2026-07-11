@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -142,24 +143,30 @@ pub(crate) async fn run_project_validation(
         ));
     }
 
-    match attempt {
-        ProjectValidationAttempt::Initial {
-            worktree_at_turn_start,
-            model_used_tools,
-        } => {
-            if !model_used_tools && let Some(worktree_at_turn_start) = worktree_at_turn_start {
-                let worktree = tokio::select! {
-                    _ = cancellation_token.cancelled() => {
-                        return ProjectValidationRun::Cancelled;
-                    }
-                    worktree = capture_worktree_fingerprint(&cwd) => worktree,
-                };
-                if worktree.is_some_and(|worktree| worktree == worktree_at_turn_start) {
-                    return ProjectValidationRun::Skipped;
-                }
-            }
-        }
-        ProjectValidationAttempt::CorrectionRerun => {}
+    match initial_attempt_worktree_unchanged(&cwd, &attempt, &cancellation_token).await {
+        Some(true) => return ProjectValidationRun::Skipped,
+        Some(false) => {}
+        None => return ProjectValidationRun::Cancelled,
+    }
+
+    let _lease = if let Some(repo_root) = project_validation_repo_root(&cwd) {
+        let Some(lease) = sess
+            .services
+            .project_validation_coordinator
+            .acquire(repo_root, &cancellation_token)
+            .await
+        else {
+            return ProjectValidationRun::Cancelled;
+        };
+        Some(lease)
+    } else {
+        None
+    };
+
+    match initial_attempt_worktree_unchanged(&cwd, &attempt, &cancellation_token).await {
+        Some(true) => return ProjectValidationRun::Skipped,
+        Some(false) => {}
+        None => return ProjectValidationRun::Cancelled,
     }
 
     if cancellation_token.is_cancelled() {
@@ -249,10 +256,29 @@ pub(crate) async fn run_project_validation(
     })
 }
 
+async fn initial_attempt_worktree_unchanged(
+    cwd: &AbsolutePathBuf,
+    attempt: &ProjectValidationAttempt,
+    cancellation_token: &CancellationToken,
+) -> Option<bool> {
+    let ProjectValidationAttempt::Initial {
+        worktree_at_turn_start: Some(worktree_at_turn_start),
+        model_used_tools: false,
+    } = attempt
+    else {
+        return Some(false);
+    };
+    let worktree = tokio::select! {
+        _ = cancellation_token.cancelled() => return None,
+        worktree = capture_worktree_fingerprint(cwd) => worktree,
+    };
+    Some(worktree.is_some_and(|worktree| worktree == *worktree_at_turn_start))
+}
+
 async fn capture_worktree_fingerprint(
     cwd: &AbsolutePathBuf,
 ) -> Option<ProjectValidationWorktreeFingerprint> {
-    let repo_root = get_git_repo_root(cwd.as_ref())?;
+    let repo_root = project_validation_repo_root(cwd)?;
     let head_commit = get_head_commit_hash(&repo_root).await?.0;
     let worktree_diff = get_worktree_diff_fingerprint(&repo_root).await;
     if worktree_diff.as_deref() == Some("unknown") {
@@ -262,6 +288,11 @@ async fn capture_worktree_fingerprint(
         head_commit,
         worktree_diff,
     })
+}
+
+fn project_validation_repo_root(cwd: &AbsolutePathBuf) -> Option<PathBuf> {
+    let repo_root = get_git_repo_root(cwd.as_ref())?;
+    Some(dunce::canonicalize(&repo_root).unwrap_or(repo_root))
 }
 
 fn is_configuration_io_error(error: &io::Error) -> bool {

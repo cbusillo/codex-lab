@@ -209,6 +209,7 @@ mod input_queue;
 mod mcp;
 mod multi_agents;
 pub(crate) mod project_validation;
+pub(crate) mod project_validation_coordinator;
 mod review;
 mod rollout_reconstruction;
 #[allow(clippy::module_inception)]
@@ -222,6 +223,7 @@ use self::handlers::submission_dispatch_span;
 use self::handlers::submission_loop;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
+use self::project_validation_coordinator::ProjectValidationCoordinator;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -404,6 +406,7 @@ pub(crate) struct CodexSpawnArgs {
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
+    pub(crate) project_validation_coordinator: Arc<ProjectValidationCoordinator>,
     pub(crate) skills_manager: Arc<SkillsManager>,
     pub(crate) plugins_manager: Arc<PluginsManager>,
     pub(crate) mcp_manager: Arc<McpManager>,
@@ -489,6 +492,7 @@ impl Codex {
             auth_manager,
             models_manager,
             environment_manager,
+            project_validation_coordinator,
             skills_manager,
             plugins_manager,
             mcp_manager,
@@ -654,6 +658,7 @@ impl Codex {
             extensions,
             agent_control,
             environment_manager,
+            project_validation_coordinator,
             analytics_events_client,
             thread_store,
             parent_rollout_thread_trace,

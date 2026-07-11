@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -23,6 +24,7 @@ use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_string::approx_token_count;
 use core_test_support::responses;
 use core_test_support::responses::ResponsesRequest;
@@ -46,6 +48,7 @@ use tempfile::tempdir;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tokio::time::timeout;
+use tracing_test::traced_test;
 use wiremock::MockServer;
 
 async fn run_validation_turn(command: ProjectValidationCommand) -> Result<Vec<EventMsg>> {
@@ -165,7 +168,7 @@ async fn build_streaming_validation_codex(
     command: ProjectValidationCommand,
 ) -> Result<TestCodex> {
     let mut builder = test_codex().with_config(move |config| {
-        config.validation.project_command = Some(command.clone());
+        config.validation.project_command = Some(command);
     });
     builder.build_with_streaming_server(server).await
 }
@@ -175,14 +178,23 @@ async fn build_validation_codex(
     command: ProjectValidationCommand,
 ) -> Result<TestCodex> {
     let mut builder = test_codex().with_config(move |config| {
-        config.validation.project_command = Some(command.clone());
+        config.validation.project_command = Some(command);
     });
     builder.build(server).await
 }
 
 async fn submit_user_input(codex: &CodexThread, test: &TestCodex, text: &str) -> Result<()> {
+    submit_user_input_at_cwd(codex, test, text, test.config.cwd.clone()).await
+}
+
+async fn submit_user_input_at_cwd(
+    codex: &CodexThread,
+    test: &TestCodex,
+    text: &str,
+    cwd: AbsolutePathBuf,
+) -> Result<()> {
     let (sandbox_policy, permission_profile) =
-        turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
+        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
     let session_model = test.session_configured.model.clone();
     codex
         .submit(Op::UserInput {
@@ -195,7 +207,7 @@ async fn submit_user_input(codex: &CodexThread, test: &TestCodex, text: &str) ->
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(test.config.cwd.clone()),
+                cwd: Some(cwd),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -231,6 +243,26 @@ async fn collect_events_until_terminal(codex: &CodexThread) -> Result<Vec<EventM
     }
 }
 
+async fn start_root_thread_with_validation_command(
+    test: &TestCodex,
+    command: ProjectValidationCommand,
+) -> Result<Arc<CodexThread>> {
+    let mut config = test.config.clone();
+    config.validation.project_command = Some(command);
+    Ok(test.thread_manager.start_thread(config).await?.thread)
+}
+
+async fn start_root_thread_with_cwd_and_validation_command(
+    test: &TestCodex,
+    cwd: &Path,
+    command: ProjectValidationCommand,
+) -> Result<Arc<CodexThread>> {
+    let mut config = test.config.clone();
+    config.cwd = AbsolutePathBuf::from_absolute_path(cwd).context("test cwd should be absolute")?;
+    config.validation.project_command = Some(command);
+    Ok(test.thread_manager.start_thread(config).await?.thread)
+}
+
 async fn wait_for_path(path: &Path) -> Result<()> {
     timeout(Duration::from_secs(5), async {
         while !path.exists() {
@@ -239,6 +271,31 @@ async fn wait_for_path(path: &Path) -> Result<()> {
     })
     .await
     .with_context(|| format!("timed out waiting for {}", path.display()))?;
+    Ok(())
+}
+
+async fn wait_for_repo_lease_contention(repo_root: &Path) -> Result<()> {
+    let canonical_repo_root = dunce::canonicalize(repo_root)?;
+    let repo_field = format!("repo_root={}", canonical_repo_root.display());
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let found = {
+                let logs = tracing_test::internal::global_buf()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                String::from_utf8_lossy(&logs).lines().any(|line| {
+                    line.contains("project validation waiting for repository lease")
+                        && line.contains(&repo_field)
+                })
+            };
+            if found {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("session did not wait for the repository lease")?;
     Ok(())
 }
 
@@ -271,6 +328,16 @@ fn run_git(path: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn run_git_stdout(path: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git").args(args).current_dir(path).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
 fn init_git_repo(path: &Path) -> Result<()> {
     for args in [
         &["init", "--quiet"][..],
@@ -281,6 +348,504 @@ fn init_git_repo(path: &Path) -> Result<()> {
     ] {
         run_git(path, args)?;
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[traced_test]
+async fn project_validation_serializes_concurrent_root_sessions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; if ! mkdir \"$2\"; then touch \"$3\"; fi; if [ \"$count\" -eq 1 ]; then touch \"$4\"; while [ ! -f \"$5\" ]; do sleep 0.01; done; else touch \"$6\"; fi; rmdir \"$2\"; printf 'validation-pass-%s' \"$count\"",
+        &[
+            "project-validation",
+            "validation-count",
+            "validation-active",
+            "validation-overlap",
+            "first-validation-started",
+            "first-validation-release",
+            "second-validation-started",
+        ],
+        /*timeout_ms*/ 10_000,
+    );
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-a1")),
+            streaming_chunk(ev_shell_command_call("shell-a1", "true")),
+            streaming_chunk(ev_completed("resp-a1")),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-a2")),
+            streaming_chunk(ev_assistant_message("msg-a1", "first complete")),
+            streaming_chunk(ev_completed("resp-a2")),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-b1")),
+            streaming_chunk(ev_shell_command_call("shell-b1", "true")),
+            streaming_chunk(ev_completed("resp-b1")),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-b2")),
+            streaming_chunk(ev_assistant_message("msg-b1", "second complete")),
+            streaming_chunk(ev_completed("resp-b2")),
+        ],
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, command.clone()).await?;
+    init_git_repo(test.cwd_path())?;
+    let first_started = test.workspace_path("first-validation-started");
+    let first_release = test.workspace_path("first-validation-release");
+    let second_started = test.workspace_path("second-validation-started");
+    let overlap = test.workspace_path("validation-overlap");
+    let count = test.workspace_path("validation-count");
+
+    submit_user_input(&test.codex, &test, "run the first change").await?;
+    wait_for_path(&first_started).await?;
+
+    let second = start_root_thread_with_validation_command(&test, command).await?;
+    submit_user_input(&second, &test, "run the second change").await?;
+    server.wait_for_request_count(/*count*/ 4).await;
+    wait_for_repo_lease_contention(test.cwd_path()).await?;
+    assert!(!second_started.exists());
+    assert!(!overlap.exists());
+
+    std::fs::write(&first_release, "release")?;
+    let first_events = collect_events_until_terminal(&test.codex).await?;
+    wait_for_path(&second_started).await?;
+    let second_events = collect_events_until_terminal(&second).await?;
+
+    let first_validation = validation_events(&first_events);
+    assert_eq!(first_validation.len(), 1);
+    assert_eq!(first_validation[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(first_validation[0].output, "validation-pass-1");
+    let second_validation = validation_events(&second_events);
+    assert_eq!(second_validation.len(), 1);
+    assert_eq!(second_validation[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(second_validation[0].output, "validation-pass-2");
+    assert_eq!(std::fs::read_to_string(count)?, "2");
+    assert!(!overlap.exists());
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn project_validation_unchanged_turn_skips_without_waiting_for_repo_lease() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command(
+        "touch owner-validation-started; while :; do sleep 0.05; done",
+        /*timeout_ms*/ 10_000,
+    );
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-a1")),
+            streaming_chunk(ev_shell_command_call("shell-a1", "true")),
+            streaming_chunk(ev_completed("resp-a1")),
+        ],
+        response_completed_chunks("resp-a2"),
+        response_completed_chunks("resp-b1"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, command.clone()).await?;
+    init_git_repo(test.cwd_path())?;
+    let owner_started = test.workspace_path("owner-validation-started");
+
+    submit_user_input(&test.codex, &test, "run the owner change").await?;
+    wait_for_path(&owner_started).await?;
+
+    let unchanged = start_root_thread_with_validation_command(&test, command).await?;
+    submit_user_input(&unchanged, &test, "inspect without changes").await?;
+    let unchanged_events = collect_events_until_terminal(&unchanged).await?;
+    assert!(validation_events(&unchanged_events).is_empty());
+    assert!(owner_started.exists());
+
+    test.codex.submit(Op::Interrupt).await?;
+    let owner_events = collect_events_until_terminal(&test.codex).await?;
+    assert!(
+        owner_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::TurnAborted(_)))
+    );
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[traced_test]
+async fn project_validation_waiter_rechecks_unchanged_worktree_after_lease() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let gate_dir = tempdir()?;
+    let owner_started = gate_dir.path().join("owner-validation-started");
+    let owner_release = gate_dir.path().join("owner-validation-release");
+    let waiter_started = gate_dir.path().join("waiter-validation-started");
+    let owner_command = shell_command_with_args(
+        "touch \"$1\"; while [ ! -f \"$2\" ]; do sleep 0.01; done; printf owner-pass",
+        &[
+            "project-validation",
+            owner_started
+                .to_str()
+                .context("owner started path should be UTF-8")?,
+            owner_release
+                .to_str()
+                .context("owner release path should be UTF-8")?,
+        ],
+        /*timeout_ms*/ 10_000,
+    );
+    let waiter_command = shell_command_with_args(
+        "touch \"$1\"; printf waiter-pass",
+        &[
+            "project-validation",
+            waiter_started
+                .to_str()
+                .context("waiter started path should be UTF-8")?,
+        ],
+        /*timeout_ms*/ 10_000,
+    );
+    let (waiter_gate_tx, waiter_gate_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-b1")),
+            gated_streaming_chunk(
+                waiter_gate_rx,
+                vec![
+                    ev_assistant_message("msg-b1", "inspection complete"),
+                    ev_completed("resp-b1"),
+                ],
+            ),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-a1")),
+            streaming_chunk(ev_shell_command_call("shell-a1", "true")),
+            streaming_chunk(ev_completed("resp-a1")),
+        ],
+        response_completed_chunks("resp-a2"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, waiter_command).await?;
+    init_git_repo(test.cwd_path())?;
+    let baseline_head = run_git_stdout(test.cwd_path(), &["rev-parse", "HEAD"])?;
+
+    submit_user_input(&test.codex, &test, "inspect the current tree").await?;
+    server.wait_for_request_count(/*count*/ 1).await;
+
+    let owner = start_root_thread_with_validation_command(&test, owner_command).await?;
+    submit_user_input(&owner, &test, "run the owner change").await?;
+    wait_for_path(&owner_started).await?;
+    run_git(
+        test.cwd_path(),
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "temporary state",
+        ],
+    )?;
+
+    let _ = waiter_gate_tx.send(());
+    wait_for_repo_lease_contention(test.cwd_path()).await?;
+
+    run_git(test.cwd_path(), &["reset", "--hard", &baseline_head])?;
+    std::fs::write(&owner_release, "release")?;
+    let owner_events = collect_events_until_terminal(&owner).await?;
+    let waiter_events = collect_events_until_terminal(&test.codex).await?;
+
+    let owner_validation = validation_events(&owner_events);
+    assert_eq!(owner_validation.len(), 1);
+    assert_eq!(owner_validation[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(owner_validation[0].output, "owner-pass");
+    assert!(validation_events(&waiter_events).is_empty());
+    assert!(!waiter_started.exists());
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn project_validation_different_repositories_run_independently() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let owner_command = shell_command(
+        "touch owner-validation-started; while :; do sleep 0.05; done",
+        /*timeout_ms*/ 10_000,
+    );
+    let independent_command = shell_command(
+        "touch independent-validation-started; printf independent-pass",
+        /*timeout_ms*/ 10_000,
+    );
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-a1")),
+            streaming_chunk(ev_shell_command_call("shell-a1", "true")),
+            streaming_chunk(ev_completed("resp-a1")),
+        ],
+        response_completed_chunks("resp-a2"),
+        vec![
+            streaming_chunk(ev_response_created("resp-b1")),
+            streaming_chunk(ev_shell_command_call("shell-b1", "true")),
+            streaming_chunk(ev_completed("resp-b1")),
+        ],
+        response_completed_chunks("resp-b2"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, owner_command).await?;
+    init_git_repo(test.cwd_path())?;
+    let owner_started = test.workspace_path("owner-validation-started");
+    let independent_repo = tempdir()?;
+    init_git_repo(independent_repo.path())?;
+    let independent_cwd = AbsolutePathBuf::from_absolute_path(independent_repo.path())
+        .context("independent repo should be absolute")?;
+
+    submit_user_input(&test.codex, &test, "run the owner change").await?;
+    wait_for_path(&owner_started).await?;
+
+    let independent = start_root_thread_with_cwd_and_validation_command(
+        &test,
+        independent_repo.path(),
+        independent_command,
+    )
+    .await?;
+    submit_user_input_at_cwd(
+        &independent,
+        &test,
+        "run the independent change",
+        independent_cwd,
+    )
+    .await?;
+    let independent_events = collect_events_until_terminal(&independent).await?;
+    let independent_validation = validation_events(&independent_events);
+    assert_eq!(independent_validation.len(), 1);
+    assert_eq!(
+        independent_validation[0].status,
+        ProjectValidationStatus::Passed
+    );
+    assert_eq!(independent_validation[0].output, "independent-pass");
+    assert!(
+        independent_repo
+            .path()
+            .join("independent-validation-started")
+            .exists()
+    );
+    assert!(owner_started.exists());
+
+    test.codex.submit(Op::Interrupt).await?;
+    let owner_events = collect_events_until_terminal(&test.codex).await?;
+    assert!(
+        owner_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::TurnAborted(_)))
+    );
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[traced_test]
+async fn project_validation_owner_cancellation_releases_repo_lease() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let owner_command = shell_command(
+        "touch owner-validation-started; while :; do sleep 0.05; done",
+        /*timeout_ms*/ 10_000,
+    );
+    let waiter_command = shell_command(
+        "touch waiter-validation-started; printf waiter-pass",
+        /*timeout_ms*/ 10_000,
+    );
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-a1")),
+            streaming_chunk(ev_shell_command_call("shell-a1", "true")),
+            streaming_chunk(ev_completed("resp-a1")),
+        ],
+        response_completed_chunks("resp-a2"),
+        vec![
+            streaming_chunk(ev_response_created("resp-b1")),
+            streaming_chunk(ev_shell_command_call("shell-b1", "true")),
+            streaming_chunk(ev_completed("resp-b1")),
+        ],
+        response_completed_chunks("resp-b2"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, owner_command).await?;
+    init_git_repo(test.cwd_path())?;
+    let owner_started = test.workspace_path("owner-validation-started");
+    let waiter_started = test.workspace_path("waiter-validation-started");
+
+    submit_user_input(&test.codex, &test, "run the owner change").await?;
+    wait_for_path(&owner_started).await?;
+
+    let waiter = start_root_thread_with_validation_command(&test, waiter_command).await?;
+    submit_user_input(&waiter, &test, "run the waiter change").await?;
+    server.wait_for_request_count(/*count*/ 4).await;
+    wait_for_repo_lease_contention(test.cwd_path()).await?;
+    assert!(!waiter_started.exists());
+
+    test.codex.submit(Op::Interrupt).await?;
+    let owner_events = collect_events_until_terminal(&test.codex).await?;
+    assert!(validation_events(&owner_events).is_empty());
+    assert!(
+        owner_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::TurnAborted(_)))
+    );
+
+    wait_for_path(&waiter_started).await?;
+    let waiter_events = collect_events_until_terminal(&waiter).await?;
+    let waiter_validation = validation_events(&waiter_events);
+    assert_eq!(waiter_validation.len(), 1);
+    assert_eq!(waiter_validation[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(waiter_validation[0].output, "waiter-pass");
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn project_validation_configuration_error_does_not_wait_for_repo_lease() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let owner_command = shell_command(
+        "touch owner-validation-started; while :; do sleep 0.05; done",
+        /*timeout_ms*/ 10_000,
+    );
+    let invalid_command = ProjectValidationCommand {
+        command: vec!["missing-project-validation-executable".to_string()],
+        timeout_ms: 10_000,
+    };
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-a1")),
+            streaming_chunk(ev_shell_command_call("shell-a1", "true")),
+            streaming_chunk(ev_completed("resp-a1")),
+        ],
+        response_completed_chunks("resp-a2"),
+        response_completed_chunks("resp-b1"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, owner_command).await?;
+    init_git_repo(test.cwd_path())?;
+    let owner_started = test.workspace_path("owner-validation-started");
+
+    submit_user_input(&test.codex, &test, "run the owner change").await?;
+    wait_for_path(&owner_started).await?;
+
+    let invalid = start_root_thread_with_validation_command(&test, invalid_command).await?;
+    submit_user_input(&invalid, &test, "finish without changes").await?;
+    let invalid_events = collect_events_until_terminal(&invalid).await?;
+    let invalid_validation = validation_events(&invalid_events);
+    assert_eq!(invalid_validation.len(), 1);
+    assert_eq!(
+        invalid_validation[0].status,
+        ProjectValidationStatus::ConfigurationError
+    );
+    assert!(invalid_validation[0].output.contains("not found"));
+
+    test.codex.submit(Op::Interrupt).await?;
+    let owner_events = collect_events_until_terminal(&test.codex).await?;
+    assert!(
+        owner_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::TurnAborted(_)))
+    );
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[traced_test]
+async fn project_validation_correction_rerun_reacquires_repo_lease() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let correction_command = shell_command(
+        "count=0; if [ -f correction-validation-count ]; then count=$(cat correction-validation-count); fi; count=$((count + 1)); printf '%s' \"$count\" > correction-validation-count; if [ \"$count\" -eq 1 ]; then printf correction-fail >&2; exit 7; fi; touch correction-rerun-started; printf correction-pass",
+        /*timeout_ms*/ 10_000,
+    );
+    let interleaved_command = shell_command(
+        "touch interleaved-validation-started; while [ ! -f interleaved-validation-release ]; do sleep 0.01; done; printf interleaved-pass",
+        /*timeout_ms*/ 10_000,
+    );
+    let (correction_gate_tx, correction_gate_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-a1")),
+            streaming_chunk(ev_shell_command_call("shell-a1", "true")),
+            streaming_chunk(ev_completed("resp-a1")),
+        ],
+        response_completed_chunks("resp-a2"),
+        vec![
+            streaming_chunk(ev_response_created("resp-a3")),
+            gated_streaming_chunk(
+                correction_gate_rx,
+                vec![
+                    ev_assistant_message("msg-a2", "correction complete"),
+                    ev_completed("resp-a3"),
+                ],
+            ),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-b1")),
+            streaming_chunk(ev_shell_command_call("shell-b1", "true")),
+            streaming_chunk(ev_completed("resp-b1")),
+        ],
+        response_completed_chunks("resp-b2"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, correction_command).await?;
+    init_git_repo(test.cwd_path())?;
+    let interleaved_started = test.workspace_path("interleaved-validation-started");
+    let interleaved_release = test.workspace_path("interleaved-validation-release");
+    let correction_rerun_started = test.workspace_path("correction-rerun-started");
+
+    submit_user_input(&test.codex, &test, "run the correction change").await?;
+    let first_validation = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ProjectValidationCompleted(event)
+                if event.status == ProjectValidationStatus::ActionableFailure
+        )
+    })
+    .await;
+    server.wait_for_request_count(/*count*/ 3).await;
+
+    let interleaved = start_root_thread_with_validation_command(&test, interleaved_command).await?;
+    submit_user_input(&interleaved, &test, "run the interleaved change").await?;
+    server.wait_for_request_count(/*count*/ 5).await;
+    wait_for_path(&interleaved_started).await?;
+
+    let _ = correction_gate_tx.send(());
+    wait_for_repo_lease_contention(test.cwd_path()).await?;
+    assert!(!correction_rerun_started.exists());
+
+    std::fs::write(&interleaved_release, "release")?;
+    let interleaved_events = collect_events_until_terminal(&interleaved).await?;
+    wait_for_path(&correction_rerun_started).await?;
+    let mut correction_events = vec![first_validation];
+    correction_events.extend(collect_events_until_terminal(&test.codex).await?);
+
+    let interleaved_validation = validation_events(&interleaved_events);
+    assert_eq!(interleaved_validation.len(), 1);
+    assert_eq!(
+        interleaved_validation[0].status,
+        ProjectValidationStatus::Passed
+    );
+    assert_eq!(interleaved_validation[0].output, "interleaved-pass");
+    let correction_validation = validation_events(&correction_events);
+    assert_eq!(correction_validation.len(), 2);
+    assert_eq!(
+        correction_validation[0].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(
+        correction_validation[1].status,
+        ProjectValidationStatus::Passed
+    );
+    assert_eq!(correction_validation[1].output, "correction-pass");
+    assert_eq!(
+        std::fs::read_to_string(test.workspace_path("correction-validation-count"))?,
+        "2"
+    );
+    server.shutdown().await;
     Ok(())
 }
 
@@ -510,7 +1075,7 @@ async fn project_validation_runs_after_untracked_change_outside_session_cwd() ->
     let mut builder = test_codex()
         .with_config(move |config| {
             config.cwd = config.cwd.join("nested");
-            config.validation.project_command = Some(command.clone());
+            config.validation.project_command = Some(command);
         })
         .with_workspace_setup(|cwd, fs| async move {
             fs.create_directory(
