@@ -138,6 +138,7 @@ use tracing::warn;
 pub(crate) struct TurnRunResult {
     pub(crate) last_agent_message: Option<String>,
     pub(crate) project_validation_eligibility: ProjectValidationEligibility,
+    pub(crate) model_used_tools: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,6 +232,7 @@ pub(crate) async fn run_turn(
     }
 
     let mut last_agent_message: Option<String> = None;
+    let mut model_used_tools = false;
     let mut stop_hook_active = false;
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
@@ -290,7 +292,9 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    model_used_tools: sampling_request_model_used_tools,
                 } = sampling_request_output;
+                model_used_tools |= sampling_request_model_used_tools;
                 can_drain_pending_input = true;
                 let has_pending_input = sess.input_queue.has_pending_input(&sess.active_turn).await;
                 let needs_follow_up = model_needs_follow_up || has_pending_input;
@@ -386,6 +390,7 @@ pub(crate) async fn run_turn(
                     return Some(TurnRunResult {
                         last_agent_message,
                         project_validation_eligibility: ProjectValidationEligibility::Eligible,
+                        model_used_tools,
                     });
                 }
                 continue;
@@ -434,6 +439,7 @@ pub(crate) async fn run_turn(
     Some(TurnRunResult {
         last_agent_message,
         project_validation_eligibility: ProjectValidationEligibility::Ineligible,
+        model_used_tools,
     })
 }
 
@@ -1353,6 +1359,19 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    model_used_tools: bool,
+}
+
+fn response_item_is_model_tool_activity(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::LocalShellCall { .. }
+            | ResponseItem::FunctionCall { .. }
+            | ResponseItem::ToolSearchCall { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::WebSearchCall { .. }
+            | ResponseItem::ImageGenerationCall { .. }
+    )
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -1965,6 +1984,7 @@ async fn try_run_sampling_request(
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
+    let mut model_used_tools = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
@@ -2025,6 +2045,7 @@ async fn try_run_sampling_request(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
+                model_used_tools |= response_item_is_model_tool_activity(&item);
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
@@ -2114,6 +2135,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        model_used_tools,
                     });
                 }
             }
@@ -2250,6 +2272,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    model_used_tools,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {

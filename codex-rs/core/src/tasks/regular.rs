@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 use crate::context::ContextualUserFragment;
 use crate::context::ProjectValidationFailure;
 use crate::session::TurnInput;
+use crate::session::project_validation::ProjectValidationAttempt;
 use crate::session::project_validation::ProjectValidationRun;
+use crate::session::project_validation::project_validation_worktree_fingerprint;
 use crate::session::project_validation::run_project_validation;
 use crate::session::turn::ProjectValidationEligibility;
 use crate::session::turn::RunTurnState;
@@ -84,6 +86,11 @@ impl SessionTask for RegularTask {
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
         let mut project_validation_phase = ProjectValidationPhase::Initial;
+        let project_validation_worktree_at_turn_start = tokio::select! {
+            _ = cancellation_token.cancelled() => return None,
+            fingerprint = project_validation_worktree_fingerprint(&ctx) => fingerprint,
+        };
+        let mut project_validation_model_used_tools = false;
         let mut run_turn_state = RunTurnState::new(ctx.as_ref()).await;
         loop {
             let turn_result = run_turn(
@@ -104,6 +111,9 @@ impl SessionTask for RegularTask {
             let validation_eligible = turn_result.as_ref().is_some_and(|result| {
                 result.project_validation_eligibility == ProjectValidationEligibility::Eligible
             });
+            if let Some(result) = turn_result.as_ref() {
+                project_validation_model_used_tools |= result.model_used_tools;
+            }
             if sess.input_queue.has_pending_input(&sess.active_turn).await {
                 next_input = Vec::new();
                 continue;
@@ -111,12 +121,21 @@ impl SessionTask for RegularTask {
             if validation_eligible {
                 match project_validation_phase {
                     ProjectValidationPhase::Initial => {
-                        project_validation_phase = ProjectValidationPhase::Complete;
-                        match run_project_validation(&sess, &ctx, cancellation_token.child_token())
-                            .await
+                        match run_project_validation(
+                            &sess,
+                            &ctx,
+                            ProjectValidationAttempt::Initial {
+                                worktree_at_turn_start: project_validation_worktree_at_turn_start
+                                    .clone(),
+                                model_used_tools: project_validation_model_used_tools,
+                            },
+                            cancellation_token.child_token(),
+                        )
+                        .await
                         {
                             ProjectValidationRun::Skipped => {}
                             ProjectValidationRun::Completed(event) => {
+                                project_validation_phase = ProjectValidationPhase::Complete;
                                 let correction = ProjectValidationFailure::from_event(&event);
                                 sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
                                     .await;
@@ -140,8 +159,13 @@ impl SessionTask for RegularTask {
                     }
                     ProjectValidationPhase::Correcting => {
                         project_validation_phase = ProjectValidationPhase::Complete;
-                        match run_project_validation(&sess, &ctx, cancellation_token.child_token())
-                            .await
+                        match run_project_validation(
+                            &sess,
+                            &ctx,
+                            ProjectValidationAttempt::CorrectionRerun,
+                            cancellation_token.child_token(),
+                        )
+                        .await
                         {
                             ProjectValidationRun::Skipped => {}
                             ProjectValidationRun::Completed(event) => {

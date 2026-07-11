@@ -33,13 +33,15 @@ through a deliberate contract rather than hard-coding repository commands.
 
 ### Debounce, Cancellation, and Deduplication
 
-There is no debounce, unchanged-tree deduplication, validation-run lock, or
-session cancellation contract. Each external process has a timeout and is
-killed when it expires. Paths and check labels are deduplicated only inside one
-harness invocation.
+The authoritative source has no debounce, unchanged-tree deduplication,
+validation-run lock, or session cancellation contract. Each external process
+has a timeout and is killed when it expires. Paths and check labels are
+deduplicated only inside one harness invocation.
 
-Codex Lab will not claim these semantics in the first slice. They are required
-before validation expands beyond one patch tool call.
+Codex Lab now suppresses the initial turn-finish project command when a real Git
+worktree fingerprint is unchanged across a tool-free root turn. Model tool
+activity, non-Git workspaces, and unreadable fingerprints fail open and preserve
+command execution. Debounce and concurrent run locking remain deferred.
 
 ### Retry and Fix Loop
 
@@ -119,9 +121,10 @@ consume them.
 
 The current Codex Lab runtime implements two safe subsets: configurable
 functional validation for committed JSON, TOML, and YAML patch results, plus
-one user-owned project validation command at the terminal root-turn boundary
-with a single bounded correction-and-rerun cycle for actionable failures. It
-does not persist a validation ledger or provide TUI controls.
+one user-owned project validation command at the terminal root-turn boundary.
+The project command skips unchanged supported Git worktrees only on tool-free
+turns and retains a single bounded correction-and-rerun cycle for actionable
+failures. It does not persist a validation ledger or provide TUI controls.
 
 ## First Contract
 
@@ -193,11 +196,35 @@ contains exactly one marked correction fragment, the single rerun passes, two
 `validation.completed` events are emitted, and one `turn.completed` closes the
 turn.
 
+## Unchanged Worktree Admission Contract
+
+The initial project-command attempt is admitted only when a supported Git
+worktree changed during the root turn:
+
+1. Before the first model request, the runtime captures the repository root's
+   current `HEAD` and a fingerprint of the diff against it, including untracked
+   files across the checkout.
+2. After a tool-free turn becomes quiescent, the runtime captures the same state
+   again.
+3. An exact match skips the initial command silently: no
+   `validation.completed` event and no correction fragment are emitted.
+   The skip remains provisional while input is pending; admission is retried
+   with the original fingerprint and cumulative tool activity after the
+   continuation becomes quiescent.
+4. Any model tool activity fails open so writes to ignored paths or external
+   tools cannot be hidden by Git fingerprinting.
+5. Non-Git workspaces, unborn repositories, and unreadable fingerprints fail
+   open and preserve command execution.
+6. Configuration, executable-resolution, and environment errors remain visible
+   even when the worktree is unchanged.
+7. Once an actionable failure starts a correction cycle, the final rerun is
+   owned by that cycle and is never suppressed by the admission gate.
+
 ## Deferred Contracts
 
 - clean-run silence and status/history presentation;
 - typed cancellation results distinct from turn abortion;
-- debounce, unchanged-tree deduplication, and concurrent-run suppression;
+- debounce and concurrent-run suppression;
 - steering that arrives after the final rerun starts;
 - resumed-turn cleanup/consumed-state and third-party-agent behavior;
 - TUI settings and active/terminal status rendering.

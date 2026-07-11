@@ -21,10 +21,12 @@ pub struct ValidationConfig {
     #[serde(default)]
     pub groups: ValidationGroups,
 
-    /// Optional project command to run after a root turn finishes agent work.
-    /// An actionable failure sends a bounded command/output fragment to the
-    /// model, permits one correction cycle, and reruns the command once. The
-    /// command should therefore tolerate up to two executions per root turn.
+    /// Optional project command to run after a root turn changes a Git worktree.
+    /// Model tool activity, non-Git workspaces, and unreadable worktree state
+    /// preserve the existing fail-open behavior and run the command. An
+    /// actionable failure sends a bounded command/output fragment to the model,
+    /// permits one correction cycle, and reruns the command once. The command
+    /// should therefore tolerate up to two executions per root turn.
     /// Repository-local config cannot set this executable field.
     #[serde(default)]
     pub project_command: Option<ProjectValidationCommand>,
