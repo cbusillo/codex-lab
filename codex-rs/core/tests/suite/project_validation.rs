@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
+use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -9,6 +11,7 @@ use codex_config::MAX_PROJECT_VALIDATION_TIMEOUT_MS;
 use codex_config::ProjectValidationCommand;
 use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
+use codex_exec_server::CreateDirectoryOptions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -27,6 +30,7 @@ use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::ev_shell_command_call;
 use core_test_support::responses::sse_completed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
@@ -257,8 +261,372 @@ fn request_message_input_texts(body: &Value, role: &str) -> Vec<String> {
         .collect()
 }
 
+fn run_git(path: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git").args(args).current_dir(path).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+fn init_git_repo(path: &Path) -> Result<()> {
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "project-validation@example.com"][..],
+        &["config", "user.name", "Project Validation"][..],
+        &["add", "--all"][..],
+        &["commit", "--quiet", "--allow-empty", "-m", "baseline"][..],
+    ] {
+        run_git(path, args)?;
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_validation_passes_once_before_turn_completion() -> Result<()> {
+async fn project_validation_skips_when_git_worktree_is_unchanged() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_once(&server, sse_completed("resp-1")).await;
+    let test = build_validation_codex(
+        &server,
+        shell_command("touch project-validation-ran", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "explain the current implementation").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    assert!(validation_events(&events).is_empty());
+    assert!(!test.workspace_path("project-validation-ran").exists());
+    assert_eq!(response_mock.requests().len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_skips_when_preexisting_dirty_worktree_is_unchanged() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_once(&server, sse_completed("resp-1")).await;
+    let test = build_validation_codex(
+        &server,
+        shell_command("touch project-validation-ran", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    init_git_repo(test.cwd_path())?;
+    std::fs::write(test.workspace_path("preexisting-dirty.txt"), "dirty")?;
+
+    submit_user_input(&test.codex, &test, "explain the current implementation").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    assert!(validation_events(&events).is_empty());
+    assert!(!test.workspace_path("project-validation-ran").exists());
+    assert_eq!(response_mock.requests().len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_retries_unchanged_skip_after_pending_input() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (first_response_gate_tx, first_response_gate_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-1")),
+            gated_streaming_chunk(
+                first_response_gate_rx,
+                vec![
+                    ev_assistant_message("msg-1", "initial answer"),
+                    ev_completed("resp-1"),
+                ],
+            ),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("resp-2")),
+            streaming_chunk(ev_shell_command_call("shell-1", "touch ignored-by-git.txt")),
+            streaming_chunk(ev_completed("resp-2")),
+        ],
+        response_completed_chunks("resp-3"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(
+        &server,
+        shell_command("printf validation-pass", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    std::fs::write(test.workspace_path(".gitignore"), "ignored-by-git.txt\n")?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "inspect the project").await?;
+    server.wait_for_request_count(/*count*/ 1).await;
+
+    let head_path = test.workspace_path(".git/HEAD");
+    let saved_head_path = test.workspace_path(".git/HEAD.project-validation-test");
+    let head_contents = std::fs::read(&head_path)?;
+    std::fs::rename(&head_path, &saved_head_path)?;
+    let mkfifo_status = Command::new("mkfifo").arg(&head_path).status()?;
+    anyhow::ensure!(mkfifo_status.success(), "mkfifo failed");
+
+    let (capture_started_tx, capture_started_rx) = oneshot::channel();
+    let (capture_release_tx, capture_release_rx) = oneshot::channel();
+    let capture_task = tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut fifo = std::fs::OpenOptions::new().write(true).open(&head_path)?;
+        std::fs::remove_file(&head_path)?;
+        std::fs::rename(&saved_head_path, &head_path)?;
+        let _ = capture_started_tx.send(());
+        capture_release_rx
+            .blocking_recv()
+            .context("capture release sender dropped")?;
+        fifo.write_all(&head_contents)?;
+        Ok(())
+    });
+
+    let _ = first_response_gate_tx.send(());
+    timeout(Duration::from_secs(5), capture_started_rx)
+        .await
+        .context("timed out waiting for validation fingerprint capture")??;
+    let steering_result = submit_user_input(&test.codex, &test, "make the requested change").await;
+    let _ = capture_release_tx.send(());
+    capture_task
+        .await
+        .context("validation fingerprint capture task panicked")??;
+    steering_result?;
+
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    assert!(test.workspace_path("ignored-by-git.txt").exists());
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass");
+    assert_eq!(server.requests().await.len(), 3);
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_runs_after_shell_tool_writes_ignored_file() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-1"),
+                ev_shell_command_call("shell-1", "touch ignored-by-git.txt"),
+                ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                ev_assistant_message("msg-1", "work complete"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let test = build_validation_codex(
+        &server,
+        shell_command("printf validation-pass", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    std::fs::write(test.workspace_path(".gitignore"), "ignored-by-git.txt\n")?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "make the requested change").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    assert!(test.workspace_path("ignored-by-git.txt").exists());
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass");
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_runs_after_server_tool_activity() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            ev_response_created("resp-1"),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "tool_search_call",
+                    "call_id": null,
+                    "status": "completed",
+                    "execution": "server",
+                    "arguments": {"query": "inspect the project"},
+                }
+            }),
+            ev_assistant_message("msg-1", "work complete"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let test = build_validation_codex(
+        &server,
+        shell_command("printf validation-pass", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "make the requested change").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass");
+    assert_eq!(response_mock.requests().len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_runs_after_untracked_change_outside_session_cwd() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (response_gate_tx, response_gate_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![vec![
+        streaming_chunk(ev_response_created("resp-1")),
+        gated_streaming_chunk(
+            response_gate_rx,
+            vec![
+                ev_assistant_message("msg-1", "work complete"),
+                ev_completed("resp-1"),
+            ],
+        ),
+    ]])
+    .await;
+    let command = shell_command("printf validation-pass", /*timeout_ms*/ 5_000);
+    let mut builder = test_codex()
+        .with_config(move |config| {
+            config.cwd = config.cwd.join("nested");
+            config.validation.project_command = Some(command.clone());
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            fs.create_directory(
+                &cwd,
+                CreateDirectoryOptions { recursive: true },
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok::<(), anyhow::Error>(())
+        });
+    let test = builder.build_with_streaming_server(&server).await?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "inspect the nested project").await?;
+    server.wait_for_request_count(/*count*/ 1).await;
+    std::fs::write(test.workspace_path("outside-session-cwd.txt"), "changed")?;
+    let _ = response_gate_tx.send(());
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass");
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_runs_after_head_changes_with_clean_worktree() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (response_gate_tx, response_gate_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![vec![
+        streaming_chunk(ev_response_created("resp-1")),
+        gated_streaming_chunk(
+            response_gate_rx,
+            vec![
+                ev_assistant_message("msg-1", "work complete"),
+                ev_completed("resp-1"),
+            ],
+        ),
+    ]])
+    .await;
+    let test = build_streaming_validation_codex(
+        &server,
+        shell_command("printf validation-pass", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "inspect the current branch").await?;
+    server.wait_for_request_count(/*count*/ 1).await;
+    run_git(
+        test.cwd_path(),
+        &["commit", "--quiet", "--allow-empty", "-m", "turn commit"],
+    )?;
+    let _ = response_gate_tx.send(());
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass");
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_owned_rerun_ignores_unchanged_worktree_gate() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-1"),
+                ev_shell_command_call("shell-1", "touch changed-by-shell.txt"),
+                ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                ev_assistant_message("msg-1", "initial work complete"),
+                ev_completed("resp-2"),
+            ]),
+            responses::sse(vec![
+                ev_assistant_message("msg-2", "correction complete"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+    let test = build_validation_codex(
+        &server,
+        shell_command(
+            "printf validation-fail >&2; exit 7",
+            /*timeout_ms*/ 5_000,
+        ),
+    )
+    .await?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "make the requested change").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 2);
+    for event in validation_events {
+        assert_eq!(event.status, ProjectValidationStatus::ActionableFailure);
+        assert_eq!(event.output, "validation-fail");
+    }
+    assert_eq!(response_mock.requests().len(), 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_non_git_workspace_fails_open_before_turn_completion() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let events = run_validation_turn(shell_command("printf validation-pass", 5_000)).await?;
@@ -279,6 +647,53 @@ async fn project_validation_passes_once_before_turn_completion() -> Result<()> {
         .position(|event| matches!(event, EventMsg::TurnComplete(_)))
         .expect("turn completion should be present");
     assert!(validation_index < completion_index);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_unborn_git_repo_fails_open() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once(&server, sse_completed("resp-1")).await;
+    let test = build_validation_codex(
+        &server,
+        shell_command("printf validation-pass", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    run_git(test.cwd_path(), &["init", "--quiet"])?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_unreadable_git_fingerprint_fails_open() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once(&server, sse_completed("resp-1")).await;
+    let test = build_validation_codex(
+        &server,
+        shell_command("printf validation-pass", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    init_git_repo(test.cwd_path())?;
+    std::fs::write(test.workspace_path(".git/index"), "invalid-index")?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass");
     Ok(())
 }
 
@@ -575,13 +990,48 @@ async fn project_validation_interrupt_during_rerun_cancels_command() -> Result<(
 async fn project_validation_reports_empty_command_as_configuration_error() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let events = run_validation_turn(ProjectValidationCommand::default()).await?;
+    let server = start_mock_server().await;
+    responses::mount_sse_once(&server, sse_completed("resp-1")).await;
+    let test = build_validation_codex(&server, ProjectValidationCommand::default()).await?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
     let validation_events = validation_events(&events);
     assert_eq!(validation_events.len(), 1);
     let event = validation_events[0];
     assert_eq!(event.status, ProjectValidationStatus::ConfigurationError);
     assert_eq!(event.exit_code, None);
     assert!(event.output.contains("non-empty executable"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_reports_missing_executable_for_unchanged_worktree() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once(&server, sse_completed("resp-1")).await;
+    let test = build_validation_codex(
+        &server,
+        ProjectValidationCommand {
+            command: vec!["missing-project-validation-executable".to_string()],
+            timeout_ms: 5_000,
+        },
+    )
+    .await?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::ConfigurationError
+    );
+    assert!(validation_events[0].output.contains("not found"));
     Ok(())
 }
 

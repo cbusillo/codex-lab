@@ -1,8 +1,12 @@
+use std::ffi::OsString;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
 use codex_config::MAX_PROJECT_VALIDATION_TIMEOUT_MS;
+use codex_git_utils::get_git_repo_root;
+use codex_git_utils::get_head_commit_hash;
+use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
@@ -30,9 +34,35 @@ pub(crate) enum ProjectValidationRun {
     Cancelled,
 }
 
+pub(crate) enum ProjectValidationAttempt {
+    Initial {
+        worktree_at_turn_start: Option<ProjectValidationWorktreeFingerprint>,
+        model_used_tools: bool,
+    },
+    CorrectionRerun,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProjectValidationWorktreeFingerprint {
+    head_commit: String,
+    worktree_diff: Option<String>,
+}
+
+pub(crate) async fn project_validation_worktree_fingerprint(
+    turn_context: &TurnContext,
+) -> Option<ProjectValidationWorktreeFingerprint> {
+    turn_context.config.validation.project_command.as_ref()?;
+    if turn_context.session_source.is_non_root_agent() {
+        return None;
+    }
+    let cwd = turn_context.environments.single_local_environment_cwd()?;
+    capture_worktree_fingerprint(cwd).await
+}
+
 pub(crate) async fn run_project_validation(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
+    attempt: ProjectValidationAttempt,
     cancellation_token: CancellationToken,
 ) -> ProjectValidationRun {
     let Some(configured) = turn_context.config.validation.project_command.as_ref() else {
@@ -98,6 +128,44 @@ pub(crate) async fn run_project_validation(
         return ProjectValidationRun::Cancelled;
     }
 
+    let env = create_env(&turn_context.shell_environment_policy, Some(sess.thread_id));
+    let search_path = env
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| OsString::from(value));
+    if which::which_in(&command[0], search_path.as_ref(), cwd.as_ref()).is_err() {
+        return ProjectValidationRun::Completed(configuration_error(
+            turn_context,
+            command,
+            None,
+            "project validation executable was not found or is not executable",
+        ));
+    }
+
+    match attempt {
+        ProjectValidationAttempt::Initial {
+            worktree_at_turn_start,
+            model_used_tools,
+        } => {
+            if !model_used_tools && let Some(worktree_at_turn_start) = worktree_at_turn_start {
+                let worktree = tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        return ProjectValidationRun::Cancelled;
+                    }
+                    worktree = capture_worktree_fingerprint(&cwd) => worktree,
+                };
+                if worktree.is_some_and(|worktree| worktree == worktree_at_turn_start) {
+                    return ProjectValidationRun::Skipped;
+                }
+            }
+        }
+        ProjectValidationAttempt::CorrectionRerun => {}
+    }
+
+    if cancellation_token.is_cancelled() {
+        return ProjectValidationRun::Cancelled;
+    }
+
     let params = ExecParams {
         command: command.clone(),
         cwd: cwd.clone(),
@@ -106,7 +174,7 @@ pub(crate) async fn run_project_validation(
             cancellation: cancellation_token.clone(),
         },
         capture_policy: ExecCapturePolicy::ShellTool,
-        env: create_env(&turn_context.shell_environment_policy, Some(sess.thread_id)),
+        env,
         network: turn_context.network.clone(),
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: turn_context.windows_sandbox_level,
@@ -178,6 +246,21 @@ pub(crate) async fn run_project_validation(
             format!("project validation infrastructure failure: {error}"),
             Duration::ZERO,
         ),
+    })
+}
+
+async fn capture_worktree_fingerprint(
+    cwd: &AbsolutePathBuf,
+) -> Option<ProjectValidationWorktreeFingerprint> {
+    let repo_root = get_git_repo_root(cwd.as_ref())?;
+    let head_commit = get_head_commit_hash(&repo_root).await?.0;
+    let worktree_diff = get_worktree_diff_fingerprint(&repo_root).await;
+    if worktree_diff.as_deref() == Some("unknown") {
+        return None;
+    }
+    Some(ProjectValidationWorktreeFingerprint {
+        head_commit,
+        worktree_diff,
     })
 }
 

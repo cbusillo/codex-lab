@@ -35,6 +35,20 @@ fn assistant_output_text(text: &str) -> ResponseItem {
     }
 }
 
+#[test]
+fn rejected_model_tool_request_counts_as_activity() {
+    let item = ResponseItem::ToolSearchCall {
+        id: None,
+        call_id: Some("tool-search-1".to_string()),
+        status: Some("completed".to_string()),
+        execution: "client".to_string(),
+        arguments: serde_json::json!({}),
+    };
+
+    assert!(ToolRouter::build_tool_call(item.clone()).is_err());
+    assert!(response_item_is_model_tool_activity(&item));
+}
+
 #[tokio::test]
 async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
