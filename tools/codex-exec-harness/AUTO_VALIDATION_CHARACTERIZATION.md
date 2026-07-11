@@ -41,7 +41,9 @@ deduplicated only inside one harness invocation.
 Codex Lab now suppresses the initial turn-finish project command when a real Git
 worktree fingerprint is unchanged across a tool-free root turn. Model tool
 activity, non-Git workspaces, and unreadable fingerprints fail open and preserve
-command execution. Debounce and concurrent run locking remain deferred.
+command execution. Project commands targeting the same Git repository are
+serialized across root sessions in one runtime. Debounce, cross-process locking,
+and result caching remain deferred.
 
 ### Retry and Fix Loop
 
@@ -220,11 +222,36 @@ worktree changed during the root turn:
 7. Once an actionable failure starts a correction cycle, the final rerun is
    owned by that cycle and is never suppressed by the admission gate.
 
+## Concurrent Run Contract
+
+Project commands targeting the same Git checkout do not execute concurrently:
+
+1. The runtime shares one project-validation coordinator across root sessions
+   created by the same thread manager.
+2. The lease key is the canonical Git repository root. Different repositories
+   remain independent, while non-Git workspaces preserve fail-open execution
+   without coordination.
+3. Configuration, executable-resolution, and environment failures remain
+   visible before lease acquisition.
+4. Lease waiting is cancellation-aware. Cancellation never emits a terminal
+   validation result and releasing or cancelling an owner cannot leave a stale
+   in-memory lease.
+5. A fast unchanged-worktree check can skip before contention. Changed or
+   uncertain attempts acquire the lease and repeat the check before execution,
+   so a waiter evaluates the current repository state rather than a stale state
+   observed while another command was active.
+6. The lease covers command execution only. An actionable failure releases it
+   during the model correction cycle, and the owned final rerun reacquires it.
+   This prevents command overlap without granting one session ownership of all
+   repository edits during model latency.
+7. Contenders wait rather than silently skip, preserving validation coverage
+   for work that may not have been included in the active command.
+
 ## Deferred Contracts
 
 - clean-run silence and status/history presentation;
 - typed cancellation results distinct from turn abortion;
-- debounce and concurrent-run suppression;
+- debounce, cross-process locking, and concurrent result coalescing;
 - steering that arrives after the final rerun starts;
 - resumed-turn cleanup/consumed-state and third-party-agent behavior;
 - TUI settings and active/terminal status rendering.
