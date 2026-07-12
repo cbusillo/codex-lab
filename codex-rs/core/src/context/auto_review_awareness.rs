@@ -108,8 +108,13 @@ fn render_awareness(
     let mut lines = Vec::new();
     let mut status_lines = Vec::new();
     let mut current_summary: Option<(&AutoReviewRun, AutoReviewSummary)> = None;
+    let visible_runs = runs
+        .iter()
+        .filter(|run| run_is_visible_for_awareness(run, active_review_target))
+        .cloned()
+        .collect::<Vec<_>>();
     let projection =
-        AutoReviewLedgerProjection::from_runs(runs, active_target, active_review_target);
+        AutoReviewLedgerProjection::from_runs(&visible_runs, active_target, active_review_target);
 
     if let Some(run_id) = &active_snapshot.pending_run_id {
         status_lines.push(format!("- pending background run: {run_id}"));
@@ -118,7 +123,7 @@ fn render_awareness(
         status_lines.push(format!("- running background run: {run_id}"));
     }
 
-    for run in runs {
+    for run in &visible_runs {
         let summary = run.project(active_target, active_review_target).summary;
         if !summary.content.is_empty() {
             match &current_summary {
@@ -174,6 +179,19 @@ fn render_awareness(
     }
 
     AutoReviewAwareness::new(lines.join("\n"))
+}
+
+fn run_is_visible_for_awareness(
+    run: &AutoReviewRun,
+    active_review_target: &ReviewTarget,
+) -> bool {
+    !matches!(
+        (&run.review_target, active_review_target),
+        (
+            ReviewTarget::CurrentTurnDiff { .. },
+            ReviewTarget::UncommittedChanges
+        )
+    ) || run.target.worktree_diff_fingerprint.is_some()
 }
 
 fn truncate_utf8_with_marker(value: &str, max_bytes: usize) -> String {

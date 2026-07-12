@@ -1290,6 +1290,38 @@ fn duplicate_lookup_uses_finding_count_for_completed_priority() -> anyhow::Resul
 }
 
 #[test]
+fn duplicate_lookup_uses_current_turn_diff_fingerprint_for_clean_target() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let review_target = ReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:committed-turn".to_string(),
+    };
+    let completed = AutoReviewRun {
+        target: sample_target("main", "head-2", "/repo"),
+        review_target: review_target.clone(),
+        ..sample_run("completed-clean-turn", &sample_output(Vec::new()))
+    };
+    store.save_run(&completed)?;
+
+    let duplicate = store
+        .find_duplicate_by_fingerprint_with_target_proof_and_filter(
+            "sha256:committed-turn",
+            Some(&sample_target("main", "head-2", "/repo")),
+            Some(&review_target),
+            |_| true,
+        )?
+        .expect("clean committed turn duplicate should be found");
+
+    assert_eq!(duplicate.run_id, "completed-clean-turn");
+    assert_eq!(
+        duplicate.disposition,
+        AutoReviewDuplicateDisposition::ReuseTerminal
+    );
+    Ok(())
+}
+
+#[test]
 fn mark_superseded_preserves_runs_with_evidence() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
@@ -1394,6 +1426,37 @@ fn mark_superseded_by_fingerprint_requires_matching_review_target() -> anyhow::R
     );
     assert_eq!(
         store.load_run("matching_turn_diff")?.status,
+        AutoReviewRunStatus::Superseded
+    );
+    Ok(())
+}
+
+#[test]
+fn mark_superseded_by_fingerprint_uses_current_turn_diff_for_clean_target() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let review_target = ReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:committed-turn".to_string(),
+    };
+    let clean = AutoReviewRun {
+        target: sample_target("main", "head-2", "/repo"),
+        review_target: review_target.clone(),
+        ..sample_run("clean-committed-turn", &sample_output(Vec::new()))
+    };
+    store.save_run(&clean)?;
+
+    let changed = store.mark_superseded_by_fingerprint_with_target(
+        "sha256:committed-turn",
+        "new-run",
+        Some("main"),
+        Some("head-2"),
+        Some(&review_target),
+    )?;
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        store.load_run("clean-committed-turn")?.status,
         AutoReviewRunStatus::Superseded
     );
     Ok(())
