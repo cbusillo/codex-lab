@@ -140,14 +140,17 @@ pub use exec_events::TurnStartedEvent;
 pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use supports_color::Stream;
 use tokio::sync::mpsc;
 use tracing::Instrument;
+use tracing::debug;
 use tracing::error;
 use tracing::field;
 use tracing::info;
@@ -162,6 +165,7 @@ use crate::event_processor::EventProcessor;
 
 const DEFAULT_ANALYTICS_ENABLED: bool = true;
 const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
+const BACKGROUND_REVIEW_SCHEDULE_GRACE: Duration = Duration::from_secs(2);
 
 enum InitialOperation {
     UserTurn {
@@ -940,8 +944,13 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // exit with a non-zero status for automation-friendly signaling.
     let mut error_seen = false;
     let mut interrupt_channel_open = true;
+    let mut active_background_review_run_ids = HashSet::new();
+    let mut completed_turn_waiting_for_background_review = false;
+    let mut turn_has_reviewable_diff = false;
+    let mut background_review_schedule_deadline = None;
     let primary_thread_id_for_requests = primary_thread_id.to_string();
     loop {
+        let mut background_review_schedule_grace_elapsed = false;
         let server_event = tokio::select! {
             maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
                 if maybe_interrupt.is_none() {
@@ -966,7 +975,23 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 continue;
             }
             maybe_event = client.next_event() => maybe_event,
+            _ = wait_for_background_review_schedule_deadline(
+                background_review_schedule_deadline
+            ), if background_review_schedule_deadline.is_some() => {
+                background_review_schedule_grace_elapsed = true;
+                None
+            }
         };
+
+        if background_review_schedule_grace_elapsed {
+            debug!("background review did not schedule before exec grace period elapsed");
+            if let Err(err) =
+                request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests).await
+            {
+                warn!("thread/unsubscribe failed during shutdown: {err}");
+            }
+            break;
+        }
 
         let Some(server_event) = server_event else {
             break;
@@ -977,6 +1002,32 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 handle_server_request(&client, request, &mut error_seen).await;
             }
             InProcessServerEvent::ServerNotification(mut notification) => {
+                if let ServerNotification::TurnDiffUpdated(payload) = &notification
+                    && payload.thread_id == primary_thread_id_for_requests
+                    && payload.turn_id == task_id
+                {
+                    turn_has_reviewable_diff = !payload.diff.trim().is_empty();
+                }
+                let completed_primary_turn = matches!(
+                    &notification,
+                    ServerNotification::TurnCompleted(payload)
+                        if payload.thread_id == primary_thread_id_for_requests
+                            && payload.turn.id == task_id
+                            && payload.turn.status
+                                == codex_app_server_protocol::TurnStatus::Completed
+                );
+                let completed_background_review = match &notification {
+                    ServerNotification::BackgroundAutoReviewStatusChanged(payload)
+                        if payload.thread_id == primary_thread_id_for_requests =>
+                    {
+                        record_background_auto_review_status(
+                            &mut active_background_review_run_ids,
+                            &payload.run_id,
+                            &payload.status,
+                        )
+                    }
+                    _ => false,
+                };
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
                         && payload.turn_id == task_id
@@ -1012,6 +1063,18 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     match event_processor.process_server_notification(notification) {
                         CodexStatus::Running => {}
                         CodexStatus::InitiateShutdown => {
+                            if completed_primary_turn
+                                && (turn_has_reviewable_diff
+                                    || !active_background_review_run_ids.is_empty())
+                            {
+                                completed_turn_waiting_for_background_review = true;
+                                background_review_schedule_deadline =
+                                    active_background_review_run_ids.is_empty().then(|| {
+                                        tokio::time::Instant::now()
+                                            + BACKGROUND_REVIEW_SCHEDULE_GRACE
+                                    });
+                                continue;
+                            }
                             if let Err(err) = request_shutdown(
                                 &client,
                                 &mut request_ids,
@@ -1024,6 +1087,21 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                             break;
                         }
                     }
+                }
+                if !completed_background_review && !active_background_review_run_ids.is_empty() {
+                    background_review_schedule_deadline = None;
+                }
+                if completed_background_review
+                    && completed_turn_waiting_for_background_review
+                    && active_background_review_run_ids.is_empty()
+                {
+                    if let Err(err) =
+                        request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests)
+                            .await
+                    {
+                        warn!("thread/unsubscribe failed during shutdown: {err}");
+                    }
+                    break;
                 }
             }
             InProcessServerEvent::Lagged { skipped } => {
@@ -1264,6 +1342,34 @@ fn session_configured_from_thread_response(
 
 fn lagged_event_warning_message(skipped: usize) -> String {
     format!("in-process app-server event stream lagged; dropped {skipped} events")
+}
+
+async fn wait_for_background_review_schedule_deadline(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    }
+}
+
+fn record_background_auto_review_status(
+    active_run_ids: &mut HashSet<String>,
+    run_id: &str,
+    status: &codex_app_server_protocol::BackgroundAutoReviewStatus,
+) -> bool {
+    match status {
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Running => {
+            active_run_ids.insert(run_id.to_string());
+            false
+        }
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
+        | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => {
+            active_run_ids.remove(run_id);
+            true
+        }
+    }
 }
 
 fn should_process_notification(

@@ -962,6 +962,83 @@ class HarnessSafetyTest(unittest.TestCase):
 
         self.assertEqual([], failures)
 
+    def test_background_review_expectations_accept_current_clean_run(self) -> None:
+        workspace_path = "/tmp/background-review-workspace"
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "background_review": {
+                        "run_count": 1,
+                        "status": "completed",
+                        "source": "background",
+                        "freshness": "current",
+                        "finding_count": 0,
+                        "review_target_type": "currentTurnDiff",
+                        "target_matches_workspace": True,
+                        "worktree_clean": True,
+                    }
+                }
+            },
+            {
+                "returncode": 0,
+                "turns": [],
+                "background_review_runs": [
+                    {
+                        "status": "completed",
+                        "source": "background",
+                        "freshness": "current",
+                        "finding_count": 0,
+                        "target": {
+                            "branch": "main",
+                            "head_sha": "abc123",
+                            "worktree_path": workspace_path,
+                        },
+                        "review_target": {
+                            "type": "currentTurnDiff",
+                            "fingerprint": "sha256:turn",
+                        },
+                    }
+                ],
+                "workspace_git": {
+                    "branch": "main",
+                    "head_sha": "abc123",
+                    "worktree_path": workspace_path,
+                    "clean": True,
+                },
+            },
+            [],
+        )
+
+        self.assertEqual([], failures)
+
+    def test_background_review_expectations_reject_stale_head(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            {"expect": {"background_review": {"target_matches_workspace": True}}},
+            {
+                "returncode": 0,
+                "turns": [],
+                "background_review_runs": [
+                    {
+                        "target": {
+                            "branch": "main",
+                            "head_sha": "old123",
+                            "worktree_path": "/tmp/workspace",
+                        }
+                    }
+                ],
+                "workspace_git": {
+                    "branch": "main",
+                    "head_sha": "new123",
+                    "worktree_path": "/tmp/workspace",
+                    "clean": True,
+                },
+            },
+            [],
+        )
+
+        self.assertEqual(1, len(failures))
+        self.assertIn("does not match workspace", failures[0])
+
     def test_token_usage_snapshot_from_events_uses_last_turn_completed_usage(self) -> None:
         usage = HARNESS.token_usage_snapshot_from_events(
             [

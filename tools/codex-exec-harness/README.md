@@ -53,7 +53,8 @@ Scenarios are JSON files. Supported fields:
   isolated harness home for opt-in live model scenarios
 - `skip_run_all`: omit a scenario from `run_all.py` and CI's all-scenario sweep
 - `expect`: assertions over return code, turn count, captured thread id, and
-  fake Responses request bodies, plus captured agent messages and commands
+  fake Responses request bodies, captured agent messages and commands, and
+  optional durable Background Review target/currentness metadata
 - `timeout_seconds`: per-run timeout, defaulting to 90 seconds
 
 The fake Responses API is for request-shape proof only. Use direct scenario runs
@@ -146,6 +147,13 @@ Use `expect.turns` to assert per-turn metadata such as `returncode`,
 Use `expect.agent_messages` and `expect.commands` to assert text in captured
 assistant messages or shell commands from `codex exec --json` events. The same
 assertions are available per turn under `expect.turns[]`.
+
+Use `expect.background_review` for a scenario that must leave a durable Background
+Review ledger. It can assert `run_count`, `status`, `source`, `freshness`,
+`finding_count`, `review_target_type`, `target_matches_workspace`, and
+`worktree_clean`. The harness saves the collected ledger and workspace Git
+state as `artifacts/background-review-runs.json` and
+`artifacts/workspace-git.json`.
 
 Use `expect.tool_outputs[]` with `request` and `call_id` to assert against one
 matching `function_call_output` or `custom_tool_call_output`. This is stricter
