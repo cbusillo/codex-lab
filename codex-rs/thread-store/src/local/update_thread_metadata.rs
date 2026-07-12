@@ -6,6 +6,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::ARCHIVED_SESSIONS_SUBDIR;
 use codex_rollout::append_rollout_item_to_path;
@@ -209,30 +210,27 @@ async fn apply_metadata_update(
                 rollout_path_archived = resolved.archived;
                 rollout_path = Some(resolved.path);
             }
-            let mut metadata = existing.clone().unwrap_or_else(|| {
-                let created_at = patch
-                    .created_at
-                    .or(patch.updated_at)
-                    .unwrap_or_else(Utc::now);
-                let mut builder = ThreadMetadataBuilder::new(
-                    thread_id,
-                    rollout_path.clone().unwrap_or_default(),
-                    created_at,
-                    patch.source.clone().unwrap_or(SessionSource::Unknown),
-                );
-                builder.model_provider = patch.model_provider.clone();
-                builder.thread_source = patch.thread_source.flatten();
-                builder.agent_nickname = patch.agent_nickname.clone().flatten();
-                builder.agent_role = patch.agent_role.clone().flatten();
-                builder.agent_path = patch.agent_path.clone().flatten();
-                builder.cwd = patch.cwd.clone().map(normalize_cwd).unwrap_or_default();
-                builder.cli_version = patch.cli_version.clone();
-                let mut metadata = builder.build(store.config.default_model_provider_id.as_str());
-                if rollout_path_archived {
-                    metadata.archived_at = Some(metadata.updated_at);
+            let mut metadata = match existing.clone() {
+                Some(metadata) => metadata,
+                None => {
+                    let rollout_path =
+                        rollout_path
+                            .as_deref()
+                            .ok_or_else(|| ThreadStoreError::Internal {
+                                message: format!(
+                                    "thread metadata missing rollout path for {thread_id}"
+                                ),
+                            })?;
+                    metadata_for_missing_sqlite_row(
+                        store,
+                        thread_id,
+                        rollout_path,
+                        rollout_path_archived,
+                        &patch,
+                    )
+                    .await?
                 }
-                metadata
-            });
+            };
             if let Some(rollout_path) = rollout_path {
                 metadata.rollout_path = rollout_path;
             }
@@ -350,6 +348,72 @@ async fn apply_metadata_update(
         },
     )
     .await
+}
+
+async fn metadata_for_missing_sqlite_row(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    rollout_path_archived: bool,
+    patch: &ThreadMetadataPatch,
+) -> ThreadStoreResult<codex_state::ThreadMetadata> {
+    let created_at = patch
+        .created_at
+        .or(patch.updated_at)
+        .unwrap_or_else(Utc::now);
+    let mut builder = ThreadMetadataBuilder::new(
+        thread_id,
+        rollout_path.to_path_buf(),
+        created_at,
+        patch.source.clone().unwrap_or(SessionSource::Unknown),
+    );
+    builder.model_provider = patch.model_provider.clone();
+    builder.history_mode = canonical_history_mode(store, thread_id, rollout_path).await?;
+    builder.thread_source = patch.thread_source.clone().flatten();
+    builder.agent_nickname = patch.agent_nickname.clone().flatten();
+    builder.agent_role = patch.agent_role.clone().flatten();
+    builder.agent_path = patch.agent_path.clone().flatten();
+    builder.cwd = patch.cwd.clone().map(normalize_cwd).unwrap_or_default();
+    builder.cli_version = patch.cli_version.clone();
+    let mut metadata = builder.build(store.config.default_model_provider_id.as_str());
+    if rollout_path_archived {
+        metadata.archived_at = Some(metadata.updated_at);
+    }
+    Ok(metadata)
+}
+
+async fn canonical_history_mode(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+) -> ThreadStoreResult<ThreadHistoryMode> {
+    if codex_rollout::existing_rollout_path(rollout_path)
+        .await
+        .is_none()
+    {
+        return Ok(store
+            .live_history_mode(thread_id)
+            .await
+            .unwrap_or(ThreadHistoryMode::Legacy));
+    }
+
+    let session_meta =
+        read_session_meta_line(rollout_path)
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!(
+                    "failed to read canonical session metadata for {thread_id}: {err}"
+                ),
+            })?;
+    if session_meta.meta.id != thread_id {
+        return Err(ThreadStoreError::Internal {
+            message: format!(
+                "failed to rebuild thread metadata: rollout session metadata id mismatch: expected {thread_id}, found {}",
+                session_meta.meta.id
+            ),
+        });
+    }
+    Ok(session_meta.meta.history_mode)
 }
 
 fn needs_rollout_compatibility_update(patch: &ThreadMetadataPatch) -> bool {

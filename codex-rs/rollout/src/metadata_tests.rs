@@ -61,6 +61,7 @@ async fn extract_metadata_from_rollout_uses_session_meta() {
     };
     let rollout_line = RolloutLine {
         timestamp: "2026-01-27T12:34:56Z".to_string(),
+        ordinal: None,
         item: RolloutItem::SessionMeta(session_meta_line.clone()),
     };
     let json = serde_json::to_string(&rollout_line).expect("rollout json");
@@ -121,6 +122,7 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
     let lines = vec![
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: session_meta,
                 git: None,
@@ -128,6 +130,7 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
         },
         RolloutLine {
             timestamp: "2026-01-27T12:35:00Z".to_string(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: polluted_meta,
                 git: None,
@@ -386,6 +389,7 @@ fn write_rollout_in_sessions_with_cwd(
     };
     let rollout_line = RolloutLine {
         timestamp: event_ts.to_string(),
+        ordinal: None,
         item: RolloutItem::SessionMeta(session_meta_line),
     };
     let json = serde_json::to_string(&rollout_line).expect("serialize rollout");

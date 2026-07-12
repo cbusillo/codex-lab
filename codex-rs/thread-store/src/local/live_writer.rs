@@ -6,6 +6,7 @@ use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
+use codex_rollout::persisted_rollout_items;
 use tracing::warn;
 
 use super::LocalThreadStore;
@@ -16,29 +17,63 @@ use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use crate::types::canonical_history_mode_from_rollout_items;
 
 pub(super) async fn create_thread(
     store: &LocalThreadStore,
     params: CreateThreadParams,
 ) -> ThreadStoreResult<()> {
     let thread_id = params.thread_id;
+    let history_mode = params.history_mode;
     store.ensure_live_recorder_absent(thread_id).await?;
     let recorder = create_thread::create_thread(store, params).await?;
-    store.insert_live_recorder(thread_id, recorder).await
+    store
+        .insert_live_recorder(thread_id, recorder, history_mode)
+        .await
 }
 
 pub(super) async fn resume_thread(
     store: &LocalThreadStore,
     params: ResumeThreadParams,
 ) -> ThreadStoreResult<()> {
-    if params.metadata.history_mode != ThreadHistoryMode::Legacy {
+    store.ensure_live_recorder_absent(params.thread_id).await?;
+    let history_mode_from_items = params
+        .history
+        .as_deref()
+        .map(Vec::as_slice)
+        .and_then(canonical_history_mode_from_rollout_items);
+    let history_mode = if let Some(history_mode) = history_mode_from_items {
+        history_mode
+    } else if let Some(rollout_path) = params.rollout_path.as_ref() {
+        super::read_thread::read_thread_by_rollout_path(
+            store,
+            rollout_path.clone(),
+            params.include_archived,
+            /*include_history*/ false,
+        )
+        .await?
+        .history_mode
+    } else if params.history.is_some() {
+        params.metadata.history_mode
+    } else {
+        super::read_thread::read_thread(
+            store,
+            ReadThreadParams {
+                thread_id: params.thread_id,
+                include_archived: params.include_archived,
+                include_history: false,
+            },
+        )
+        .await?
+        .history_mode
+    };
+    if matches!(history_mode, ThreadHistoryMode::Paginated) && params.history.is_none() {
         return Err(ThreadStoreError::UnsupportedHistoryMode {
             thread_id: params.thread_id,
-            history_mode: params.metadata.history_mode,
+            history_mode,
             operation: "resume_thread",
         });
     }
-    store.ensure_live_recorder_absent(params.thread_id).await?;
     let rollout_path = match (params.rollout_path, params.history) {
         (Some(rollout_path), _history) => rollout_path,
         (None, history) => {
@@ -78,16 +113,30 @@ pub(super) async fn resume_thread(
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to resume local thread recorder: {err}"),
         })?;
-    store.insert_live_recorder(params.thread_id, recorder).await
+    store
+        .insert_live_recorder(params.thread_id, recorder, history_mode)
+        .await
 }
 
 pub(super) async fn append_items(
     store: &LocalThreadStore,
     params: AppendThreadItemsParams,
 ) -> ThreadStoreResult<()> {
-    let recorder = store.live_recorder(params.thread_id).await?;
+    let (recorder, history_mode) = store
+        .live_recorders
+        .lock()
+        .await
+        .get(&params.thread_id)
+        .map(|entry| (entry.recorder.clone(), entry.history_mode))
+        .ok_or(ThreadStoreError::ThreadNotFound {
+            thread_id: params.thread_id,
+        })?;
+    let persisted_items = persisted_rollout_items(params.items.as_slice(), history_mode);
+    if persisted_items.is_empty() {
+        return Ok(());
+    }
     recorder
-        .record_canonical_items(params.items.as_slice())
+        .record_canonical_items(persisted_items.as_slice())
         .await
         .map_err(thread_store_io_error)?;
     // LiveThread applies metadata immediately after append_items returns. Wait for the local
@@ -155,6 +204,7 @@ pub(super) async fn rollout_path(
         .await
         .get(&thread_id)
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?
+        .recorder
         .rollout_path()
         .to_path_buf())
 }
