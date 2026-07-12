@@ -607,10 +607,16 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadTurnsListResponse,
     },
+    #[experimental("thread/items/list")]
+    ThreadItemsList => "thread/items/list" {
+        params: v2::ThreadItemsListParams,
+        // Explicitly concurrent: this primarily reads append-only rollout storage.
+        serialization: None,
+        response: v2::ThreadItemsListResponse,
+    },
     #[experimental("thread/turns/items/list")]
     ThreadTurnsItemsList => "thread/turns/items/list" {
         params: v2::ThreadTurnsItemsListParams,
-        // Explicitly concurrent: this primarily reads append-only rollout storage.
         serialization: None,
         response: v2::ThreadTurnsItemsListResponse,
     },
@@ -2061,6 +2067,18 @@ mod tests {
             },
         };
         assert_eq!(thread_turns_list.serialization_scope(), None);
+
+        let thread_items_list = ClientRequest::ThreadItemsList {
+            request_id: request_id(),
+            params: v2::ThreadItemsListParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: None,
+                cursor: None,
+                limit: None,
+                sort_direction: None,
+            },
+        };
+        assert_eq!(thread_items_list.serialization_scope(), None);
 
         let thread_turns_items_list = ClientRequest::ThreadTurnsItemsList {
             request_id: request_id(),

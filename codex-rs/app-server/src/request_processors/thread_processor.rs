@@ -624,6 +624,13 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn thread_items_list(
+        &self,
+        _params: ThreadItemsListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        Err(method_not_found("thread/items/list is not supported yet"))
+    }
+
     pub(crate) async fn thread_turns_items_list(
         &self,
         _params: ThreadTurnsItemsListParams,

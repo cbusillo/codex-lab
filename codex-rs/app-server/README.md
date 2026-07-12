@@ -191,7 +191,8 @@ Example with notification opt-out:
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
 - `thread/turns/list` — experimental; page through a stored thread’s turn history without resuming it; supports cursor-based pagination with `sortDirection`, `itemsView`, `nextCursor`, and `backwardsCursor`.
-- `thread/turns/items/list` — experimental; reserved for paging full items for one turn. The API shape is present, but app-server currently returns an unsupported-method JSON-RPC error.
+- `thread/items/list` — experimental; reserved for paging persisted thread items across a thread, optionally filtered by `turnId`. The API shape is present, but app-server currently returns an unsupported-method JSON-RPC error.
+- `thread/turns/items/list` — experimental compatibility route for older clients; requires `turnId` and retains the legacy unsupported-method response.
 - `thread/metadata/update` — patch stored thread metadata in sqlite; currently supports updating persisted `gitInfo` fields and returns the refreshed `thread`.
 - `thread/settings/update` — experimental; queue a partial update to a loaded thread’s next-turn settings without starting a turn or adding transcript items. Omitted fields leave settings unchanged; `serviceTier: null` clears the tier; `sandboxPolicy` and `permissions` cannot be combined. Returns `{}` when the update is accepted and emits `thread/settings/updated` with the full effective settings only if they actually change. `turn/start` settings overrides emit the same notification when they change the stored settings.
 - `thread/memoryMode/set` — experimental; set a thread’s persisted memory eligibility to `"enabled"` or `"disabled"` for either a loaded thread or a stored rollout; returns `{}` on success.
@@ -548,10 +549,10 @@ Every returned `Turn` includes `itemsView`, which tells clients whether the `ite
 } }
 ```
 
-`thread/turns/items/list` is the planned hydration API for fetching full items for one turn:
+`thread/items/list` pages full persisted items across a thread, optionally filtered to one turn:
 
 ```json
-{ "method": "thread/turns/items/list", "id": 25, "params": {
+{ "method": "thread/items/list", "id": 25, "params": {
     "threadId": "thr_123",
     "turnId": "turn_456",
     "limit": 100,
@@ -559,7 +560,9 @@ Every returned `Turn` includes `itemsView`, which tells clients whether the `ite
 } }
 ```
 
-This method currently returns JSON-RPC `-32601` with message `thread/turns/items/list is not supported yet`.
+Omit `turnId` or pass `null` to request items across the thread. This method currently returns JSON-RPC `-32601` with message `thread/items/list is not supported yet`.
+
+Older clients may continue to call `thread/turns/items/list` with a required `turnId`; unsupported stores retain the legacy `thread/turns/items/list is not supported yet` error message.
 
 ### Example: Update stored thread metadata
 

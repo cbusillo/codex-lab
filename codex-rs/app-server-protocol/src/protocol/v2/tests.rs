@@ -235,10 +235,10 @@ fn thread_resume_response_round_trips_initial_turns_page() {
 }
 
 #[test]
-fn thread_turns_items_list_round_trips() {
-    let params = ThreadTurnsItemsListParams {
+fn thread_items_list_round_trips() {
+    let params = ThreadItemsListParams {
         thread_id: "thr_123".to_string(),
-        turn_id: "turn_456".to_string(),
+        turn_id: Some("turn_456".to_string()),
         cursor: Some("cursor_1".to_string()),
         limit: Some(50),
         sort_direction: Some(SortDirection::Asc),
@@ -254,7 +254,7 @@ fn thread_turns_items_list_round_trips() {
             "sortDirection": "asc",
         })
     );
-    let response = ThreadTurnsItemsListResponse {
+    let response = ThreadItemsListResponse {
         data: vec![ThreadItem::ContextCompaction {
             id: "item_1".to_string(),
         }],
@@ -264,6 +264,80 @@ fn thread_turns_items_list_round_trips() {
 
     assert_eq!(
         serde_json::to_value(&response).expect("serialize response"),
+        json!({
+            "data": [{"type": "contextCompaction", "id": "item_1"}],
+            "nextCursor": null,
+            "backwardsCursor": "cursor_0",
+        })
+    );
+
+    let params_without_turn = ThreadItemsListParams {
+        thread_id: "thr_123".to_string(),
+        turn_id: None,
+        cursor: None,
+        limit: None,
+        sort_direction: None,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&params_without_turn).expect("serialize params without turn"),
+        json!({
+            "threadId": "thr_123",
+            "turnId": null,
+            "cursor": null,
+            "limit": null,
+            "sortDirection": null,
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ThreadItemsListParams>(json!({
+            "threadId": "thr_123",
+        }))
+        .expect("deserialize params without turn"),
+        params_without_turn
+    );
+}
+
+#[test]
+fn thread_turns_items_list_legacy_shape_round_trips() {
+    let params = ThreadTurnsItemsListParams {
+        thread_id: "thr_123".to_string(),
+        turn_id: "turn_456".to_string(),
+        cursor: Some("cursor_1".to_string()),
+        limit: Some(50),
+        sort_direction: Some(SortDirection::Asc),
+    };
+
+    assert_eq!(
+        serde_json::to_value(&params).expect("serialize legacy params"),
+        json!({
+            "threadId": "thr_123",
+            "turnId": "turn_456",
+            "cursor": "cursor_1",
+            "limit": 50,
+            "sortDirection": "asc",
+        })
+    );
+    assert_eq!(
+        ThreadItemsListParams::from(params),
+        ThreadItemsListParams {
+            thread_id: "thr_123".to_string(),
+            turn_id: Some("turn_456".to_string()),
+            cursor: Some("cursor_1".to_string()),
+            limit: Some(50),
+            sort_direction: Some(SortDirection::Asc),
+        }
+    );
+
+    let response = ThreadTurnsItemsListResponse::from(ThreadItemsListResponse {
+        data: vec![ThreadItem::ContextCompaction {
+            id: "item_1".to_string(),
+        }],
+        next_cursor: None,
+        backwards_cursor: Some("cursor_0".to_string()),
+    });
+    assert_eq!(
+        serde_json::to_value(response).expect("serialize legacy response"),
         json!({
             "data": [{"type": "contextCompaction", "id": "item_1"}],
             "nextCursor": null,
