@@ -5,6 +5,7 @@ use similar::TextDiff;
 use std::sync::OnceLock;
 
 use crate::responses::ResponsesRequest;
+use crate::responses::without_response_item_ids;
 use codex_protocol::protocol::APPS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
@@ -267,6 +268,9 @@ fn format_request_body_snapshot(
     options: &ContextSnapshotOptions,
 ) -> String {
     let mut body = request.body_json();
+    if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
+        *input = without_response_item_ids(input);
+    }
     canonicalize_json_snapshot_value(&mut body, options);
     serde_json::to_string_pretty(&body).expect("request body should serialize")
 }

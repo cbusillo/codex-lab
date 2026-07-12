@@ -56,6 +56,15 @@ pub enum WireApi {
     Responses,
 }
 
+/// Controls whether canonical response-item IDs are retained in provider requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseItemIdPolicy {
+    /// Send canonical IDs to providers that implement OpenAI/Azure Responses semantics.
+    Retain,
+    /// Strip IDs from request-local clones for providers that reject them.
+    Strip,
+}
+
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
@@ -398,6 +407,14 @@ impl ModelProviderInfo {
 
     pub fn supports_remote_compaction(&self) -> bool {
         self.is_openai() || is_azure_responses_provider(&self.name, self.base_url.as_deref())
+    }
+
+    pub fn response_item_id_policy(&self) -> ResponseItemIdPolicy {
+        if self.is_openai() || is_azure_responses_provider(&self.name, self.base_url.as_deref()) {
+            ResponseItemIdPolicy::Retain
+        } else {
+            ResponseItemIdPolicy::Strip
+        }
     }
 
     pub fn has_command_auth(&self) -> bool {

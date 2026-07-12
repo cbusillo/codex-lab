@@ -210,6 +210,7 @@ mod mcp;
 mod multi_agents;
 pub(crate) mod project_validation;
 pub(crate) mod project_validation_coordinator;
+mod response_item_identity;
 mod review;
 mod rollout_reconstruction;
 #[allow(clippy::module_inception)]
@@ -1283,8 +1284,13 @@ impl Session {
                     let _ = self.flush_rollout().await;
                 }
             }
-            InitialHistory::Forked(rollout_items) => {
+            InitialHistory::Forked(mut rollout_items) => {
                 let turn_context = self.new_default_turn().await;
+                for rollout_item in &mut rollout_items {
+                    if let RolloutItem::ResponseItem(response_item) = rollout_item {
+                        response_item_identity::assign_missing_response_item_id(response_item);
+                    }
+                }
                 self.apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
 
@@ -2657,6 +2663,8 @@ impl Session {
         turn_context: &TurnContext,
         items: &[ResponseItem],
     ) {
+        let items = response_item_identity::prepare_conversation_items_for_history(items);
+        let items = items.as_ref();
         {
             let mut state = self.state.lock().await;
             state.record_items(items.iter(), turn_context.truncation_policy);
@@ -2740,6 +2748,12 @@ impl Session {
         reference_context_item: Option<TurnContextItem>,
         compacted_item: CompactedItem,
     ) {
+        let items =
+            response_item_identity::assign_missing_response_item_ids(items.into()).into_owned();
+        let compacted_item = CompactedItem {
+            replacement_history: Some(items.clone()),
+            ..compacted_item
+        };
         {
             let mut state = self.state.lock().await;
             state.replace_history(items, reference_context_item.clone());

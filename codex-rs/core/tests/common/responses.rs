@@ -35,6 +35,19 @@ use wiremock::http::HeaderValue;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
 
+pub fn without_response_item_ids(items: &[Value]) -> Vec<Value> {
+    items
+        .iter()
+        .cloned()
+        .map(|mut item| {
+            if let Some(item) = item.as_object_mut() {
+                item.remove("id");
+            }
+            item
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct ResponseMock {
     requests: Arc<Mutex<Vec<ResponsesRequest>>>,

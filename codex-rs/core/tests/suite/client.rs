@@ -68,6 +68,7 @@ use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_failed;
+use core_test_support::responses::without_response_item_ids;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -114,6 +115,105 @@ fn message_input_text_contains(request: &ResponsesRequest, role: &str, needle: &
         .message_input_texts(role)
         .iter()
         .any(|text| text.contains(needle))
+}
+
+fn response_message_item_id(request: &ResponsesRequest, role: &str, text: &str) -> String {
+    request
+        .inputs_of_type("message")
+        .into_iter()
+        .find(|item| {
+            item.get("role").and_then(serde_json::Value::as_str) == Some(role)
+                && message_input_texts(item).contains(&text)
+        })
+        .and_then(|item| {
+            item.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| panic!("missing item ID for {role} message {text:?}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_item_ids_persist_across_resume_and_preserve_server_ids() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg_server", "first reply"),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex();
+    let initial = builder.build(&server).await?;
+    let home = Arc::clone(&initial.home);
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+
+    initial.submit_turn("before resume").await?;
+    initial.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&initial.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+
+    let resumed = builder.resume(&server, home, rollout_path).await?;
+    resumed.submit_turn("after resume").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let user_id = response_message_item_id(&requests[0], "user", "before resume");
+    let user_uuid = user_id
+        .strip_prefix("msg_")
+        .expect("message ID should have the Responses API prefix");
+    assert_eq!(
+        Uuid::parse_str(user_uuid)?.get_version(),
+        Some(uuid::Version::SortRand)
+    );
+    assert_eq!(
+        response_message_item_id(&requests[1], "user", "before resume"),
+        user_id
+    );
+    assert_eq!(
+        response_message_item_id(&requests[1], "assistant", "first reply"),
+        "msg_server"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn custom_provider_http_requests_strip_canonical_item_ids() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.name = "custom-provider".to_string();
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn("strip request ids").await?;
+
+    for item in response_mock.single_request().input() {
+        assert!(
+            item.get("id").is_none(),
+            "custom provider request item should omit canonical ID: {item}"
+        );
+    }
+
+    Ok(())
 }
 
 /// Writes an `auth.json` into the provided `codex_home` with the specified parameters.
@@ -2450,7 +2550,7 @@ async fn includes_developer_instructions_message_in_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn azure_responses_request_includes_store_and_reasoning_ids() {
+async fn azure_responses_request_retains_canonical_item_ids() {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
@@ -2526,7 +2626,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
 
     let mut prompt = Prompt::default();
     prompt.input.push(ResponseItem::Reasoning {
-        id: Some("reasoning-id".into()),
+        id: Some("rs_reasoning".into()),
         summary: vec![ReasoningItemReasoningSummary::SummaryText {
             text: "summary".into(),
         }],
@@ -2536,7 +2636,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         encrypted_content: None,
     });
     prompt.input.push(ResponseItem::Message {
-        id: Some("message-id".into()),
+        id: Some("msg_message".into()),
         role: "assistant".into(),
         content: vec![ContentItem::OutputText {
             text: "message".into(),
@@ -2544,7 +2644,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         phase: None,
     });
     prompt.input.push(ResponseItem::WebSearchCall {
-        id: Some("web-search-id".into()),
+        id: Some("ws_web_search".into()),
         status: Some("completed".into()),
         action: Some(WebSearchAction::Search {
             query: Some("weather".into()),
@@ -2552,19 +2652,19 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         }),
     });
     prompt.input.push(ResponseItem::FunctionCall {
-        id: Some("function-id".into()),
+        id: Some("fc_function".into()),
         name: "do_thing".into(),
         namespace: None,
         arguments: "{}".into(),
         call_id: "function-call-id".into(),
     });
     prompt.input.push(ResponseItem::FunctionCallOutput {
-        id: None,
+        id: Some("fco_function_output".into()),
         call_id: "function-call-id".into(),
         output: FunctionCallOutputPayload::from_text("ok".into()),
     });
     prompt.input.push(ResponseItem::LocalShellCall {
-        id: Some("local-shell-id".into()),
+        id: Some("lsh_local_shell".into()),
         call_id: Some("local-shell-call-id".into()),
         status: LocalShellStatus::Completed,
         action: LocalShellAction::Exec(LocalShellExecAction {
@@ -2576,17 +2676,39 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         }),
     });
     prompt.input.push(ResponseItem::CustomToolCall {
-        id: Some("custom-tool-id".into()),
+        id: Some("ctc_custom_tool".into()),
         status: Some("completed".into()),
         call_id: "custom-tool-call-id".into(),
         name: "custom_tool".into(),
         input: "{}".into(),
     });
     prompt.input.push(ResponseItem::CustomToolCallOutput {
-        id: None,
+        id: Some("ctco_custom_tool_output".into()),
         call_id: "custom-tool-call-id".into(),
         name: None,
         output: FunctionCallOutputPayload::from_text("ok".into()),
+    });
+    prompt.input.push(ResponseItem::ImageGenerationCall {
+        id: Some("ig_provider".into()),
+        status: "completed".into(),
+        revised_prompt: Some("generated image".into()),
+        result: "image-data".into(),
+    });
+    prompt.input.push(ResponseItem::Message {
+        id: Some("legacy-message-id".into()),
+        role: "assistant".into(),
+        content: vec![ContentItem::OutputText {
+            text: "legacy unprefixed id".into(),
+        }],
+        phase: None,
+    });
+    prompt.input.push(ResponseItem::Message {
+        id: Some(String::new()),
+        role: "assistant".into(),
+        content: vec![ContentItem::OutputText {
+            text: "legacy empty id".into(),
+        }],
+        phase: None,
     });
 
     let mut stream = client_session
@@ -2615,21 +2737,21 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
 
     assert_eq!(body["store"], serde_json::Value::Bool(true));
     assert_eq!(body["stream"], serde_json::Value::Bool(true));
-    assert_eq!(body["input"].as_array().map(Vec::len), Some(8));
-    assert_eq!(body["input"][0]["id"].as_str(), Some("reasoning-id"));
-    assert_eq!(body["input"][1]["id"].as_str(), Some("message-id"));
-    assert_eq!(body["input"][2]["id"].as_str(), Some("web-search-id"));
-    assert_eq!(body["input"][3]["id"].as_str(), Some("function-id"));
+    assert_eq!(body["input"].as_array().map(Vec::len), Some(11));
+    assert_eq!(body["input"][0]["id"].as_str(), Some("rs_reasoning"));
+    assert_eq!(body["input"][1]["id"].as_str(), Some("msg_message"));
+    assert_eq!(body["input"][2]["id"].as_str(), Some("ws_web_search"));
+    assert_eq!(body["input"][3]["id"].as_str(), Some("fc_function"));
+    assert_eq!(body["input"][4]["id"].as_str(), Some("fco_function_output"));
+    assert_eq!(body["input"][5]["id"].as_str(), Some("lsh_local_shell"));
+    assert_eq!(body["input"][6]["id"].as_str(), Some("ctc_custom_tool"));
     assert_eq!(
-        body["input"][4]["call_id"].as_str(),
-        Some("function-call-id")
+        body["input"][7]["id"].as_str(),
+        Some("ctco_custom_tool_output")
     );
-    assert_eq!(body["input"][5]["id"].as_str(), Some("local-shell-id"));
-    assert_eq!(body["input"][6]["id"].as_str(), Some("custom-tool-id"));
-    assert_eq!(
-        body["input"][7]["call_id"].as_str(),
-        Some("custom-tool-call-id")
-    );
+    assert_eq!(body["input"][8]["id"].as_str(), Some("ig_provider"));
+    assert!(body["input"][9].get("id").is_none());
+    assert!(body["input"][10].get("id").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3519,9 +3641,9 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
         .expect("r3 missing input array");
     // skipping earlier context and developer messages
     let tail_len = r3_tail_expected.as_array().unwrap().len();
-    let actual_tail = &r3_input_array[r3_input_array.len() - tail_len..];
+    let actual_tail = without_response_item_ids(&r3_input_array[r3_input_array.len() - tail_len..]);
     assert_eq!(
-        serde_json::Value::Array(actual_tail.to_vec()),
+        serde_json::Value::Array(actual_tail),
         r3_tail_expected,
         "request 3 tail mismatch",
     );

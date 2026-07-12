@@ -58,7 +58,10 @@ impl Prompt {
             .iter()
             .cloned()
             .map(|item| {
-                let ResponseItem::Message { role, content, .. } = &item else {
+                let ResponseItem::Message {
+                    id, role, content, ..
+                } = &item
+                else {
                     return item;
                 };
                 if role != "assistant" {
@@ -66,7 +69,13 @@ impl Prompt {
                 }
                 InterAgentCommunication::from_message_content(content)
                     .filter(|communication| communication.encrypted_content.is_some())
-                    .map(|communication| communication.to_model_input_item())
+                    .map(|communication| {
+                        let mut formatted = communication.to_model_input_item();
+                        if let Some(id) = id {
+                            formatted.set_id(id.clone());
+                        }
+                        formatted
+                    })
                     .unwrap_or(item)
             })
             .collect()

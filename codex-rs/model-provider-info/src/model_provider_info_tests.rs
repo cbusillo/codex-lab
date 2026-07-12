@@ -140,6 +140,34 @@ fn test_supports_remote_compaction_for_openai() {
 }
 
 #[test]
+fn response_item_id_policy_retains_only_openai_and_azure_requests() {
+    let openai = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let azure = ModelProviderInfo {
+        name: "custom".to_string(),
+        base_url: Some("https://example.openai.azure.com/openai".to_string()),
+        ..ModelProviderInfo::default()
+    };
+    let custom = ModelProviderInfo {
+        name: "custom".to_string(),
+        base_url: Some("https://example.com/v1".to_string()),
+        ..ModelProviderInfo::default()
+    };
+
+    assert_eq!(
+        openai.response_item_id_policy(),
+        ResponseItemIdPolicy::Retain
+    );
+    assert_eq!(
+        azure.response_item_id_policy(),
+        ResponseItemIdPolicy::Retain
+    );
+    assert_eq!(
+        custom.response_item_id_policy(),
+        ResponseItemIdPolicy::Strip
+    );
+}
+
+#[test]
 fn test_personal_access_token_uses_chatgpt_codex_base_url() {
     let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
         .to_api_provider(Some(AuthMode::PersonalAccessToken))

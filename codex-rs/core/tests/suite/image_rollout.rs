@@ -1,4 +1,5 @@
 use anyhow::Context;
+use codex_core::test_support::without_generated_response_item_ids;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::PermissionProfile;
@@ -59,6 +60,19 @@ fn extract_image_url(item: &ResponseItem) -> Option<String> {
         }),
         _ => None,
     }
+}
+
+fn assert_generated_message_id(item: &ResponseItem) {
+    let Some(item_id) = item.id() else {
+        panic!("persisted message id");
+    };
+    let Some(uuid) = item_id
+        .strip_prefix("msg_")
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+    else {
+        panic!("message UUIDv7 id");
+    };
+    assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
 }
 
 async fn read_rollout_text(path: &Path) -> anyhow::Result<String> {
@@ -155,6 +169,7 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
     let rollout_text = read_rollout_text(&rollout_path).await?;
     let actual = find_user_message_with_image(&rollout_text)
         .expect("expected user message with input image in rollout");
+    assert_generated_message_id(&actual);
 
     let image_url = extract_image_url(&actual).expect("expected image url in rollout");
     let expected = ResponseItem::Message {
@@ -180,7 +195,7 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
         phase: None,
     };
 
-    assert_eq!(actual, expected);
+    assert_eq!(without_generated_response_item_ids(&[actual]), [expected]);
 
     Ok(())
 }
@@ -254,6 +269,7 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
     let rollout_text = read_rollout_text(&rollout_path).await?;
     let actual = find_user_message_with_image(&rollout_text)
         .expect("expected user message with input image in rollout");
+    assert_generated_message_id(&actual);
 
     let image_url = extract_image_url(&actual).expect("expected image url in rollout");
     let expected = ResponseItem::Message {
@@ -271,7 +287,7 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
         phase: None,
     };
 
-    assert_eq!(actual, expected);
+    assert_eq!(without_generated_response_item_ids(&[actual]), [expected]);
 
     Ok(())
 }

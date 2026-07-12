@@ -7,6 +7,7 @@ use crate::session::session::SessionSettingsUpdate;
 use crate::session::tests::make_session_and_context;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
+use crate::test_support::without_generated_response_item_ids;
 use codex_extension_api::empty_extension_registry;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::models::ContentItem;
@@ -54,6 +55,16 @@ fn assistant_msg(text: &str) -> ResponseItem {
         }],
         phase: None,
     }
+}
+
+fn rollout_response_item_matches_without_generated_id(
+    item: &RolloutItem,
+    expected: &ResponseItem,
+) -> bool {
+    let RolloutItem::ResponseItem(item) = item else {
+        return false;
+    };
+    without_generated_response_item_ids(std::slice::from_ref(item)) == [expected.clone()]
 }
 
 fn test_session_provenance(request_id: &str) -> SessionProvenance {
@@ -1290,10 +1301,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .into_iter()
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
-    let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
-    ))
-    .expect("serialize interrupted marker");
+    let interrupted_marker = contextual_user_interrupted_marker();
     let interrupted_abort_json = serde_json::to_value(RolloutItem::EventMsg(
         EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: expected_turn_id,
@@ -1307,8 +1315,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         rollout_items
             .iter()
             .filter(|item| {
-                serde_json::to_value(item).expect("serialize rollout item")
-                    == interrupted_marker_json
+                rollout_response_item_matches_without_generated_id(item, &interrupted_marker)
             })
             .count(),
         1,
@@ -1491,16 +1498,12 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .into_iter()
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
-    let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
-    ))
-    .expect("serialize interrupted marker");
+    let interrupted_marker = contextual_user_interrupted_marker();
     assert_eq!(
         forked_rollout_items
             .iter()
             .filter(|item| {
-                serde_json::to_value(item).expect("serialize forked rollout item")
-                    == interrupted_marker_json
+                rollout_response_item_matches_without_generated_id(item, &interrupted_marker)
             })
             .count(),
         1,
@@ -1534,8 +1537,7 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         reforked_rollout_items
             .iter()
             .filter(|item| {
-                serde_json::to_value(item).expect("serialize re-forked rollout item")
-                    == interrupted_marker_json
+                rollout_response_item_matches_without_generated_id(item, &interrupted_marker)
             })
             .count(),
         1,

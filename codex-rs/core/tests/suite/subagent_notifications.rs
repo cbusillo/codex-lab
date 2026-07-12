@@ -1086,8 +1086,25 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
         .await?
         .pop()
         .expect("child request");
+    let mut agent_messages = child_request.inputs_of_type("agent_message");
+    let agent_message = agent_messages.first_mut().expect("agent message");
+    let item_id = agent_message
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("history item id");
+    let item_uuid = item_id
+        .strip_prefix("amsg_")
+        .expect("agent message id prefix");
     assert_eq!(
-        child_request.inputs_of_type("agent_message"),
+        uuid::Uuid::parse_str(item_uuid)?.get_version(),
+        Some(uuid::Version::SortRand)
+    );
+    agent_message
+        .as_object_mut()
+        .expect("agent message object")
+        .remove("id");
+    assert_eq!(
+        agent_messages,
         vec![json!({
             "type": "agent_message",
             "author": "/root",

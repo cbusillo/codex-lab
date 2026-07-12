@@ -3,6 +3,7 @@ use codex_core::LoadedAgentsMd;
 use codex_core::build_prompt_input;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
+use codex_core::test_support::without_generated_response_item_ids;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::user_input::UserInput;
@@ -44,7 +45,10 @@ async fn build_prompt_input_includes_context_and_user_message() -> Result<()> {
         }],
         phase: None,
     };
-    assert_eq!(input.last(), Some(&expected_user_message));
+    assert_eq!(
+        without_generated_response_item_ids(&input[input.len() - 1..]),
+        [expected_user_message]
+    );
     assert!(input.iter().any(|item| {
         let ResponseItem::Message { content, .. } = item else {
             return false;

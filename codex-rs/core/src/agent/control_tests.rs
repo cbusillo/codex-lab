@@ -12,6 +12,7 @@ use crate::config::ExternalCommandProtocol;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use crate::init_state_db;
+use crate::test_support::without_generated_response_item_ids;
 use assert_matches::assert_matches;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -928,8 +929,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         },
     ];
     assert_eq!(
-        history.raw_items(),
-        &expected_history,
+        without_generated_response_item_ids(history.raw_items()),
+        expected_history,
         "full-history forked child history should replace parent usage hints with the child subagent hint while filtering non-final assistant/tool chatter"
     );
     assert_eq!(

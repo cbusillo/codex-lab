@@ -117,7 +117,9 @@ async fn responses_websocket_streams_request() {
 
     let harness = websocket_harness(&server).await;
     let mut client_session = harness.client.new_session();
-    let prompt = prompt_with_input(vec![message_item("hello")]);
+    let mut message = message_item("hello");
+    message.set_id("msg_existing".to_string());
+    let prompt = prompt_with_input(vec![message]);
 
     stream_until_complete(&mut client_session, &harness, &prompt).await;
 
@@ -129,6 +131,7 @@ async fn responses_websocket_streams_request() {
     assert_eq!(body["model"].as_str(), Some(MODEL));
     assert_eq!(body["stream"], serde_json::Value::Bool(true));
     assert_eq!(body["input"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["input"][0].get("id"), None);
     let handshake = server.single_handshake();
     assert_eq!(
         handshake.header(OPENAI_BETA_HEADER),
@@ -161,6 +164,57 @@ async fn responses_websocket_streams_request() {
         .parse::<i64>()
         .expect("websocket stream request start timestamp should be an integer");
     assert!(stream_request_start_ms > 0);
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_retains_item_ids_for_openai_provider() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server(vec![vec![vec![
+        ev_response_created("resp-1"),
+        ev_completed("resp-1"),
+    ]]])
+    .await;
+    let mut provider = websocket_provider(&server);
+    provider.name = "OpenAI".to_string();
+    let harness =
+        websocket_harness_with_provider_options(provider, /*runtime_metrics_enabled*/ false).await;
+    let mut client_session = harness.client.new_session();
+    let mut message = message_item("hello");
+    message.set_id("msg_existing".to_string());
+    let prompt = prompt_with_input(vec![message]);
+
+    stream_until_complete(&mut client_session, &harness, &prompt).await;
+
+    let connection = server.single_connection();
+    let body = connection.first().expect("missing request").body_json();
+    assert_eq!(body["input"][0]["id"].as_str(), Some("msg_existing"));
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_strips_item_ids_for_custom_provider() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server(vec![vec![vec![
+        ev_response_created("resp-1"),
+        ev_completed("resp-1"),
+    ]]])
+    .await;
+    let harness = websocket_harness(&server).await;
+    let mut client_session = harness.client.new_session();
+    let mut message = message_item("hello");
+    message.set_id("msg_existing".to_string());
+    let prompt = prompt_with_input(vec![message]);
+
+    stream_until_complete(&mut client_session, &harness, &prompt).await;
+
+    let connection = server.single_connection();
+    let body = connection.first().expect("missing request").body_json();
+    assert!(body["input"][0].get("id").is_none());
 
     server.shutdown().await;
 }

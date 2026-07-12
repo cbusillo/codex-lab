@@ -936,6 +936,27 @@ fn normalize_string(value: &str) -> String {
     if is_uuid_like(value) {
         return "<UUID>".to_string();
     }
+    if let Some((prefix, uuid)) = value.rsplit_once('_')
+        && matches!(
+            prefix,
+            "msg"
+                | "amsg"
+                | "rs"
+                | "lsh"
+                | "fc"
+                | "tsc"
+                | "fco"
+                | "ctc"
+                | "ctco"
+                | "tso"
+                | "ws"
+                | "ig"
+                | "cmp"
+        )
+        && is_uuid_like(uuid)
+    {
+        return format!("{prefix}_<UUID>");
+    }
 
     let mut text = value.to_string();
     normalize_tmp_prefix_before_marker(&mut text, "/skills/");

@@ -18,6 +18,7 @@ use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 use codex_protocol::config_types::CollaborationModeMask;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use once_cell::sync::Lazy;
@@ -42,6 +43,25 @@ pub fn set_thread_manager_test_mode(enabled: bool) {
 
 pub fn set_deterministic_process_ids(enabled: bool) {
     unified_exec::set_deterministic_process_ids_for_tests(enabled);
+}
+
+pub fn without_generated_response_item_ids(items: &[ResponseItem]) -> Vec<ResponseItem> {
+    items
+        .iter()
+        .cloned()
+        .map(|mut item| {
+            if item.id().is_some_and(is_generated_response_item_id) {
+                item.clear_id();
+            }
+            item
+        })
+        .collect()
+}
+
+fn is_generated_response_item_id(id: &str) -> bool {
+    id.rsplit_once('_')
+        .and_then(|(_, uuid)| uuid::Uuid::parse_str(uuid).ok())
+        .is_some_and(|uuid| uuid.get_version() == Some(uuid::Version::SortRand))
 }
 
 pub fn auth_manager_from_auth(auth: CodexAuth) -> Arc<AuthManager> {
