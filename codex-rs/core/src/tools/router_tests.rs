@@ -334,6 +334,7 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
     session
         .record_conversation_items(&turn, std::slice::from_ref(&history_item))
         .await;
+    let recorded_history_item = session.clone_history().await.raw_items()[0].clone();
 
     let router = ToolRouter::from_turn_context(
         &turn,
@@ -391,7 +392,7 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
                 json!({
                     "arguments": { "message": "hello" },
                     "callId": "call-extension",
-                    "conversationHistory": [history_item],
+                    "conversationHistory": [recorded_history_item],
                     "ok": true,
                 })
             );

@@ -151,6 +151,7 @@ mod tests {
 
     use super::CoreTurnItemEmitter;
     use super::ExtensionToolAdapter;
+    use crate::test_support::without_generated_response_item_ids;
     use crate::tools::context::ToolCallSource;
     use crate::tools::context::ToolInvocation;
     use crate::tools::context::ToolPayload;
@@ -302,7 +303,11 @@ mod tests {
         let EventMsg::RawResponseItem(raw_history_item) = raw_history_event.msg else {
             panic!("expected raw response item event");
         };
-        assert_eq!(raw_history_item.item, history_item);
+        assert_eq!(
+            without_generated_response_item_ids(std::slice::from_ref(&raw_history_item.item)),
+            [history_item]
+        );
+        let recorded_history_item = raw_history_item.item;
         let invocation = ToolInvocation {
             session,
             turn,
@@ -333,7 +338,7 @@ mod tests {
         assert_eq!(captured_call.truncation_policy, truncation_policy);
         assert_eq!(
             captured_call.conversation_history.items(),
-            std::slice::from_ref(&history_item)
+            std::slice::from_ref(&recorded_history_item)
         );
         match captured_call.payload {
             ToolPayload::Function { arguments } => {

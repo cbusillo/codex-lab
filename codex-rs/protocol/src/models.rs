@@ -752,9 +752,8 @@ pub enum MessagePhase {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseItem {
     Message {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         role: String,
         content: Vec<ContentItem>,
@@ -766,18 +765,16 @@ pub enum ResponseItem {
         phase: Option<MessagePhase>,
     },
     AgentMessage {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         author: String,
         recipient: String,
         content: Vec<AgentMessageInputContent>,
     },
     Reasoning {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         summary: Vec<ReasoningItemReasoningSummary>,
         #[serde(default, skip_serializing_if = "should_serialize_reasoning_content")]
@@ -787,9 +784,8 @@ pub enum ResponseItem {
     },
     LocalShellCall {
         /// Legacy id field retained for compatibility with older payloads.
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         /// Set when using the Responses API.
         call_id: Option<String>,
@@ -797,9 +793,8 @@ pub enum ResponseItem {
         action: LocalShellAction,
     },
     FunctionCall {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -812,9 +807,8 @@ pub enum ResponseItem {
         call_id: String,
     },
     ToolSearchCall {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         call_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -830,9 +824,8 @@ pub enum ResponseItem {
     //   - an array of structured content items (`content_items`)
     // We keep this behavior centralized in `FunctionCallOutputPayload`.
     FunctionCallOutput {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         call_id: String,
         #[ts(as = "FunctionCallOutputBody")]
@@ -840,9 +833,8 @@ pub enum ResponseItem {
         output: FunctionCallOutputPayload,
     },
     CustomToolCall {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -856,9 +848,8 @@ pub enum ResponseItem {
     // `function_call_output.output` so freeform tools can return either plain
     // text or structured content items.
     CustomToolCallOutput {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         call_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -869,9 +860,8 @@ pub enum ResponseItem {
         output: FunctionCallOutputPayload,
     },
     ToolSearchOutput {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         call_id: Option<String>,
         status: String,
@@ -888,9 +878,8 @@ pub enum ResponseItem {
     //   "action": {"type":"search","query":"weather: San Francisco, CA"}
     // }
     WebSearchCall {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -921,22 +910,15 @@ pub enum ResponseItem {
     },
     #[serde(alias = "compaction_summary")]
     Compaction {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         encrypted_content: String,
     },
-    CompactionTrigger {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
-        id: Option<String>,
-    },
+    CompactionTrigger {},
     ContextCompaction {
-        #[serde(default, skip_serializing)]
-        #[ts(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -952,7 +934,7 @@ impl ResponseItem {
         matches!(self, Self::Message { role, .. } if role == "user")
     }
 
-    /// Returns the non-empty Responses API item ID, if present.
+    /// Returns the Responses API item ID, if present.
     pub fn id(&self) -> Option<&str> {
         match self {
             Self::Message { id, .. }
@@ -968,9 +950,8 @@ impl ResponseItem {
             | Self::WebSearchCall { id, .. }
             | Self::ImageGenerationCall { id, .. }
             | Self::Compaction { id, .. }
-            | Self::CompactionTrigger { id }
-            | Self::ContextCompaction { id, .. } => id.as_deref().filter(|id| !id.is_empty()),
-            Self::Other => None,
+            | Self::ContextCompaction { id, .. } => id.as_deref(),
+            Self::CompactionTrigger {} | Self::Other => None,
         }
     }
 
@@ -990,9 +971,29 @@ impl ResponseItem {
             | Self::WebSearchCall { id, .. }
             | Self::ImageGenerationCall { id, .. }
             | Self::Compaction { id, .. }
-            | Self::CompactionTrigger { id }
             | Self::ContextCompaction { id, .. } => *id = Some(new_id),
-            Self::Other => {}
+            Self::CompactionTrigger {} | Self::Other => {}
+        }
+    }
+
+    /// Clears the Responses API item ID for variants that carry one.
+    pub fn clear_id(&mut self) {
+        match self {
+            Self::Message { id, .. }
+            | Self::AgentMessage { id, .. }
+            | Self::Reasoning { id, .. }
+            | Self::LocalShellCall { id, .. }
+            | Self::FunctionCall { id, .. }
+            | Self::ToolSearchCall { id, .. }
+            | Self::FunctionCallOutput { id, .. }
+            | Self::CustomToolCall { id, .. }
+            | Self::CustomToolCallOutput { id, .. }
+            | Self::ToolSearchOutput { id, .. }
+            | Self::WebSearchCall { id, .. }
+            | Self::ImageGenerationCall { id, .. }
+            | Self::Compaction { id, .. }
+            | Self::ContextCompaction { id, .. } => *id = None,
+            Self::CompactionTrigger {} | Self::Other => {}
         }
     }
 }
@@ -1753,8 +1754,8 @@ mod tests {
     ];
 
     #[test]
-    fn response_item_ids_support_legacy_payloads_for_every_concrete_variant() -> Result<()> {
-        let legacy_payloads = [
+    fn response_item_ids_roundtrip_and_support_legacy_payloads() -> Result<()> {
+        let canonical_legacy_payloads = [
             r#"{"type":"message","role":"user","content":[]}"#,
             r#"{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[]}"#,
             r#"{"type":"reasoning","summary":[],"content":null,"encrypted_content":null}"#,
@@ -1768,22 +1769,35 @@ mod tests {
             r#"{"type":"web_search_call"}"#,
             r#"{"type":"image_generation_call","status":"completed","result":"image"}"#,
             r#"{"type":"compaction","encrypted_content":"summary"}"#,
-            r#"{"type":"compaction_trigger"}"#,
             r#"{"type":"context_compaction"}"#,
         ];
 
-        for payload in legacy_payloads {
+        for payload in canonical_legacy_payloads {
             let mut item: ResponseItem = serde_json::from_str(payload)?;
             assert_eq!(item.id(), None);
 
             item.set_id("item-1".to_string());
 
             assert_eq!(item.id(), Some("item-1"));
+            let serialized = serde_json::to_value(&item)?;
+            assert_eq!(serialized.get("id"), Some(&serde_json::json!("item-1")));
+            assert_eq!(serde_json::from_value::<ResponseItem>(serialized)?, item);
+
+            item.clear_id();
+            assert_eq!(item.id(), None);
+            assert!(serde_json::to_value(item)?.get("id").is_none());
         }
+
+        let mut item: ResponseItem = serde_json::from_str(r#"{"type":"compaction_trigger"}"#)?;
+        assert_eq!(item.id(), None);
+        item.set_id("item-1".to_string());
+        assert_eq!(item.id(), None);
+        assert!(serde_json::to_value(item)?.get("id").is_none());
 
         let mut item = ResponseItem::Other;
         item.set_id("item-1".to_string());
         assert_eq!(item.id(), None);
+        assert!(serde_json::to_value(item)?.get("id").is_none());
 
         Ok(())
     }
@@ -2654,7 +2668,7 @@ mod tests {
 
     #[test]
     fn serializes_compaction_trigger_without_payload() -> Result<()> {
-        let item = ResponseItem::CompactionTrigger { id: None };
+        let item = ResponseItem::CompactionTrigger {};
 
         assert_eq!(
             serde_json::to_value(item)?,
@@ -2671,7 +2685,7 @@ mod tests {
 
         let item: ResponseItem = serde_json::from_str(json)?;
 
-        assert_eq!(item, ResponseItem::CompactionTrigger { id: None });
+        assert_eq!(item, ResponseItem::CompactionTrigger {});
         Ok(())
     }
 
@@ -2712,7 +2726,6 @@ mod tests {
                     queries: Some(vec!["weather seattle".into(), "seattle weather now".into()]),
                 }),
                 Some("completed".into()),
-                true,
             ),
             (
                 r#"{
@@ -2728,7 +2741,6 @@ mod tests {
                     url: Some("https://example.com".into()),
                 }),
                 Some("open".into()),
-                true,
             ),
             (
                 r#"{
@@ -2746,7 +2758,6 @@ mod tests {
                     pattern: Some("installation".into()),
                 }),
                 Some("in_progress".into()),
-                true,
             ),
             (
                 r#"{
@@ -2757,12 +2768,10 @@ mod tests {
                 Some("ws_partial".into()),
                 None,
                 Some("in_progress".into()),
-                false,
             ),
         ];
 
-        for (json_literal, expected_id, expected_action, expected_status, expect_roundtrip) in cases
-        {
+        for (json_literal, expected_id, expected_action, expected_status) in cases {
             let parsed: ResponseItem = serde_json::from_str(json_literal)?;
             let expected = ResponseItem::WebSearchCall {
                 id: expected_id.clone(),
@@ -2772,10 +2781,7 @@ mod tests {
             assert_eq!(parsed, expected);
 
             let serialized = serde_json::to_value(&parsed)?;
-            let mut expected_serialized: serde_json::Value = serde_json::from_str(json_literal)?;
-            if !expect_roundtrip && let Some(obj) = expected_serialized.as_object_mut() {
-                obj.remove("id");
-            }
+            let expected_serialized: serde_json::Value = serde_json::from_str(json_literal)?;
             assert_eq!(serialized, expected_serialized);
         }
 

@@ -123,6 +123,7 @@ use codex_model_provider::create_model_provider;
 #[cfg(test)]
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::ResponseItemIdPolicy;
 use codex_model_provider_info::WireApi;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
@@ -157,6 +158,11 @@ const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
+
+fn response_item_id_is_prefixed(id: &str) -> bool {
+    id.split_once('_')
+        .is_some_and(|(prefix, suffix)| !prefix.is_empty() && !suffix.is_empty())
+}
 
 pub(crate) struct CompactConversationRequestSettings {
     pub(crate) effort: Option<ReasoningEffortConfig>,
@@ -493,7 +499,7 @@ impl ModelClient {
         let ResponsesApiRequest {
             model,
             instructions,
-            input,
+            mut input,
             tools,
             parallel_tool_calls,
             reasoning,
@@ -502,6 +508,7 @@ impl ModelClient {
             text,
             ..
         } = request;
+        self.prepare_response_items_for_request(&mut input);
         let payload = ApiCompactionInput {
             model: &model,
             input: &input,
@@ -821,6 +828,25 @@ impl ModelClient {
         Ok(request)
     }
 
+    fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
+        for item in input.iter_mut() {
+            if item
+                .id()
+                .is_some_and(|id| !response_item_id_is_prefixed(id))
+            {
+                item.clear_id();
+            }
+        }
+
+        if self.state.provider.info().response_item_id_policy() == ResponseItemIdPolicy::Retain {
+            return;
+        }
+
+        for item in input {
+            item.clear_id();
+        }
+    }
+
     /// Returns whether the Responses-over-WebSocket transport is active for this session.
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
@@ -1071,9 +1097,21 @@ impl ModelClientSession {
         }
 
         let baseline_len = baseline.len();
-        if request.input.starts_with(&baseline)
-            && (allow_empty_delta || baseline_len < request.input.len())
-        {
+        let input_starts_with_baseline = request.input.starts_with(&baseline)
+            || if request.input.len() >= baseline_len {
+                let mut baseline_without_ids = baseline.clone();
+                for item in &mut baseline_without_ids {
+                    item.clear_id();
+                }
+                let mut request_prefix_without_ids = request.input[..baseline_len].to_vec();
+                for item in &mut request_prefix_without_ids {
+                    item.clear_id();
+                }
+                request_prefix_without_ids == baseline_without_ids
+            } else {
+                false
+            };
+        if input_starts_with_baseline && (allow_empty_delta || baseline_len < request.input.len()) {
             Some(request.input[baseline_len..].to_vec())
         } else {
             trace!("incremental request failed, items didn't match");
@@ -1323,7 +1361,7 @@ impl ModelClientSession {
                 )
                 .await;
 
-            let request = self.client.build_responses_request(
+            let mut request = self.client.build_responses_request(
                 &client_setup.api_provider,
                 prompt,
                 model_info,
@@ -1331,6 +1369,8 @@ impl ModelClientSession {
                 summary,
                 service_tier.clone(),
             )?;
+            self.client
+                .prepare_response_items_for_request(&mut request.input);
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
@@ -1437,7 +1477,7 @@ impl ModelClientSession {
                     model_info.use_responses_lite,
                 )
                 .await;
-            let request = self.client.build_responses_request(
+            let mut request = self.client.build_responses_request(
                 &client_setup.api_provider,
                 prompt,
                 model_info,
@@ -1445,6 +1485,8 @@ impl ModelClientSession {
                 summary,
                 service_tier.clone(),
             )?;
+            self.client
+                .prepare_response_items_for_request(&mut request.input);
             let mut ws_payload = ResponseCreateWsRequest {
                 client_metadata: response_create_client_metadata(
                     Some(self.client.build_ws_client_metadata(

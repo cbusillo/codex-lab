@@ -411,7 +411,7 @@ async fn streaming_client_does_not_retry_auth_build_error() -> Result<()> {
 }
 
 #[tokio::test]
-async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
+async fn azure_default_store_serializes_ids_and_headers() -> Result<()> {
     let state = RecordingState::default();
     let transport = RecordingTransport::new(state.clone());
     let client = ResponsesClient::new(transport, provider("azure"), Arc::new(NoAuth));

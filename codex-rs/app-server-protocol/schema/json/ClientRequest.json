@@ -2271,6 +2271,12 @@
               },
               "type": "array"
             },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "phase": {
               "anyOf": [
                 {
@@ -2311,6 +2317,12 @@
               },
               "type": "array"
             },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "recipient": {
               "type": "string"
             },
@@ -2349,6 +2361,12 @@
                 "null"
               ]
             },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "summary": {
               "items": {
                 "$ref": "#/definitions/ReasoningItemReasoningSummary"
@@ -2382,6 +2400,13 @@
                 "null"
               ]
             },
+            "id": {
+              "description": "Legacy id field retained for compatibility with older payloads.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "$ref": "#/definitions/LocalShellStatus"
             },
@@ -2408,6 +2433,12 @@
             },
             "call_id": {
               "type": "string"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "name": {
               "type": "string"
@@ -2447,6 +2478,12 @@
             "execution": {
               "type": "string"
             },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "type": [
                 "string",
@@ -2474,6 +2511,12 @@
             "call_id": {
               "type": "string"
             },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "output": {
               "$ref": "#/definitions/FunctionCallOutputBody"
             },
@@ -2497,6 +2540,12 @@
           "properties": {
             "call_id": {
               "type": "string"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "input": {
               "type": "string"
@@ -2531,6 +2580,12 @@
           "properties": {
             "call_id": {
               "type": "string"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "name": {
               "type": [
@@ -2568,6 +2623,12 @@
             "execution": {
               "type": "string"
             },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "type": "string"
             },
@@ -2602,6 +2663,12 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
               ]
             },
             "status": {
@@ -2666,6 +2733,12 @@
             "encrypted_content": {
               "type": "string"
             },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "compaction"
@@ -2700,6 +2773,12 @@
         {
           "properties": {
             "encrypted_content": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
               "type": [
                 "string",
                 "null"

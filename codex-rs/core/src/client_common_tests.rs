@@ -2,10 +2,48 @@ use codex_api::OpenAiVerbosity;
 use codex_api::ResponsesApiRequest;
 use codex_api::TextControls;
 use codex_api::create_text_param_for_request;
+use codex_protocol::AgentPath;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::models::AgentMessageInputContent;
 use pretty_assertions::assert_eq;
 
 use super::*;
+
+#[test]
+fn encrypted_agent_message_formatting_carries_history_item_id() {
+    let communication = InterAgentCommunication::new_encrypted(
+        AgentPath::root().join("worker").expect("worker path"),
+        AgentPath::root(),
+        vec![AgentPath::root().join("reviewer").expect("reviewer path")],
+        "encrypted-payload".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let mut history_item = ResponseItem::from(communication.to_response_input_item());
+    history_item.set_id("amsg_history".to_string());
+    let prompt = Prompt {
+        input: vec![history_item.clone()],
+        ..Prompt::default()
+    };
+
+    let ResponseItem::Message { content, .. } = &history_item else {
+        panic!("encrypted mailbox history should retain its message envelope");
+    };
+    assert_eq!(
+        InterAgentCommunication::from_message_content(content),
+        Some(communication.clone())
+    );
+    assert_eq!(
+        prompt.get_formatted_input(),
+        vec![ResponseItem::AgentMessage {
+            id: Some("amsg_history".to_string()),
+            author: communication.author.to_string(),
+            recipient: communication.recipient.to_string(),
+            content: vec![AgentMessageInputContent::EncryptedContent {
+                encrypted_content: "encrypted-payload".to_string(),
+            }],
+        }]
+    );
+}
 
 #[test]
 fn serializes_text_verbosity_when_set() {

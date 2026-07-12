@@ -12,6 +12,7 @@ use crate::shell::default_user_shell;
 use crate::skills::SkillRenderSideEffects;
 use crate::skills::render::SkillMetadataBudget;
 use crate::test_support::models_manager_with_provider;
+use crate::test_support::without_generated_response_item_ids;
 use crate::tools::format_exec_output_str;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
@@ -41,6 +42,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -204,6 +206,283 @@ fn assistant_message(text: &str) -> ResponseItem {
         }],
         phase: None,
     }
+}
+
+#[test]
+fn assigns_type_specific_uuid_v7_response_item_ids_once() {
+    let cases = [
+        (r#"{"type":"message","role":"user","content":[]}"#, "msg"),
+        (
+            r#"{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[]}"#,
+            "amsg",
+        ),
+        (
+            r#"{"type":"reasoning","summary":[],"content":null,"encrypted_content":null}"#,
+            "rs",
+        ),
+        (
+            r#"{"type":"local_shell_call","call_id":null,"status":"completed","action":{"type":"exec","command":[],"timeout_ms":null,"working_directory":null,"env":null,"user":null}}"#,
+            "lsh",
+        ),
+        (
+            r#"{"type":"function_call","name":"shell","arguments":"{}","call_id":"call-1"}"#,
+            "fc",
+        ),
+        (
+            r#"{"type":"tool_search_call","call_id":null,"execution":"client","arguments":{}}"#,
+            "tsc",
+        ),
+        (
+            r#"{"type":"function_call_output","call_id":"call-1","output":"ok"}"#,
+            "fco",
+        ),
+        (
+            r#"{"type":"custom_tool_call","call_id":"call-2","name":"code","input":"work"}"#,
+            "ctc",
+        ),
+        (
+            r#"{"type":"custom_tool_call_output","call_id":"call-2","output":"ok"}"#,
+            "ctco",
+        ),
+        (
+            r#"{"type":"tool_search_output","call_id":"call-3","status":"completed","execution":"client","tools":[]}"#,
+            "tso",
+        ),
+        (r#"{"type":"web_search_call"}"#, "ws"),
+        (
+            r#"{"type":"image_generation_call","status":"completed","result":"image"}"#,
+            "ig",
+        ),
+        (
+            r#"{"type":"compaction","encrypted_content":"summary"}"#,
+            "cmp",
+        ),
+        (r#"{"type":"context_compaction"}"#, "cmp"),
+    ];
+
+    for (payload, prefix) in cases {
+        let mut item: ResponseItem = serde_json::from_str(payload).expect("response item");
+
+        response_item_identity::assign_missing_response_item_id(&mut item);
+
+        let assigned_id = item.id().expect("canonical item id").to_string();
+        let uuid_text = assigned_id
+            .strip_prefix(&format!("{prefix}_"))
+            .expect("type-specific item prefix");
+        let uuid = uuid::Uuid::parse_str(uuid_text).expect("hyphenated UUID");
+        assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
+        assert_eq!(uuid.hyphenated().to_string(), uuid_text);
+
+        response_item_identity::assign_missing_response_item_id(&mut item);
+        assert_eq!(item.id(), Some(assigned_id.as_str()));
+    }
+
+    let mut empty_id = user_message("empty id");
+    empty_id.set_id(String::new());
+    response_item_identity::assign_missing_response_item_id(&mut empty_id);
+    assert!(empty_id.id().is_some_and(|id| id.starts_with("msg_")));
+
+    let mut server_id = user_message("server id");
+    server_id.set_id("msg_server".to_string());
+    response_item_identity::assign_missing_response_item_id(&mut server_id);
+    assert_eq!(server_id.id(), Some("msg_server"));
+
+    let communication = InterAgentCommunication::new_encrypted(
+        AgentPath::root().join("worker").expect("worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "encrypted".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let mut encrypted_agent_message = ResponseItem::from(communication.to_response_input_item());
+    response_item_identity::assign_missing_response_item_id(&mut encrypted_agent_message);
+    assert!(
+        encrypted_agent_message
+            .id()
+            .is_some_and(|id| id.starts_with("amsg_"))
+    );
+
+    let mut compaction_trigger = ResponseItem::CompactionTrigger {};
+    response_item_identity::assign_missing_response_item_id(&mut compaction_trigger);
+    assert_eq!(compaction_trigger.id(), None);
+    let mut other = ResponseItem::Other;
+    response_item_identity::assign_missing_response_item_id(&mut other);
+    assert_eq!(other.id(), None);
+}
+
+#[tokio::test]
+async fn record_conversation_items_reuses_enriched_items_everywhere() {
+    let (mut session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let rollout_path = attach_thread_persistence(
+        Arc::get_mut(&mut session).expect("session should be uniquely owned"),
+    )
+    .await;
+    let direct_agent_message = ResponseItem::AgentMessage {
+        id: None,
+        author: "/root/worker".to_string(),
+        recipient: "/root".to_string(),
+        content: vec![AgentMessageInputContent::EncryptedContent {
+            encrypted_content: "encrypted".to_string(),
+        }],
+    };
+    let mut server_message = assistant_message("server response");
+    server_message.set_id("msg_server".to_string());
+
+    session
+        .record_conversation_items(&turn_context, &[direct_agent_message, server_message])
+        .await;
+
+    let history = session.clone_history().await;
+    assert_eq!(history.raw_items().len(), 2);
+    assert!(
+        history.raw_items()[0]
+            .id()
+            .is_some_and(|id| id.starts_with("amsg_"))
+    );
+    assert_eq!(history.raw_items()[1].id(), Some("msg_server"));
+
+    let mut notified_items = Vec::new();
+    while notified_items.len() < history.raw_items().len() {
+        let event = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("raw response item timeout")
+            .expect("raw response item event");
+        if let EventMsg::RawResponseItem(event) = event.msg {
+            notified_items.push(event.item);
+        }
+    }
+    assert_eq!(notified_items, history.raw_items());
+
+    session.flush_rollout().await.expect("rollout should flush");
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let persisted_items = resumed
+        .history
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::ResponseItem(item) => Some(item.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(persisted_items, history.raw_items());
+}
+
+#[tokio::test]
+async fn compacted_replacement_history_persists_live_item_identity() {
+    let (mut session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let rollout_path = attach_thread_persistence(
+        Arc::get_mut(&mut session).expect("session should be uniquely owned"),
+    )
+    .await;
+
+    session
+        .replace_compacted_history(
+            vec![user_message("replacement")],
+            /*reference_context_item*/ None,
+            CompactedItem {
+                message: "summary".to_string(),
+                replacement_history: Some(vec![assistant_message("stale replacement")]),
+            },
+        )
+        .await;
+
+    let history = session.clone_history().await;
+    assert!(
+        history.raw_items()[0]
+            .id()
+            .is_some_and(|id| id.starts_with("msg_"))
+    );
+
+    session.flush_rollout().await.expect("rollout should flush");
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let replacement_history = resumed.history.iter().find_map(|item| match item {
+        RolloutItem::Compacted(compacted) => compacted.replacement_history.as_ref(),
+        _ => None,
+    });
+    assert_eq!(
+        replacement_history.map(Vec::as_slice),
+        Some(history.raw_items())
+    );
+}
+
+#[tokio::test]
+async fn fork_assigns_only_top_level_response_item_ids_before_replay() {
+    let (mut session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let rollout_path = attach_thread_persistence(
+        Arc::get_mut(&mut session).expect("session should be uniquely owned"),
+    )
+    .await;
+    let nested_legacy_item = assistant_message("nested legacy item");
+    let top_level_item = user_message("top-level fork item");
+
+    session
+        .record_initial_history(InitialHistory::Forked(vec![
+            RolloutItem::Compacted(CompactedItem {
+                message: "legacy summary".to_string(),
+                replacement_history: Some(vec![nested_legacy_item]),
+            }),
+            RolloutItem::ResponseItem(top_level_item),
+        ]))
+        .await;
+
+    let history = session.clone_history().await;
+    assert_eq!(history.raw_items().len(), 2);
+    assert_eq!(history.raw_items()[0].id(), None);
+    let forked_item_id = history.raw_items()[1]
+        .id()
+        .expect("top-level fork item id")
+        .to_string();
+
+    session.flush_rollout().await.expect("rollout should flush");
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let persisted_nested_id = resumed.history.iter().find_map(|item| match item {
+        RolloutItem::Compacted(compacted) => compacted
+            .replacement_history
+            .as_ref()
+            .and_then(|items| items.first())
+            .map(ResponseItem::id),
+        _ => None,
+    });
+    assert_eq!(persisted_nested_id, Some(None));
+    let persisted_top_level_id = resumed.history.iter().find_map(|item| match item {
+        RolloutItem::ResponseItem(item) => item.id(),
+        _ => None,
+    });
+    assert_eq!(persisted_top_level_id, Some(forked_item_id.as_str()));
+}
+
+#[tokio::test]
+async fn resume_does_not_backfill_legacy_response_item_ids() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+
+    session
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::default(),
+            history: vec![RolloutItem::ResponseItem(user_message(
+                "legacy resumed item",
+            ))]
+            .into(),
+            rollout_path: None,
+        }))
+        .await;
+
+    let history = session.clone_history().await;
+    assert_eq!(history.raw_items().len(), 1);
+    assert_eq!(history.raw_items()[0].id(), None);
 }
 
 fn fake_chatgpt_token_data(account_id: &str) -> TokenData {
@@ -1844,7 +2123,10 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
         .await;
     expected.extend(session.build_initial_context(&turn_context).await);
     let history_after_seed = session.clone_history().await;
-    assert_eq!(expected, history_after_seed.raw_items());
+    assert_eq!(
+        expected,
+        without_generated_response_item_ids(history_after_seed.raw_items())
+    );
 
     session
         .record_context_updates_and_set_reference_context_item(&turn_context)
@@ -2426,7 +2708,10 @@ async fn record_initial_history_reconstructs_forked_transcript() {
         .await;
 
     let history = session.state.lock().await.clone_history();
-    assert_eq!(expected, history.raw_items());
+    assert_eq!(
+        expected,
+        without_generated_response_item_ids(history.raw_items())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2816,7 +3101,10 @@ async fn thread_rollback_fails_without_persisted_thread_history() {
         error_event.codex_error_info,
         Some(CodexErrorInfo::ThreadRollbackFailed)
     );
-    assert_eq!(sess.clone_history().await.raw_items(), initial_context);
+    assert_eq!(
+        without_generated_response_item_ids(sess.clone_history().await.raw_items()),
+        initial_context
+    );
 }
 
 #[tokio::test]
@@ -3195,7 +3483,10 @@ async fn thread_rollback_fails_when_turn_in_progress() {
     );
 
     let history = sess.clone_history().await;
-    assert_eq!(initial_context, history.raw_items());
+    assert_eq!(
+        initial_context,
+        without_generated_response_item_ids(history.raw_items())
+    );
 }
 
 #[tokio::test]
@@ -3216,7 +3507,10 @@ async fn thread_rollback_fails_when_num_turns_is_zero() {
     );
 
     let history = sess.clone_history().await;
-    assert_eq!(initial_context, history.raw_items());
+    assert_eq!(
+        initial_context,
+        without_generated_response_item_ids(history.raw_items())
+    );
 }
 
 #[tokio::test]
@@ -8460,7 +8754,10 @@ async fn handle_output_item_done_records_image_save_history_message() {
             image_output_path.display(),
         ),
     );
-    assert_eq!(history.raw_items(), &[image_message, item]);
+    assert_eq!(
+        without_generated_response_item_ids(history.raw_items()),
+        vec![image_message, item]
+    );
     assert_eq!(
         std::fs::read(&expected_saved_path).expect("saved file"),
         b"foo"
@@ -8609,7 +8906,10 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
         .await;
     let history = session.clone_history().await;
     let initial_context = session.build_initial_context(&turn_context).await;
-    assert_eq!(history.raw_items().to_vec(), initial_context);
+    assert_eq!(
+        without_generated_response_item_ids(history.raw_items()),
+        initial_context
+    );
 
     let current_context = session.reference_context_item().await;
     assert_eq!(
@@ -8655,7 +8955,10 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
     let history = session.clone_history().await;
     let mut expected_history = vec![compacted_summary];
     expected_history.extend(session.build_initial_context(&turn_context).await);
-    assert_eq!(history.raw_items().to_vec(), expected_history);
+    assert_eq!(
+        without_generated_response_item_ids(history.raw_items()),
+        expected_history
+    );
 }
 
 #[tokio::test]
@@ -9344,7 +9647,7 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
         phase: None,
     };
     assert!(
-        history.raw_items().iter().any(|item| item == &expected),
+        without_generated_response_item_ids(history.raw_items()).contains(&expected),
         "expected pending input to be persisted into history on turn completion"
     );
 
