@@ -13,6 +13,7 @@ mod test_support;
 
 use async_trait::async_trait;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::StateDbHandle;
 use std::collections::HashMap;
@@ -55,8 +56,13 @@ use crate::UpdateThreadMetadataParams;
 #[derive(Clone)]
 pub struct LocalThreadStore {
     pub(super) config: LocalThreadStoreConfig,
-    live_recorders: Arc<Mutex<HashMap<ThreadId, RolloutRecorder>>>,
+    live_recorders: Arc<Mutex<HashMap<ThreadId, LiveRecorderEntry>>>,
     state_db: Option<StateDbHandle>,
+}
+
+struct LiveRecorderEntry {
+    recorder: RolloutRecorder,
+    history_mode: ThreadHistoryMode,
 }
 
 /// Process-scoped configuration for local thread storage.
@@ -133,8 +139,16 @@ impl LocalThreadStore {
             .lock()
             .await
             .get(&thread_id)
-            .cloned()
+            .map(|entry| entry.recorder.clone())
             .ok_or(ThreadStoreError::ThreadNotFound { thread_id })
+    }
+
+    pub(super) async fn live_history_mode(&self, thread_id: ThreadId) -> Option<ThreadHistoryMode> {
+        self.live_recorders
+            .lock()
+            .await
+            .get(&thread_id)
+            .map(|entry| entry.history_mode)
     }
 
     pub(super) async fn ensure_live_recorder_absent(
@@ -153,13 +167,17 @@ impl LocalThreadStore {
         &self,
         thread_id: ThreadId,
         recorder: RolloutRecorder,
+        history_mode: ThreadHistoryMode,
     ) -> ThreadStoreResult<()> {
         match self.live_recorders.lock().await.entry(thread_id) {
             Entry::Occupied(entry) => Err(ThreadStoreError::InvalidRequest {
                 message: format!("thread {} already has a live local writer", entry.key()),
             }),
             Entry::Vacant(entry) => {
-                entry.insert(recorder);
+                entry.insert(LiveRecorderEntry {
+                    recorder,
+                    history_mode,
+                });
                 Ok(())
             }
         }
@@ -295,9 +313,13 @@ mod tests {
     use std::sync::Arc;
 
     use codex_protocol::ThreadId;
+    use codex_protocol::items::TurnItem;
+    use codex_protocol::items::UserMessageItem;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::RolloutItem;
+    use codex_protocol::protocol::RolloutLine;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::ThreadHistoryMode;
     use codex_protocol::protocol::ThreadMemoryMode;
@@ -306,6 +328,7 @@ mod tests {
 
     use super::*;
     use crate::LiveThread;
+    use crate::ThreadMetadataPatch;
     use crate::ThreadPersistenceMetadata;
     use crate::local::test_support::test_config;
     use crate::local::test_support::write_archived_session_file;
@@ -642,7 +665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_thread_rejects_paginated_history_mode() {
+    async fn paginated_live_appends_use_paginated_history_mode_and_ordinals() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let thread_id = ThreadId::default();
@@ -650,19 +673,41 @@ mod tests {
         params.history_mode = ThreadHistoryMode::Paginated;
         params.metadata.history_mode = ThreadHistoryMode::Paginated;
 
-        let err = store
+        store
             .create_thread(params)
             .await
-            .expect_err("paginated local thread creation should remain blocked");
+            .expect("create paginated thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    user_message_item("legacy event should not persist"),
+                    paginated_user_message_item(thread_id, "turn-1", "item-1"),
+                ],
+            })
+            .await
+            .expect("append paginated item");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("paginated rollout path");
+        let contents = tokio::fs::read_to_string(rollout_path)
+            .await
+            .expect("read paginated rollout");
+        let lines = contents
+            .lines()
+            .map(|line| serde_json::from_str::<RolloutLine>(line).expect("rollout line"))
+            .collect::<Vec<_>>();
 
+        assert_eq!(
+            lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+            vec![Some(0), Some(1)]
+        );
         assert!(matches!(
-            err,
-            ThreadStoreError::UnsupportedHistoryMode {
-                thread_id: rejected_thread_id,
-                history_mode: ThreadHistoryMode::Paginated,
-                operation: "create_thread",
-            } if rejected_thread_id == thread_id
+            &lines[1].item,
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) if event.turn_id == "turn-1"
         ));
+        assert!(!contents.contains("legacy event should not persist"));
     }
 
     #[tokio::test]
@@ -736,7 +781,7 @@ mod tests {
             .await
             .expect("shutdown initial writer");
 
-        let resumed_store = LocalThreadStore::new(config, /*state_db*/ None);
+        let resumed_store = LocalThreadStore::new(config.clone(), /*state_db*/ None);
         resumed_store
             .resume_thread(ResumeThreadParams {
                 thread_id,
@@ -842,21 +887,43 @@ mod tests {
     #[tokio::test]
     async fn resume_thread_rejects_paginated_history_mode() {
         let home = TempDir::new().expect("temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let config = test_config(home.path());
         let thread_id = ThreadId::default();
-        let mut metadata = thread_metadata();
-        metadata.history_mode = ThreadHistoryMode::Paginated;
+        let mut create_params = create_thread_params(thread_id);
+        create_params.history_mode = ThreadHistoryMode::Paginated;
+        create_params.metadata.history_mode = ThreadHistoryMode::Paginated;
+        let first_store = LocalThreadStore::new(config.clone(), /*state_db*/ None);
+        first_store
+            .create_thread(create_params)
+            .await
+            .expect("create paginated thread");
+        first_store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![paginated_user_message_item(thread_id, "turn-1", "item-1")],
+            })
+            .await
+            .expect("append paginated item");
+        let rollout_path = first_store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("paginated rollout path");
+        first_store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown paginated writer");
 
+        let store = LocalThreadStore::new(config, /*state_db*/ None);
         let err = store
             .resume_thread(ResumeThreadParams {
                 thread_id,
-                rollout_path: None,
+                rollout_path: Some(rollout_path),
                 history: None,
                 include_archived: true,
-                metadata,
+                metadata: thread_metadata(),
             })
             .await
-            .expect_err("paginated local thread resume should remain blocked");
+            .expect_err("history-less paginated resume should remain blocked");
 
         assert!(matches!(
             err,
@@ -866,6 +933,143 @@ mod tests {
                 operation: "resume_thread",
             } if rejected_thread_id == thread_id
         ));
+    }
+
+    #[tokio::test]
+    async fn resume_paginated_thread_with_history_advances_ordinal() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let thread_id = ThreadId::default();
+        let mut create_params = create_thread_params(thread_id);
+        create_params.history_mode = ThreadHistoryMode::Paginated;
+        create_params.metadata.history_mode = ThreadHistoryMode::Paginated;
+
+        let first_store = LocalThreadStore::new(config.clone(), /*state_db*/ None);
+        first_store
+            .create_thread(create_params)
+            .await
+            .expect("create paginated thread");
+        first_store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![paginated_user_message_item(thread_id, "turn-1", "item-1")],
+            })
+            .await
+            .expect("append initial paginated item");
+        let rollout_path = first_store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("paginated rollout path");
+        first_store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown initial writer");
+
+        let resumed_store = LocalThreadStore::new(config.clone(), /*state_db*/ None);
+        resumed_store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: Some(Vec::new().into()),
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume paginated writer with explicit history");
+        resumed_store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![paginated_user_message_item(thread_id, "turn-2", "item-2")],
+            })
+            .await
+            .expect("append resumed paginated item");
+        resumed_store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush resumed paginated writer");
+        resumed_store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown resumed paginated writer");
+
+        let second_resumed_store = LocalThreadStore::new(config, /*state_db*/ None);
+        second_resumed_store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: Some(Vec::new().into()),
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume paginated writer a second time");
+        second_resumed_store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![paginated_user_message_item(thread_id, "turn-3", "item-3")],
+            })
+            .await
+            .expect("append second resumed paginated item");
+        second_resumed_store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush second resumed paginated writer");
+
+        let contents = tokio::fs::read_to_string(rollout_path)
+            .await
+            .expect("read resumed rollout");
+        let lines = contents
+            .lines()
+            .map(|line| serde_json::from_str::<RolloutLine>(line).expect("rollout line"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
+        assert!(matches!(
+            &lines[3].item,
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) if event.turn_id == "turn-3"
+        ));
+    }
+
+    #[tokio::test]
+    async fn metadata_seed_uses_live_paginated_history_mode() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite_home.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime.clone()));
+        let thread_id = ThreadId::default();
+        let mut create_params = create_thread_params(thread_id);
+        create_params.history_mode = ThreadHistoryMode::Paginated;
+        create_params.metadata.history_mode = ThreadHistoryMode::Paginated;
+        store
+            .create_thread(create_params)
+            .await
+            .expect("create deferred paginated thread");
+
+        store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch: ThreadMetadataPatch {
+                    preview: Some("paginated preview".to_string()),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await
+            .expect("seed paginated metadata");
+
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(metadata.history_mode, ThreadHistoryMode::Paginated);
     }
 
     #[tokio::test]
@@ -1102,6 +1306,23 @@ mod tests {
             local_images: Vec::new(),
             text_elements: Vec::new(),
             ..Default::default()
+        }))
+    }
+
+    fn paginated_user_message_item(
+        thread_id: ThreadId,
+        turn_id: &str,
+        item_id: &str,
+    ) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id,
+            turn_id: turn_id.to_string(),
+            item: TurnItem::UserMessage(UserMessageItem {
+                id: item_id.to_string(),
+                client_id: None,
+                content: Vec::new(),
+            }),
+            completed_at_ms: 1,
         }))
     }
 

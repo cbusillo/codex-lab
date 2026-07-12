@@ -108,6 +108,15 @@ pub struct ResumeThreadParams {
     pub metadata: ThreadPersistenceMetadata,
 }
 
+pub(crate) fn canonical_history_mode_from_rollout_items(
+    items: &[RolloutItem],
+) -> Option<ThreadHistoryMode> {
+    items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.history_mode),
+        _ => None,
+    })
+}
+
 /// Parameters for appending rollout items to a live thread.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppendThreadItemsParams {
@@ -735,6 +744,24 @@ mod tests {
             serde_json::from_value(json!({})).expect("deserialize legacy patch");
 
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn canonical_history_mode_uses_first_session_meta() {
+        fn session_meta(history_mode: ThreadHistoryMode) -> RolloutItem {
+            let mut meta = codex_protocol::protocol::SessionMeta::default();
+            meta.history_mode = history_mode;
+            RolloutItem::SessionMeta(codex_protocol::protocol::SessionMetaLine { meta, git: None })
+        }
+
+        assert_eq!(
+            canonical_history_mode_from_rollout_items(&[
+                session_meta(ThreadHistoryMode::Legacy),
+                session_meta(ThreadHistoryMode::Paginated),
+            ]),
+            Some(ThreadHistoryMode::Legacy)
+        );
+        assert_eq!(canonical_history_mode_from_rollout_items(&[]), None);
     }
 
     #[test]

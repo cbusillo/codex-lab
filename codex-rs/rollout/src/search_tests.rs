@@ -16,6 +16,7 @@ fn completed_user_message_produces_search_snippet() {
     let thread_id = ThreadId::default();
     let line = RolloutLine {
         timestamp: "2026-07-12T00:00:00Z".to_string(),
+        ordinal: None,
         item: RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
             thread_id,
             turn_id: "turn-1".to_string(),

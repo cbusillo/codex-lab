@@ -16,6 +16,7 @@ use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SessionProvenance;
 use codex_app_server_protocol::SessionProvenanceParams;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -373,6 +374,35 @@ async fn thread_start_rejects_unknown_environment_as_invalid_request() -> Result
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
     assert_eq!(error.error.message, "unknown turn environment id `missing`");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_rejects_paginated_history_mode() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            history_mode: Some(ThreadHistoryMode::Paginated),
+            ..Default::default()
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.id, RequestId::Integer(request_id));
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert_eq!(
+        error.error.message,
+        "thread/start.historyMode=paginated is not supported by this binary yet"
+    );
     Ok(())
 }
 
