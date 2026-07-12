@@ -514,29 +514,6 @@ pub(crate) async fn handle_output_item_done(
     Ok(output)
 }
 
-fn response_item_id(item: &ResponseItem) -> Option<&str> {
-    let id = match item {
-        ResponseItem::Message { id, .. }
-        | ResponseItem::LocalShellCall { id, .. }
-        | ResponseItem::FunctionCall { id, .. }
-        | ResponseItem::ToolSearchCall { id, .. }
-        | ResponseItem::CustomToolCall { id, .. }
-        | ResponseItem::WebSearchCall { id, .. } => id.as_deref(),
-        ResponseItem::Reasoning { id, .. } | ResponseItem::ImageGenerationCall { id, .. } => {
-            Some(id.as_str())
-        }
-        ResponseItem::AgentMessage { .. }
-        | ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::ToolSearchOutput { .. }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::CompactionTrigger
-        | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::Other => None,
-    };
-    id.filter(|id| !id.is_empty())
-}
-
 fn log_response_item(item: &ResponseItem) {
     let item_type = match item {
         ResponseItem::Message { .. } => "message",
@@ -552,11 +529,11 @@ fn log_response_item(item: &ResponseItem) {
         ResponseItem::WebSearchCall { .. } => "web_search_call",
         ResponseItem::ImageGenerationCall { .. } => "image_generation_call",
         ResponseItem::Compaction { .. } => "compaction",
-        ResponseItem::CompactionTrigger => "compaction_trigger",
+        ResponseItem::CompactionTrigger { .. } => "compaction_trigger",
         ResponseItem::ContextCompaction { .. } => "context_compaction",
         ResponseItem::Other => "other",
     };
-    debug!(item_type, item_id = response_item_id(item), "Output item");
+    debug!(item_type, item_id = item.id(), "Output item");
 }
 
 pub(crate) async fn handle_non_tool_response_item(
@@ -667,6 +644,7 @@ pub(crate) fn response_input_to_response_item(input: &ResponseInputItem) -> Opti
     match input {
         ResponseInputItem::FunctionCallOutput { call_id, output } => {
             Some(ResponseItem::FunctionCallOutput {
+                id: None,
                 call_id: call_id.clone(),
                 output: output.clone(),
             })
@@ -676,6 +654,7 @@ pub(crate) fn response_input_to_response_item(input: &ResponseInputItem) -> Opti
             name,
             output,
         } => Some(ResponseItem::CustomToolCallOutput {
+            id: None,
             call_id: call_id.clone(),
             name: name.clone(),
             output: output.clone(),
@@ -683,6 +662,7 @@ pub(crate) fn response_input_to_response_item(input: &ResponseInputItem) -> Opti
         ResponseInputItem::McpToolCallOutput { call_id, output } => {
             let output = output.as_function_call_output_payload();
             Some(ResponseItem::FunctionCallOutput {
+                id: None,
                 call_id: call_id.clone(),
                 output,
             })
@@ -693,6 +673,7 @@ pub(crate) fn response_input_to_response_item(input: &ResponseInputItem) -> Opti
             execution,
             tools,
         } => Some(ResponseItem::ToolSearchOutput {
+            id: None,
             call_id: Some(call_id.clone()),
             status: status.clone(),
             execution: execution.clone(),

@@ -362,7 +362,7 @@ fn parses_agent_message() {
 #[test]
 fn parses_reasoning_summary_and_raw_content() {
     let item = ResponseItem::Reasoning {
-        id: "reasoning_1".to_string(),
+        id: Some("reasoning_1".to_string()),
         summary: vec![
             ReasoningItemReasoningSummary::SummaryText {
                 text: "Step 1".to_string(),
@@ -394,7 +394,7 @@ fn parses_reasoning_summary_and_raw_content() {
 #[test]
 fn parses_reasoning_including_raw_content() {
     let item = ResponseItem::Reasoning {
-        id: "reasoning_2".to_string(),
+        id: Some("reasoning_2".to_string()),
         summary: vec![ReasoningItemReasoningSummary::SummaryText {
             text: "Summarized step".to_string(),
         }],
@@ -421,6 +421,41 @@ fn parses_reasoning_including_raw_content() {
         }
         other => panic!("expected TurnItem::Reasoning, got {other:?}"),
     }
+}
+
+#[test]
+fn parses_image_generation_call_with_id() {
+    let item = ResponseItem::ImageGenerationCall {
+        id: Some("ig_1".to_string()),
+        status: "completed".to_string(),
+        revised_prompt: Some("A blue square".to_string()),
+        result: "image-data".to_string(),
+    };
+
+    let turn_item = parse_turn_item(&item).expect("expected image generation turn item");
+
+    match turn_item {
+        TurnItem::ImageGeneration(image) => {
+            assert_eq!(image.id, "ig_1");
+            assert_eq!(image.status, "completed");
+            assert_eq!(image.revised_prompt.as_deref(), Some("A blue square"));
+            assert_eq!(image.result, "image-data");
+            assert_eq!(image.saved_path, None);
+        }
+        other => panic!("expected TurnItem::ImageGeneration, got {other:?}"),
+    }
+}
+
+#[test]
+fn image_generation_call_without_id_is_not_a_turn_item() {
+    let item = ResponseItem::ImageGenerationCall {
+        id: None,
+        status: "completed".to_string(),
+        revised_prompt: None,
+        result: "image-data".to_string(),
+    };
+
+    assert!(parse_turn_item(&item).is_none());
 }
 
 #[test]

@@ -752,6 +752,7 @@ impl InterAgentCommunication {
     pub fn to_model_input_item(&self) -> ResponseItem {
         match &self.encrypted_content {
             Some(encrypted_content) => ResponseItem::AgentMessage {
+                id: None,
                 author: self.author.to_string(),
                 recipient: self.recipient.to_string(),
                 content: vec![AgentMessageInputContent::EncryptedContent {
