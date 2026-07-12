@@ -96,6 +96,33 @@ fn awareness_treats_current_turn_diff_as_current_uncommitted_target() {
 }
 
 #[test]
+fn awareness_omits_clean_current_turn_diff_from_uncommitted_target() {
+    let run = AutoReviewRun {
+        review_target: ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:committed-turn".to_string(),
+        },
+        ..sample_run(
+            "run_committed",
+            AutoReviewRunStatus::Completed,
+            vec![sample_finding(
+                "f1",
+                "Committed finding",
+                "must not be injected",
+            )],
+        )
+    };
+
+    let awareness = render_awareness(
+        &[run],
+        &sample_target("main", "head-2", "/repo"),
+        &ReviewTarget::UncommittedChanges,
+        &BackgroundAutoReviewActiveSnapshot::default(),
+    );
+
+    assert!(awareness.is_none());
+}
+
+#[test]
 fn awareness_reports_stale_status_without_stale_findings() {
     let stale_run = AutoReviewRun {
         target: sample_target("main", "head-1", "/repo"),

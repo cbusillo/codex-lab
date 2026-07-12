@@ -1,3 +1,4 @@
+use codex_auto_review::AutoReviewFreshness;
 use codex_auto_review::AutoReviewRunFreshness;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
@@ -39,6 +40,7 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::ev_shell_command_call;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
@@ -935,6 +937,173 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         !review_request.body_contains_text("pre_existing_dirty.txt"),
         "background review request should not include pre-existing dirty work"
     );
+    harness.server().verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_runs_after_same_turn_commit() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::new().await?;
+    init_git_repo(harness.cwd());
+    let initial_head = current_git_head(harness.cwd()).expect("initial git head");
+    let codex_home = harness.test().codex_home_path().to_path_buf();
+    let path = "auto_background_review_committed.txt";
+    let contents = "review committed turn\n";
+    let patch =
+        format!("*** Begin Patch\n*** Add File: {path}\n+review committed turn\n*** End Patch");
+    let review_json = serde_json::json!({
+        "findings": [
+            {
+                "title": "Committed turn finding stays out of later context",
+                "body": "This finding must remain durable without being injected into a later normal turn.",
+                "confidence_score": 0.9,
+                "priority": 1,
+                "code_location": {
+                    "absolute_file_path": harness.cwd().join(path),
+                    "line_range": {"start": 1, "end": 1}
+                }
+            }
+        ],
+        "overall_correctness": "patch is incorrect",
+        "overall_explanation": "Committed turn diff was reviewed.",
+        "overall_confidence_score": 0.9
+    })
+    .to_string();
+    let request_log = mount_sse_sequence(
+        harness.server(),
+        vec![
+            sse(vec![
+                ev_response_created("resp-commit-1"),
+                ev_apply_patch_custom_tool_call("auto-bg-commit-patch", &patch),
+                ev_completed("resp-commit-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-commit-2"),
+                ev_shell_command_call(
+                    "auto-bg-commit-shell",
+                    &format!("git add {path} && git commit -m 'commit reviewed turn'"),
+                ),
+                ev_completed("resp-commit-2"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-commit", "patch committed"),
+                ev_completed("resp-commit-3"),
+            ]),
+            responses::sse(vec![
+                ev_assistant_message("msg-commit-review", &review_json),
+                ev_completed_with_tokens("resp-commit-review", 12_345),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-after-commit-review", "continued"),
+                ev_completed("resp-after-commit-review"),
+            ]),
+        ],
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn("create and commit a file to review")
+        .await?;
+
+    let pending_status = wait_for_background_auto_review_status(
+        harness.test().codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+    let running_status = wait_for_background_auto_review_status(
+        harness.test().codex.as_ref(),
+        BackgroundAutoReviewStatus::Running,
+        Some(pending_status.run_id.as_str()),
+    )
+    .await;
+    let completed_status = wait_for_background_auto_review_status(
+        harness.test().codex.as_ref(),
+        BackgroundAutoReviewStatus::Completed,
+        Some(running_status.run_id.as_str()),
+    )
+    .await;
+    let run = load_single_auto_review_run(&codex_home)?;
+    let committed_head = current_git_head(harness.cwd()).expect("committed git head");
+    let turn_diff = added_file_turn_diff(path, contents);
+    let turn_diff_fingerprint = diff_fingerprint(&turn_diff).expect("turn diff fingerprint");
+
+    assert_ne!(committed_head, initial_head);
+    assert_eq!(get_worktree_diff_fingerprint(harness.cwd()).await, None);
+    assert_eq!(run.run_id, completed_status.run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Completed);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert_eq!(
+        run.review_target,
+        ReviewTarget::CurrentTurnDiff {
+            fingerprint: turn_diff_fingerprint,
+        }
+    );
+    assert_eq!(
+        run.target.head_sha.as_deref(),
+        Some(committed_head.as_str())
+    );
+    assert_eq!(
+        run.target.snapshot_commit.as_deref(),
+        Some(committed_head.as_str())
+    );
+    assert_eq!(
+        run.target.head_at_launch.as_deref(),
+        Some(committed_head.as_str())
+    );
+    assert_eq!(run.target.worktree_diff_fingerprint, None);
+
+    let active_target = codex_auto_review::AutoReviewRunTarget {
+        branch: Some("main".to_string()),
+        head_sha: Some(committed_head.clone()),
+        base_sha: None,
+        worktree_path: Some(harness.cwd().to_path_buf()),
+        snapshot_epoch: run.target.snapshot_epoch,
+        snapshot_commit: Some(committed_head.clone()),
+        head_at_launch: Some(committed_head),
+        worktree_diff_fingerprint: None,
+    };
+    assert_eq!(
+        run.target.freshness(&active_target),
+        AutoReviewFreshness::Current
+    );
+    assert!(run.target_matches(&active_target, &ReviewTarget::UncommittedChanges));
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "expected patch, commit, foreground completion, and background review requests"
+    );
+    let review_request = &requests[3];
+    assert_eq!(
+        review_request.header("x-openai-subagent").as_deref(),
+        Some("review")
+    );
+    assert!(review_request.body_contains_text("Review only the following unified diff"));
+    assert!(review_request.body_contains_text(path));
+
+    harness
+        .test()
+        .submit_turn("continue after the committed review")
+        .await?;
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        5,
+        "expected the follow-up normal turn after the background review"
+    );
+    let follow_up_request = &requests[4];
+    assert!(!follow_up_request.body_contains_text("<auto_review_awareness>"));
+    assert!(
+        !follow_up_request.body_contains_text("Committed turn finding stays out of later context")
+    );
+    assert!(!follow_up_request.body_contains_text(
+        "This finding must remain durable without being injected into a later normal turn."
+    ));
     harness.server().verify().await;
     Ok(())
 }
@@ -2348,6 +2517,147 @@ async fn automatic_background_review_reuses_completed_durable_duplicate() -> any
         completed.target.worktree_diff_fingerprint.as_deref(),
         Some(fingerprint.as_str())
     );
+
+    let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_reuses_completed_clean_turn_diff_duplicate()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let path = "auto_background_review_clean_duplicate.txt";
+    let contents = "reuse clean committed review\n";
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {path}\n+reuse clean committed review\n*** End Patch"
+    );
+    let foreground_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-clean-duplicate-1"),
+            ev_apply_patch_custom_tool_call("auto-bg-clean-duplicate-patch", &patch),
+            ev_completed("resp-clean-duplicate-1"),
+        ]),
+    }];
+    let commit_tool = vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            ev_response_created("resp-clean-duplicate-2"),
+            ev_shell_command_call(
+                "auto-bg-clean-duplicate-shell",
+                &format!("git add {path} && git commit -m 'commit duplicate turn'"),
+            ),
+            ev_completed("resp-clean-duplicate-2"),
+        ]),
+    }];
+    let (gate_foreground_completed_tx, gate_foreground_completed_rx) = oneshot::channel();
+    let foreground_complete = vec![StreamingSseChunk {
+        gate: Some(gate_foreground_completed_rx),
+        body: responses::sse(vec![
+            ev_assistant_message("msg-clean-duplicate", "patch committed"),
+            ev_completed("resp-clean-duplicate-3"),
+        ]),
+    }];
+    let (server, _completions) =
+        start_streaming_sse_server(vec![foreground_tool, commit_tool, foreground_complete]).await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+    let initial_head = current_git_head(test.cwd_path()).expect("initial git head");
+
+    let turn = test.submit_turn("create and commit an already reviewed diff");
+    tokio::pin!(turn);
+    tokio::select! {
+        result = &mut turn => panic!("turn completed before duplicate was seeded: {result:?}"),
+        _ = server.wait_for_request_count(3) => {}
+    }
+
+    let committed_head = current_git_head(test.cwd_path()).expect("committed git head");
+    assert_ne!(committed_head, initial_head);
+    assert_eq!(get_worktree_diff_fingerprint(test.cwd_path()).await, None);
+    let turn_diff = added_file_turn_diff(path, contents);
+    let turn_diff_fingerprint = diff_fingerprint(&turn_diff).expect("turn diff fingerprint");
+    let output = ReviewOutputEvent {
+        findings: vec![ReviewFinding {
+            title: "Existing clean durable finding".to_string(),
+            body: "existing clean durable finding body".to_string(),
+            confidence_score: 0.9,
+            priority: 1,
+            code_location: ReviewCodeLocation {
+                absolute_file_path: test.cwd_path().join(path),
+                line_range: ReviewLineRange { start: 1, end: 1 },
+            },
+        }],
+        overall_correctness: "patch is incorrect".to_string(),
+        overall_explanation: "summary".to_string(),
+        overall_confidence_score: 0.8,
+    };
+    let mut existing = compact_auto_review_run(
+        "existing_clean_turn_diff_review",
+        AutoReviewRunStatus::Completed,
+        codex_auto_review::AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: Some(committed_head.clone()),
+            base_sha: None,
+            worktree_path: Some(test.cwd_path().to_path_buf()),
+            snapshot_epoch: None,
+            snapshot_commit: Some(committed_head.clone()),
+            head_at_launch: Some(committed_head),
+            worktree_diff_fingerprint: None,
+        },
+        &output,
+    );
+    existing.review_target = ReviewTarget::CurrentTurnDiff {
+        fingerprint: turn_diff_fingerprint,
+    };
+    let store = AutoReviewStore::for_scope(codex_home.path(), test.cwd_path());
+    store.save_run(&existing)?;
+    store.save_output(&existing.run_id, &output)?;
+
+    let _ = gate_foreground_completed_tx.send(());
+    turn.await?;
+
+    let skipped_status = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Skipped,
+        None,
+    )
+    .await;
+    assert_eq!(
+        skipped_status.error_summary.as_deref(),
+        Some("equivalent background auto review already exists: existing_clean_turn_diff_review")
+    );
+    server
+        .assert_request_count_stays(3, Duration::from_millis(2500))
+        .await;
+
+    let runs = load_auto_review_runs(codex_home.path())?;
+    assert_eq!(runs.len(), 2);
+    let skipped = runs
+        .iter()
+        .find(|run| run.run_id == skipped_status.run_id)
+        .expect("expected clean duplicate candidate run");
+    assert_eq!(skipped.status, AutoReviewRunStatus::Skipped);
+    assert_eq!(
+        skipped.superseded_by.as_deref(),
+        Some("existing_clean_turn_diff_review")
+    );
+    assert_eq!(
+        skipped.cancel_reason.as_deref(),
+        Some("duplicate_auto_review_scope")
+    );
+    let completed = runs
+        .iter()
+        .find(|run| run.run_id == "existing_clean_turn_diff_review")
+        .expect("expected completed clean duplicate to remain visible");
+    assert_eq!(completed.status, AutoReviewRunStatus::Completed);
+    assert_eq!(completed.target.worktree_diff_fingerprint, None);
+    assert_eq!(completed.review_target, existing.review_target);
 
     let _codex_home_guard = codex_home;
     server.shutdown().await;

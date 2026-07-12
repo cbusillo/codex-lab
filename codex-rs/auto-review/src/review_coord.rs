@@ -169,6 +169,11 @@ impl ReviewCoordination {
     }
 
     pub fn clear_stale_lock_if_dead(&self) -> Result<bool> {
+        if !self.root.try_exists().with_context(|| {
+            format!("failed to inspect review state dir {}", self.root.display())
+        })? {
+            return Ok(false);
+        }
         let lock_path = self.lock_path();
         let _cleanup_guard = try_acquire_cleanup_lock(&lock_path)?;
         let text = match fs::read_to_string(&lock_path) {

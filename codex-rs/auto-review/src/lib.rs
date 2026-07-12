@@ -448,7 +448,7 @@ impl AutoReviewStore {
         let mut changed = 0;
         for run in self.load_index_for_write()?.runs {
             if run.run_id == superseded_by
-                || run.target.worktree_diff_fingerprint.as_deref() != Some(fingerprint)
+                || auto_review_run_diff_fingerprint(&run) != Some(fingerprint)
                 || !duplicate_target_matches_branch_head(&run, active_branch, active_head)
                 || active_review_target
                     .is_some_and(|active_review_target| run.review_target != *active_review_target)
@@ -513,7 +513,7 @@ impl AutoReviewStore {
             .load_index_for_read()?
             .runs
             .into_iter()
-            .filter(|run| run.target.worktree_diff_fingerprint.as_deref() == Some(fingerprint))
+            .filter(|run| auto_review_run_diff_fingerprint(run) == Some(fingerprint))
             .filter(|run| {
                 !matches!(
                     run.status,
@@ -1321,6 +1321,17 @@ fn duplicate_target_matches_branch_head(
         return false;
     }
     run.target.head_sha.as_deref() == active_head.and_then(non_empty_str)
+}
+
+fn auto_review_run_diff_fingerprint(run: &AutoReviewRun) -> Option<&str> {
+    run.target
+        .worktree_diff_fingerprint
+        .as_deref()
+        .and_then(non_empty_str)
+        .or_else(|| match &run.review_target {
+            ReviewTarget::CurrentTurnDiff { fingerprint } => non_empty_str(fingerprint),
+            _ => None,
+        })
 }
 
 fn duplicate_target_is_reusable(

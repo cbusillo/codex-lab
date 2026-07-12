@@ -77,6 +77,21 @@ fn coordination_files_share_scoped_review_root_with_auto_review_store() {
 }
 
 #[test]
+fn clear_stale_lock_if_dead_is_noop_for_fresh_scope() {
+    let home = TempDir::new().expect("temp home");
+    let repo = TempDir::new().expect("temp repo");
+    let coordination = ReviewCoordination::for_scope(home.path(), repo.path());
+
+    assert!(!coordination.root().exists());
+    assert!(
+        !coordination
+            .clear_stale_lock_if_dead()
+            .expect("fresh scope should have no stale lock")
+    );
+    assert!(!coordination.root().exists());
+}
+
+#[test]
 fn coordination_only_does_not_make_has_store_files_true() {
     let home = TempDir::new().expect("temp home");
     let repo = TempDir::new().expect("temp repo");

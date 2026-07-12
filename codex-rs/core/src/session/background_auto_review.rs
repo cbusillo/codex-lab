@@ -81,38 +81,37 @@ impl Session {
         let Some(start) = start else {
             return;
         };
-        let Some(after_fingerprint) = background_review_fingerprint(turn_context.as_ref()).await
-        else {
-            let mut state = self.state.lock().await;
-            let _ = state
-                .background_auto_review
-                .complete_regular_turn_from_start(start, None);
-            debug!(turn_id = %turn_context.sub_id, "background auto review skipped: clean or unsupported worktree");
-            return;
-        };
-        let schedule = {
-            let mut state = self.state.lock().await;
-            state
-                .background_auto_review
-                .complete_regular_turn_from_start(start, Some(after_fingerprint))
-        };
-        let Some(schedule) = schedule else {
-            debug!(turn_id = %turn_context.sub_id, "background auto review skipped: unchanged or duplicate fingerprint");
-            return;
-        };
         let Some(cwd) = turn_context
             .environments
             .single_local_environment_cwd()
             .cloned()
         else {
+            let mut state = self.state.lock().await;
+            let _ = state
+                .background_auto_review
+                .complete_regular_turn_from_start(start, None);
             debug!("background auto review skipped: no single local worktree");
             return;
         };
-        let Some(turn_diff) = turn_diff.and_then(non_empty_turn_diff) else {
+        let turn_diff = turn_diff.and_then(non_empty_turn_diff);
+        let turn_diff_fingerprint = turn_diff.as_deref().and_then(diff_fingerprint);
+        let after_fingerprint = background_review_fingerprint_for_cwd(&cwd).await;
+        let schedule_fingerprint = after_fingerprint.or_else(|| turn_diff_fingerprint.clone());
+        let schedule = {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .complete_regular_turn_from_start(start, schedule_fingerprint)
+        };
+        let Some(schedule) = schedule else {
+            debug!(turn_id = %turn_context.sub_id, "background auto review skipped: clean, unchanged, or duplicate fingerprint");
+            return;
+        };
+        let Some(turn_diff) = turn_diff else {
             debug!("background auto review skipped: current-turn diff unavailable");
             return;
         };
-        let Some(turn_diff_fingerprint) = diff_fingerprint(&turn_diff) else {
+        let Some(turn_diff_fingerprint) = turn_diff_fingerprint else {
             debug!("background auto review skipped: current-turn diff unavailable");
             return;
         };
@@ -572,7 +571,7 @@ impl Session {
         &self,
         persistence: &ReviewPersistenceContext,
     ) -> Option<AutoReviewDuplicateMatch> {
-        let fingerprint = persistence.worktree_diff_fingerprint()?;
+        let fingerprint = persistence.dedupe_diff_fingerprint()?;
         let codex_home = self.codex_home().await;
         let store = AutoReviewStore::for_scope(codex_home, persistence.store_scope());
         let active_run_ids = {
@@ -609,7 +608,7 @@ impl Session {
         &self,
         persistence: &ReviewPersistenceContext,
     ) {
-        let Some(fingerprint) = persistence.worktree_diff_fingerprint() else {
+        let Some(fingerprint) = persistence.dedupe_diff_fingerprint() else {
             return;
         };
         let codex_home = self.codex_home().await;

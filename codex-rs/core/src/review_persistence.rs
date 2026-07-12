@@ -109,6 +109,14 @@ impl ReviewPersistenceContext {
         self.target.worktree_diff_fingerprint.as_deref()
     }
 
+    pub(crate) fn dedupe_diff_fingerprint(&self) -> Option<&str> {
+        self.worktree_diff_fingerprint()
+            .or_else(|| match &self.review_target {
+                ReviewTarget::CurrentTurnDiff { fingerprint } => Some(fingerprint.as_str()),
+                _ => None,
+            })
+    }
+
     pub(crate) fn review_target(&self) -> &ReviewTarget {
         &self.review_target
     }
