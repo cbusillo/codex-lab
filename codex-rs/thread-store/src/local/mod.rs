@@ -16,6 +16,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::StateDbHandle;
+use codex_state::ThreadHistoryRepository;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
@@ -58,6 +59,8 @@ pub struct LocalThreadStore {
     pub(super) config: LocalThreadStoreConfig,
     live_recorders: Arc<Mutex<HashMap<ThreadId, LiveRecorderEntry>>>,
     state_db: Option<StateDbHandle>,
+    #[allow(dead_code)]
+    history_db: Arc<ThreadHistoryRepository>,
 }
 
 struct LiveRecorderEntry {
@@ -98,10 +101,12 @@ impl std::fmt::Debug for LocalThreadStore {
 impl LocalThreadStore {
     /// Create a local store using an already initialized state DB handle.
     pub fn new(config: LocalThreadStoreConfig, state_db: Option<StateDbHandle>) -> Self {
+        let history_db = Arc::new(ThreadHistoryRepository::new(config.sqlite_home.clone()));
         Self {
             config,
             live_recorders: Arc::new(Mutex::new(HashMap::new())),
             state_db,
+            history_db,
         }
     }
 
@@ -333,6 +338,18 @@ mod tests {
     use crate::local::test_support::test_config;
     use crate::local::test_support::write_archived_session_file;
     use crate::local::test_support::write_session_file;
+
+    #[test]
+    fn local_store_owns_one_lazy_history_repository_across_clones() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let history_path = codex_state::thread_history_db_path(config.sqlite_home.as_path());
+        let store = LocalThreadStore::new(config, /*state_db*/ None);
+        let cloned = store.clone();
+
+        assert!(!history_path.exists());
+        assert!(Arc::ptr_eq(&store.history_db, &cloned.history_db));
+    }
 
     #[tokio::test]
     async fn live_writer_lifecycle_writes_and_closes() {

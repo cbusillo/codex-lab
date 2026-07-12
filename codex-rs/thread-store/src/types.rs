@@ -356,11 +356,21 @@ pub struct ListItemsParams {
     pub sort_direction: SortDirection,
 }
 
+/// A projected app-server `ThreadItem` snapshot within a turn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredThreadItem {
+    pub turn_id: Option<String>,
+    pub item_key: String,
+    pub item_ordinal: u64,
+    pub item_created_at_ms: i64,
+    pub materialized_thread_item_json: Vec<u8>,
+}
+
 /// A page of persisted items within a thread, optionally filtered to a turn.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ItemPage {
     /// Items returned for this page.
-    pub items: Vec<RolloutItem>,
+    pub items: Vec<StoredThreadItem>,
     /// Opaque cursor to continue listing.
     pub next_cursor: Option<String>,
     /// Opaque cursor for fetching in the opposite direction.
@@ -678,6 +688,39 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn item_page_round_trips_projected_item_contract() {
+        let value = json!({
+            "items": [
+                {
+                    "turn_id": null,
+                    "item_key": "item-unbound",
+                    "item_ordinal": 42,
+                    "item_created_at_ms": 1_234,
+                    "materialized_thread_item_json": [123, 125]
+                },
+                {
+                    "turn_id": "turn-1",
+                    "item_key": "item-bound",
+                    "item_ordinal": u64::MAX,
+                    "item_created_at_ms": -1,
+                    "materialized_thread_item_json": [91, 93]
+                }
+            ],
+            "next_cursor": "next",
+            "backwards_cursor": "previous"
+        });
+
+        let page: ItemPage = serde_json::from_value(value.clone()).expect("deserialize item page");
+        assert_eq!(page.items[0].turn_id, None);
+        assert_eq!(page.items[1].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(page.items[1].item_ordinal, u64::MAX);
+        assert_eq!(
+            serde_json::to_value(page).expect("serialize item page"),
+            value
+        );
+    }
 
     #[test]
     fn thread_metadata_patch_round_trips_optional_clears() {
