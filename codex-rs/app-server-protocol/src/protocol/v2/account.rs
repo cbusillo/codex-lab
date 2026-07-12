@@ -407,7 +407,8 @@ pub struct GetAccountResponse {
 pub struct AccountUpdatedNotification {
     pub auth_mode: Option<AuthMode>,
     pub plan_type: Option<PlanType>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub account: Option<Account>,
 }
 

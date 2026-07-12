@@ -4,4 +4,8 @@
 import type { AbsolutePathBuf } from "../AbsolutePathBuf";
 import type { ProjectValidationStatus } from "./ProjectValidationStatus";
 
+/**
+ * One completed project-validation command execution. An actionable first execution may be
+ * followed by one bounded correction cycle and a second completion notification.
+ */
 export type ProjectValidationCompletedNotification = { threadId: string, turnId: string, command: Array<string>, cwd?: AbsolutePathBuf, status: ProjectValidationStatus, exitCode?: number, output: string, outputTruncated: boolean, durationMs: bigint, };

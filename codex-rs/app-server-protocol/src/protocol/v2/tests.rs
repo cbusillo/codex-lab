@@ -99,6 +99,29 @@ fn approvals_reviewer_serializes_auto_review_and_accepts_legacy_guardian_subagen
 }
 
 #[test]
+fn account_updated_notification_omits_absent_account_and_accepts_legacy_shape() {
+    let notification = AccountUpdatedNotification {
+        auth_mode: None,
+        plan_type: None,
+        account: None,
+    };
+    let legacy_shape = json!({
+        "authMode": null,
+        "planType": null,
+    });
+
+    assert_eq!(
+        serde_json::to_value(&notification).expect("serialize account update"),
+        legacy_shape
+    );
+    assert_eq!(
+        serde_json::from_value::<AccountUpdatedNotification>(legacy_shape)
+            .expect("deserialize legacy account update"),
+        notification
+    );
+}
+
+#[test]
 fn turn_defaults_legacy_missing_items_view_to_full() {
     let turn: Turn = serde_json::from_value(json!({
         "id": "turn_123",
