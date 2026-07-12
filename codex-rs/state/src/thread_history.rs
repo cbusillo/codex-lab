@@ -8,13 +8,11 @@ use sqlx::Row;
 use sqlx::Sqlite;
 use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
-use sqlx::sqlite::SqliteAutoVacuum;
-use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::OnceCell;
 
 use crate::THREAD_HISTORY_DB_FILENAME;
 use crate::migrations::runtime_thread_history_migrator;
-use crate::runtime::base_sqlite_options;
+use crate::runtime::open_thread_history_sqlite;
 
 #[allow(dead_code)]
 const MAX_KEYSET_PAGE_SIZE: usize = 1_000;
@@ -221,6 +219,45 @@ impl ThreadHistoryRepository {
 
         let pool = self.pool().await?;
         let mut transaction = pool.begin().await?;
+        let existing_checkpoint = sqlx::query(
+            r#"
+SELECT next_rollout_byte_offset,
+       next_rollout_ordinal,
+       rollout_source_id,
+       rollout_fingerprint
+FROM thread_history_projection_state
+WHERE thread_id = ?
+            "#,
+        )
+        .bind(thread_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(existing_checkpoint) = existing_checkpoint {
+            let existing_byte_offset: i64 =
+                existing_checkpoint.try_get("next_rollout_byte_offset")?;
+            let existing_ordinal: i64 = existing_checkpoint.try_get("next_rollout_ordinal")?;
+            let existing_source_id: Option<String> =
+                existing_checkpoint.try_get("rollout_source_id")?;
+            let existing_fingerprint: Option<String> =
+                existing_checkpoint.try_get("rollout_fingerprint")?;
+            if existing_source_id.as_deref().is_some_and(|source_id| {
+                source_id != suffix.checkpoint.source.rollout_source_id.as_str()
+            }) {
+                bail!("thread history rollout source changed without invalidating the projection");
+            }
+            if next_byte_offset < existing_byte_offset || next_ordinal < existing_ordinal {
+                bail!("thread history checkpoint must not move backwards");
+            }
+            if next_byte_offset == existing_byte_offset && next_ordinal == existing_ordinal {
+                if existing_fingerprint.as_deref()
+                    == Some(suffix.checkpoint.source.rollout_fingerprint.as_str())
+                {
+                    transaction.commit().await?;
+                    return Ok(());
+                }
+                bail!("thread history checkpoint fingerprint changed without advancing");
+            }
+        }
         for mutation in &suffix.mutations {
             match mutation {
                 ThreadHistoryMutation::UpsertTurn(turn) => {
@@ -305,22 +342,21 @@ ON CONFLICT(thread_id) DO NOTHING
         .bind(ThreadHistoryProjectionStatus::Dirty.as_str())
         .execute(&mut *transaction)
         .await?;
-        let generation: i64 = sqlx::query_scalar(
-            "SELECT projection_generation FROM thread_history_projection_state WHERE thread_id = ?",
+        let generation: Option<i64> = sqlx::query_scalar(
+            r#"
+UPDATE thread_history_projection_state
+SET projection_generation = projection_generation + 1,
+    projection_status = ?
+WHERE thread_id = ? AND projection_generation < ?
+RETURNING projection_generation
+            "#,
         )
+        .bind(ThreadHistoryProjectionStatus::Dirty.as_str())
         .bind(thread_id)
-        .fetch_one(&mut *transaction)
+        .bind(i64::MAX)
+        .fetch_optional(&mut *transaction)
         .await?;
-        let generation = generation
-            .checked_add(1)
-            .context("thread history projection generation overflow")?;
-        sqlx::query(
-            "UPDATE thread_history_projection_state SET projection_generation = ? WHERE thread_id = ?",
-        )
-        .bind(generation)
-        .bind(thread_id)
-        .execute(&mut *transaction)
-        .await?;
+        let generation = generation.context("thread history projection generation overflow")?;
         transaction.commit().await?;
         sqlite_unsigned(generation, "projection_generation")
     }
@@ -476,17 +512,8 @@ WHERE thread_id = ?
                     .parent()
                     .context("thread history database path has no parent")?;
                 tokio::fs::create_dir_all(parent).await?;
-                let options = base_sqlite_options(self.path.as_path())
-                    .auto_vacuum(SqliteAutoVacuum::Incremental);
-                let pool = SqlitePoolOptions::new()
-                    .max_connections(5)
-                    .connect_with(options)
-                    .await?;
-                if let Err(error) = runtime_thread_history_migrator().run(&pool).await {
-                    pool.close().await;
-                    return Err(error.into());
-                }
-                Ok(pool)
+                open_thread_history_sqlite(self.path.as_path(), &runtime_thread_history_migrator())
+                    .await
             })
             .await
     }
@@ -510,7 +537,7 @@ INSERT INTO thread_turns (
 ON CONFLICT(thread_id, turn_id) DO UPDATE SET
     status = excluded.status,
     error_json = excluded.error_json,
-    started_at = excluded.started_at,
+    started_at = COALESCE(thread_turns.started_at, excluded.started_at),
     completed_at = excluded.completed_at,
     duration_ms = excluded.duration_ms
         "#,

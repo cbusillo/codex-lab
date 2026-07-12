@@ -1,17 +1,44 @@
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use pretty_assertions::assert_eq;
+use sqlx::migrate::Migrator;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 
 use super::*;
+use crate::migrations::THREAD_HISTORY_MIGRATOR;
 
 fn test_sqlite_home() -> PathBuf {
     std::env::temp_dir().join(format!("codex-thread-history-{}", uuid::Uuid::new_v4()))
 }
 
 fn source(fingerprint: &str) -> ThreadHistorySource {
+    source_with_id("rollout-source-1", fingerprint)
+}
+
+fn source_with_id(source_id: &str, fingerprint: &str) -> ThreadHistorySource {
     ThreadHistorySource {
-        rollout_source_id: "rollout-source-1".to_string(),
+        rollout_source_id: source_id.to_string(),
         rollout_fingerprint: fingerprint.to_string(),
+    }
+}
+
+fn migrator_through(version: i64) -> Migrator {
+    Migrator {
+        migrations: Cow::Owned(
+            THREAD_HISTORY_MIGRATOR
+                .migrations
+                .iter()
+                .filter(|migration| migration.version <= version)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: THREAD_HISTORY_MIGRATOR.ignore_missing,
+        locking: THREAD_HISTORY_MIGRATOR.locking,
+        no_tx: THREAD_HISTORY_MIGRATOR.no_tx,
+        table_name: THREAD_HISTORY_MIGRATOR.table_name.clone(),
+        create_schemas: THREAD_HISTORY_MIGRATOR.create_schemas.clone(),
     }
 }
 
@@ -67,6 +94,11 @@ async fn repository_opens_lazily_and_applies_integrity_migration() {
     let sqlite_home = test_sqlite_home();
     let repository = ThreadHistoryRepository::new(sqlite_home.clone());
     assert!(!repository.path().exists());
+    assert!(
+        crate::runtime::runtime_db_paths(sqlite_home.as_path())
+            .into_iter()
+            .any(|db| db.path == repository.path())
+    );
 
     repository.ensure_open().await.expect("open history db");
     assert!(repository.path().exists());
@@ -132,6 +164,124 @@ async fn repository_opens_lazily_and_applies_integrity_migration() {
         .ensure_open()
         .await
         .expect("runtime migrator should tolerate a newer applied migration");
+    let _ = tokio::fs::remove_dir_all(sqlite_home).await;
+}
+
+#[tokio::test]
+async fn integrity_migration_upgrades_populated_v1_database() {
+    let sqlite_home = test_sqlite_home();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("create sqlite home");
+    let path = thread_history_db_path(sqlite_home.as_path());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(path.as_path())
+                .create_if_missing(true),
+        )
+        .await
+        .expect("open v1 history db");
+    migrator_through(/*version*/ 1)
+        .run(&pool)
+        .await
+        .expect("apply v1 migration");
+    sqlx::query(
+        "INSERT INTO thread_turns (thread_id, turn_id, rollout_ordinal, status) VALUES (?, ?, ?, ?)",
+    )
+    .bind("thread-1")
+    .bind("turn-1")
+    .bind(1_i64)
+    .bind("completed")
+    .execute(&pool)
+    .await
+    .expect("insert v1 turn");
+    sqlx::query(
+        "INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, item_json) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind("thread-1")
+    .bind("turn-1")
+    .bind("item-1")
+    .bind(2_i64)
+    .bind("{}")
+    .execute(&pool)
+    .await
+    .expect("insert v1 item");
+    sqlx::query(
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
+    )
+    .bind("thread-1")
+    .bind(300_i64)
+    .bind(3_i64)
+    .execute(&pool)
+    .await
+    .expect("insert v1 checkpoint");
+    pool.close().await;
+
+    let repository = ThreadHistoryRepository::new(sqlite_home.clone());
+    repository.ensure_open().await.expect("upgrade history db");
+    assert_eq!(
+        repository.checkpoint("thread-1").await.expect("checkpoint"),
+        Some(ThreadHistoryCheckpoint {
+            thread_id: "thread-1".to_string(),
+            next_rollout_byte_offset: 300,
+            next_rollout_ordinal: 3,
+            rollout_source_id: None,
+            rollout_fingerprint: None,
+            projection_generation: 0,
+            projection_status: ThreadHistoryProjectionStatus::Dirty,
+        })
+    );
+    let item_created_at_ms: i64 = sqlx::query_scalar(
+        "SELECT item_created_at_ms FROM thread_items WHERE thread_id = ? AND item_id = ?",
+    )
+    .bind("thread-1")
+    .bind("item-1")
+    .fetch_one(repository.pool().await.expect("history pool"))
+    .await
+    .expect("upgraded item timestamp");
+    assert_eq!(item_created_at_ms, 0);
+    sqlx::query("DELETE FROM thread_turns WHERE thread_id = ? AND turn_id = ?")
+        .bind("thread-1")
+        .bind("turn-1")
+        .execute(repository.pool().await.expect("history pool"))
+        .await
+        .expect("delete upgraded turn");
+    let item_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM thread_items WHERE thread_id = ?")
+            .bind("thread-1")
+            .fetch_one(repository.pool().await.expect("history pool"))
+            .await
+            .expect("count cascaded items");
+    assert_eq!(item_count, 0);
+    drop(repository);
+    let _ = tokio::fs::remove_dir_all(sqlite_home).await;
+}
+
+#[tokio::test]
+async fn lazy_open_retries_after_path_collision_is_removed() {
+    let sqlite_home = test_sqlite_home();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("create sqlite home");
+    let repository = ThreadHistoryRepository::new(sqlite_home.clone());
+    tokio::fs::create_dir(repository.path())
+        .await
+        .expect("create path collision");
+
+    repository
+        .ensure_open()
+        .await
+        .expect_err("directory at database path should fail open");
+    tokio::fs::remove_dir(repository.path())
+        .await
+        .expect("remove path collision");
+    repository
+        .ensure_open()
+        .await
+        .expect("same repository should retry open");
+    drop(repository);
     let _ = tokio::fs::remove_dir_all(sqlite_home).await;
 }
 
@@ -204,7 +354,7 @@ async fn suffix_transaction_preserves_first_ordinals_and_rolls_back_atomically()
             rollout_ordinal: 1,
             status: ThreadHistoryTurnStatus::Completed,
             error_json: None,
-            started_at: Some(30),
+            started_at: Some(10),
             completed_at: None,
             duration_ms: None,
         }]
@@ -242,6 +392,10 @@ async fn suffix_transaction_preserves_first_ordinals_and_rolls_back_atomically()
         })
     );
 
+    let checkpoint = repository
+        .checkpoint("thread-1")
+        .await
+        .expect("checkpoint before rollback");
     let error = repository
         .apply_suffix(
             "thread-1",
@@ -253,14 +407,18 @@ async fn suffix_transaction_preserves_first_ordinals_and_rolls_back_atomically()
                         ThreadHistoryTurnStatus::InProgress,
                     ),
                     item(
+                        "turn-2", "item-2", /*rollout_ordinal*/ 6,
+                        /*item_created_at_ms*/ 600, "{}",
+                    ),
+                    item(
                         "missing-turn",
-                        "item-2",
-                        /*rollout_ordinal*/ 6,
-                        /*item_created_at_ms*/ 600,
+                        "item-3",
+                        /*rollout_ordinal*/ 7,
+                        /*item_created_at_ms*/ 700,
                         "{}",
                     ),
                 ],
-                /*next_rollout_ordinal*/ 7,
+                /*next_rollout_ordinal*/ 8,
                 "fingerprint-3",
             ),
         )
@@ -281,12 +439,140 @@ async fn suffix_transaction_preserves_first_ordinals_and_rolls_back_atomically()
     );
     assert_eq!(
         repository
+            .items_keyset(ThreadHistoryItemsQuery {
+                thread_id: "thread-1",
+                turn_id: None,
+                cursor: None,
+                direction: ThreadHistoryPageDirection::Ascending,
+                limit: 10,
+            })
+            .await
+            .expect("query items after rollback"),
+        items
+    );
+    assert_eq!(
+        repository
             .checkpoint("thread-1")
             .await
-            .expect("checkpoint after rollback")
-            .expect("checkpoint row")
-            .next_rollout_ordinal,
-        5
+            .expect("checkpoint after rollback"),
+        checkpoint
+    );
+    let _ = tokio::fs::remove_dir_all(sqlite_home).await;
+}
+
+#[tokio::test]
+async fn checkpoint_fencing_rejects_rewind_and_source_replacement() {
+    let sqlite_home = test_sqlite_home();
+    let repository = ThreadHistoryRepository::new(sqlite_home.clone());
+    repository
+        .apply_suffix(
+            "thread-1",
+            &suffix(
+                vec![
+                    turn(
+                        "turn-1",
+                        /*rollout_ordinal*/ 1,
+                        ThreadHistoryTurnStatus::Completed,
+                    ),
+                    item(
+                        "turn-1", "item-1", /*rollout_ordinal*/ 2,
+                        /*item_created_at_ms*/ 20, "{}",
+                    ),
+                ],
+                /*next_rollout_ordinal*/ 3,
+                "fingerprint-1",
+            ),
+        )
+        .await
+        .expect("apply first suffix");
+    let destructive_suffix = suffix(
+        vec![
+            turn(
+                "turn-2",
+                /*rollout_ordinal*/ 3,
+                ThreadHistoryTurnStatus::Completed,
+            ),
+            item(
+                "turn-2", "item-2", /*rollout_ordinal*/ 4, /*item_created_at_ms*/ 40,
+                "{}",
+            ),
+            ThreadHistoryMutation::RemoveLatestTurns {
+                rollout_ordinal: 5,
+                count: 1,
+            },
+        ],
+        /*next_rollout_ordinal*/ 6,
+        "fingerprint-2",
+    );
+    repository
+        .apply_suffix("thread-1", &destructive_suffix)
+        .await
+        .expect("apply destructive suffix");
+    repository
+        .apply_suffix("thread-1", &destructive_suffix)
+        .await
+        .expect("exact replay should be idempotent");
+
+    let turns = repository
+        .turns_keyset(ThreadHistoryTurnsQuery {
+            thread_id: "thread-1",
+            cursor: None,
+            direction: ThreadHistoryPageDirection::Ascending,
+            limit: 10,
+        })
+        .await
+        .expect("turns after replay");
+    assert_eq!(
+        turns
+            .iter()
+            .map(|turn| turn.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["turn-1"]
+    );
+    let checkpoint = repository
+        .checkpoint("thread-1")
+        .await
+        .expect("checkpoint after replay");
+
+    let rewind = repository
+        .apply_suffix(
+            "thread-1",
+            &suffix(Vec::new(), /*next_rollout_ordinal*/ 5, "rewind"),
+        )
+        .await
+        .expect_err("checkpoint rewind should fail");
+    assert!(rewind.to_string().contains("must not move backwards"));
+    let changed_fingerprint = repository
+        .apply_suffix(
+            "thread-1",
+            &suffix(Vec::new(), /*next_rollout_ordinal*/ 6, "changed"),
+        )
+        .await
+        .expect_err("same checkpoint with new fingerprint should fail");
+    assert!(
+        changed_fingerprint
+            .to_string()
+            .contains("fingerprint changed")
+    );
+    let replacement = ThreadHistorySuffix {
+        mutations: Vec::new(),
+        checkpoint: ThreadHistoryCheckpointUpdate {
+            next_rollout_byte_offset: 700,
+            next_rollout_ordinal: 7,
+            source: source_with_id("rollout-source-2", "replacement"),
+        },
+    };
+    let source_error = repository
+        .apply_suffix("thread-1", &replacement)
+        .await
+        .expect_err("source replacement should require invalidation");
+    assert!(source_error.to_string().contains("rollout source changed"));
+    assert_eq!(
+        repository
+            .checkpoint("thread-1")
+            .await
+            .expect("checkpoint after rejected suffixes"),
+        checkpoint
     );
     let _ = tokio::fs::remove_dir_all(sqlite_home).await;
 }
@@ -295,12 +581,6 @@ async fn suffix_transaction_preserves_first_ordinals_and_rolls_back_atomically()
 async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     let sqlite_home = test_sqlite_home();
     let repository = ThreadHistoryRepository::new(sqlite_home.clone());
-    repository.mark_dirty("thread-1").await.expect("mark dirty");
-    assert_eq!(
-        repository.bump_generation("thread-1").await.expect("bump"),
-        1
-    );
-
     repository
         .apply_suffix(
             "thread-1",
@@ -345,10 +625,24 @@ async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
         .await
         .expect("checkpoint")
         .expect("checkpoint row");
-    assert_eq!(checkpoint.projection_generation, 1);
+    assert_eq!(checkpoint.projection_generation, 0);
     assert_eq!(
         checkpoint.projection_status,
         ThreadHistoryProjectionStatus::Clean
+    );
+    assert_eq!(
+        repository.bump_generation("thread-1").await.expect("bump"),
+        1
+    );
+    let invalidated = repository
+        .checkpoint("thread-1")
+        .await
+        .expect("invalidated checkpoint")
+        .expect("invalidated checkpoint row");
+    assert_eq!(invalidated.projection_generation, 1);
+    assert_eq!(
+        invalidated.projection_status,
+        ThreadHistoryProjectionStatus::Dirty
     );
 
     let forward = repository
@@ -435,6 +729,35 @@ async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     );
 
     repository
+        .apply_suffix(
+            "thread-2",
+            &suffix(
+                vec![
+                    turn(
+                        "turn-a",
+                        /*rollout_ordinal*/ 1,
+                        ThreadHistoryTurnStatus::Completed,
+                    ),
+                    item(
+                        "turn-a",
+                        "item-a",
+                        /*rollout_ordinal*/ 2,
+                        /*item_created_at_ms*/ 20,
+                        r#"{"thread":2}"#,
+                    ),
+                ],
+                /*next_rollout_ordinal*/ 3,
+                "thread-2-fingerprint",
+            ),
+        )
+        .await
+        .expect("seed second thread");
+    let second_thread_checkpoint = repository
+        .checkpoint("thread-2")
+        .await
+        .expect("second thread checkpoint");
+
+    repository
         .delete_thread("thread-1")
         .await
         .expect("delete thread");
@@ -445,6 +768,38 @@ async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     assert_eq!(
         repository.checkpoint("thread-1").await.expect("checkpoint"),
         None
+    );
+    assert!(
+        repository
+            .turns_keyset(ThreadHistoryTurnsQuery {
+                thread_id: "thread-1",
+                cursor: None,
+                direction: ThreadHistoryPageDirection::Ascending,
+                limit: 10,
+            })
+            .await
+            .expect("deleted turns")
+            .is_empty()
+    );
+    assert!(
+        repository
+            .items_keyset(ThreadHistoryItemsQuery {
+                thread_id: "thread-1",
+                turn_id: None,
+                cursor: None,
+                direction: ThreadHistoryPageDirection::Ascending,
+                limit: 10,
+            })
+            .await
+            .expect("deleted items")
+            .is_empty()
+    );
+    assert_eq!(
+        repository
+            .checkpoint("thread-2")
+            .await
+            .expect("second thread after delete"),
+        second_thread_checkpoint
     );
     let overflow = repository
         .apply_suffix(

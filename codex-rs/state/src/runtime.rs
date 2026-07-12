@@ -13,6 +13,7 @@ use crate::LogRow;
 use crate::MEMORIES_DB_FILENAME;
 use crate::STATE_DB_FILENAME;
 use crate::SortKey;
+use crate::THREAD_HISTORY_DB_FILENAME;
 use crate::ThreadMetadata;
 use crate::ThreadMetadataBuilder;
 use crate::ThreadsPage;
@@ -131,7 +132,16 @@ const MEMORIES_DB: RuntimeDbSpec = RuntimeDbSpec {
     migrate_phase: "migrate_memories",
 };
 
-const RUNTIME_DBS: [RuntimeDbSpec; 4] = [STATE_DB, LOGS_DB, GOALS_DB, MEMORIES_DB];
+const THREAD_HISTORY_DB: RuntimeDbSpec = RuntimeDbSpec {
+    label: "thread history DB",
+    filename: THREAD_HISTORY_DB_FILENAME,
+    kind: DbKind::ThreadHistory,
+    open_phase: "open_thread_history",
+    migrate_phase: "migrate_thread_history",
+};
+
+const RUNTIME_DBS: [RuntimeDbSpec; 5] =
+    [STATE_DB, LOGS_DB, GOALS_DB, MEMORIES_DB, THREAD_HISTORY_DB];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeDbPath {
@@ -302,7 +312,7 @@ impl StateRuntime {
     }
 }
 
-pub(crate) fn base_sqlite_options(path: &Path) -> SqliteConnectOptions {
+fn base_sqlite_options(path: &Path) -> SqliteConnectOptions {
     SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
@@ -345,6 +355,19 @@ async fn open_memories_sqlite(
     telemetry_override: Option<&dyn DbTelemetry>,
 ) -> anyhow::Result<SqlitePool> {
     open_sqlite(path, migrator, MEMORIES_DB, telemetry_override).await
+}
+
+pub(crate) async fn open_thread_history_sqlite(
+    path: &Path,
+    migrator: &Migrator,
+) -> anyhow::Result<SqlitePool> {
+    open_sqlite(
+        path,
+        migrator,
+        THREAD_HISTORY_DB,
+        /*telemetry_override*/ None,
+    )
+    .await
 }
 
 async fn open_sqlite(

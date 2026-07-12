@@ -690,6 +690,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn item_page_round_trips_projected_item_contract() {
+        let value = json!({
+            "items": [
+                {
+                    "turn_id": null,
+                    "item_key": "item-unbound",
+                    "item_ordinal": 42,
+                    "item_created_at_ms": 1_234,
+                    "materialized_thread_item_json": [123, 125]
+                },
+                {
+                    "turn_id": "turn-1",
+                    "item_key": "item-bound",
+                    "item_ordinal": u64::MAX,
+                    "item_created_at_ms": -1,
+                    "materialized_thread_item_json": [91, 93]
+                }
+            ],
+            "next_cursor": "next",
+            "backwards_cursor": "previous"
+        });
+
+        let page: ItemPage = serde_json::from_value(value.clone()).expect("deserialize item page");
+        assert_eq!(page.items[0].turn_id, None);
+        assert_eq!(page.items[1].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(page.items[1].item_ordinal, u64::MAX);
+        assert_eq!(
+            serde_json::to_value(page).expect("serialize item page"),
+            value
+        );
+    }
+
+    #[test]
     fn thread_metadata_patch_round_trips_optional_clears() {
         let patch = ThreadMetadataPatch {
             name: Some(None),
