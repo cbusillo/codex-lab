@@ -72,23 +72,25 @@ mod tests {
             }
         ));
 
-        let items_err = store
-            .list_items(ListItemsParams {
-                thread_id,
-                turn_id: "turn_1".to_string(),
-                include_archived: true,
-                cursor: None,
-                page_size: 10,
-                sort_direction: SortDirection::Asc,
-            })
-            .await
-            .expect_err("default list_items should be unsupported");
-        assert!(matches!(
-            items_err,
-            ThreadStoreError::Unsupported {
-                operation: "list_items"
-            }
-        ));
+        for turn_id in [None, Some("turn_1".to_string())] {
+            let items_err = store
+                .list_items(ListItemsParams {
+                    thread_id,
+                    turn_id,
+                    include_archived: true,
+                    cursor: None,
+                    page_size: 10,
+                    sort_direction: SortDirection::Asc,
+                })
+                .await
+                .expect_err("default list_items should be unsupported");
+            assert!(matches!(
+                items_err,
+                ThreadStoreError::Unsupported {
+                    operation: "list_items"
+                }
+            ));
+        }
     }
 }
 
