@@ -5,4 +5,4 @@ import type { AuthMode } from "../AuthMode";
 import type { PlanType } from "../PlanType";
 import type { Account } from "./Account";
 
-export type AccountUpdatedNotification = { authMode: AuthMode | null, planType: PlanType | null, account?: Account | null, };
+export type AccountUpdatedNotification = { authMode: AuthMode | null, planType: PlanType | null, account?: Account, };

@@ -2775,6 +2775,7 @@
       ]
     },
     "ProjectValidationCompletedNotification": {
+      "description": "One completed project-validation command execution. An actionable first execution may be followed by one bounded correction cycle and a second completion notification.",
       "properties": {
         "command": {
           "items": {
