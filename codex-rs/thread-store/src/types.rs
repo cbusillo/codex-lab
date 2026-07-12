@@ -356,11 +356,21 @@ pub struct ListItemsParams {
     pub sort_direction: SortDirection,
 }
 
+/// A projected app-server `ThreadItem` snapshot within a turn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredThreadItem {
+    pub turn_id: Option<String>,
+    pub item_key: String,
+    pub item_ordinal: u64,
+    pub item_created_at_ms: i64,
+    pub materialized_thread_item_json: Vec<u8>,
+}
+
 /// A page of persisted items within a thread, optionally filtered to a turn.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ItemPage {
     /// Items returned for this page.
-    pub items: Vec<RolloutItem>,
+    pub items: Vec<StoredThreadItem>,
     /// Opaque cursor to continue listing.
     pub next_cursor: Option<String>,
     /// Opaque cursor for fetching in the opposite direction.

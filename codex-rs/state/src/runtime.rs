@@ -302,7 +302,7 @@ impl StateRuntime {
     }
 }
 
-fn base_sqlite_options(path: &Path) -> SqliteConnectOptions {
+pub(crate) fn base_sqlite_options(path: &Path) -> SqliteConnectOptions {
     SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
