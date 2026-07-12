@@ -87,6 +87,7 @@ use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadInjectItemsParams;
+use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadMemoryModeSetParams;
@@ -609,7 +610,16 @@ impl TestAppServer {
         self.send_request("thread/turns/list", params).await
     }
 
-    /// Send a `thread/turns/items/list` JSON-RPC request.
+    /// Send a `thread/items/list` JSON-RPC request.
+    pub async fn send_thread_items_list_request(
+        &mut self,
+        params: ThreadItemsListParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/items/list", params).await
+    }
+
+    /// Send a legacy `thread/turns/items/list` JSON-RPC request.
     pub async fn send_thread_turns_items_list_request(
         &mut self,
         params: ThreadTurnsItemsListParams,
