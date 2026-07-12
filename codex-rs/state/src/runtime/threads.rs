@@ -386,6 +386,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
             &mut builder,
             crate::SortKey::UpdatedAt,
             SortDirection::Desc,
+            OrderByIndex::Enabled,
             /*limit*/ 1,
         );
 
@@ -401,14 +402,9 @@ ON CONFLICT(child_thread_id) DO NOTHING
         filters: ThreadFilterOptions<'_>,
     ) -> anyhow::Result<crate::ThreadsPage> {
         let limit = page_size.saturating_add(1);
-        let sort_key = filters.sort_key;
-        let sort_direction = filters.sort_direction;
 
         let mut builder = QueryBuilder::<Sqlite>::new("");
-        push_thread_select_columns(&mut builder);
-        builder.push(" FROM threads");
-        push_thread_filters(&mut builder, filters);
-        push_thread_order_and_limit(&mut builder, sort_key, sort_direction, limit);
+        push_list_threads_query(&mut builder, filters, limit);
 
         let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
         let mut items = rows
@@ -420,7 +416,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
             items.pop();
             items
                 .last()
-                .and_then(|item| anchor_from_item(item, sort_key))
+                .and_then(|item| anchor_from_item(item, filters.sort_key))
         } else {
             None
         };
@@ -455,7 +451,13 @@ ON CONFLICT(child_thread_id) DO NOTHING
                 search_term: None,
             },
         );
-        push_thread_order_and_limit(&mut builder, sort_key, SortDirection::Desc, limit);
+        push_thread_order_and_limit(
+            &mut builder,
+            sort_key,
+            SortDirection::Desc,
+            OrderByIndex::Enabled,
+            limit,
+        );
 
         let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
         rows.into_iter()
@@ -940,6 +942,29 @@ fn one_thread_id_from_rows(
     }
 }
 
+fn push_list_threads_query(
+    builder: &mut QueryBuilder<Sqlite>,
+    filters: ThreadFilterOptions<'_>,
+    limit: usize,
+) {
+    push_thread_select_columns(builder);
+    builder.push(" FROM threads");
+    push_thread_filters(builder, filters);
+    let order_by_index = match filters.cwd_filters {
+        // Multi-cwd listing is supported but at the time of writing has no current use in production.
+        // Preserve its query plan so the global timestamp index does not regress cwd filtering into a scan.
+        Some(cwd_filters) if cwd_filters.len() > 1 => OrderByIndex::Disabled,
+        Some(_) | None => OrderByIndex::Enabled,
+    };
+    push_thread_order_and_limit(
+        builder,
+        filters.sort_key,
+        filters.sort_direction,
+        order_by_index,
+        limit,
+    );
+}
+
 pub(super) fn push_thread_select_columns(builder: &mut QueryBuilder<Sqlite>) {
     builder.push(
         r#"
@@ -1082,10 +1107,21 @@ pub(super) fn push_thread_filters<'a>(
     }
 }
 
+/// Controls whether SQLite may use the ordered column to satisfy `ORDER BY` from an index.
+///
+/// Disabling it adds a unary `+` to the ordered column. This preserves the sort semantics while
+/// preventing a timestamp-only index from winning over a more selective filtering index.
+#[derive(Clone, Copy)]
+pub(super) enum OrderByIndex {
+    Enabled,
+    Disabled,
+}
+
 pub(super) fn push_thread_order_and_limit(
     builder: &mut QueryBuilder<Sqlite>,
     sort_key: SortKey,
     sort_direction: SortDirection,
+    order_by_index: OrderByIndex,
     limit: usize,
 ) {
     let order_column = match sort_key {
@@ -1097,6 +1133,12 @@ pub(super) fn push_thread_order_and_limit(
         SortDirection::Desc => "DESC",
     };
     builder.push(" ORDER BY ");
+    match order_by_index {
+        OrderByIndex::Enabled => {}
+        OrderByIndex::Disabled => {
+            builder.push("+");
+        }
+    }
     builder.push(order_column);
     builder.push(" ");
     builder.push(order_direction);
@@ -1391,9 +1433,9 @@ mod tests {
         }
 
         let cwd_filters = vec![first_cwd, second_cwd];
-        let page = runtime
+        let first_page = runtime
             .list_threads(
-                /*page_size*/ 10,
+                /*page_size*/ 1,
                 ThreadFilterOptions {
                     archived_only: false,
                     allowed_sources: &[],
@@ -1408,8 +1450,44 @@ mod tests {
             .await
             .expect("list should succeed");
 
-        let ids = page.items.iter().map(|item| item.id).collect::<Vec<_>>();
-        assert_eq!(ids, vec![second_id, first_id]);
+        let ids = first_page
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![second_id]);
+        assert_eq!(
+            first_page.next_anchor,
+            Some(Anchor {
+                ts: DateTime::<Utc>::from_timestamp_millis(1_700_000_300_000)
+                    .expect("valid timestamp"),
+            })
+        );
+
+        let second_page = runtime
+            .list_threads(
+                /*page_size*/ 1,
+                ThreadFilterOptions {
+                    archived_only: false,
+                    allowed_sources: &[],
+                    model_providers: None,
+                    cwd_filters: Some(cwd_filters.as_slice()),
+                    anchor: first_page.next_anchor.as_ref(),
+                    sort_key: SortKey::UpdatedAt,
+                    sort_direction: SortDirection::Desc,
+                    search_term: None,
+                },
+            )
+            .await
+            .expect("second page should succeed");
+
+        let ids = second_page
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![first_id]);
+        assert_eq!(second_page.next_anchor, None);
 
         let page = runtime
             .list_threads(
@@ -1429,6 +1507,85 @@ mod tests {
             .expect("list with empty cwd filters should succeed");
 
         assert_eq!(page.items, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn list_threads_uses_indexes_matching_cwd_filters() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+
+        let model_providers = ["test-provider".to_string()];
+        let cwd_filters = [
+            PathBuf::from("/workspace/one"),
+            PathBuf::from("/workspace/two"),
+        ];
+        let anchor = Anchor {
+            ts: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+        };
+        for (sort_key, visible_index, cwd_index) in [
+            (
+                SortKey::CreatedAt,
+                "idx_threads_visible_created_at_ms",
+                "idx_threads_archived_cwd_created_at_ms",
+            ),
+            (
+                SortKey::UpdatedAt,
+                "idx_threads_visible_updated_at_ms",
+                "idx_threads_archived_cwd_updated_at_ms",
+            ),
+        ] {
+            for (cwd_filters, anchor, expected_index, expect_order_index_disabled) in [
+                (None, None, visible_index, false),
+                (Some(&cwd_filters[..1]), None, cwd_index, false),
+                (
+                    Some(&cwd_filters[..]),
+                    None,
+                    "idx_threads_archived_cwd_",
+                    true,
+                ),
+                (Some(&cwd_filters[..]), Some(&anchor), cwd_index, true),
+            ] {
+                let mut builder = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
+                push_list_threads_query(
+                    &mut builder,
+                    ThreadFilterOptions {
+                        archived_only: false,
+                        allowed_sources: &[],
+                        model_providers: Some(&model_providers),
+                        cwd_filters,
+                        anchor,
+                        sort_key,
+                        sort_direction: SortDirection::Desc,
+                        search_term: None,
+                    },
+                    /*limit*/ 201,
+                );
+                let query_sql = builder.sql();
+                let query_sql = query_sql.as_str();
+                assert_eq!(
+                    query_sql.contains("ORDER BY +threads."),
+                    expect_order_index_disabled,
+                    "unexpected ORDER BY index control: {query_sql}"
+                );
+                let plan_details = builder
+                    .build()
+                    .fetch_all(runtime.pool.as_ref())
+                    .await
+                    .expect("query plan should load")
+                    .into_iter()
+                    .map(|row| row.get::<String, _>("detail"))
+                    .collect::<Vec<_>>();
+
+                assert!(
+                    plan_details
+                        .iter()
+                        .any(|detail| detail.contains(expected_index)),
+                    "query plan did not use {expected_index}: {plan_details:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
