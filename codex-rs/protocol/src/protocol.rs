@@ -109,6 +109,14 @@ pub const REALTIME_CONVERSATION_OPEN_TAG: &str = "<realtime_conversation>";
 pub const REALTIME_CONVERSATION_CLOSE_TAG: &str = "</realtime_conversation>";
 pub const USER_MESSAGE_BEGIN: &str = "## My request for Codex:";
 
+/// Removes the model-context prefix from a user message before displaying it.
+pub fn strip_user_message_prefix(text: &str) -> &str {
+    match text.find(USER_MESSAGE_BEGIN) {
+        Some(idx) => text[idx + USER_MESSAGE_BEGIN.len()..].trim(),
+        None => text.trim(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnEnvironmentSelection {
     pub environment_id: String,
@@ -2298,6 +2306,23 @@ pub struct UserMessageEvent {
     pub text_elements: Vec<crate::user_input::TextElement>,
 }
 
+/// Returns the user-facing preview text for a user message.
+pub fn user_message_preview(user: &UserMessageEvent) -> Option<String> {
+    let message = strip_user_message_prefix(user.message.as_str());
+    if !message.is_empty() {
+        return Some(message.to_string());
+    }
+    if user
+        .images
+        .as_ref()
+        .is_some_and(|images| !images.is_empty())
+        || !user.local_images.is_empty()
+    {
+        return Some("[Image]".to_string());
+    }
+    None
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct AgentReasoningEvent {
     pub text: String,
@@ -2559,12 +2584,17 @@ impl InitialHistory {
 
     pub fn get_history_mode(&self, default_history_mode: ThreadHistoryMode) -> ThreadHistoryMode {
         match self {
-            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
-                default_history_mode
-            }
+            InitialHistory::New | InitialHistory::Cleared => default_history_mode,
             InitialHistory::Resumed(_) => self
                 .get_resumed_session_meta()
                 .map(|meta| meta.history_mode)
+                .unwrap_or(default_history_mode),
+            InitialHistory::Forked(items) => items
+                .iter()
+                .find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.history_mode),
+                    _ => None,
+                })
                 .unwrap_or(default_history_mode),
         }
     }
@@ -4280,6 +4310,41 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
     use tempfile::TempDir;
+
+    #[test]
+    fn copied_history_uses_persisted_history_mode() {
+        let thread_id = ThreadId::default();
+
+        for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+            let session_meta = RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    session_id: thread_id.into(),
+                    id: thread_id,
+                    history_mode,
+                    ..SessionMeta::default()
+                },
+                git: None,
+            });
+            let default_history_mode = match history_mode {
+                ThreadHistoryMode::Legacy => ThreadHistoryMode::Paginated,
+                ThreadHistoryMode::Paginated => ThreadHistoryMode::Legacy,
+            };
+
+            assert_eq!(
+                InitialHistory::Resumed(ResumedHistory {
+                    conversation_id: thread_id,
+                    history: std::sync::Arc::new(vec![session_meta.clone()]),
+                    rollout_path: None,
+                })
+                .get_history_mode(default_history_mode),
+                history_mode
+            );
+            assert_eq!(
+                InitialHistory::Forked(vec![session_meta]).get_history_mode(default_history_mode),
+                history_mode
+            );
+        }
+    }
 
     fn sorted_writable_roots(roots: Vec<WritableRoot>) -> Vec<(PathBuf, Vec<PathBuf>)> {
         let mut sorted_roots: Vec<(PathBuf, Vec<PathBuf>)> = roots

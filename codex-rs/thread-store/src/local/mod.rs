@@ -642,6 +642,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_thread_rejects_paginated_history_mode() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+        let mut params = create_thread_params(thread_id);
+        params.history_mode = ThreadHistoryMode::Paginated;
+        params.metadata.history_mode = ThreadHistoryMode::Paginated;
+
+        let err = store
+            .create_thread(params)
+            .await
+            .expect_err("paginated local thread creation should remain blocked");
+
+        assert!(matches!(
+            err,
+            ThreadStoreError::UnsupportedHistoryMode {
+                thread_id: rejected_thread_id,
+                history_mode: ThreadHistoryMode::Paginated,
+                operation: "create_thread",
+            } if rejected_thread_id == thread_id
+        ));
+    }
+
+    #[tokio::test]
     async fn discard_thread_drops_unmaterialized_live_writer() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
@@ -813,6 +837,35 @@ mod tests {
 
         assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
         assert!(err.to_string().contains("requires a cwd"));
+    }
+
+    #[tokio::test]
+    async fn resume_thread_rejects_paginated_history_mode() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+        let mut metadata = thread_metadata();
+        metadata.history_mode = ThreadHistoryMode::Paginated;
+
+        let err = store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: None,
+                history: None,
+                include_archived: true,
+                metadata,
+            })
+            .await
+            .expect_err("paginated local thread resume should remain blocked");
+
+        assert!(matches!(
+            err,
+            ThreadStoreError::UnsupportedHistoryMode {
+                thread_id: rejected_thread_id,
+                history_mode: ThreadHistoryMode::Paginated,
+                operation: "resume_thread",
+            } if rejected_thread_id == thread_id
+        ));
     }
 
     #[tokio::test]

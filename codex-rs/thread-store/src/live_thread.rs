@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::persisted_rollout_items;
 use tokio::sync::Mutex;
@@ -30,6 +31,7 @@ use crate::thread_metadata_sync::ThreadMetadataSync;
 #[derive(Clone)]
 pub struct LiveThread {
     thread_id: ThreadId,
+    history_mode: ThreadHistoryMode,
     thread_store: Arc<dyn ThreadStore>,
     metadata_sync: Arc<Mutex<ThreadMetadataSync>>,
 }
@@ -89,10 +91,12 @@ impl LiveThread {
         params: CreateThreadParams,
     ) -> ThreadStoreResult<Self> {
         let thread_id = params.thread_id;
+        let history_mode = params.history_mode;
         let metadata_sync = ThreadMetadataSync::for_create(&params).await;
         thread_store.create_thread(params).await?;
         Ok(Self {
             thread_id,
+            history_mode,
             thread_store,
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
         })
@@ -103,6 +107,7 @@ impl LiveThread {
         mut params: ResumeThreadParams,
     ) -> ThreadStoreResult<Self> {
         let thread_id = params.thread_id;
+        let history_mode = params.metadata.history_mode;
         let should_load_history = params.history.is_none();
         let include_archived = params.include_archived;
         thread_store.resume_thread(params.clone()).await?;
@@ -124,27 +129,28 @@ impl LiveThread {
         let metadata_sync = ThreadMetadataSync::for_resume(&params);
         Ok(Self {
             thread_id,
+            history_mode,
             thread_store,
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
         })
     }
 
     pub async fn append_items(&self, items: &[RolloutItem]) -> ThreadStoreResult<()> {
-        let canonical_items = persisted_rollout_items(items);
-        if canonical_items.is_empty() {
+        let persisted_items = persisted_rollout_items(items, self.history_mode);
+        if persisted_items.is_empty() {
             return Ok(());
         }
         self.thread_store
             .append_items(AppendThreadItemsParams {
                 thread_id: self.thread_id,
-                items: canonical_items.clone(),
+                items: persisted_items.clone(),
             })
             .await?;
         let update = self
             .metadata_sync
             .lock()
             .await
-            .observe_appended_items(canonical_items.as_slice());
+            .observe_appended_items(persisted_items.as_slice());
         if let Some(update) = update {
             self.thread_store
                 .update_thread_metadata(UpdateThreadMetadataParams {
