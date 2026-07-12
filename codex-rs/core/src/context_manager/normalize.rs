@@ -4,12 +4,41 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use std::collections::HashSet;
+use uuid::Uuid;
 
 use crate::util::error_or_panic;
 use tracing::info;
 
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER: &str =
     "image content omitted because you do not support image input";
+const SYNTHETIC_OUTPUT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x90d38d3e_6a5b_4d52_bfe2_2f1e634bfac4);
+
+#[derive(Clone, Copy)]
+pub(super) enum SyntheticOutputKind {
+    FunctionCall,
+    LocalShellCall,
+    ToolSearchCall,
+    CustomToolCall,
+}
+
+impl SyntheticOutputKind {
+    fn source_prefix(self) -> &'static str {
+        match self {
+            Self::FunctionCall => "fc",
+            Self::LocalShellCall => "lsh",
+            Self::ToolSearchCall => "tsc",
+            Self::CustomToolCall => "ctc",
+        }
+    }
+
+    fn output_prefix(self) -> &'static str {
+        match self {
+            Self::FunctionCall | Self::LocalShellCall => "fco",
+            Self::ToolSearchCall => "tso",
+            Self::CustomToolCall => "ctco",
+        }
+    }
+}
 
 pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
     // Collect synthetic outputs to insert immediately after their calls.
@@ -19,7 +48,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
 
     for (idx, item) in items.iter().enumerate() {
         match item {
-            ResponseItem::FunctionCall { call_id, .. } => {
+            ResponseItem::FunctionCall { id, call_id, .. } => {
                 let has_output = items.iter().any(|i| match i {
                     ResponseItem::FunctionCallOutput {
                         call_id: existing, ..
@@ -32,7 +61,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                     missing_outputs_to_insert.push((
                         idx,
                         ResponseItem::FunctionCallOutput {
-                            id: None,
+                            id: synthetic_output_id(
+                                SyntheticOutputKind::FunctionCall,
+                                id.as_deref(),
+                            ),
                             call_id: call_id.clone(),
                             output: FunctionCallOutputPayload::from_text("aborted".to_string()),
                         },
@@ -40,6 +72,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                 }
             }
             ResponseItem::ToolSearchCall {
+                id,
                 call_id: Some(call_id),
                 ..
             } => {
@@ -56,7 +89,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                     missing_outputs_to_insert.push((
                         idx,
                         ResponseItem::ToolSearchOutput {
-                            id: None,
+                            id: synthetic_output_id(
+                                SyntheticOutputKind::ToolSearchCall,
+                                id.as_deref(),
+                            ),
                             call_id: Some(call_id.clone()),
                             status: "completed".to_string(),
                             execution: "client".to_string(),
@@ -65,7 +101,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                     ));
                 }
             }
-            ResponseItem::CustomToolCall { call_id, .. } => {
+            ResponseItem::CustomToolCall { id, call_id, .. } => {
                 let has_output = items.iter().any(|i| match i {
                     ResponseItem::CustomToolCallOutput {
                         call_id: existing, ..
@@ -80,7 +116,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                     missing_outputs_to_insert.push((
                         idx,
                         ResponseItem::CustomToolCallOutput {
-                            id: None,
+                            id: synthetic_output_id(
+                                SyntheticOutputKind::CustomToolCall,
+                                id.as_deref(),
+                            ),
                             call_id: call_id.clone(),
                             name: None,
                             output: FunctionCallOutputPayload::from_text("aborted".to_string()),
@@ -89,7 +128,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                 }
             }
             // LocalShellCall is represented in upstream streams by a FunctionCallOutput
-            ResponseItem::LocalShellCall { call_id, .. } => {
+            ResponseItem::LocalShellCall { id, call_id, .. } => {
                 if let Some(call_id) = call_id.as_ref() {
                     let has_output = items.iter().any(|i| match i {
                         ResponseItem::FunctionCallOutput {
@@ -105,7 +144,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                         missing_outputs_to_insert.push((
                             idx,
                             ResponseItem::FunctionCallOutput {
-                                id: None,
+                                id: synthetic_output_id(
+                                    SyntheticOutputKind::LocalShellCall,
+                                    id.as_deref(),
+                                ),
                                 call_id: call_id.clone(),
                                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
                             },
@@ -121,6 +163,20 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
     for (idx, output_item) in missing_outputs_to_insert.into_iter().rev() {
         items.insert(idx + 1, output_item);
     }
+}
+
+pub(super) fn synthetic_output_id(
+    kind: SyntheticOutputKind,
+    item_id: Option<&str>,
+) -> Option<String> {
+    let source_id = item_id.filter(|id| {
+        id.split_once('_')
+            .is_some_and(|(prefix, suffix)| prefix == kind.source_prefix() && !suffix.is_empty())
+    })?;
+    let output_prefix = kind.output_prefix();
+    let name = format!("{output_prefix}:{source_id}");
+    let uuid = Uuid::new_v5(&SYNTHETIC_OUTPUT_ID_NAMESPACE, name.as_bytes());
+    Some(format!("{output_prefix}_{uuid}"))
 }
 
 pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItem>) {
