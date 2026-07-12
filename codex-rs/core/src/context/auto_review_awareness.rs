@@ -181,10 +181,7 @@ fn render_awareness(
     AutoReviewAwareness::new(lines.join("\n"))
 }
 
-fn run_is_visible_for_awareness(
-    run: &AutoReviewRun,
-    active_review_target: &ReviewTarget,
-) -> bool {
+fn run_is_visible_for_awareness(run: &AutoReviewRun, active_review_target: &ReviewTarget) -> bool {
     !matches!(
         (&run.review_target, active_review_target),
         (
