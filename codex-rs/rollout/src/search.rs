@@ -4,12 +4,13 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
-use codex_protocol::protocol::USER_MESSAGE_BEGIN;
+use codex_protocol::protocol::strip_user_message_prefix;
 use regex::Regex;
 use regex::RegexBuilder;
 use tokio::process::Command;
@@ -260,6 +261,18 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
                 Some(agent.message.trim().to_string())
             }
         }
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
+            let TurnItem::UserMessage(user) = &event.item else {
+                return None;
+            };
+            let user = user.as_legacy_user_message_event();
+            let text = strip_user_message_prefix(user.message.as_str());
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        }
         RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) => {
             let text = content
                 .iter()
@@ -284,13 +297,6 @@ fn content_item_text(item: &ContentItem) -> Option<&str> {
     match item {
         ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text.as_str()),
         ContentItem::InputImage { .. } => None,
-    }
-}
-
-fn strip_user_message_prefix(text: &str) -> &str {
-    match text.find(USER_MESSAGE_BEGIN) {
-        Some(idx) => text[idx + USER_MESSAGE_BEGIN.len()..].trim(),
-        None => text.trim(),
     }
 }
 
@@ -338,3 +344,7 @@ fn char_end_after(text: &str, byte_index: usize, chars_after: usize) -> usize {
         .map(|(offset, _)| byte_index.saturating_add(offset))
         .unwrap_or(text.len())
 }
+
+#[cfg(test)]
+#[path = "search_tests.rs"]
+mod tests;

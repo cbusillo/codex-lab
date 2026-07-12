@@ -1,12 +1,14 @@
 use crate::protocol::EventMsg;
 use crate::protocol::RolloutItem;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::ThreadHistoryMode;
 
 /// Whether a rollout `item` should be persisted in rollout files.
-pub fn is_persisted_rollout_item(item: &RolloutItem) -> bool {
+pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistoryMode) -> bool {
     match item {
         RolloutItem::ResponseItem(item) => should_persist_response_item(item),
-        RolloutItem::EventMsg(ev) => should_persist_event_msg(ev),
+        RolloutItem::EventMsg(ev) => should_persist_event_msg(ev, history_mode),
         // Persist Codex executive markers so we can analyze flows (e.g., compaction, API turns).
         RolloutItem::Compacted(_) | RolloutItem::TurnContext(_) | RolloutItem::SessionMeta(_) => {
             true
@@ -14,11 +16,14 @@ pub fn is_persisted_rollout_item(item: &RolloutItem) -> bool {
     }
 }
 
-/// Return the canonical rollout items that should be persisted for a live append.
-pub fn persisted_rollout_items(items: &[RolloutItem]) -> Vec<RolloutItem> {
+/// Return the rollout items that should be persisted for a live append.
+pub fn persisted_rollout_items(
+    items: &[RolloutItem],
+    history_mode: ThreadHistoryMode,
+) -> Vec<RolloutItem> {
     let mut persisted = Vec::new();
     for item in items {
-        if is_persisted_rollout_item(item) {
+        if is_persisted_rollout_item(item, history_mode) {
             persisted.push(item.clone());
         }
     }
@@ -73,31 +78,32 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
 
 /// Whether an `EventMsg` should be persisted in rollout files.
 #[inline]
-pub fn should_persist_event_msg(ev: &EventMsg) -> bool {
+pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) -> bool {
     match ev {
+        EventMsg::ItemCompleted(event) => {
+            matches!(history_mode, ThreadHistoryMode::Paginated)
+                || matches!(&event.item, TurnItem::Plan(_))
+        }
+        EventMsg::TokenCount(_)
+        | EventMsg::ThreadGoalUpdated(_)
+        | EventMsg::ThreadRolledBack(_)
+        | EventMsg::TurnAborted(_)
+        | EventMsg::TurnStarted(_)
+        | EventMsg::TurnComplete(_) => true,
+        // This fork keeps manual review lifecycle events distinct from background review state and
+        // has no canonical review TurnItem variants, so both history modes retain these events.
+        EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => true,
+        // Paginated rollouts retain the canonical completed TurnItem instead of its legacy
+        // projection. Legacy rollouts preserve the existing event set unchanged.
         EventMsg::UserMessage(_)
         | EventMsg::AgentMessage(_)
         | EventMsg::AgentReasoning(_)
         | EventMsg::AgentReasoningRawContent(_)
         | EventMsg::PatchApplyEnd(_)
-        | EventMsg::TokenCount(_)
-        | EventMsg::ThreadGoalUpdated(_)
         | EventMsg::ContextCompacted(_)
-        | EventMsg::EnteredReviewMode(_)
-        | EventMsg::ExitedReviewMode(_)
         | EventMsg::McpToolCallEnd(_)
-        | EventMsg::ThreadRolledBack(_)
-        | EventMsg::TurnAborted(_)
-        | EventMsg::TurnStarted(_)
-        | EventMsg::TurnComplete(_)
         | EventMsg::WebSearchEnd(_)
-        | EventMsg::ImageGenerationEnd(_) => true,
-        EventMsg::ItemCompleted(event) => {
-            // Plan items are derived from streaming tags and are not part of the
-            // raw ResponseItem history, so we persist their completion to replay
-            // them on resume without bloating rollouts with every item lifecycle.
-            matches!(event.item, codex_protocol::items::TurnItem::Plan(_))
-        }
+        | EventMsg::ImageGenerationEnd(_) => matches!(history_mode, ThreadHistoryMode::Legacy),
         EventMsg::Error(_)
         | EventMsg::GuardianAssessment(_)
         | EventMsg::ExecCommandEnd(_)
@@ -159,3 +165,7 @@ pub fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::CollabResumeBegin(_) => false,
     }
 }
+
+#[cfg(test)]
+#[path = "policy_tests.rs"]
+mod tests;

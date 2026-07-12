@@ -29,9 +29,12 @@ use crate::list::read_head_for_summary;
 use crate::rollout_date_parts;
 use anyhow::Result;
 use codex_protocol::ThreadId;
+use codex_protocol::items::TurnItem;
+use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
@@ -41,7 +44,9 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::ThreadGoalUpdatedEvent;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_protocol::user_input::UserInput;
 
 const NO_SOURCE_FILTER: &[SessionSource] = &[];
 const TEST_PROVIDER: &str = "test-provider";
@@ -486,6 +491,26 @@ fn write_session_file_with_meta_payload(
     uuid: Uuid,
     payload: serde_json::Value,
 ) -> std::io::Result<()> {
+    write_session_file_with_meta_payload_and_event(
+        root,
+        ts_str,
+        uuid,
+        payload,
+        serde_json::json!({
+            "type": "user_message",
+            "message": "Hello from user",
+            "kind": "plain",
+        }),
+    )
+}
+
+fn write_session_file_with_meta_payload_and_event(
+    root: &Path,
+    ts_str: &str,
+    uuid: Uuid,
+    payload: serde_json::Value,
+    event_payload: serde_json::Value,
+) -> std::io::Result<()> {
     let format: &[FormatItem] =
         format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]");
     let dt = PrimitiveDateTime::parse(ts_str, format)
@@ -509,12 +534,12 @@ fn write_session_file_with_meta_payload(
     });
     writeln!(file, "{meta}")?;
 
-    let user_event = serde_json::json!({
+    let event = serde_json::json!({
         "timestamp": ts_str,
         "type": "event_msg",
-        "payload": {"type": "user_message", "message": "Hello from user", "kind": "plain"}
+        "payload": event_payload,
     });
-    writeln!(file, "{user_event}")?;
+    writeln!(file, "{event}")?;
 
     let times = FileTimes::new().set_modified(dt.into());
     file.set_times(times)?;
@@ -1071,6 +1096,63 @@ async fn test_goal_first_thread_reads_later_user_message() {
     assert_eq!(
         item.first_user_message.as_deref(),
         Some("run the benchmark")
+    );
+}
+
+#[tokio::test]
+async fn test_paginated_thread_reads_completed_user_message() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let uuid = Uuid::from_u128(102);
+    let thread_id = thread_id_from_uuid(uuid);
+    write_session_file_with_meta_payload_and_event(
+        home,
+        "2025-05-02T10-30-00",
+        uuid,
+        serde_json::json!({
+            "id": uuid,
+            "timestamp": "2025-05-02T10-30-00",
+            "cwd": ".",
+            "originator": "test_originator",
+            "cli_version": "test_version",
+            "source": "vscode",
+            "model_provider": TEST_PROVIDER,
+            "history_mode": "paginated",
+        }),
+        serde_json::to_value(EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id,
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
+                text: "paginated user request".to_string(),
+                text_elements: Vec::new(),
+            }])),
+            completed_at_ms: 0,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let provider_filter = provider_vec(&[TEST_PROVIDER]);
+    let page = get_threads(
+        home,
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        Some(provider_filter.as_slice()),
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(page.items.len(), 1);
+    let item = &page.items[0];
+    assert_eq!(item.thread_id, Some(thread_id));
+    assert_eq!(item.preview.as_deref(), Some("paginated user request"));
+    assert_eq!(
+        item.first_user_message.as_deref(),
+        Some("paginated user request")
     );
 }
 
