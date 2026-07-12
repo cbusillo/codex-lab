@@ -190,6 +190,102 @@ async fn response_item_ids_persist_across_resume_and_preserve_server_ids() -> an
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<()> {
+    let function_call_id = "missing-output-call";
+    let thread_id = ThreadId::default();
+    let rollout = vec![
+        RolloutLine {
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            item: RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    session_id: thread_id.into(),
+                    id: thread_id,
+                    parent_thread_id: None,
+                    timestamp: "2024-01-01T00:00:00Z".to_string(),
+                    cwd: ".".into(),
+                    originator: "test_originator".to_string(),
+                    cli_version: "test_version".to_string(),
+                    model_provider: Some("test-provider".to_string()),
+                    ..Default::default()
+                },
+                git: None,
+            }),
+        },
+        RolloutLine {
+            timestamp: "2024-01-01T00:00:01.000Z".to_string(),
+            item: RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                id: Some("fc_existing".to_string()),
+                name: "do_it".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: function_call_id.to_string(),
+            }),
+        },
+    ];
+    let tmpdir = TempDir::new()?;
+    let session_path = tmpdir.path().join("normalized-call-output-item-id.jsonl");
+    let mut file = std::fs::File::create(&session_path)?;
+    for line in rollout {
+        writeln!(file, "{}", serde_json::to_string(&line)?)?;
+    }
+
+    let server = MockServer::start().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+            sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+        ],
+    )
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let mut builder = test_codex();
+    let first = builder
+        .resume(&server, Arc::clone(&codex_home), session_path.clone())
+        .await?;
+
+    first.submit_turn("first resume").await?;
+    first.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&first.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+    assert!(
+        !std::fs::read_to_string(&session_path)?.contains("\"type\":\"function_call_output\""),
+        "prompt-only repair should not be persisted to the rollout"
+    );
+
+    let second = builder.resume(&server, codex_home, session_path).await?;
+    second.submit_turn("second resume").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let first_output = requests[0].function_call_output(function_call_id);
+    let first_output_id = first_output
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .expect("reconstructed output should have an item ID")
+        .to_string();
+    assert_eq!(first_output_id, "fco_742749b0-3645-5d32-a172-676827826a07");
+    let first_output_uuid = first_output_id
+        .strip_prefix("fco_")
+        .expect("synthetic output should use the Responses API prefix");
+    assert_eq!(
+        Uuid::parse_str(first_output_uuid)?.get_version(),
+        Some(uuid::Version::Sha1)
+    );
+    assert_eq!(
+        requests[1]
+            .function_call_output(function_call_id)
+            .get("id")
+            .and_then(serde_json::Value::as_str),
+        Some(first_output_id.as_str())
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn custom_provider_http_requests_strip_canonical_item_ids() -> anyhow::Result<()> {
     let server = MockServer::start().await;
     let response_mock = mount_sse_once(

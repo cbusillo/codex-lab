@@ -1,3 +1,4 @@
+use super::super::normalize::SyntheticOutputKind;
 use super::*;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -1230,7 +1231,7 @@ fn normalize_adds_missing_output_for_function_call() {
 #[test]
 fn normalize_adds_missing_output_for_custom_tool_call() {
     let items = vec![ResponseItem::CustomToolCall {
-        id: None,
+        id: Some("ctc_00000000-0000-7000-8000-000000000005".to_string()),
         status: None,
         call_id: "tool-x".to_string(),
         name: "custom".to_string(),
@@ -1244,14 +1245,14 @@ fn normalize_adds_missing_output_for_custom_tool_call() {
         h.raw_items(),
         vec![
             ResponseItem::CustomToolCall {
-                id: None,
+                id: Some("ctc_00000000-0000-7000-8000-000000000005".to_string()),
                 status: None,
                 call_id: "tool-x".to_string(),
                 name: "custom".to_string(),
                 input: "{}".to_string(),
             },
             ResponseItem::CustomToolCallOutput {
-                id: None,
+                id: Some("ctco_53789a49-78a7-576f-9424-b69aaa53e60a".to_string()),
                 call_id: "tool-x".to_string(),
                 name: None,
                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
@@ -1264,7 +1265,7 @@ fn normalize_adds_missing_output_for_custom_tool_call() {
 #[test]
 fn normalize_adds_missing_output_for_local_shell_call_with_id() {
     let items = vec![ResponseItem::LocalShellCall {
-        id: None,
+        id: Some("lsh_00000000-0000-7000-8000-000000000004".to_string()),
         call_id: Some("shell-1".to_string()),
         status: LocalShellStatus::Completed,
         action: LocalShellAction::Exec(LocalShellExecAction {
@@ -1283,7 +1284,7 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id() {
         h.raw_items(),
         vec![
             ResponseItem::LocalShellCall {
-                id: None,
+                id: Some("lsh_00000000-0000-7000-8000-000000000004".to_string()),
                 call_id: Some("shell-1".to_string()),
                 status: LocalShellStatus::Completed,
                 action: LocalShellAction::Exec(LocalShellExecAction {
@@ -1295,7 +1296,7 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id() {
                 }),
             },
             ResponseItem::FunctionCallOutput {
-                id: None,
+                id: Some("fco_01edf808-529c-5820-9ac0-d8305accd576".to_string()),
                 call_id: "shell-1".to_string(),
                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
             },
@@ -1455,6 +1456,186 @@ fn normalize_adds_missing_output_for_function_call_inserts_output() {
             },
         ]
     );
+}
+
+#[test]
+fn synthetic_output_ids_are_deterministic_distinct_and_output_typed() {
+    let function_call_source_id = "fc_00000000-0000-7000-8000-000000000001";
+    let function_output_id = super::super::normalize::synthetic_output_id(
+        SyntheticOutputKind::FunctionCall,
+        Some(function_call_source_id),
+    );
+
+    assert_eq!(
+        function_output_id.as_deref(),
+        Some("fco_ed601c94-3ec7-524e-bb98-0ae149f05927")
+    );
+    assert_eq!(
+        super::super::normalize::synthetic_output_id(
+            SyntheticOutputKind::FunctionCall,
+            Some(function_call_source_id),
+        ),
+        function_output_id
+    );
+    assert_ne!(
+        function_output_id,
+        super::super::normalize::synthetic_output_id(
+            SyntheticOutputKind::FunctionCall,
+            Some("fc_00000000-0000-7000-8000-000000000002")
+        )
+    );
+    assert_eq!(
+        super::super::normalize::synthetic_output_id(
+            SyntheticOutputKind::LocalShellCall,
+            Some("lsh_00000000-0000-7000-8000-000000000004")
+        )
+        .as_deref(),
+        Some("fco_01edf808-529c-5820-9ac0-d8305accd576")
+    );
+    assert_eq!(
+        super::super::normalize::synthetic_output_id(
+            SyntheticOutputKind::ToolSearchCall,
+            Some("tsc_00000000-0000-7000-8000-000000000003")
+        )
+        .as_deref(),
+        Some("tso_80f64221-5fa4-5c07-93ba-7d3dc00f78e5")
+    );
+    assert_eq!(
+        super::super::normalize::synthetic_output_id(
+            SyntheticOutputKind::CustomToolCall,
+            Some("ctc_00000000-0000-7000-8000-000000000005")
+        )
+        .as_deref(),
+        Some("ctco_53789a49-78a7-576f-9424-b69aaa53e60a")
+    );
+}
+
+#[test]
+fn synthetic_output_ids_require_valid_source_response_item_ids() {
+    for source_id in [
+        None,
+        Some(""),
+        Some("legacy-id"),
+        Some("_legacy"),
+        Some("fc_"),
+        Some("msg_valid"),
+    ] {
+        assert_eq!(
+            super::super::normalize::synthetic_output_id(
+                SyntheticOutputKind::FunctionCall,
+                source_id,
+            ),
+            None
+        );
+    }
+}
+
+#[test]
+fn normalize_wires_synthetic_ids_for_nonpanicking_call_variants() {
+    let mut items = vec![
+        ResponseItem::FunctionCall {
+            id: Some("fc_00000000-0000-7000-8000-000000000001".to_string()),
+            name: "function".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: "function-call".to_string(),
+        },
+        ResponseItem::ToolSearchCall {
+            id: Some("tsc_00000000-0000-7000-8000-000000000003".to_string()),
+            call_id: Some("tool-search-call".to_string()),
+            status: None,
+            execution: "client".to_string(),
+            arguments: serde_json::json!({}),
+        },
+    ];
+
+    super::super::normalize::ensure_call_outputs_present(&mut items);
+
+    assert_eq!(items.len(), 4);
+    assert!(matches!(
+        &items[1],
+        ResponseItem::FunctionCallOutput { id: Some(id), call_id, .. }
+            if id == "fco_ed601c94-3ec7-524e-bb98-0ae149f05927"
+                && call_id == "function-call"
+    ));
+    assert!(matches!(
+        &items[3],
+        ResponseItem::ToolSearchOutput { id: Some(id), call_id: Some(call_id), .. }
+            if id == "tso_80f64221-5fa4-5c07-93ba-7d3dc00f78e5"
+                && call_id == "tool-search-call"
+    ));
+}
+
+#[test]
+fn for_prompt_synthesizes_stable_output_ids_without_mutating_history() {
+    let items = vec![
+        ResponseItem::FunctionCall {
+            id: Some("fc_00000000-0000-7000-8000-000000000001".to_string()),
+            name: "do_it".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: "call-valid".to_string(),
+        },
+        ResponseItem::FunctionCall {
+            id: Some("legacy-call-id".to_string()),
+            name: "legacy".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: "call-legacy".to_string(),
+        },
+        ResponseItem::Message {
+            id: Some("msg_later".to_string()),
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "later turn".to_string(),
+            }],
+            phase: None,
+        },
+    ];
+    let history = create_history_with_items(items.clone());
+
+    let first = history.clone().for_prompt(&default_input_modalities());
+    assert_eq!(history.raw_items(), items.as_slice());
+    let second = history.for_prompt(&default_input_modalities());
+
+    assert_eq!(
+        first,
+        vec![
+            ResponseItem::FunctionCall {
+                id: Some("fc_00000000-0000-7000-8000-000000000001".to_string()),
+                name: "do_it".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: "call-valid".to_string(),
+            },
+            ResponseItem::FunctionCallOutput {
+                id: Some("fco_ed601c94-3ec7-524e-bb98-0ae149f05927".to_string()),
+                call_id: "call-valid".to_string(),
+                output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+            },
+            ResponseItem::FunctionCall {
+                id: Some("legacy-call-id".to_string()),
+                name: "legacy".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: "call-legacy".to_string(),
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "call-legacy".to_string(),
+                output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+            },
+            ResponseItem::Message {
+                id: Some("msg_later".to_string()),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "later turn".to_string(),
+                }],
+                phase: None,
+            },
+        ]
+    );
+    assert_eq!(second, first);
 }
 
 #[test]
