@@ -1202,6 +1202,8 @@ mod tests {
     use codex_protocol::AgentPath;
     use codex_protocol::ThreadId;
     use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
+    use codex_protocol::items::CommandExecutionItem as CoreCommandExecutionItem;
+    use codex_protocol::items::CommandExecutionStatus as CoreCommandExecutionStatus;
     use codex_protocol::items::HookPromptFragment as CoreHookPromptFragment;
     use codex_protocol::items::SleepItem as CoreSleepItem;
     use codex_protocol::items::SubAgentActivityItem as CoreSubAgentActivityItem;
@@ -1515,6 +1517,92 @@ mod tests {
                     agent_path: String::from(agent_path),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn legacy_rollout_command_event_matches_canonical_turn_item_fallback() {
+        let turn_id = "turn-1";
+        let thread_id = ThreadId::new();
+        let command = vec!["echo".to_string(), "hello world".to_string()];
+        let parsed_cmd = vec![ParsedCommand::Unknown {
+            cmd: "echo hello world".to_string(),
+        }];
+        let cwd = test_path_buf("/tmp").abs();
+        let turn_started = RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: turn_id.to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }));
+        let turn_completed = RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: turn_id.to_string(),
+            last_agent_message: None,
+            completed_at: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
+        }));
+        let legacy_items = vec![
+            turn_started.clone(),
+            RolloutItem::EventMsg(EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+                call_id: "exec-1".to_string(),
+                process_id: Some("pid-1".to_string()),
+                turn_id: turn_id.to_string(),
+                completed_at_ms: 0,
+                command: command.clone(),
+                cwd: cwd.clone(),
+                parsed_cmd: parsed_cmd.clone(),
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                aggregated_output: "hello world\n".to_string(),
+                exit_code: 0,
+                duration: Duration::from_millis(12),
+                formatted_output: String::new(),
+                status: CoreExecCommandStatus::Completed,
+            })),
+            turn_completed.clone(),
+        ];
+        let canonical_item = RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id,
+            turn_id: turn_id.to_string(),
+            item: CoreTurnItem::CommandExecution(CoreCommandExecutionItem {
+                id: "exec-1".to_string(),
+                process_id: Some("pid-1".to_string()),
+                command,
+                cwd,
+                parsed_cmd,
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                status: CoreCommandExecutionStatus::Completed,
+                stdout: Some(String::new()),
+                stderr: Some(String::new()),
+                aggregated_output: Some("hello world\n".to_string()),
+                exit_code: Some(0),
+                duration: Some(Duration::from_millis(12)),
+                formatted_output: Some(String::new()),
+            }),
+            completed_at_ms: 12,
+        }));
+        let mut legacy_json = serde_json::to_value(canonical_item).expect("serialize rollout item");
+        legacy_json["payload"]
+            .as_object_mut()
+            .expect("event payload")
+            .remove("completed_at_ms");
+        let canonical_item: RolloutItem =
+            serde_json::from_value(legacy_json).expect("deserialize legacy rollout item");
+        let RolloutItem::EventMsg(EventMsg::ItemCompleted(completed)) = &canonical_item else {
+            panic!("expected canonical completed item");
+        };
+        assert_eq!(completed.completed_at_ms, 0);
+
+        let canonical_items = vec![turn_started, canonical_item, turn_completed];
+
+        assert_eq!(
+            build_turns_from_rollout_items(&canonical_items),
+            build_turns_from_rollout_items(&legacy_items)
         );
     }
 
