@@ -578,6 +578,119 @@ async fn checkpoint_fencing_rejects_rewind_and_source_replacement() {
 }
 
 #[tokio::test]
+async fn active_target_uses_latest_in_progress_turn_and_fails_when_none_remain() {
+    let sqlite_home = test_sqlite_home();
+    let repository = ThreadHistoryRepository::new(sqlite_home.clone());
+    repository
+        .apply_suffix(
+            "thread-1",
+            &suffix(
+                vec![
+                    turn(
+                        "turn-1",
+                        /*rollout_ordinal*/ 1,
+                        ThreadHistoryTurnStatus::InProgress,
+                    ),
+                    turn(
+                        "turn-2",
+                        /*rollout_ordinal*/ 2,
+                        ThreadHistoryTurnStatus::InProgress,
+                    ),
+                    ThreadHistoryMutation::UpsertItem(ThreadHistoryItemUpsert {
+                        target: ThreadHistoryTurnTarget::Active,
+                        item_id: "item-active".to_string(),
+                        rollout_ordinal: 3,
+                        item_created_at_ms: 30,
+                        item_json: "{}".to_string(),
+                    }),
+                ],
+                /*next_rollout_ordinal*/ 4,
+                "fingerprint-1",
+            ),
+        )
+        .await
+        .expect("apply active item");
+    let active_items = repository
+        .items_keyset(ThreadHistoryItemsQuery {
+            thread_id: "thread-1",
+            turn_id: Some("turn-2"),
+            cursor: None,
+            direction: ThreadHistoryPageDirection::Ascending,
+            limit: 10,
+        })
+        .await
+        .expect("items for latest active turn");
+    assert_eq!(
+        active_items
+            .iter()
+            .map(|item| item.item_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["item-active"]
+    );
+
+    repository
+        .apply_suffix(
+            "thread-1",
+            &suffix(
+                vec![
+                    ThreadHistoryMutation::UpsertTurn(ThreadHistoryTurnUpsert {
+                        target: ThreadHistoryTurnTarget::Active,
+                        rollout_ordinal: 4,
+                        status: ThreadHistoryTurnStatus::Completed,
+                        error_json: None,
+                        started_at: None,
+                        completed_at: Some(40),
+                        duration_ms: Some(20),
+                    }),
+                    ThreadHistoryMutation::UpsertTurn(ThreadHistoryTurnUpsert {
+                        target: ThreadHistoryTurnTarget::Active,
+                        rollout_ordinal: 5,
+                        status: ThreadHistoryTurnStatus::Completed,
+                        error_json: None,
+                        started_at: None,
+                        completed_at: Some(50),
+                        duration_ms: Some(40),
+                    }),
+                ],
+                /*next_rollout_ordinal*/ 6,
+                "fingerprint-2",
+            ),
+        )
+        .await
+        .expect("complete active turns");
+    let checkpoint = repository
+        .checkpoint("thread-1")
+        .await
+        .expect("checkpoint before missing active turn");
+    let error = repository
+        .apply_suffix(
+            "thread-1",
+            &suffix(
+                vec![ThreadHistoryMutation::UpsertItem(ThreadHistoryItemUpsert {
+                    target: ThreadHistoryTurnTarget::Active,
+                    item_id: "item-missing-active".to_string(),
+                    rollout_ordinal: 6,
+                    item_created_at_ms: 60,
+                    item_json: "{}".to_string(),
+                })],
+                /*next_rollout_ordinal*/ 7,
+                "fingerprint-3",
+            ),
+        )
+        .await
+        .expect_err("missing active turn should fail");
+    assert!(error.to_string().contains("no active projected turn"));
+    assert_eq!(
+        repository
+            .checkpoint("thread-1")
+            .await
+            .expect("checkpoint after missing active turn"),
+        checkpoint
+    );
+    let _ = tokio::fs::remove_dir_all(sqlite_home).await;
+}
+
+#[tokio::test]
 async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     let sqlite_home = test_sqlite_home();
     let repository = ThreadHistoryRepository::new(sqlite_home.clone());
@@ -629,6 +742,17 @@ async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     assert_eq!(
         checkpoint.projection_status,
         ThreadHistoryProjectionStatus::Clean
+    );
+    repository.mark_dirty("thread-1").await.expect("mark dirty");
+    let dirty = repository
+        .checkpoint("thread-1")
+        .await
+        .expect("dirty checkpoint")
+        .expect("dirty checkpoint row");
+    assert_eq!(dirty.projection_generation, 0);
+    assert_eq!(
+        dirty.projection_status,
+        ThreadHistoryProjectionStatus::Dirty
     );
     assert_eq!(
         repository.bump_generation("thread-1").await.expect("bump"),
