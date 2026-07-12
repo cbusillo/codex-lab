@@ -30,11 +30,31 @@ use super::SecretListEntry;
 use super::SecretName;
 use super::SecretScope;
 use super::SecretsBackend;
-use super::compute_keyring_account;
+use super::compute_keyring_account_for_namespace;
 use super::keyring_service;
 
 const SECRETS_VERSION: u8 = 1;
 const LOCAL_SECRETS_FILENAME: &str = "local.age";
+const CODEX_AUTH_SECRETS_FILENAME: &str = "codex_auth.age";
+const MCP_OAUTH_SECRETS_FILENAME: &str = "mcp_oauth.age";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LocalSecretsNamespace {
+    #[default]
+    ManagedSecrets,
+    CodexAuth,
+    McpOAuth,
+}
+
+impl LocalSecretsNamespace {
+    fn filename(self) -> &'static str {
+        match self {
+            Self::ManagedSecrets => LOCAL_SECRETS_FILENAME,
+            Self::CodexAuth => CODEX_AUTH_SECRETS_FILENAME,
+            Self::McpOAuth => MCP_OAUTH_SECRETS_FILENAME,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct SecretsFile {
@@ -55,13 +75,27 @@ impl SecretsFile {
 pub struct LocalSecretsBackend {
     codex_home: PathBuf,
     keyring_store: Arc<dyn KeyringStore>,
+    namespace: LocalSecretsNamespace,
 }
 
 impl LocalSecretsBackend {
     pub fn new(codex_home: PathBuf, keyring_store: Arc<dyn KeyringStore>) -> Self {
+        Self::new_with_namespace(
+            codex_home,
+            keyring_store,
+            LocalSecretsNamespace::ManagedSecrets,
+        )
+    }
+
+    pub fn new_with_namespace(
+        codex_home: PathBuf,
+        keyring_store: Arc<dyn KeyringStore>,
+        namespace: LocalSecretsNamespace,
+    ) -> Self {
         Self {
             codex_home,
             keyring_store,
+            namespace,
         }
     }
 
@@ -112,7 +146,7 @@ impl LocalSecretsBackend {
     }
 
     fn secrets_path(&self) -> PathBuf {
-        self.secrets_dir().join(LOCAL_SECRETS_FILENAME)
+        self.secrets_dir().join(self.namespace.filename())
     }
 
     fn load_file(&self) -> Result<SecretsFile> {
@@ -157,7 +191,7 @@ impl LocalSecretsBackend {
     }
 
     fn load_or_create_passphrase(&self) -> Result<SecretString> {
-        let account = compute_keyring_account(&self.codex_home);
+        let account = compute_keyring_account_for_namespace(&self.codex_home, self.namespace);
         let loaded = self
             .keyring_store
             .load(keyring_service(), &account)
@@ -208,8 +242,15 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
+    let filename = path.file_name().with_context(|| {
+        format!(
+            "failed to compute filename for secrets file at {}",
+            path.display()
+        )
+    })?;
     let tmp_path = dir.join(format!(
-        ".{LOCAL_SECRETS_FILENAME}.tmp-{}-{nonce}",
+        ".{}.tmp-{}-{nonce}",
+        filename.to_string_lossy(),
         std::process::id()
     ));
 
@@ -362,7 +403,7 @@ mod tests {
     fn set_fails_when_keyring_is_unavailable() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
         let keyring = Arc::new(MockKeyringStore::default());
-        let account = compute_keyring_account(codex_home.path());
+        let account = super::super::compute_keyring_account(codex_home.path());
         keyring.set_error(
             &account,
             KeyringError::Invalid("error".into(), "load".into()),
@@ -406,6 +447,70 @@ mod tests {
             .collect();
         assert_eq!(filenames, vec![LOCAL_SECRETS_FILENAME.to_string()]);
         assert_eq!(backend.get(&scope, &name)?, Some("two".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn local_namespaces_use_separate_files_and_keyring_accounts() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let managed_backend = LocalSecretsBackend::new_with_namespace(
+            codex_home.path().to_path_buf(),
+            keyring.clone(),
+            LocalSecretsNamespace::ManagedSecrets,
+        );
+        let codex_auth_backend = LocalSecretsBackend::new_with_namespace(
+            codex_home.path().to_path_buf(),
+            keyring.clone(),
+            LocalSecretsNamespace::CodexAuth,
+        );
+        let mcp_oauth_backend = LocalSecretsBackend::new_with_namespace(
+            codex_home.path().to_path_buf(),
+            keyring.clone(),
+            LocalSecretsNamespace::McpOAuth,
+        );
+        let scope = SecretScope::Global;
+        let name = SecretName::new("TEST_SECRET")?;
+
+        managed_backend.set(&scope, &name, "managed")?;
+        codex_auth_backend.set(&scope, &name, "codex-auth")?;
+        mcp_oauth_backend.set(&scope, &name, "mcp-oauth")?;
+
+        assert_eq!(
+            managed_backend.get(&scope, &name)?,
+            Some("managed".to_string())
+        );
+        assert_eq!(
+            codex_auth_backend.get(&scope, &name)?,
+            Some("codex-auth".to_string())
+        );
+        assert_eq!(
+            mcp_oauth_backend.get(&scope, &name)?,
+            Some("mcp-oauth".to_string())
+        );
+        let secrets_dir = codex_home.path().join("secrets");
+        assert!(secrets_dir.join(LOCAL_SECRETS_FILENAME).exists());
+        assert!(secrets_dir.join(CODEX_AUTH_SECRETS_FILENAME).exists());
+        assert!(secrets_dir.join(MCP_OAUTH_SECRETS_FILENAME).exists());
+
+        let managed_account = compute_keyring_account_for_namespace(
+            codex_home.path(),
+            LocalSecretsNamespace::ManagedSecrets,
+        );
+        let codex_auth_account = compute_keyring_account_for_namespace(
+            codex_home.path(),
+            LocalSecretsNamespace::CodexAuth,
+        );
+        let mcp_oauth_account = compute_keyring_account_for_namespace(
+            codex_home.path(),
+            LocalSecretsNamespace::McpOAuth,
+        );
+        assert_ne!(managed_account, codex_auth_account);
+        assert_ne!(managed_account, mcp_oauth_account);
+        assert_ne!(codex_auth_account, mcp_oauth_account);
+        assert!(keyring.saved_value(&managed_account).is_some());
+        assert!(keyring.saved_value(&codex_auth_account).is_some());
+        assert!(keyring.saved_value(&mcp_oauth_account).is_some());
         Ok(())
     }
 }

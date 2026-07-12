@@ -17,6 +17,7 @@ mod local;
 mod sanitizer;
 
 pub use local::LocalSecretsBackend;
+pub use local::LocalSecretsNamespace;
 pub use sanitizer::redact_secrets;
 
 const KEYRING_SERVICE: &str = "codex";
@@ -122,6 +123,22 @@ impl SecretsManager {
         Self { backend }
     }
 
+    pub fn new_with_keyring_store_and_namespace(
+        codex_home: PathBuf,
+        backend_kind: SecretsBackendKind,
+        keyring_store: Arc<dyn KeyringStore>,
+        namespace: LocalSecretsNamespace,
+    ) -> Self {
+        let backend: Arc<dyn SecretsBackend> = match backend_kind {
+            SecretsBackendKind::Local => Arc::new(LocalSecretsBackend::new_with_namespace(
+                codex_home,
+                keyring_store,
+                namespace,
+            )),
+        };
+        Self { backend }
+    }
+
     pub fn set(&self, scope: &SecretScope, name: &SecretName, value: &str) -> Result<()> {
         self.backend.set(scope, name, value)
     }
@@ -163,6 +180,13 @@ pub fn environment_id_from_cwd(cwd: &Path) -> String {
 }
 
 pub(crate) fn compute_keyring_account(codex_home: &Path) -> String {
+    compute_keyring_account_for_namespace(codex_home, LocalSecretsNamespace::ManagedSecrets)
+}
+
+pub(crate) fn compute_keyring_account_for_namespace(
+    codex_home: &Path,
+    namespace: LocalSecretsNamespace,
+) -> String {
     let canonical = codex_home
         .canonicalize()
         .unwrap_or_else(|_| codex_home.to_path_buf())
@@ -173,7 +197,11 @@ pub(crate) fn compute_keyring_account(codex_home: &Path) -> String {
     let digest = hasher.finalize();
     let hex = format!("{digest:x}");
     let short = hex.get(..16).unwrap_or(hex.as_str());
-    format!("secrets|{short}")
+    match namespace {
+        LocalSecretsNamespace::ManagedSecrets => format!("secrets|{short}"),
+        LocalSecretsNamespace::CodexAuth => format!("secrets|codex-auth|{short}"),
+        LocalSecretsNamespace::McpOAuth => format!("secrets|mcp-oauth|{short}"),
+    }
 }
 
 pub(crate) fn keyring_service() -> &'static str {
