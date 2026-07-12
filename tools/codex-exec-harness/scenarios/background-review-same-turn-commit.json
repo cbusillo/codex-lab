@@ -1,0 +1,101 @@
+{
+  "name": "background-review-same-turn-commit",
+  "characterization": {
+    "issue": 302,
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.5",
+  "prompt": "Create committed-review.txt with apply_patch, commit it, and finish the turn.",
+  "config_toml": "model_provider = \"harness\"\nreview_model = \"gpt-5.5\"\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-background-review-patch",
+        "events": [
+          {
+            "item": {
+              "type": "custom_tool_call",
+              "name": "apply_patch",
+              "input": "*** Begin Patch\n*** Add File: committed-review.txt\n+review committed turn\n*** End Patch",
+              "call_id": "call-background-review-patch"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-background-review-commit",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "shell_command",
+              "arguments": "{\"command\":\"git config user.email test@example.com && git config user.name 'Test User' && git add committed-review.txt && git commit -m 'commit reviewed turn'\"}",
+              "call_id": "call-background-review-commit"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-background-review-complete"
+      },
+      {
+        "response_id": "resp-background-review-result",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-background-review-result",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "{\"findings\":[],\"overall_correctness\":\"patch is correct\",\"overall_explanation\":\"Committed turn diff was reviewed.\",\"overall_confidence_score\":0.9}"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 4,
+    "turn_count": 1,
+    "thread_id": "required",
+    "background_review": {
+      "run_count": 1,
+      "status": "completed",
+      "source": "background",
+      "freshness": "current",
+      "finding_count": 0,
+      "review_target_type": "currentTurnDiff",
+      "target_matches_workspace": true,
+      "worktree_clean": true
+    },
+    "responses": [
+      {
+        "request": 3,
+        "scope": "input",
+        "contains_all": [
+          "Review only the following unified diff",
+          "committed-review.txt"
+        ]
+      }
+    ],
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-background-review-patch",
+        "contains": "Success. Updated the following files:"
+      },
+      {
+        "request": 2,
+        "call_id": "call-background-review-commit",
+        "contains": "commit reviewed turn"
+      }
+    ]
+  },
+  "timeout_seconds": 60
+}

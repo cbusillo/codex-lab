@@ -329,6 +329,47 @@ def auto_review_finding_detail(
     raise HarnessError(f"unknown auto review finding id: {finding_id}")
 
 
+def load_durable_background_review_runs(codex_home: Path) -> list[dict[str, Any]]:
+    review_root = codex_home / "state" / "review"
+    runs_by_id: dict[str, dict[str, Any]] = {}
+    runs_paths = sorted(review_root.glob("*/auto-review/runs.json"))
+    runs_paths.extend(sorted(review_root.glob("*/store/runs.json")))
+    for runs_path in runs_paths:
+        index = load_json(runs_path)
+        runs = index.get("runs", [])
+        if not isinstance(runs, list):
+            raise HarnessError(f"{runs_path}: runs must be a list")
+        for run in runs:
+            if not isinstance(run, dict):
+                raise HarnessError(f"{runs_path}: run entries must be objects")
+            run_id = run.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                raise HarnessError(f"{runs_path}: run_id must be a non-empty string")
+            runs_by_id[run_id] = run
+    return list(runs_by_id.values())
+
+
+def collect_workspace_git_state(workspace: Path) -> dict[str, Any]:
+    def git_text(*args: str) -> str | None:
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if completed.returncode != 0:
+            return None
+        return completed.stdout.strip()
+
+    status = git_text("status", "--porcelain")
+    return {
+        "branch": git_text("branch", "--show-current"),
+        "head_sha": git_text("rev-parse", "HEAD"),
+        "worktree_path": str(workspace.resolve()),
+        "clean": status == "" if status is not None else None,
+    }
+
+
 def response_sse_body(response: dict[str, Any]) -> str:
     if "sse" in response:
         return str(response["sse"])
@@ -927,6 +968,89 @@ def add_token_usage_assertion_failures(
         )
 
 
+def add_background_review_assertion_failures(
+    failures: list[str], run: dict[str, Any], assertion: Any
+) -> None:
+    if assertion is None:
+        return
+    if not isinstance(assertion, dict):
+        raise HarnessError("expect.background_review must be an object")
+
+    runs = run.get("background_review_runs", [])
+    if not isinstance(runs, list):
+        runs = []
+    expected_count = maybe_scenario_int(
+        assertion.get("run_count"), "expect.background_review.run_count"
+    )
+    if expected_count is not None and len(runs) != expected_count:
+        failures.append(
+            f"expected {expected_count} durable auto review runs, found {len(runs)}"
+        )
+    if not runs:
+        return
+    if len(runs) != 1:
+        failures.append(
+            "auto review field assertions require exactly one durable run"
+        )
+        return
+
+    durable_run = runs[0]
+    for field in ["status", "source", "freshness"]:
+        expected = assertion.get(field)
+        if isinstance(expected, str) and durable_run.get(field) != expected:
+            failures.append(
+                f"auto review: expected {field} {expected!r}, found {durable_run.get(field)!r}"
+            )
+
+    expected_finding_count = maybe_scenario_int(
+        assertion.get("finding_count"), "expect.background_review.finding_count"
+    )
+    if (
+        expected_finding_count is not None
+        and durable_run.get("finding_count") != expected_finding_count
+    ):
+        failures.append(
+            "auto review: expected finding_count "
+            f"{expected_finding_count}, found {durable_run.get('finding_count')!r}"
+        )
+
+    review_target = durable_run.get("review_target")
+    expected_review_target_type = assertion.get("review_target_type")
+    if isinstance(expected_review_target_type, str):
+        actual_review_target_type = (
+            review_target.get("type") if isinstance(review_target, dict) else None
+        )
+        if actual_review_target_type != expected_review_target_type:
+            failures.append(
+                "auto review: expected review_target.type "
+                f"{expected_review_target_type!r}, found {actual_review_target_type!r}"
+            )
+
+    workspace_git = run.get("workspace_git")
+    target = durable_run.get("target")
+    if assertion.get("target_matches_workspace") is True:
+        if not isinstance(workspace_git, dict) or not isinstance(target, dict):
+            failures.append("auto review: missing workspace or target metadata")
+        else:
+            for field in ["branch", "head_sha", "worktree_path"]:
+                if target.get(field) != workspace_git.get(field):
+                    failures.append(
+                        "auto review: target "
+                        f"{field} {target.get(field)!r} does not match workspace "
+                        f"{workspace_git.get(field)!r}"
+                    )
+
+    if assertion.get("worktree_clean") is True:
+        if not isinstance(workspace_git, dict) or workspace_git.get("clean") is not True:
+            failures.append("auto review: expected a clean workspace")
+        if not isinstance(target, dict):
+            failures.append("auto review: missing target metadata")
+        elif target.get("worktree_diff_fingerprint") is not None:
+            failures.append(
+                "auto review: clean target unexpectedly recorded a worktree diff fingerprint"
+            )
+
+
 def add_list_text_assertion_failures(
     failures: list[str], values: Any, assertion: Any, label: str
 ) -> None:
@@ -1071,6 +1195,9 @@ def evaluate_expectations(
         run.get("commands"),
         expect.get("commands"),
         "commands",
+    )
+    add_background_review_assertion_failures(
+        failures, run, expect.get("background_review")
     )
 
     if expect.get("same_thread_id") is True:
@@ -1298,8 +1425,14 @@ def run_scenario(args: argparse.Namespace) -> int:
             run = run_turns(scenario, codex_bin, paths, server.requests)
             requests = server.requests
 
+    background_review_runs = load_durable_background_review_runs(paths.codex_home)
+    workspace_git = collect_workspace_git_state(paths.workspace)
+    run["background_review_runs"] = background_review_runs
+    run["workspace_git"] = workspace_git
     failures = evaluate_expectations(scenario, run, requests)
     save_json(paths.artifacts / "responses-requests.json", requests)
+    save_json(paths.artifacts / "background-review-runs.json", background_review_runs)
+    save_json(paths.artifacts / "workspace-git.json", workspace_git)
     summary = {
         "scenario": name,
         "scenario_path": str(scenario_path),
@@ -1310,6 +1443,7 @@ def run_scenario(args: argparse.Namespace) -> int:
         "event_count": len(run["events"]),
         "event_types": run.get("event_types", {}),
         "responses_request_count": len(requests),
+        "background_review_run_count": len(background_review_runs),
         "thread_id": run.get("thread_id"),
         "token_usage": run.get("token_usage", empty_token_usage()),
         "turns": run.get("turns", []),
