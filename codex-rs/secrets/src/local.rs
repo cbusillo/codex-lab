@@ -27,6 +27,7 @@ use tracing::debug;
 use tracing::warn;
 
 use super::SecretListEntry;
+use super::SecretMutation;
 use super::SecretName;
 use super::SecretScope;
 use super::SecretsBackend;
@@ -34,6 +35,10 @@ use super::atomic_file;
 use super::compute_keyring_account_for_namespace;
 use super::keyring_service;
 
+mod mutation;
+#[cfg(test)]
+#[path = "local/mutation_tests.rs"]
+mod mutation_tests;
 #[cfg(windows)]
 mod windows;
 
@@ -353,6 +358,15 @@ impl SecretsBackend for LocalSecretsBackend {
 
     fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
         LocalSecretsBackend::list(self, scope_filter)
+    }
+
+    fn mutate(
+        &self,
+        scope: &SecretScope,
+        name: &SecretName,
+        mutator: &mut dyn FnMut(Option<&str>) -> Result<SecretMutation>,
+    ) -> Result<bool> {
+        LocalSecretsBackend::mutate(self, scope, name, mutator)
     }
 }
 
