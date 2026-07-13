@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::compiler_fence;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use age::decrypt;
 use age::encrypt;
@@ -292,8 +296,7 @@ impl LocalSecretsBackend {
         let plaintext = serde_json::to_vec(file).context("failed to serialize secrets file")?;
         let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
         let path = self.secrets_path();
-        fs::write(&path, &ciphertext)
-            .with_context(|| format!("failed to write secrets file at {}", path.display()))?;
+        write_file_atomically(&path, &ciphertext)?;
         Ok(())
     }
 
@@ -336,6 +339,85 @@ impl SecretsBackend for LocalSecretsBackend {
 
     fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
         LocalSecretsBackend::list(self, scope_filter)
+    }
+}
+
+fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    let dir = path.parent().with_context(|| {
+        format!(
+            "failed to compute parent directory for secrets file at {}",
+            path.display()
+        )
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let filename = path.file_name().with_context(|| {
+        format!(
+            "failed to compute filename for secrets file at {}",
+            path.display()
+        )
+    })?;
+    let tmp_path = dir.join(format!(
+        ".{}.tmp-{}-{nonce}",
+        filename.to_string_lossy(),
+        std::process::id()
+    ));
+
+    {
+        let mut tmp_file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .with_context(|| {
+                format!(
+                    "failed to create temp secrets file at {}",
+                    tmp_path.display()
+                )
+            })?;
+        tmp_file.write_all(contents).with_context(|| {
+            format!(
+                "failed to write temp secrets file at {}",
+                tmp_path.display()
+            )
+        })?;
+        tmp_file.sync_all().with_context(|| {
+            format!("failed to sync temp secrets file at {}", tmp_path.display())
+        })?;
+    }
+
+    match fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(initial_error) => {
+            #[cfg(target_os = "windows")]
+            {
+                if path.exists() {
+                    fs::remove_file(path).with_context(|| {
+                        format!(
+                            "failed to remove existing secrets file at {} before replace",
+                            path.display()
+                        )
+                    })?;
+                    fs::rename(&tmp_path, path).with_context(|| {
+                        format!(
+                            "failed to replace secrets file at {} with {}",
+                            path.display(),
+                            tmp_path.display()
+                        )
+                    })?;
+                    return Ok(());
+                }
+            }
+
+            let _ = fs::remove_file(&tmp_path);
+            Err(initial_error).with_context(|| {
+                format!(
+                    "failed to atomically replace secrets file at {} with {}",
+                    path.display(),
+                    tmp_path.display()
+                )
+            })
+        }
     }
 }
 
