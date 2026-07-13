@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -136,6 +138,53 @@ class CodexLabProvenanceTest(unittest.TestCase):
                         {**provenance, field: value},
                     )
                     self.assertEqual("unverifiable", invalid_shape["status"])
+
+    def test_verify_only_cli_emits_current_and_stale_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo, commit = self.make_repo(root)
+            current = root / "current-codex-lab"
+            write_fake_binary(current, commit, "clean")
+            current_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--repo-root",
+                    str(repo),
+                    "--binary",
+                    str(current),
+                    "--verify-only",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            current_report = json.loads(current_result.stdout)
+            self.assertEqual(0, current_result.returncode)
+            self.assertEqual("current", current_report["status"])
+            self.assertIn("binary_sha256", current_report)
+
+            stale = root / "stale-codex-lab"
+            write_fake_binary(stale, "0" * 40, "clean")
+            stale_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--repo-root",
+                    str(repo),
+                    "--binary",
+                    str(stale),
+                    "--verify-only",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stale_report = json.loads(stale_result.stdout)
+            self.assertEqual(1, stale_result.returncode)
+            self.assertEqual("stale", stale_report["status"])
 
 
 if __name__ == "__main__":
