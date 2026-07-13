@@ -1211,20 +1211,22 @@ impl App {
                     return;
                 }
             };
-            let previous_active_account_id =
-                match codex_login::get_active_account_id(&self.config.codex_home) {
-                    Ok(previous_active_account_id) => previous_active_account_id,
-                    Err(err) => {
-                        self.chat_widget
+            let previous_active_account_id = match codex_login::get_active_account_id(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            ) {
+                Ok(previous_active_account_id) => previous_active_account_id,
+                Err(err) => {
+                    self.chat_widget
                         .show_login_accounts_view_with_feedback(Some(
                             LoginAccountsFeedback::Error(format!(
                                 "Failed to read current active account before selecting {}: {err}",
                                 selection.label
                             )),
                         ));
-                        return;
-                    }
-                };
+                    return;
+                }
+            };
 
             match codex_login::activate_account(
                 &self.config.codex_home,
@@ -1319,9 +1321,13 @@ impl App {
             .map_err(|err| format!("failed to clear selected auth credentials: {err}"))?,
         }
 
-        codex_login::set_active_account_id(&self.config.codex_home, previous_active_account_id)
-            .map(|_| ())
-            .map_err(|err| format!("failed to restore previous active account: {err}"))
+        codex_login::set_active_account_id(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            previous_active_account_id,
+        )
+        .map(|_| ())
+        .map_err(|err| format!("failed to restore previous active account: {err}"))
     }
 
     async fn restart_default_auth_session_after_account_switch(
@@ -1434,28 +1440,31 @@ impl App {
             return;
         }
 
-        let was_default_active = codex_login::get_active_account_id(&self.config.codex_home)
-            .ok()
-            .flatten()
-            .is_some_and(|active_id| active_id == selection.account_id);
+        let was_default_active = codex_login::get_active_account_id(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .ok()
+        .flatten()
+        .is_some_and(|active_id| active_id == selection.account_id);
         let current_session_uses_default_auth_home =
             self.config.auth_home == self.config.codex_home;
         let needs_session_restart = was_default_active && current_session_uses_default_auth_home;
 
-        let removed =
-            match codex_login::remove_account(&self.config.codex_home, &selection.account_id) {
-                Ok(removed) => removed,
-                Err(err) => {
-                    self.chat_widget
-                        .show_login_accounts_view_with_feedback(Some(
-                            LoginAccountsFeedback::Error(format!(
-                                "Failed to disconnect {}: {err}",
-                                selection.label
-                            )),
-                        ));
-                    return;
-                }
-            };
+        let removed = match codex_login::remove_account(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            &selection.account_id,
+        ) {
+            Ok(removed) => removed,
+            Err(err) => {
+                self.chat_widget
+                    .show_login_accounts_view_with_feedback(Some(LoginAccountsFeedback::Error(
+                        format!("Failed to disconnect {}: {err}", selection.label),
+                    )));
+                return;
+            }
+        };
 
         let Some(_removed) = removed else {
             self.chat_widget
@@ -1469,7 +1478,10 @@ impl App {
             LoginAccountsFeedback::Info(format!("Disconnected {}.", selection.label));
 
         if was_default_active {
-            match codex_login::get_active_account_id(&self.config.codex_home) {
+            match codex_login::get_active_account_id(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            ) {
                 Ok(Some(fallback_account_id)) => {
                     if let Err(err) = codex_login::activate_account(
                         &self.config.codex_home,

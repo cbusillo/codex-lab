@@ -3295,12 +3295,15 @@ impl Session {
     async fn saved_account_id(&self, auth: &CodexAuth) -> Option<String> {
         let auth_home = self.auth_home().await;
         let account = match auth.auth_mode() {
-            AuthMode::ApiKey => {
-                codex_login::find_api_key_account_by_key(auth_home.as_path(), auth.api_key()?)
-            }
+            AuthMode::ApiKey => codex_login::find_api_key_account_by_key(
+                auth_home.as_path(),
+                self.services.auth_manager.auth_credentials_store_mode(),
+                auth.api_key()?,
+            ),
             AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
                 codex_login::find_chatgpt_account_by_tokens(
                     auth_home.as_path(),
+                    self.services.auth_manager.auth_credentials_store_mode(),
                     &auth.get_token_data().ok()?,
                 )
             }

@@ -3164,7 +3164,7 @@ async fn usage_limit_auto_switch_emits_user_visible_notice() -> anyhow::Result<(
         Some(format!("Bearer access-{}", accounts.candidate_chatgpt_id))
     );
     assert_eq!(
-        codex_login::get_active_account_id(home.path())?,
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
         Some(accounts.candidate_id.clone())
     );
     assert_ne!(accounts.current_id, accounts.candidate_id);
@@ -3249,7 +3249,7 @@ async fn usage_limit_auto_switch_stops_after_all_stored_accounts_are_limited() -
         Some(expected_authorization.as_str())
     );
     assert_eq!(
-        codex_login::get_active_account_id(home.path())?,
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
         Some(accounts.candidate_id)
     );
 

@@ -715,6 +715,7 @@ pub(crate) fn upsert_login_account(
             if let Some(api_key) = auth.openai_api_key.as_ref() {
                 let _ = upsert_api_key_account(
                     codex_home,
+                    auth_credentials_store_mode,
                     api_key.clone(),
                     /*label*/ None,
                     /*make_active*/ true,
@@ -726,6 +727,7 @@ pub(crate) fn upsert_login_account(
                 let last_refresh = auth.last_refresh.unwrap_or_else(Utc::now);
                 let _ = upsert_chatgpt_account(
                     codex_home,
+                    auth_credentials_store_mode,
                     tokens.clone(),
                     last_refresh,
                     tokens.id_token.email.clone(),
@@ -762,6 +764,7 @@ pub(crate) fn remove_login_account_best_effort(
     };
     if let Err(err) = remove_account_matching_credentials(
         codex_home,
+        auth_credentials_store_mode,
         auth.resolved_mode(),
         auth.openai_api_key.as_deref(),
         auth.tokens.as_ref(),
@@ -1696,6 +1699,10 @@ impl AuthManager {
     /// Current cached auth (clone) without attempting a refresh.
     pub fn auth_cached(&self) -> Option<CodexAuth> {
         self.inner.read().ok().and_then(|c| c.auth.clone())
+    }
+
+    pub fn auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode {
+        self.auth_credentials_store_mode
     }
 
     /// Subscribes to cached auth changes that can affect request recovery.

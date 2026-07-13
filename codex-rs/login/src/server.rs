@@ -1297,6 +1297,7 @@ mod tests {
             .context("old tokens should exist")?;
         upsert_chatgpt_account(
             codex_home.path(),
+            AuthCredentialsStoreMode::File,
             old_tokens.clone(),
             chrono::Utc::now(),
             /*label*/ None,
@@ -1342,7 +1343,7 @@ mod tests {
                 "client_id": crate::auth::CLIENT_ID,
             })
         );
-        let accounts = list_accounts(codex_home.path())?;
+        let accounts = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
         assert_eq!(accounts.len(), 1);
         let account = &accounts[0];
         let tokens = account.tokens.as_ref().context("new account tokens")?;
@@ -1378,6 +1379,7 @@ mod tests {
             .context("old tokens should exist")?;
         upsert_chatgpt_account(
             codex_home.path(),
+            AuthCredentialsStoreMode::File,
             old_tokens.clone(),
             chrono::Utc::now(),
             /*label*/ None,
@@ -1395,7 +1397,7 @@ mod tests {
         )
         .await?;
 
-        let accounts = list_accounts(codex_home.path())?;
+        let accounts = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
         assert_eq!(accounts.len(), 1);
         let account = &accounts[0];
         let tokens = account.tokens.as_ref().context("new account tokens")?;
@@ -1425,6 +1427,7 @@ mod tests {
             .context("old tokens should exist")?;
         upsert_chatgpt_account(
             codex_home.path(),
+            AuthCredentialsStoreMode::File,
             old_tokens.clone(),
             chrono::Utc::now(),
             /*label*/ None,
@@ -1442,7 +1445,7 @@ mod tests {
         )
         .await?;
 
-        let accounts = list_accounts(codex_home.path())?;
+        let accounts = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
         assert_eq!(accounts.len(), 2);
         let account_ids = accounts
             .iter()
@@ -1455,8 +1458,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(account_ids.contains(&Some("old-account")));
         assert!(account_ids.contains(&Some("new-account")));
-        let active_account_id = crate::auth_accounts::get_active_account_id(codex_home.path())?
-            .context("active account should be set")?;
+        let active_account_id = crate::auth_accounts::get_active_account_id(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+        )?
+        .context("active account should be set")?;
         let active_account = accounts
             .iter()
             .find(|account| account.id == active_account_id)
@@ -1502,6 +1508,7 @@ mod tests {
             .context("old tokens should exist")?;
         upsert_chatgpt_account(
             codex_home.path(),
+            AuthCredentialsStoreMode::File,
             old_tokens.clone(),
             chrono::Utc::now(),
             /*label*/ None,
@@ -1519,7 +1526,7 @@ mod tests {
         )
         .await?;
 
-        let accounts = list_accounts(codex_home.path())?;
+        let accounts = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
         assert_eq!(accounts.len(), 1);
         let tokens = accounts[0]
             .tokens

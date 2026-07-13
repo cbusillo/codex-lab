@@ -49,11 +49,17 @@ struct AuthImportCandidate {
 
 pub fn import_auth_accounts_from_auth_homes(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<AuthAccountImportReport> {
     let mut report = AuthAccountImportReport::default();
 
     for candidate in import_candidates(codex_home)? {
-        import_auth_home(codex_home, candidate, &mut report)?;
+        import_auth_home(
+            codex_home,
+            auth_credentials_store_mode,
+            candidate,
+            &mut report,
+        )?;
     }
 
     Ok(report)
@@ -77,6 +83,7 @@ fn import_candidates(codex_home: &Path) -> io::Result<Vec<AuthImportCandidate>> 
 
 fn import_auth_home(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     candidate: AuthImportCandidate,
     report: &mut AuthAccountImportReport,
 ) -> io::Result<()> {
@@ -101,11 +108,18 @@ fn import_auth_home(
         Err(err) => return Err(err),
     };
 
-    import_auth_payload(codex_home, candidate.source, auth, report)
+    import_auth_payload(
+        codex_home,
+        auth_credentials_store_mode,
+        candidate.source,
+        auth,
+        report,
+    )
 }
 
 fn import_auth_payload(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     source: AuthAccountImportSource,
     auth: AuthDotJson,
     report: &mut AuthAccountImportReport,
@@ -116,7 +130,12 @@ fn import_auth_payload(
                 push_skip(report, source, AuthAccountImportSkipReason::InvalidAuth);
                 return Ok(());
             };
-            insert_api_key_account_if_missing(codex_home, api_key, /*label*/ None)?
+            insert_api_key_account_if_missing(
+                codex_home,
+                auth_credentials_store_mode,
+                api_key,
+                /*label*/ None,
+            )?
         }
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
             let Some(tokens) = auth.tokens else {
@@ -126,6 +145,7 @@ fn import_auth_payload(
             let last_refresh = auth.last_refresh.unwrap_or_else(chrono::Utc::now);
             insert_chatgpt_account_if_missing(
                 codex_home,
+                auth_credentials_store_mode,
                 tokens.clone(),
                 last_refresh,
                 tokens.id_token.email,

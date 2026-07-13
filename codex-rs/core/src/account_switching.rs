@@ -240,6 +240,7 @@ fn has_unexpired_tried_marker(
 pub fn select_next_account_id(
     codex_home: &Path,
     auth_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     state: &RateLimitSwitchState,
     allow_api_key_fallback: bool,
     now: DateTime<Utc>,
@@ -247,9 +248,9 @@ pub fn select_next_account_id(
 ) -> io::Result<Option<String>> {
     let current = match current_account_id {
         Some(id) => Some(id.to_string()),
-        None => codex_login::get_active_account_id(auth_home)?,
+        None => codex_login::get_active_account_id(auth_home, auth_credentials_store_mode)?,
     };
-    let accounts = codex_login::list_accounts(auth_home)?;
+    let accounts = codex_login::list_accounts(auth_home, auth_credentials_store_mode)?;
 
     let snapshots = account_usage::list_rate_limit_snapshots(codex_home).unwrap_or_default();
     let snapshot_map: HashMap<String, account_usage::StoredRateLimitSnapshot> = snapshots
@@ -332,11 +333,12 @@ pub fn switch_active_account_to_preferred_for_new_session(
     now: DateTime<Utc>,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<Option<StoredAccount>> {
-    let current_account_id = codex_login::get_active_account_id(auth_home)?;
+    let current_account_id =
+        codex_login::get_active_account_id(auth_home, auth_credentials_store_mode)?;
     let Some(current_account_id) = current_account_id else {
         return Ok(None);
     };
-    let accounts = codex_login::list_accounts(auth_home)?;
+    let accounts = codex_login::list_accounts(auth_home, auth_credentials_store_mode)?;
 
     if let Some(current) = accounts
         .iter()
@@ -403,6 +405,7 @@ pub fn switch_active_account_on_rate_limit(
     match select_next_account_id(
         codex_home,
         auth_home,
+        auth_credentials_store_mode,
         state,
         allow_api_key_fallback,
         now,
@@ -431,6 +434,25 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde::Serialize;
     use serde_json::json;
+
+    fn select_next_account_id(
+        codex_home: &Path,
+        auth_home: &Path,
+        state: &RateLimitSwitchState,
+        allow_api_key_fallback: bool,
+        now: DateTime<Utc>,
+        current_account_id: Option<&str>,
+    ) -> io::Result<Option<String>> {
+        super::select_next_account_id(
+            codex_home,
+            auth_home,
+            AuthCredentialsStoreMode::File,
+            state,
+            allow_api_key_fallback,
+            now,
+            current_account_id,
+        )
+    }
 
     fn fake_jwt(account_id: &str, email: &str) -> String {
         #[derive(Serialize)]
@@ -476,6 +498,7 @@ mod tests {
     fn upsert_chatgpt(codex_home: &Path, account_id: &str) -> String {
         codex_login::upsert_chatgpt_account(
             codex_home,
+            AuthCredentialsStoreMode::File,
             token_data(account_id, "user@example.com"),
             Utc::now(),
             None,
@@ -488,15 +511,28 @@ mod tests {
     fn upsert_claim_only_chatgpt(codex_home: &Path, account_id: &str) -> String {
         let mut tokens = token_data(account_id, "user@example.com");
         tokens.account_id = None;
-        codex_login::upsert_chatgpt_account(codex_home, tokens, Utc::now(), None, false)
-            .expect("upsert claim-only chatgpt")
-            .id
+        codex_login::upsert_chatgpt_account(
+            codex_home,
+            AuthCredentialsStoreMode::File,
+            tokens,
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("upsert claim-only chatgpt")
+        .id
     }
 
     fn upsert_api_key(codex_home: &Path, key: &str) -> String {
-        codex_login::upsert_api_key_account(codex_home, key.to_string(), None, false)
-            .expect("upsert api key")
-            .id
+        codex_login::upsert_api_key_account(
+            codex_home,
+            AuthCredentialsStoreMode::File,
+            key.to_string(),
+            None,
+            false,
+        )
+        .expect("upsert api key")
+        .id
     }
 
     fn rate_limit_snapshot(resets_at_seconds: i64, used_percent: f64) -> RateLimitSnapshot {
@@ -523,7 +559,12 @@ mod tests {
         let current = upsert_chatgpt(temp.path(), "current");
         let slower = upsert_chatgpt(temp.path(), "slower");
         let faster = upsert_claim_only_chatgpt(temp.path(), "faster");
-        codex_login::set_active_account_id(temp.path(), Some(current.clone())).expect("set active");
+        codex_login::set_active_account_id(
+            temp.path(),
+            AuthCredentialsStoreMode::File,
+            Some(current),
+        )
+        .expect("set active");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &slower,
@@ -677,7 +718,12 @@ mod tests {
         let now = Utc::now();
         let current = upsert_chatgpt(temp.path(), "current");
         let candidate = upsert_chatgpt(temp.path(), "candidate");
-        codex_login::set_active_account_id(temp.path(), Some(current.clone())).expect("set active");
+        codex_login::set_active_account_id(
+            temp.path(),
+            AuthCredentialsStoreMode::File,
+            Some(current.clone()),
+        )
+        .expect("set active");
         let current_auth = AuthDotJson {
             auth_mode: None,
             openai_api_key: None,
@@ -706,13 +752,14 @@ mod tests {
         assert_eq!(
             outcome,
             AccountSwitchOutcome::Switched(
-                codex_login::find_account(temp.path(), &candidate)
+                codex_login::find_account(temp.path(), AuthCredentialsStoreMode::File, &candidate,)
                     .expect("find account")
                     .expect("candidate account")
             )
         );
         assert_eq!(
-            codex_login::get_active_account_id(temp.path()).expect("active account"),
+            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
+                .expect("active account"),
             Some(candidate)
         );
         assert!(state.has_tried(&current));
@@ -817,7 +864,12 @@ mod tests {
         let current = upsert_chatgpt(temp.path(), "current");
         let slower = upsert_chatgpt(temp.path(), "slower");
         let faster = upsert_chatgpt(temp.path(), "faster");
-        codex_login::set_active_account_id(temp.path(), Some(current.clone())).expect("set active");
+        codex_login::set_active_account_id(
+            temp.path(),
+            AuthCredentialsStoreMode::File,
+            Some(current),
+        )
+        .expect("set active");
         save_auth(
             temp.path(),
             &AuthDotJson {
@@ -857,7 +909,8 @@ mod tests {
 
         assert_eq!(switched.id, faster);
         assert_eq!(
-            codex_login::get_active_account_id(temp.path()).expect("active account"),
+            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
+                .expect("active account"),
             Some(faster)
         );
     }
@@ -868,7 +921,12 @@ mod tests {
         let now = Utc::now();
         let api_key = upsert_api_key(temp.path(), "sk-current");
         let _chatgpt = upsert_chatgpt(temp.path(), "chatgpt");
-        codex_login::set_active_account_id(temp.path(), Some(api_key.clone())).expect("set active");
+        codex_login::set_active_account_id(
+            temp.path(),
+            AuthCredentialsStoreMode::File,
+            Some(api_key.clone()),
+        )
+        .expect("set active");
 
         let switched = switch_active_account_to_preferred_for_new_session(
             temp.path(),
@@ -880,7 +938,8 @@ mod tests {
 
         assert_eq!(switched, None);
         assert_eq!(
-            codex_login::get_active_account_id(temp.path()).expect("active account"),
+            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
+                .expect("active account"),
             Some(api_key)
         );
     }
@@ -890,7 +949,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
         let _chatgpt = upsert_chatgpt(temp.path(), "chatgpt");
-        codex_login::set_active_account_id(temp.path(), None).expect("clear active");
+        codex_login::set_active_account_id(temp.path(), AuthCredentialsStoreMode::File, None)
+            .expect("clear active");
 
         let switched = switch_active_account_to_preferred_for_new_session(
             temp.path(),
@@ -902,7 +962,8 @@ mod tests {
 
         assert_eq!(switched, None);
         assert_eq!(
-            codex_login::get_active_account_id(temp.path()).expect("active account"),
+            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
+                .expect("active account"),
             None
         );
     }
@@ -913,7 +974,12 @@ mod tests {
         let now = Utc::now();
         let current = upsert_chatgpt(temp.path(), "current");
         let blocked = upsert_chatgpt(temp.path(), "blocked");
-        codex_login::set_active_account_id(temp.path(), Some(current.clone())).expect("set active");
+        codex_login::set_active_account_id(
+            temp.path(),
+            AuthCredentialsStoreMode::File,
+            Some(current.clone()),
+        )
+        .expect("set active");
         account_usage::record_usage_limit_hint(
             temp.path(),
             &blocked,
@@ -934,7 +1000,8 @@ mod tests {
 
         assert_eq!(switched, None);
         assert_eq!(
-            codex_login::get_active_account_id(temp.path()).expect("active account"),
+            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
+                .expect("active account"),
             Some(current)
         );
     }

@@ -665,22 +665,26 @@ impl AccountRequestProcessor {
     }
 
     async fn list_accounts_response(&self) -> Result<ListAccountsResponse, JSONRPCErrorError> {
-        let active_account_id = codex_login::get_active_account_id(Self::auth_storage_home(
-            &self.config,
-        ))
+        let active_account_id = codex_login::get_active_account_id(
+            Self::auth_storage_home(&self.config),
+            self.config.cli_auth_credentials_store_mode,
+        )
         .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
-        let accounts = codex_login::list_accounts(Self::auth_storage_home(&self.config))
-            .map_err(|err| internal_error(format!("failed to read stored accounts: {err}")))?
-            .into_iter()
-            .map(|account| AccountListEntry {
-                is_active: active_account_id.as_deref() == Some(account.id.as_str()),
-                account_id: account.id,
-                auth_mode: account.mode,
-                label: account.label,
-                created_at: account.created_at.map(|ts| ts.timestamp()),
-                last_used_at: account.last_used_at.map(|ts| ts.timestamp()),
-            })
-            .collect();
+        let accounts = codex_login::list_accounts(
+            Self::auth_storage_home(&self.config),
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to read stored accounts: {err}")))?
+        .into_iter()
+        .map(|account| AccountListEntry {
+            is_active: active_account_id.as_deref() == Some(account.id.as_str()),
+            account_id: account.id,
+            auth_mode: account.mode,
+            label: account.label,
+            created_at: account.created_at.map(|ts| ts.timestamp()),
+            last_used_at: account.last_used_at.map(|ts| ts.timestamp()),
+        })
+        .collect();
         Ok(ListAccountsResponse {
             active_account_id,
             accounts,
@@ -703,10 +707,17 @@ impl AccountRequestProcessor {
         }
 
         let auth_home = Self::auth_storage_home(&self.config);
-        let previous_active_account_id = codex_login::get_active_account_id(auth_home)
-            .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
-        let removed = codex_login::remove_account(auth_home, &params.account_id)
-            .map_err(|err| internal_error(format!("failed to remove stored account: {err}")))?;
+        let previous_active_account_id = codex_login::get_active_account_id(
+            auth_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
+        let removed = codex_login::remove_account(
+            auth_home,
+            self.config.cli_auth_credentials_store_mode,
+            &params.account_id,
+        )
+        .map_err(|err| internal_error(format!("failed to remove stored account: {err}")))?;
         let Some(_removed) = removed else {
             return Ok(RemoveAccountResponse {
                 status: RemoveAccountStatus::NotFound,
@@ -714,8 +725,11 @@ impl AccountRequestProcessor {
             });
         };
 
-        let mut active_account_id = codex_login::get_active_account_id(auth_home)
-            .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
+        let mut active_account_id = codex_login::get_active_account_id(
+            auth_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
         let active_account_changed = previous_active_account_id != active_account_id;
 
         if active_account_changed {

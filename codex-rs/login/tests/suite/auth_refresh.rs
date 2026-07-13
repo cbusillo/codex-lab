@@ -62,6 +62,7 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
     ctx.write_auth(&initial_auth).await?;
     upsert_chatgpt_account(
         ctx.codex_home.path(),
+        AuthCredentialsStoreMode::File,
         initial_tokens.clone(),
         initial_last_refresh,
         /*label*/ None,
@@ -100,7 +101,7 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
         .context("token data should be cached")?;
     assert_eq!(cached, refreshed_tokens);
 
-    let accounts = list_accounts(ctx.codex_home.path())?;
+    let accounts = list_accounts(ctx.codex_home.path(), AuthCredentialsStoreMode::File)?;
     assert_eq!(accounts.len(), 1);
     let account = &accounts[0];
     assert_eq!(

@@ -97,14 +97,16 @@ fn login_with_api_key_upserts_active_auth_account() {
     super::login_with_api_key(dir.path(), "sk-new", AuthCredentialsStoreMode::File)
         .expect("login_with_api_key should succeed");
 
-    let accounts = list_accounts(dir.path()).expect("list accounts");
+    let accounts =
+        list_accounts(dir.path(), AuthCredentialsStoreMode::File).expect("list accounts");
     assert_eq!(accounts.len(), 1);
     let account = &accounts[0];
     assert_eq!(account.mode, AuthMode::ApiKey);
     assert_eq!(account.openai_api_key.as_deref(), Some("sk-new"));
     assert_eq!(account.tokens, None);
     assert_eq!(
-        get_active_account_id(dir.path()).expect("active account id"),
+        get_active_account_id(dir.path(), AuthCredentialsStoreMode::File)
+            .expect("active account id"),
         Some(account.id.clone())
     );
 }
@@ -133,11 +135,12 @@ fn ephemeral_login_with_api_key_skips_auth_account_upsert() {
         .expect("login_with_api_key should succeed");
 
     assert_eq!(
-        list_accounts(dir.path()).expect("list accounts"),
+        list_accounts(dir.path(), AuthCredentialsStoreMode::File).expect("list accounts"),
         Vec::new()
     );
     assert_eq!(
-        get_active_account_id(dir.path()).expect("active account id"),
+        get_active_account_id(dir.path(), AuthCredentialsStoreMode::File)
+            .expect("active account id"),
         None
     );
 }
@@ -163,11 +166,12 @@ fn non_file_modes_skip_plaintext_auth_account_upsert() {
     }
 
     assert_eq!(
-        list_accounts(dir.path()).expect("list accounts"),
+        list_accounts(dir.path(), AuthCredentialsStoreMode::File).expect("list accounts"),
         Vec::new()
     );
     assert_eq!(
-        get_active_account_id(dir.path()).expect("active account id"),
+        get_active_account_id(dir.path(), AuthCredentialsStoreMode::File)
+            .expect("active account id"),
         None
     );
 }
@@ -193,11 +197,12 @@ fn auto_mode_can_remove_matching_plaintext_auth_account_record() {
     );
 
     assert_eq!(
-        list_accounts(dir.path()).expect("list accounts"),
+        list_accounts(dir.path(), AuthCredentialsStoreMode::File).expect("list accounts"),
         Vec::new()
     );
     assert_eq!(
-        get_active_account_id(dir.path()).expect("active account id"),
+        get_active_account_id(dir.path(), AuthCredentialsStoreMode::File)
+            .expect("active account id"),
         None
     );
 }
@@ -477,13 +482,22 @@ fn logout_removes_auth_file() -> Result<(), std::io::Error> {
     super::login_with_api_key(dir.path(), "sk-test-key", AuthCredentialsStoreMode::File)?;
     let auth_file = get_auth_file(dir.path());
     assert!(auth_file.exists());
-    assert_eq!(list_accounts(dir.path())?.len(), 1);
+    assert_eq!(
+        list_accounts(dir.path(), AuthCredentialsStoreMode::File)?.len(),
+        1
+    );
 
     assert!(logout(dir.path(), AuthCredentialsStoreMode::File)?);
 
     assert!(!auth_file.exists());
-    assert_eq!(list_accounts(dir.path())?, Vec::new());
-    assert_eq!(get_active_account_id(dir.path())?, None);
+    assert_eq!(
+        list_accounts(dir.path(), AuthCredentialsStoreMode::File)?,
+        Vec::new()
+    );
+    assert_eq!(
+        get_active_account_id(dir.path(), AuthCredentialsStoreMode::File)?,
+        None
+    );
     Ok(())
 }
 

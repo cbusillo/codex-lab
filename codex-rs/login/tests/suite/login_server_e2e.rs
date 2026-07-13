@@ -165,7 +165,7 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     assert_eq!(json["tokens"]["refresh_token"], "refresh-123");
     assert_eq!(json["tokens"]["account_id"], chatgpt_account_id);
 
-    let accounts = list_accounts(&codex_home)?;
+    let accounts = list_accounts(&codex_home, AuthCredentialsStoreMode::File)?;
     assert_eq!(accounts.len(), 1);
     let account = &accounts[0];
     assert_eq!(account.mode, codex_app_server_protocol::AuthMode::Chatgpt);
@@ -174,7 +174,7 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     assert_eq!(tokens.account_id.as_deref(), Some(chatgpt_account_id));
     assert_eq!(tokens.access_token, "access-123");
     assert_eq!(
-        get_active_account_id(&codex_home)?,
+        get_active_account_id(&codex_home, AuthCredentialsStoreMode::File)?,
         Some(account.id.clone())
     );
 

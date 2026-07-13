@@ -228,16 +228,22 @@ async fn login_slash_command_lists_selectable_stored_accounts() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let chatgpt = codex_login::upsert_chatgpt_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         make_chatgpt_tokens("account-stored", "stored@example.com"),
         Utc::now(),
         Some("stored@example.com".to_string()),
         /*make_active*/ true,
     )
     .expect("insert chatgpt account");
-    codex_login::set_active_account_id(&chat.config.codex_home, Some(chatgpt.id))
-        .expect("set active account");
+    codex_login::set_active_account_id(
+        &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
+        Some(chatgpt.id),
+    )
+    .expect("set active account");
     codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-test-secret-value".to_string(),
         Some("Automation key".to_string()),
         /*make_active*/ false,
@@ -318,6 +324,7 @@ async fn login_slash_command_refreshes_open_accounts_view() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-initial-key".to_string(),
         Some("Initial key".to_string()),
         /*make_active*/ true,
@@ -332,6 +339,7 @@ async fn login_slash_command_refreshes_open_accounts_view() {
 
     codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-later-key".to_string(),
         Some("Later key".to_string()),
         /*make_active*/ false,
@@ -370,6 +378,7 @@ async fn login_slash_command_stored_account_selection_switches_account() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let account = codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-test-secret-value".to_string(),
         Some("Automation key".to_string()),
         /*make_active*/ false,
@@ -392,6 +401,7 @@ async fn login_slash_command_disconnects_stored_account_after_confirmation() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let account = codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-test-secret-value".to_string(),
         Some("Automation key".to_string()),
         /*make_active*/ false,
@@ -420,6 +430,7 @@ async fn login_slash_command_disconnect_confirmation_can_be_cancelled() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-test-secret-value".to_string(),
         Some("Automation key".to_string()),
         /*make_active*/ false,
@@ -439,13 +450,18 @@ async fn login_slash_command_disconnects_active_account_after_confirmation() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let account = codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-test-secret-value".to_string(),
         Some("Automation key".to_string()),
         /*make_active*/ true,
     )
     .expect("insert api key account");
-    codex_login::set_active_account_id(&chat.config.codex_home, Some(account.id.clone()))
-        .expect("set active account");
+    codex_login::set_active_account_id(
+        &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
+        Some(account.id.clone()),
+    )
+    .expect("set active account");
 
     chat.dispatch_command(SlashCommand::Login);
     let popup = render_bottom_popup(&chat, /*width*/ 100);
@@ -468,6 +484,7 @@ async fn login_slash_command_stored_account_selectable_from_auth_profile() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let account = codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-test-secret-value".to_string(),
         Some("Automation key".to_string()),
         /*make_active*/ true,
@@ -500,13 +517,18 @@ async fn login_slash_command_active_stored_account_is_not_selectable() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let account = codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-test-secret-value".to_string(),
         Some("Automation key".to_string()),
         /*make_active*/ true,
     )
     .expect("insert api key account");
-    codex_login::set_active_account_id(&chat.config.codex_home, Some(account.id))
-        .expect("set active account");
+    codex_login::set_active_account_id(
+        &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
+        Some(account.id),
+    )
+    .expect("set active account");
 
     chat.dispatch_command(SlashCommand::Login);
     let popup = render_bottom_popup(&chat, /*width*/ 100);
@@ -556,6 +578,7 @@ async fn login_slash_command_add_selection_moves_after_account_rows() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     codex_login::upsert_api_key_account(
         &chat.config.codex_home,
+        AuthCredentialsStoreMode::File,
         "sk-test-secret-value".to_string(),
         Some("Automation key".to_string()),
         /*make_active*/ false,
