@@ -1,7 +1,10 @@
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Barrier;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -14,6 +17,21 @@ use pretty_assertions::assert_eq;
 use super::*;
 use crate::SecretsBackendKind;
 use crate::SecretsManager;
+
+#[cfg(unix)]
+struct PermissionRestoreGuard {
+    path: PathBuf,
+    permissions: Option<fs::Permissions>,
+}
+
+#[cfg(unix)]
+impl Drop for PermissionRestoreGuard {
+    fn drop(&mut self) {
+        if let Some(permissions) = self.permissions.take() {
+            let _ = fs::set_permissions(&self.path, permissions);
+        }
+    }
+}
 
 #[test]
 fn manager_mutation_reports_whether_ciphertext_changed() -> Result<()> {
@@ -80,7 +98,10 @@ fn concurrent_mutations_observe_committed_updates() -> Result<()> {
     let second_manager = manager.clone();
     let second_scope = scope.clone();
     let second_name = name.clone();
+    let second_ready = Arc::new(Barrier::new(/*n*/ 2));
+    let second_thread_ready = second_ready.clone();
     let second = thread::spawn(move || {
+        second_thread_ready.wait();
         second_manager.mutate(&second_scope, &second_name, |current| {
             second_started_sender.send(())?;
             let current = current
@@ -90,6 +111,7 @@ fn concurrent_mutations_observe_committed_updates() -> Result<()> {
         })
     });
 
+    second_ready.wait();
     assert!(
         second_started_receiver
             .recv_timeout(Duration::from_millis(/*millis*/ 100))
@@ -173,11 +195,17 @@ fn write_error_preserves_existing_ciphertext() -> Result<()> {
     let mut read_only_permissions = original_permissions.clone();
     read_only_permissions.set_mode(/*mode*/ 0o500);
     fs::set_permissions(&secrets_dir, read_only_permissions)?;
+    let mut permission_guard = PermissionRestoreGuard {
+        path: secrets_dir.clone(),
+        permissions: Some(original_permissions),
+    };
 
     let mutation = backend.mutate(&scope, &name, &mut |_| {
         Ok(SecretMutation::Set("after".to_string()))
     });
-    fs::set_permissions(&secrets_dir, original_permissions)?;
+    if let Some(permissions) = permission_guard.permissions.take() {
+        fs::set_permissions(&secrets_dir, permissions)?;
+    }
 
     mutation.expect_err("read-only secrets directory must reject the write");
     assert_eq!(fs::read(backend.secrets_path())?, ciphertext);
