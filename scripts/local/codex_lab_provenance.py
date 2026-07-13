@@ -196,6 +196,29 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_binary(repo_root: Path, binary_path: Path) -> dict[str, Any]:
+    expected = checkout_identity(repo_root)
+    binary_path = binary_path.expanduser().resolve(strict=True)
+    digest = sha256_file(binary_path)
+    if checkout_identity(repo_root) != expected:
+        return unavailable_report(
+            binary_path, expected, "checkout changed during verification"
+        )
+    report = verification_report(
+        expected, binary_path, reported_provenance(binary_path)
+    )
+    if sha256_file(binary_path) != digest:
+        return unavailable_report(
+            binary_path, expected, "binary changed during verification"
+        )
+    if checkout_identity(repo_root) != expected:
+        return unavailable_report(
+            binary_path, expected, "checkout changed during verification"
+        )
+    report["binary_sha256"] = digest
+    return report
+
+
 def ensure_private_directory(path: Path) -> None:
     path.mkdir(mode=0o700, exist_ok=True)
     if path.is_symlink() or path.resolve(strict=True) != path:
@@ -331,7 +354,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--artifact-root", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--artifact-root", type=Path)
+    mode.add_argument("--verify-only", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
@@ -339,7 +364,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
-        report = stage_candidate(args.repo_root, args.binary, args.artifact_root)
+        if args.verify_only:
+            report = verify_binary(args.repo_root, args.binary)
+        else:
+            report = stage_candidate(args.repo_root, args.binary, args.artifact_root)
     except (OSError, RuntimeError, TypeError, ValueError, ProvenanceError) as error:
         report = unavailable_report(args.binary, None, str(error))
 

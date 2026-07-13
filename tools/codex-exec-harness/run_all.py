@@ -12,7 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_DIR = ROOT / "tools" / "codex-exec-harness" / "scenarios"
 HARNESS = ROOT / "tools" / "codex-exec-harness" / "harness.py"
+PROVENANCE_HELPER = ROOT / "scripts" / "local" / "codex_lab_provenance.py"
 DEFAULT_CODEX_BIN = ROOT / "codex-rs" / "target" / "debug" / "codex"
+PROVENANCE_TIMEOUT_SECONDS = 120
 TOKEN_USAGE_FIELDS = [
     "input_tokens",
     "cached_input_tokens",
@@ -47,7 +49,9 @@ def empty_token_usage() -> dict[str, int]:
 
 
 def add_token_usage(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
-    return {field: left.get(field, 0) + right.get(field, 0) for field in TOKEN_USAGE_FIELDS}
+    return {
+        field: left.get(field, 0) + right.get(field, 0) for field in TOKEN_USAGE_FIELDS
+    }
 
 
 def load_summary(stdout: str) -> dict[str, object] | None:
@@ -79,6 +83,88 @@ def git_revision() -> str | None:
     return result.stdout.strip()
 
 
+def unavailable_provenance(binary_path: str, failure: str) -> dict[str, object]:
+    try:
+        display_path = str(Path(binary_path).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        display_path = binary_path
+    return {
+        "schema_version": 1,
+        "status": "unverifiable",
+        "binary_path": display_path,
+        "expected": None,
+        "provenance": None,
+        "failures": [failure],
+    }
+
+
+def verify_provenance(binary_path: str) -> dict[str, object]:
+    try:
+        requested_binary = Path(binary_path).expanduser()
+        if not requested_binary.is_absolute():
+            requested_binary = Path.cwd() / requested_binary
+        binary_path = str(requested_binary.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError) as error:
+        return unavailable_provenance(binary_path, f"invalid binary path: {error}")
+    command = [
+        sys.executable,
+        str(PROVENANCE_HELPER),
+        "--repo-root",
+        str(ROOT),
+        "--binary",
+        binary_path,
+        "--verify-only",
+        "--json",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=PROVENANCE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return unavailable_provenance(binary_path, "provenance verification timed out")
+    except OSError as error:
+        return unavailable_provenance(
+            binary_path, f"could not run provenance verification: {error}"
+        )
+
+    report = load_summary(result.stdout)
+    if report is None:
+        detail = result.stderr.strip() or "helper did not emit a JSON report"
+        return unavailable_provenance(binary_path, detail)
+    status = report.get("status")
+    if status not in {"current", "stale", "unverifiable"}:
+        return unavailable_provenance(
+            binary_path, "helper emitted an unsupported provenance status"
+        )
+    if (status == "current") != (result.returncode == 0):
+        return unavailable_provenance(
+            binary_path, "helper returned an inconsistent provenance result"
+        )
+    return report
+
+
+def provenance_revision(report: dict[str, object]) -> str | None:
+    expected = report.get("expected")
+    if isinstance(expected, dict):
+        source_commit = expected.get("source_commit")
+        if isinstance(source_commit, str):
+            return source_commit
+    return git_revision()
+
+
+def print_provenance_failure(report: dict[str, object]) -> None:
+    print(f"Codex Lab provenance {report['status']}", file=sys.stderr)
+    failures = report.get("failures")
+    if isinstance(failures, list):
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+
+
 def save_report(path: Path, report: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -101,6 +187,31 @@ def main(argv: list[str]) -> int:
     scenario_results: list[dict[str, object]] = []
     aggregate_tokens = empty_token_usage()
     exit_code = 0
+    provenance = verify_provenance(args.codex_bin)
+    verified_binary = provenance.get("binary_path")
+    if not isinstance(verified_binary, str):
+        verified_binary = args.codex_bin
+
+    if provenance["status"] != "current":
+        print_provenance_failure(provenance)
+        report = {
+            "schema_version": 1,
+            "codex_bin": verified_binary,
+            "git_revision": provenance_revision(provenance),
+            "output_root": args.output_root,
+            "passed": False,
+            "partial": False,
+            "returncode": 1,
+            "scenario_count": 0,
+            "scenario_total": len(scenarios),
+            "wall_seconds": round(time.time() - started_at, 3),
+            "token_usage": aggregate_tokens,
+            "provenance": provenance,
+            "scenarios": scenario_results,
+        }
+        if args.report_json is not None:
+            save_report(Path(args.report_json), report)
+        return 1
 
     for scenario in scenarios:
         print(f"== {scenario.relative_to(ROOT)}", flush=True)
@@ -109,7 +220,7 @@ def main(argv: list[str]) -> int:
             str(HARNESS),
             str(scenario),
             "--codex-bin",
-            args.codex_bin,
+            verified_binary,
         ]
         if args.output_root is not None:
             command.extend(["--output-root", args.output_root])
@@ -141,7 +252,11 @@ def main(argv: list[str]) -> int:
         if isinstance(token_usage, dict):
             aggregate_tokens = add_token_usage(
                 aggregate_tokens,
-                {key: value for key, value in token_usage.items() if isinstance(value, int)},
+                {
+                    key: value
+                    for key, value in token_usage.items()
+                    if isinstance(value, int)
+                },
             )
         scenario_results.append(summary)
         if result.returncode != 0:
@@ -150,8 +265,8 @@ def main(argv: list[str]) -> int:
 
     report = {
         "schema_version": 1,
-        "codex_bin": args.codex_bin,
-        "git_revision": git_revision(),
+        "codex_bin": verified_binary,
+        "git_revision": provenance_revision(provenance),
         "output_root": args.output_root,
         "passed": exit_code == 0,
         "partial": exit_code != 0 and len(scenario_results) < len(scenarios),
@@ -160,6 +275,7 @@ def main(argv: list[str]) -> int:
         "scenario_total": len(scenarios),
         "wall_seconds": round(time.time() - started_at, 3),
         "token_usage": aggregate_tokens,
+        "provenance": provenance,
         "scenarios": scenario_results,
     }
     if args.report_json is not None:

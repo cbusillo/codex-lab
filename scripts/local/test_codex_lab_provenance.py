@@ -67,6 +67,9 @@ class CodexLabProvenanceTest(unittest.TestCase):
             self.assertEqual("dirty", PROVENANCE.checkout_identity(repo)["dirty_state"])
             source = root / "dirty-codex-lab"
             write_fake_binary(source, commit, "dirty")
+            verified = PROVENANCE.verify_binary(repo, source)
+            self.assertEqual("current", verified["status"])
+            self.assertIn("binary_sha256", verified)
             rejected = PROVENANCE.stage_candidate(repo, source, root / "artifacts")
             self.assertEqual("unverifiable", rejected["status"])
 

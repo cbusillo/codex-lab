@@ -17,6 +17,21 @@ Run the full harness suite against a freshly built local Codex binary:
 just exec-harness-test
 ```
 
+The full runner verifies the binary once before any scenario starts. Its
+aggregate report records the exact executable path, source commit, dirty state,
+build profile/channel, and binary digest under `provenance`. A stale or
+unverifiable binary stops the run before scenario evidence is accepted.
+
+Verify an existing binary without running scenarios:
+
+```sh
+python3 scripts/local/codex_lab_provenance.py \
+  --repo-root . \
+  --binary codex-rs/target/debug/codex \
+  --verify-only \
+  --json
+```
+
 Run one scenario against an existing binary:
 
 ```sh

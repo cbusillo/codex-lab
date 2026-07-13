@@ -12,7 +12,9 @@ on:
       - "justfile"
       - "scripts/just-shell.py"
       - "scripts/local/cleanup-space.sh"
+      - "scripts/local/codex_lab_provenance.py"
       - "scripts/local/exec-harness-env.sh"
+      - "scripts/local/test_codex_lab_provenance.py"
       - "tools/codex-exec-harness/**"
       - "codex-rs/**"
 
