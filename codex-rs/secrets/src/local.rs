@@ -1,15 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::compiler_fence;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use age::decrypt;
 use age::encrypt;
@@ -34,6 +30,7 @@ use super::SecretListEntry;
 use super::SecretName;
 use super::SecretScope;
 use super::SecretsBackend;
+use super::atomic_file;
 use super::compute_keyring_account_for_namespace;
 use super::keyring_service;
 
@@ -112,6 +109,8 @@ impl LocalSecretsBackend {
     pub fn set(&self, scope: &SecretScope, name: &SecretName, value: &str) -> Result<()> {
         anyhow::ensure!(!value.is_empty(), "secret value must not be empty");
         let _lock = self.acquire_lock(LockMode::Exclusive)?;
+        #[cfg(windows)]
+        self.recover_windows_atomic_write()?;
         let canonical_key = scope.canonical_key(name);
         let mut file = self.load_file()?;
         file.secrets.insert(canonical_key, value.to_string());
@@ -129,6 +128,8 @@ impl LocalSecretsBackend {
             return Ok(false);
         }
         let _lock = self.acquire_lock(LockMode::Exclusive)?;
+        #[cfg(windows)]
+        self.recover_windows_atomic_write()?;
         let canonical_key = scope.canonical_key(name);
         let mut file = self.load_file()?;
         let removed = file.secrets.remove(&canonical_key).is_some();
@@ -251,28 +252,49 @@ impl LocalSecretsBackend {
         file
     }
 
-    fn load_file(&self) -> Result<SecretsFile> {
-        let path = self.secrets_path();
-        if !path
-            .try_exists()
-            .with_context(|| format!("failed to inspect secrets file at {}", path.display()))?
-        {
-            return Ok(SecretsFile::new_empty());
-        }
+    #[cfg(windows)]
+    fn recover_windows_atomic_write(&self) -> Result<()> {
+        atomic_file::recover_interrupted_write(&self.secrets_path()).with_context(|| {
+            format!(
+                "failed to recover interrupted secrets replacement at {}",
+                self.secrets_path().display()
+            )
+        })?;
+        Ok(())
+    }
 
-        let ciphertext = fs::read(&path)
-            .with_context(|| format!("failed to read secrets file at {}", path.display()))?;
+    fn load_file(&self) -> Result<SecretsFile> {
+        let logical_path = self.secrets_path();
+        #[cfg(windows)]
+        let source_path = atomic_file::readable_path(&logical_path)?;
+        #[cfg(not(windows))]
+        let source_path = if logical_path.try_exists().with_context(|| {
+            format!(
+                "failed to inspect secrets file at {}",
+                logical_path.display()
+            )
+        })? {
+            Some(logical_path.clone())
+        } else {
+            None
+        };
+        let Some(source_path) = source_path else {
+            return Ok(SecretsFile::new_empty());
+        };
+
+        let ciphertext = fs::read(&source_path)
+            .with_context(|| format!("failed to read secrets file at {}", source_path.display()))?;
         let passphrase = self.load_passphrase()?.with_context(|| {
             format!(
                 "secrets file exists at {} but its key is missing from the keyring",
-                path.display()
+                logical_path.display()
             )
         })?;
         let plaintext = decrypt_with_passphrase(&ciphertext, &passphrase)?;
         let mut parsed: SecretsFile = serde_json::from_slice(&plaintext).with_context(|| {
             format!(
                 "failed to deserialize decrypted secrets file at {}",
-                path.display()
+                source_path.display()
             )
         })?;
         if parsed.version == 0 {
@@ -296,7 +318,7 @@ impl LocalSecretsBackend {
         let plaintext = serde_json::to_vec(file).context("failed to serialize secrets file")?;
         let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
         let path = self.secrets_path();
-        write_file_atomically(&path, &ciphertext)?;
+        atomic_file::write_file_atomically(&path, &ciphertext)?;
         Ok(())
     }
 
@@ -339,85 +361,6 @@ impl SecretsBackend for LocalSecretsBackend {
 
     fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
         LocalSecretsBackend::list(self, scope_filter)
-    }
-}
-
-fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
-    let dir = path.parent().with_context(|| {
-        format!(
-            "failed to compute parent directory for secrets file at {}",
-            path.display()
-        )
-    })?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let filename = path.file_name().with_context(|| {
-        format!(
-            "failed to compute filename for secrets file at {}",
-            path.display()
-        )
-    })?;
-    let tmp_path = dir.join(format!(
-        ".{}.tmp-{}-{nonce}",
-        filename.to_string_lossy(),
-        std::process::id()
-    ));
-
-    {
-        let mut tmp_file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)
-            .with_context(|| {
-                format!(
-                    "failed to create temp secrets file at {}",
-                    tmp_path.display()
-                )
-            })?;
-        tmp_file.write_all(contents).with_context(|| {
-            format!(
-                "failed to write temp secrets file at {}",
-                tmp_path.display()
-            )
-        })?;
-        tmp_file.sync_all().with_context(|| {
-            format!("failed to sync temp secrets file at {}", tmp_path.display())
-        })?;
-    }
-
-    match fs::rename(&tmp_path, path) {
-        Ok(()) => Ok(()),
-        Err(initial_error) => {
-            #[cfg(target_os = "windows")]
-            {
-                if path.exists() {
-                    fs::remove_file(path).with_context(|| {
-                        format!(
-                            "failed to remove existing secrets file at {} before replace",
-                            path.display()
-                        )
-                    })?;
-                    fs::rename(&tmp_path, path).with_context(|| {
-                        format!(
-                            "failed to replace secrets file at {} with {}",
-                            path.display(),
-                            tmp_path.display()
-                        )
-                    })?;
-                    return Ok(());
-                }
-            }
-
-            let _ = fs::remove_file(&tmp_path);
-            Err(initial_error).with_context(|| {
-                format!(
-                    "failed to atomically replace secrets file at {} with {}",
-                    path.display(),
-                    tmp_path.display()
-                )
-            })
-        }
     }
 }
 
@@ -726,6 +669,109 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_read_uses_backup_generation_without_mutating_state() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
+        let first_name = SecretName::new("FIRST")?;
+        let second_name = SecretName::new("SECOND")?;
+        backend.set(&SecretScope::Global, &first_name, "one")?;
+
+        let path = backend.secrets_path();
+        let old_ciphertext = fs::read(&path)?;
+        backend.set(&SecretScope::Global, &first_name, "new")?;
+        let new_ciphertext = fs::read(&path)?;
+        let transaction = atomic_file::transaction_paths(
+            &path,
+            atomic_file::TransactionKind::ReplaceExisting,
+            "a1-b2-c3",
+        )?;
+        fs::remove_file(&path)?;
+        fs::write(&transaction.temp, new_ciphertext)?;
+        fs::write(&transaction.backup, old_ciphertext)?;
+        fs::write(&transaction.marker, b"")?;
+
+        assert_eq!(
+            backend.get(&SecretScope::Global, &first_name)?,
+            Some("one".to_string())
+        );
+        assert!(transaction.temp.try_exists()?);
+        assert!(transaction.backup.try_exists()?);
+        assert!(transaction.marker.try_exists()?);
+
+        backend.set(&SecretScope::Global, &second_name, "two")?;
+        assert_eq!(
+            backend.get(&SecretScope::Global, &first_name)?,
+            Some("one".to_string())
+        );
+        assert_eq!(
+            backend.get(&SecretScope::Global, &second_name)?,
+            Some("two".to_string())
+        );
+        assert!(!atomic_file::recovery_artifacts_exist(&path)?);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_read_uses_committed_destination_without_cleanup() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
+        let name = SecretName::new("FIRST")?;
+        backend.set(&SecretScope::Global, &name, "old")?;
+
+        let path = backend.secrets_path();
+        let old_ciphertext = fs::read(&path)?;
+        backend.set(&SecretScope::Global, &name, "new")?;
+        let transaction = atomic_file::transaction_paths(
+            &path,
+            atomic_file::TransactionKind::ReplaceExisting,
+            "a1-b2-c3",
+        )?;
+        fs::write(&transaction.backup, old_ciphertext)?;
+        fs::write(&transaction.marker, b"")?;
+
+        assert_eq!(
+            backend.get(&SecretScope::Global, &name)?,
+            Some("new".to_string())
+        );
+        assert!(transaction.backup.try_exists()?);
+        assert!(transaction.marker.try_exists()?);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_first_publish_temp_is_readable_before_recovery() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
+        let name = SecretName::new("FIRST")?;
+        backend.set(&SecretScope::Global, &name, "one")?;
+
+        let path = backend.secrets_path();
+        let ciphertext = fs::read(&path)?;
+        let transaction = atomic_file::transaction_paths(
+            &path,
+            atomic_file::TransactionKind::FirstPublish,
+            "a1-b2-c3",
+        )?;
+        fs::remove_file(&path)?;
+        fs::write(&transaction.temp, ciphertext)?;
+        fs::write(&transaction.marker, b"")?;
+
+        assert_eq!(
+            backend.get(&SecretScope::Global, &name)?,
+            Some("one".to_string())
+        );
+        assert!(transaction.temp.try_exists()?);
+        assert!(transaction.marker.try_exists()?);
+        Ok(())
+    }
+
     #[test]
     fn concurrent_first_writes_share_one_key_and_preserve_both_values() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
@@ -804,18 +850,15 @@ mod tests {
         thread::spawn(move || {
             let _ = delete_sender.send(delete_backend.delete(&SecretScope::Global, &delete_name));
         });
-        let delete_completed_early = delete_receiver
-            .recv_timeout(Duration::from_millis(/*millis*/ 100))
-            .ok()
-            .transpose()?;
+        assert!(matches!(
+            delete_receiver.recv_timeout(Duration::from_millis(/*millis*/ 100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
         load_release_sender.send(()).expect("release set writer");
         set_thread.join().expect("set writer")?;
-        let deleted = match delete_completed_early {
-            Some(deleted) => deleted,
-            None => delete_receiver
-                .recv_timeout(Duration::from_secs(/*secs*/ 30))
-                .expect("delete writer")?,
-        };
+        let deleted = delete_receiver
+            .recv_timeout(Duration::from_secs(/*secs*/ 30))
+            .expect("delete writer")?;
 
         assert!(deleted);
         assert_eq!(

@@ -13,6 +13,7 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 
+mod atomic_file;
 mod local;
 mod sanitizer;
 
