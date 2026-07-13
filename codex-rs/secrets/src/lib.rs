@@ -13,9 +13,12 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 
+mod document;
 mod local;
 mod sanitizer;
 
+pub use document::EncryptedDocument;
+pub use document::EncryptedDocumentStore;
 pub use local::LocalSecretsBackend;
 pub use local::LocalSecretsNamespace;
 pub use sanitizer::redact_secrets;
@@ -177,10 +180,6 @@ pub fn environment_id_from_cwd(cwd: &Path) -> String {
     let hex = format!("{digest:x}");
     let short = hex.get(..12).unwrap_or(hex.as_str());
     format!("cwd-{short}")
-}
-
-pub(crate) fn compute_keyring_account(codex_home: &Path) -> String {
-    compute_keyring_account_for_namespace(codex_home, LocalSecretsNamespace::ManagedSecrets)
 }
 
 pub(crate) fn compute_keyring_account_for_namespace(
