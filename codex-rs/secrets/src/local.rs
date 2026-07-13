@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::compiler_fence;
+#[cfg(not(windows))]
 use std::time::SystemTime;
+#[cfg(not(windows))]
 use std::time::UNIX_EPOCH;
 
 use age::decrypt;
@@ -27,6 +29,7 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::debug;
 use tracing::warn;
 
 use super::SecretListEntry;
@@ -118,12 +121,8 @@ impl LocalSecretsBackend {
     }
 
     pub fn get(&self, scope: &SecretScope, name: &SecretName) -> Result<Option<String>> {
-        if !self.secrets_file_exists()? {
-            return Ok(None);
-        }
-        let _lock = self.acquire_lock(LockMode::Shared)?;
         let canonical_key = scope.canonical_key(name);
-        let file = self.load_file()?;
+        let file = self.load_file_for_read()?;
         Ok(file.secrets.get(&canonical_key).cloned())
     }
 
@@ -139,11 +138,7 @@ impl LocalSecretsBackend {
     }
 
     pub fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
-        if !self.secrets_file_exists()? {
-            return Ok(Vec::new());
-        }
-        let _lock = self.acquire_lock(LockMode::Shared)?;
-        let file = self.load_file()?;
+        let file = self.load_file_for_read()?;
         let mut entries = Vec::new();
         for canonical_key in file.secrets.keys() {
             let Some(entry) = parse_canonical_key(canonical_key) else {
@@ -173,29 +168,82 @@ impl LocalSecretsBackend {
             .join(format!(".{}.lock", self.namespace.filename()))
     }
 
-    fn secrets_file_exists(&self) -> Result<bool> {
-        let path = self.secrets_path();
-        path.try_exists()
-            .with_context(|| format!("failed to inspect secrets file at {}", path.display()))
+    fn acquire_lock(&self, mode: LockMode) -> Result<Option<fs::File>> {
+        let path = self.lock_path();
+        match mode {
+            LockMode::Shared => {
+                let file = match fs::OpenOptions::new().read(true).open(&path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let secrets_path = self.secrets_path();
+                        if !secrets_path.try_exists().with_context(|| {
+                            format!(
+                                "failed to inspect secrets file at {}",
+                                secrets_path.display()
+                            )
+                        })? {
+                            return Ok(None);
+                        }
+                        let mut options = fs::OpenOptions::new();
+                        options.create(true).read(true).write(true);
+                        #[cfg(unix)]
+                        options.mode(0o600);
+                        match options.open(&path) {
+                            Ok(file) => file,
+                            Err(error) => {
+                                debug!(
+                                    "reading secrets without a shared lock because {} could not be created: {error}",
+                                    path.display()
+                                );
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        debug!(
+                            "reading secrets without a shared lock because {} could not be opened: {error}",
+                            path.display()
+                        );
+                        return Ok(None);
+                    }
+                };
+                if let Err(error) = FileExt::lock_shared(&file) {
+                    debug!(
+                        "reading secrets without a shared lock because {} could not be locked: {error}",
+                        path.display()
+                    );
+                    return Ok(None);
+                }
+                Ok(Some(file))
+            }
+            LockMode::Exclusive => {
+                let dir = self.secrets_dir();
+                fs::create_dir_all(&dir)
+                    .with_context(|| format!("failed to create secrets dir {}", dir.display()))?;
+                let mut options = fs::OpenOptions::new();
+                options.create(true).read(true).write(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                let file = options.open(&path).with_context(|| {
+                    format!("failed to open secrets lock at {}", path.display())
+                })?;
+                FileExt::lock_exclusive(&file).with_context(|| {
+                    format!("failed to lock secrets file at {}", path.display())
+                })?;
+                Ok(Some(file))
+            }
+        }
     }
 
-    fn acquire_lock(&self, mode: LockMode) -> Result<fs::File> {
-        let dir = self.secrets_dir();
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create secrets dir {}", dir.display()))?;
-        let path = self.lock_path();
-        let mut options = fs::OpenOptions::new();
-        options.create(true).read(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let file = options
-            .open(&path)
-            .with_context(|| format!("failed to open secrets lock at {}", path.display()))?;
-        match mode {
-            LockMode::Shared => FileExt::lock_shared(&file),
-            LockMode::Exclusive => FileExt::lock_exclusive(&file),
+    fn load_file_for_read(&self) -> Result<SecretsFile> {
+        let read_lock = self.acquire_lock(LockMode::Shared)?;
+        let file = self.load_file()?;
+        if read_lock.is_none()
+            && self.lock_path().try_exists().unwrap_or(false)
+            && let Some(_retry_lock) = self.acquire_lock(LockMode::Shared)?
+        {
+            return self.load_file();
         }
-        .with_context(|| format!("failed to lock secrets file at {}", path.display()))?;
         Ok(file)
     }
 
@@ -244,7 +292,7 @@ impl LocalSecretsBackend {
         let plaintext = serde_json::to_vec(file).context("failed to serialize secrets file")?;
         let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
         let path = self.secrets_path();
-        write_file_atomically(&path, &ciphertext)?;
+        write_secrets_file(&path, &ciphertext)?;
         Ok(())
     }
 
@@ -290,7 +338,30 @@ impl SecretsBackend for LocalSecretsBackend {
     }
 }
 
-fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+fn write_secrets_file(path: &Path, contents: &[u8]) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("failed to open secrets file at {}", path.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("failed to write secrets file at {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync secrets file at {}", path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        write_file_atomically_unix(path, contents)
+    }
+}
+
+#[cfg(not(windows))]
+fn write_file_atomically_unix(path: &Path, contents: &[u8]) -> Result<()> {
     let dir = path.parent().with_context(|| {
         format!(
             "failed to compute parent directory for secrets file at {}",
@@ -334,8 +405,7 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
         })?;
     }
 
-    if let Err(error) = replace_file(&tmp_path, path) {
-        #[cfg(not(windows))]
+    if let Err(error) = fs::rename(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(error).with_context(|| {
             format!(
@@ -347,56 +417,6 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     }
     if let Err(err) = sync_parent_directory(dir) {
         warn!("failed to sync secrets directory after atomic replace: {err:#}");
-    }
-    Ok(())
-}
-
-fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
-    #[cfg(not(windows))]
-    {
-        fs::rename(src, dst)
-    }
-    #[cfg(windows)]
-    {
-        if !dst.try_exists()? {
-            return fs::rename(src, dst);
-        }
-        replace_file_windows(src, dst)
-    }
-}
-
-#[cfg(windows)]
-fn replace_file_windows(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
-
-    unsafe extern "system" {
-        fn ReplaceFileW(
-            lp_replaced_file_name: *const u16,
-            lp_replacement_file_name: *const u16,
-            lp_backup_file_name: *const u16,
-            dw_replace_flags: u32,
-            lp_exclude: *mut c_void,
-            lp_reserved: *mut c_void,
-        ) -> i32;
-    }
-
-    let dst = dst.canonicalize()?;
-    let src = src.canonicalize()?;
-    let dst_wide: Vec<u16> = dst.as_os_str().encode_wide().chain(Some(0)).collect();
-    let src_wide: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
-    let replaced = unsafe {
-        ReplaceFileW(
-            dst_wide.as_ptr(),
-            src_wide.as_ptr(),
-            std::ptr::null(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if replaced == 0 {
-        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
@@ -478,6 +498,8 @@ mod tests {
     use codex_keyring_store::tests::MockKeyringStore;
     use keyring::Error as KeyringError;
     use pretty_assertions::assert_eq;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Barrier;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
@@ -564,13 +586,19 @@ mod tests {
     fn load_file_rejects_newer_schema_versions() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
         let keyring = Arc::new(MockKeyringStore::default());
-        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
+        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring.clone());
 
         let file = SecretsFile {
             version: SECRETS_VERSION + 1,
             secrets: BTreeMap::new(),
         };
         backend.save_file(&file)?;
+        let ciphertext = fs::read(backend.secrets_path())?;
+        let account = compute_keyring_account_for_namespace(
+            codex_home.path(),
+            LocalSecretsNamespace::ManagedSecrets,
+        );
+        let passphrase = keyring.saved_value(&account);
 
         let error = backend
             .load_file()
@@ -579,6 +607,8 @@ mod tests {
             error.to_string().contains("newer than supported version"),
             "unexpected error: {error:#}"
         );
+        assert_eq!(fs::read(backend.secrets_path())?, ciphertext);
+        assert_eq!(keyring.saved_value(&account), passphrase);
         Ok(())
     }
 
@@ -618,12 +648,49 @@ mod tests {
         let name = SecretName::new("TEST_SECRET")?;
 
         assert_eq!(backend.get(&SecretScope::Global, &name)?, None);
+        assert_eq!(backend.list(None)?, Vec::new());
         let account = compute_keyring_account_for_namespace(
             codex_home.path(),
             LocalSecretsNamespace::ManagedSecrets,
         );
         assert!(!keyring.contains(&account));
         assert!(!backend.secrets_path().exists());
+        assert!(!backend.lock_path().exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_store_can_be_read_without_creating_a_lock_file() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
+        let name = SecretName::new("TEST_SECRET")?;
+        backend.set(&SecretScope::Global, &name, "secret")?;
+        fs::remove_file(backend.lock_path())?;
+
+        let secrets_dir = backend.secrets_dir();
+        let original_permissions = fs::metadata(&secrets_dir)?.permissions();
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_mode(0o500);
+        fs::set_permissions(&secrets_dir, read_only_permissions)?;
+        let read_result = (|| -> Result<_> {
+            Ok((
+                backend.get(&SecretScope::Global, &name)?,
+                backend.list(None)?,
+            ))
+        })();
+        fs::set_permissions(&secrets_dir, original_permissions)?;
+
+        let (value, entries) = read_result?;
+        assert_eq!(value, Some("secret".to_string()));
+        assert_eq!(
+            entries,
+            vec![SecretListEntry {
+                scope: SecretScope::Global,
+                name,
+            }]
+        );
         assert!(!backend.lock_path().exists());
         Ok(())
     }
@@ -678,8 +745,12 @@ mod tests {
             "missing persistent lock file: {filenames:?}"
         );
         assert!(
-            filenames.iter().all(|filename| !filename.contains(".tmp-")),
-            "unexpected temp file: {filenames:?}"
+            filenames.iter().all(|filename| {
+                !filename.contains(".tmp-")
+                    && !filename.ends_with(".tmp")
+                    && !filename.ends_with(".bak")
+            }),
+            "unexpected replacement artifact: {filenames:?}"
         );
         assert_eq!(backend.get(&scope, &name)?, Some("two".to_string()));
         Ok(())
@@ -782,13 +853,12 @@ mod tests {
     }
 
     #[test]
-    fn failed_atomic_replace_preserves_destination_and_cleans_temp_file() -> Result<()> {
+    fn failed_file_write_preserves_destination_and_cleans_temp_file() -> Result<()> {
         let dir = tempfile::tempdir().expect("tempdir");
         let destination = dir.path().join("destination");
         fs::create_dir(&destination)?;
 
-        write_file_atomically(&destination, b"secret")
-            .expect_err("replacing a directory should fail");
+        write_secrets_file(&destination, b"secret").expect_err("replacing a directory should fail");
 
         assert!(destination.is_dir());
         let entries = fs::read_dir(dir.path())?.collect::<std::io::Result<Vec<_>>>()?;
