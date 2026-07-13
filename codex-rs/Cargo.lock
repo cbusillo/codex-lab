@@ -3866,6 +3866,7 @@ dependencies = [
  "base64 0.22.1",
  "codex-git-utils",
  "codex-keyring-store",
+ "fs2",
  "keyring",
  "pretty_assertions",
  "rand 0.9.3",

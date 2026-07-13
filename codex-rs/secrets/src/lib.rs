@@ -179,10 +179,6 @@ pub fn environment_id_from_cwd(cwd: &Path) -> String {
     format!("cwd-{short}")
 }
 
-pub(crate) fn compute_keyring_account(codex_home: &Path) -> String {
-    compute_keyring_account_for_namespace(codex_home, LocalSecretsNamespace::ManagedSecrets)
-}
-
 pub(crate) fn compute_keyring_account_for_namespace(
     codex_home: &Path,
     namespace: LocalSecretsNamespace,
