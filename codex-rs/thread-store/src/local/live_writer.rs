@@ -11,6 +11,7 @@ use tracing::warn;
 
 use super::LocalThreadStore;
 use super::create_thread;
+use super::thread_history_projection::ProjectionReconcileMode;
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::ReadThreadParams;
@@ -113,9 +114,19 @@ pub(super) async fn resume_thread(
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to resume local thread recorder: {err}"),
         })?;
+    let rollout_path = recorder.rollout_path().to_path_buf();
     store
         .insert_live_recorder(params.thread_id, recorder, history_mode)
-        .await
+        .await?;
+    reconcile_paginated_history(
+        store,
+        params.thread_id,
+        history_mode,
+        rollout_path.as_path(),
+        ProjectionReconcileMode::VerifyPrefix,
+    )
+    .await;
+    Ok(())
 }
 
 pub(super) async fn append_items(
@@ -141,33 +152,58 @@ pub(super) async fn append_items(
         .map_err(thread_store_io_error)?;
     // LiveThread applies metadata immediately after append_items returns. Wait for the local
     // writer so SQLite never gets ahead of JSONL for accepted live appends.
-    recorder.flush().await.map_err(thread_store_io_error)
+    recorder.flush().await.map_err(thread_store_io_error)?;
+    reconcile_paginated_history(
+        store,
+        params.thread_id,
+        history_mode,
+        recorder.rollout_path(),
+        ProjectionReconcileMode::TrustLiveWriter,
+    )
+    .await;
+    Ok(())
 }
 
 pub(super) async fn persist_thread(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<()> {
-    store
-        .live_recorder(thread_id)
-        .await?
-        .persist()
-        .await
-        .map_err(thread_store_io_error)?;
-    sync_materialized_rollout_path(store, thread_id).await
+    let recorder = store.live_recorder(thread_id).await?;
+    recorder.persist().await.map_err(thread_store_io_error)?;
+    sync_materialized_rollout_path(store, thread_id).await?;
+    let history_mode = store.live_history_mode(thread_id).await;
+    if let Some(history_mode) = history_mode {
+        reconcile_paginated_history(
+            store,
+            thread_id,
+            history_mode,
+            recorder.rollout_path(),
+            ProjectionReconcileMode::TrustLiveWriter,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 pub(super) async fn flush_thread(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<()> {
-    store
-        .live_recorder(thread_id)
-        .await?
-        .flush()
-        .await
-        .map_err(thread_store_io_error)?;
-    sync_materialized_rollout_path(store, thread_id).await
+    let recorder = store.live_recorder(thread_id).await?;
+    recorder.flush().await.map_err(thread_store_io_error)?;
+    sync_materialized_rollout_path(store, thread_id).await?;
+    let history_mode = store.live_history_mode(thread_id).await;
+    if let Some(history_mode) = history_mode {
+        reconcile_paginated_history(
+            store,
+            thread_id,
+            history_mode,
+            recorder.rollout_path(),
+            ProjectionReconcileMode::TrustLiveWriter,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 pub(super) async fn shutdown_thread(
@@ -177,6 +213,17 @@ pub(super) async fn shutdown_thread(
     let recorder = store.live_recorder(thread_id).await?;
     recorder.shutdown().await.map_err(thread_store_io_error)?;
     sync_materialized_rollout_path(store, thread_id).await?;
+    let history_mode = store.live_history_mode(thread_id).await;
+    if let Some(history_mode) = history_mode {
+        reconcile_paginated_history(
+            store,
+            thread_id,
+            history_mode,
+            recorder.rollout_path(),
+            ProjectionReconcileMode::TrustLiveWriter,
+        )
+        .await;
+    }
     store.live_recorders.lock().await.remove(&thread_id);
     Ok(())
 }
@@ -250,6 +297,21 @@ async fn sync_materialized_rollout_path(
         warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
     }
     Ok(())
+}
+
+async fn reconcile_paginated_history(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    history_mode: ThreadHistoryMode,
+    rollout_path: &std::path::Path,
+    mode: ProjectionReconcileMode,
+) {
+    if matches!(history_mode, ThreadHistoryMode::Paginated) {
+        store
+            .history_projection
+            .reconcile_best_effort(thread_id, rollout_path, mode)
+            .await;
+    }
 }
 
 fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
