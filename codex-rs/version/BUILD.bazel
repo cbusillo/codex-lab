@@ -8,3 +8,8 @@ codex_rust_crate(
         "//codex-rs/models-manager:models.json",
     ],
 )
+
+# Source-archive and release builds that need exact provenance pass the complete tuple through
+# Bazel action inputs, for example:
+#   --action_env=CODEX_BUILD_COMMIT --action_env=CODEX_BUILD_DIRTY \
+#   --action_env=CODEX_BUILD_CHANNEL
