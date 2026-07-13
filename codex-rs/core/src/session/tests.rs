@@ -3752,6 +3752,7 @@ async fn usage_limit_hint_uses_active_saved_api_key_account_id() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let account = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-active".to_string(),
         Some("active".to_string()),
         true,
@@ -3784,6 +3785,7 @@ async fn usage_limit_hint_uses_matching_saved_chatgpt_account_id() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-stale".to_string(),
         Some("stale".to_string()),
         true,
@@ -3813,6 +3815,7 @@ async fn usage_limit_hint_uses_matching_saved_chatgpt_account_id() {
     .expect("chatgpt auth");
     let account = codex_login::upsert_chatgpt_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         tokens,
         Utc::now(),
         Some("active".to_string()),
@@ -3851,6 +3854,7 @@ async fn usage_limit_hint_reads_saved_api_key_from_auth_home_and_writes_codex_ho
     std::fs::create_dir_all(&auth_home).expect("create auth home");
     let account = codex_login::upsert_api_key_account(
         &auth_home,
+        AuthCredentialsStoreMode::File,
         "sk-active".to_string(),
         Some("active".to_string()),
         true,
@@ -3890,6 +3894,7 @@ async fn usage_limit_hint_ignores_mismatched_saved_api_key_account_id() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-stale".to_string(),
         Some("stale".to_string()),
         true,
@@ -3921,6 +3926,7 @@ async fn usage_limit_hint_prefers_chatgpt_token_account_id_over_saved_active_acc
     let codex_home = tempfile::tempdir().expect("create temp dir");
     codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-active".to_string(),
         Some("active".to_string()),
         true,

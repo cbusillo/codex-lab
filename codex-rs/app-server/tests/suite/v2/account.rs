@@ -711,6 +711,7 @@ async fn chatgpt_device_code_login_refreshes_auth_for_loaded_thread() -> Result<
 
     let initial = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-initial".to_string(),
         Some("initial".to_string()),
         /*make_active*/ false,
@@ -1409,12 +1410,14 @@ async fn switch_active_account_refreshes_auth_for_loaded_thread() -> Result<()> 
 
     let first = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-first".to_string(),
         Some("first".to_string()),
         /*make_active*/ false,
     )?;
     let second = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-second".to_string(),
         Some("second".to_string()),
         /*make_active*/ false,
@@ -1474,12 +1477,14 @@ async fn switch_active_account_activates_stored_account_and_notifies() -> Result
 
     let first = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-first".to_string(),
         Some("first".to_string()),
         /*make_active*/ false,
     )?;
     let second = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-second".to_string(),
         Some("second".to_string()),
         /*make_active*/ false,
@@ -1515,7 +1520,8 @@ async fn switch_active_account_activates_stored_account_and_notifies() -> Result
     assert_eq!(payload.auth_mode, Some(AuthMode::ApiKey));
     assert_eq!(payload.plan_type, None);
 
-    let active_account_id = codex_login::get_active_account_id(codex_home.path())?;
+    let active_account_id =
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)?;
     assert_eq!(active_account_id.as_deref(), Some(second.id.as_str()));
     let auth = codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?;
     let auth = auth.expect("switch should write auth.json");
@@ -1546,12 +1552,14 @@ async fn list_accounts_returns_server_owned_account_entries() -> Result<()> {
 
     let first = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-first".to_string(),
         Some("first".to_string()),
         /*make_active*/ false,
     )?;
     let second = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-second".to_string(),
         Some("second".to_string()),
         /*make_active*/ false,
@@ -1617,12 +1625,14 @@ async fn remove_account_removes_active_account_promotes_fallback_and_notifies() 
 
     let fallback = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-fallback".to_string(),
         Some("fallback".to_string()),
         /*make_active*/ false,
     )?;
     let active = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-active".to_string(),
         Some("active".to_string()),
         /*make_active*/ false,
@@ -1666,10 +1676,11 @@ async fn remove_account_removes_active_account_promotes_fallback_and_notifies() 
     assert_eq!(payload.auth_mode, Some(AuthMode::ApiKey));
     assert_eq!(payload.plan_type, None);
 
-    let accounts = codex_login::list_accounts(codex_home.path())?;
+    let accounts = codex_login::list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
     assert!(!accounts.iter().any(|account| account.id == active.id));
     assert!(accounts.iter().any(|account| account.id == fallback.id));
-    let active_account_id = codex_login::get_active_account_id(codex_home.path())?;
+    let active_account_id =
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)?;
     assert_eq!(active_account_id.as_deref(), Some(fallback.id.as_str()));
     let auth = codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?;
     let auth = auth.expect("fallback activation should write auth.json");
@@ -1718,12 +1729,14 @@ async fn remove_active_account_refreshes_fallback_auth_for_loaded_thread() -> Re
 
     let fallback = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-fallback".to_string(),
         Some("fallback".to_string()),
         /*make_active*/ false,
     )?;
     let active = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-active".to_string(),
         Some("active".to_string()),
         /*make_active*/ false,
@@ -1786,6 +1799,7 @@ async fn remove_account_reports_not_found_without_changing_active_account() -> R
 
     let active = codex_login::upsert_api_key_account(
         codex_home.path(),
+        AuthCredentialsStoreMode::File,
         "sk-active".to_string(),
         Some("active".to_string()),
         /*make_active*/ false,
@@ -1816,7 +1830,8 @@ async fn remove_account_reports_not_found_without_changing_active_account() -> R
         Some(active.id.as_str())
     );
 
-    let active_account_id = codex_login::get_active_account_id(codex_home.path())?;
+    let active_account_id =
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)?;
     assert_eq!(active_account_id.as_deref(), Some(active.id.as_str()));
     let auth = codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?;
     let auth = auth.expect("active auth should remain materialized");

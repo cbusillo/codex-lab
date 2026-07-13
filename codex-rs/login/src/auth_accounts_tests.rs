@@ -6,6 +6,91 @@ use pretty_assertions::assert_eq;
 use serde::Serialize;
 use tempfile::TempDir;
 
+const TEST_AUTH_CREDENTIALS_STORE_MODE: AuthCredentialsStoreMode = AuthCredentialsStoreMode::File;
+
+fn list_accounts(codex_home: &Path) -> io::Result<Vec<StoredAccount>> {
+    super::list_accounts(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE)
+}
+
+fn get_active_account_id(codex_home: &Path) -> io::Result<Option<String>> {
+    super::get_active_account_id(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE)
+}
+
+fn find_account(codex_home: &Path, account_id: &str) -> io::Result<Option<StoredAccount>> {
+    super::find_account(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE, account_id)
+}
+
+fn update_account_last_refresh(
+    codex_home: &Path,
+    account_id: &str,
+    last_refresh: DateTime<Utc>,
+) -> io::Result<Option<StoredAccount>> {
+    super::update_account_last_refresh(
+        codex_home,
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        account_id,
+        last_refresh,
+    )
+}
+
+fn set_active_account_id(
+    codex_home: &Path,
+    account_id: Option<String>,
+) -> io::Result<Option<StoredAccount>> {
+    super::set_active_account_id(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE, account_id)
+}
+
+fn remove_account(codex_home: &Path, account_id: &str) -> io::Result<Option<StoredAccount>> {
+    super::remove_account(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE, account_id)
+}
+
+fn remove_account_matching_credentials(
+    codex_home: &Path,
+    mode: AuthMode,
+    openai_api_key: Option<&str>,
+    tokens: Option<&TokenData>,
+) -> io::Result<Option<StoredAccount>> {
+    super::remove_account_matching_credentials(
+        codex_home,
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        mode,
+        openai_api_key,
+        tokens,
+    )
+}
+
+fn upsert_api_key_account(
+    codex_home: &Path,
+    api_key: String,
+    label: Option<String>,
+    make_active: bool,
+) -> io::Result<StoredAccount> {
+    super::upsert_api_key_account(
+        codex_home,
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        api_key,
+        label,
+        make_active,
+    )
+}
+
+fn upsert_chatgpt_account(
+    codex_home: &Path,
+    tokens: TokenData,
+    last_refresh: DateTime<Utc>,
+    label: Option<String>,
+    make_active: bool,
+) -> io::Result<StoredAccount> {
+    super::upsert_chatgpt_account(
+        codex_home,
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        tokens,
+        last_refresh,
+        label,
+        make_active,
+    )
+}
+
 fn make_chatgpt_tokens(account_id: Option<&str>, email: Option<&str>) -> TokenData {
     fn fake_jwt(account_id: Option<&str>, email: Option<&str>) -> String {
         #[derive(Serialize)]
@@ -58,6 +143,37 @@ fn make_chatgpt_tokens_with_claim_only_account_id(
     let mut tokens = make_chatgpt_tokens(account_id, email);
     tokens.account_id = None;
     tokens
+}
+
+#[test]
+fn store_mode_plumbing_preserves_shared_file_catalog() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = super::upsert_api_key_account(
+        temp.path(),
+        AuthCredentialsStoreMode::Ephemeral,
+        "sk-mode-plumbing".to_string(),
+        Some("Mode plumbing".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("upsert account");
+
+    for mode in [
+        AuthCredentialsStoreMode::File,
+        AuthCredentialsStoreMode::Keyring,
+        AuthCredentialsStoreMode::Auto,
+        AuthCredentialsStoreMode::Ephemeral,
+    ] {
+        assert_eq!(
+            vec![stored.clone()],
+            super::list_accounts(temp.path(), mode).expect("list accounts")
+        );
+        assert_eq!(
+            Some(stored.id.clone()),
+            super::get_active_account_id(temp.path(), mode).expect("active account id")
+        );
+    }
+
+    assert!(accounts_file_path(temp.path()).is_file());
 }
 
 #[test]
@@ -173,7 +289,12 @@ fn find_chatgpt_account_by_tokens_finds_matching_non_active_account() {
 
     assert_eq!(
         Some(chatgpt),
-        find_chatgpt_account_by_tokens(temp.path(), &tokens).expect("find chatgpt")
+        super::find_chatgpt_account_by_tokens(
+            temp.path(),
+            TEST_AUTH_CREDENTIALS_STORE_MODE,
+            &tokens,
+        )
+        .expect("find chatgpt")
     );
 }
 
@@ -198,7 +319,12 @@ fn find_api_key_account_by_key_finds_matching_non_active_account() {
 
     assert_eq!(
         Some(api_key),
-        find_api_key_account_by_key(temp.path(), "sk-saved").expect("find api key")
+        super::find_api_key_account_by_key(
+            temp.path(),
+            TEST_AUTH_CREDENTIALS_STORE_MODE,
+            "sk-saved",
+        )
+        .expect("find api key")
     );
 }
 
@@ -360,7 +486,9 @@ fn auth_for_account_returns_auth_without_persisting_activation() {
     )
     .expect("upsert api key");
 
-    let (account, auth) = auth_for_account(temp.path(), &stored.id).expect("account auth");
+    let (account, auth) =
+        super::auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &stored.id)
+            .expect("account auth");
 
     assert_eq!(stored, account);
     assert_eq!(

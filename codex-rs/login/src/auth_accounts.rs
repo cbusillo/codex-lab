@@ -74,6 +74,13 @@ fn accounts_file_path(codex_home: &Path) -> PathBuf {
     codex_home.join(ACCOUNTS_FILE_NAME)
 }
 
+fn accounts_file_path_for_mode(
+    codex_home: &Path,
+    _auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> PathBuf {
+    accounts_file_path(codex_home)
+}
+
 fn read_accounts_file(path: &Path) -> io::Result<AccountsFile> {
     match File::open(path) {
         Ok(mut file) => {
@@ -356,20 +363,30 @@ fn select_fallback_active_account(data: &mut AccountsFile) {
     }
 }
 
-pub fn list_accounts(codex_home: &Path) -> io::Result<Vec<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+pub fn list_accounts(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<Vec<StoredAccount>> {
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let data = read_accounts_file(&path)?;
     Ok(data.accounts)
 }
 
-pub fn get_active_account_id(codex_home: &Path) -> io::Result<Option<String>> {
-    let path = accounts_file_path(codex_home);
+pub fn get_active_account_id(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<Option<String>> {
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let data = read_accounts_file(&path)?;
     Ok(data.active_account_id)
 }
 
-pub fn find_account(codex_home: &Path, account_id: &str) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+pub fn find_account(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    account_id: &str,
+) -> io::Result<Option<StoredAccount>> {
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let data = read_accounts_file(&path)?;
     Ok(data.accounts.into_iter().find(|acc| acc.id == account_id))
 }
@@ -395,9 +412,10 @@ fn find_preferred_matching_account(
 
 pub fn find_chatgpt_account_by_tokens(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     tokens: &TokenData,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let data = read_accounts_file(&path)?;
     Ok(find_preferred_matching_account(&data, |account| {
         match_chatgpt_account(account, tokens)
@@ -406,9 +424,10 @@ pub fn find_chatgpt_account_by_tokens(
 
 pub fn find_api_key_account_by_key(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     api_key: &str,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let data = read_accounts_file(&path)?;
     Ok(find_preferred_matching_account(&data, |account| {
         match_api_key_account(account, api_key)
@@ -417,9 +436,10 @@ pub fn find_api_key_account_by_key(
 
 pub fn auth_for_account(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     account_id: &str,
 ) -> io::Result<(StoredAccount, AuthDotJson)> {
-    let account = find_account(codex_home, account_id)?
+    let account = find_account(codex_home, auth_credentials_store_mode, account_id)?
         .ok_or_else(|| io::Error::other(format!("account with id {account_id} was not found")))?;
 
     let auth =
@@ -461,10 +481,11 @@ pub fn auth_for_account(
 
 pub fn update_account_last_refresh(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     account_id: &str,
     last_refresh: DateTime<Utc>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let mut data = read_accounts_file(&path)?;
 
     let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == account_id) else {
@@ -478,9 +499,10 @@ pub fn update_account_last_refresh(
 
 pub fn set_active_account_id(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     account_id: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let mut data = read_accounts_file(&path)?;
 
     let mut updated = None;
@@ -504,7 +526,7 @@ pub fn activate_account(
     account_id: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<StoredAccount> {
-    let (_account, auth) = auth_for_account(codex_home, account_id)?;
+    let (_account, auth) = auth_for_account(codex_home, auth_credentials_store_mode, account_id)?;
     commit_active_account(codex_home, account_id, &auth, auth_credentials_store_mode)
 }
 
@@ -527,7 +549,11 @@ fn restore_previous_activation(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<()> {
     let auth_result = restore_previous_auth(codex_home, previous_auth, auth_credentials_store_mode);
-    let active_account_result = set_active_account_id(codex_home, previous_active_account_id);
+    let active_account_result = set_active_account_id(
+        codex_home,
+        auth_credentials_store_mode,
+        previous_active_account_id,
+    );
 
     auth_result?;
     active_account_result?;
@@ -541,10 +567,15 @@ pub fn commit_active_account(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<StoredAccount> {
     let previous_auth = crate::load_auth_dot_json(codex_home, auth_credentials_store_mode)?;
-    let previous_active_account_id = get_active_account_id(codex_home)?;
+    let previous_active_account_id =
+        get_active_account_id(codex_home, auth_credentials_store_mode)?;
 
     save_auth(codex_home, auth, auth_credentials_store_mode)?;
-    match set_active_account_id(codex_home, Some(account_id.to_string())) {
+    match set_active_account_id(
+        codex_home,
+        auth_credentials_store_mode,
+        Some(account_id.to_string()),
+    ) {
         Ok(Some(activated)) => Ok(activated),
         Ok(None) => {
             let rollback_result = restore_previous_activation(
@@ -578,8 +609,12 @@ pub fn commit_active_account(
     }
 }
 
-pub fn remove_account(codex_home: &Path, account_id: &str) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+pub fn remove_account(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    account_id: &str,
+) -> io::Result<Option<StoredAccount>> {
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let mut data = read_accounts_file(&path)?;
 
     let removed = if let Some(pos) = data.accounts.iter().position(|acc| acc.id == account_id) {
@@ -604,17 +639,18 @@ pub fn clear_active_account(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<()> {
-    set_active_account_id(codex_home, None)?;
+    set_active_account_id(codex_home, auth_credentials_store_mode, None)?;
     crate::delete_auth(codex_home, auth_credentials_store_mode).map(|_| ())
 }
 
 pub fn remove_account_matching_credentials(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     mode: AuthMode,
     openai_api_key: Option<&str>,
     tokens: Option<&TokenData>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let mut data = read_accounts_file(&path)?;
 
     let removed = match mode {
@@ -647,11 +683,12 @@ pub fn remove_account_matching_credentials(
 
 pub fn upsert_api_key_account(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     api_key: String,
     label: Option<String>,
     make_active: bool,
 ) -> io::Result<StoredAccount> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let data = read_accounts_file(&path)?;
 
     let new_account = StoredAccount {
@@ -681,10 +718,11 @@ pub fn upsert_api_key_account(
 
 pub(crate) fn insert_api_key_account_if_missing(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     api_key: String,
     label: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let mut data = read_accounts_file(&path)?;
 
     if data
@@ -713,12 +751,13 @@ pub(crate) fn insert_api_key_account_if_missing(
 
 pub fn upsert_chatgpt_account(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     tokens: TokenData,
     last_refresh: DateTime<Utc>,
     label: Option<String>,
     make_active: bool,
 ) -> io::Result<StoredAccount> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let data = read_accounts_file(&path)?;
 
     let new_account = StoredAccount {
@@ -748,11 +787,12 @@ pub fn upsert_chatgpt_account(
 
 pub(crate) fn insert_chatgpt_account_if_missing(
     codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
     tokens: TokenData,
     last_refresh: DateTime<Utc>,
     label: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path(codex_home);
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     let mut data = read_accounts_file(&path)?;
 
     if data

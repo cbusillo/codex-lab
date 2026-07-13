@@ -1,10 +1,7 @@
 use super::*;
 use crate::auth::AuthDotJson;
 use crate::auth::save_auth;
-use crate::auth_accounts::get_active_account_id;
-use crate::auth_accounts::list_accounts;
-use crate::auth_accounts::set_active_account_id;
-use crate::auth_accounts::upsert_api_key_account;
+use crate::auth_accounts::StoredAccount;
 use crate::auth_profiles::profile_home;
 use crate::auth_profiles::record_auth_profile_login;
 use crate::token_data::IdTokenInfo;
@@ -16,7 +13,23 @@ use codex_config::types::AuthCredentialsStoreMode;
 use pretty_assertions::assert_eq;
 use serde::Serialize;
 use std::fs;
+use std::io;
+use std::path::Path;
 use tempfile::TempDir;
+
+const TEST_AUTH_CREDENTIALS_STORE_MODE: AuthCredentialsStoreMode = AuthCredentialsStoreMode::File;
+
+fn import_auth_accounts_from_auth_homes(codex_home: &Path) -> io::Result<AuthAccountImportReport> {
+    super::import_auth_accounts_from_auth_homes(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE)
+}
+
+fn list_accounts(codex_home: &Path) -> io::Result<Vec<StoredAccount>> {
+    crate::auth_accounts::list_accounts(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE)
+}
+
+fn get_active_account_id(codex_home: &Path) -> io::Result<Option<String>> {
+    crate::auth_accounts::get_active_account_id(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE)
+}
 
 fn make_chatgpt_tokens(account_id: &str, email: &str) -> TokenData {
     fn fake_jwt(account_id: &str, email: &str) -> String {
@@ -300,14 +313,20 @@ fn import_keeps_same_email_different_chatgpt_accounts_distinct() {
 #[test]
 fn import_preserves_existing_active_account() {
     let temp = TempDir::new().expect("tempdir");
-    let active = upsert_api_key_account(
+    let active = crate::auth_accounts::upsert_api_key_account(
         temp.path(),
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
         "sk-active".to_string(),
         /*label*/ None,
         /*make_active*/ true,
     )
     .expect("insert active account");
-    set_active_account_id(temp.path(), Some(active.id.clone())).expect("set active");
+    crate::auth_accounts::set_active_account_id(
+        temp.path(),
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        Some(active.id.clone()),
+    )
+    .expect("set active");
     save_api_key_auth(temp.path(), "sk-imported");
 
     import_auth_accounts_from_auth_homes(temp.path()).expect("import accounts");

@@ -1128,12 +1128,12 @@ fn load_account_rows(
     );
     let active_account_id = default_auth_home_is_current
         .then(|| {
-            codex_login::get_active_account_id(codex_home)
+            codex_login::get_active_account_id(codex_home, auth_credentials_store_mode)
                 .ok()
                 .flatten()
         })
         .flatten();
-    let mut accounts = match codex_login::list_accounts(codex_home) {
+    let mut accounts = match codex_login::list_accounts(codex_home, auth_credentials_store_mode) {
         Ok(accounts) => accounts
             .into_iter()
             .map(|account| AccountRow::from(account, active_account_id.as_deref()))
@@ -1185,6 +1185,7 @@ fn sync_account_store_from_auth(
         let email = tokens.id_token.email.clone();
         return codex_login::upsert_chatgpt_account(
             codex_home,
+            auth_credentials_store_mode,
             tokens,
             last_refresh,
             email,
@@ -1196,7 +1197,11 @@ fn sync_account_store_from_auth(
 
     if let Some(api_key) = auth.openai_api_key {
         return codex_login::upsert_api_key_account(
-            codex_home, api_key, /*label*/ None, /*make_active*/ true,
+            codex_home,
+            auth_credentials_store_mode,
+            api_key,
+            /*label*/ None,
+            /*make_active*/ true,
         )
         .err()
         .map(|err| format!("Failed to record API key login: {err}"));
