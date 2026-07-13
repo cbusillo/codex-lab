@@ -490,6 +490,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Barrier;
+    use std::sync::Mutex;
+    use std::sync::PoisonError;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
     use std::thread;
@@ -508,7 +510,7 @@ mod tests {
         ) -> std::result::Result<Option<String>, CredentialStoreError> {
             let loaded = self.inner.load(service, account)?;
             if loaded.is_none() {
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(/*millis*/ 50));
             }
             Ok(loaded)
         }
@@ -535,8 +537,8 @@ mod tests {
     struct BlockingLoadKeyringStore {
         inner: MockKeyringStore,
         block_next_load: Arc<AtomicBool>,
-        load_started: Arc<Barrier>,
-        load_release: Arc<Barrier>,
+        load_started: mpsc::Sender<()>,
+        load_release: Arc<Mutex<mpsc::Receiver<()>>>,
     }
 
     impl KeyringStore for BlockingLoadKeyringStore {
@@ -546,9 +548,23 @@ mod tests {
             account: &str,
         ) -> std::result::Result<Option<String>, CredentialStoreError> {
             let loaded = self.inner.load(service, account)?;
-            if self.block_next_load.swap(false, Ordering::SeqCst) {
-                self.load_started.wait();
-                self.load_release.wait();
+            if self.block_next_load.swap(/*val*/ false, Ordering::SeqCst) {
+                self.load_started.send(()).map_err(|error| {
+                    CredentialStoreError::new(KeyringError::Invalid(
+                        "failed to signal blocked keyring load".into(),
+                        error.to_string(),
+                    ))
+                })?;
+                self.load_release
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .recv_timeout(Duration::from_secs(/*secs*/ 5))
+                    .map_err(|error| {
+                        CredentialStoreError::new(KeyringError::Invalid(
+                            "blocked keyring load was not released".into(),
+                            error.to_string(),
+                        ))
+                    })?;
             }
             Ok(loaded)
         }
@@ -637,7 +653,7 @@ mod tests {
         let name = SecretName::new("TEST_SECRET")?;
 
         assert_eq!(backend.get(&SecretScope::Global, &name)?, None);
-        assert_eq!(backend.list(None)?, Vec::new());
+        assert_eq!(backend.list(/*scope_filter*/ None)?, Vec::new());
         assert!(!backend.delete(&SecretScope::Global, &name)?);
         let account = compute_keyring_account_for_namespace(
             codex_home.path(),
@@ -662,12 +678,12 @@ mod tests {
         let secrets_dir = backend.secrets_dir();
         let original_permissions = fs::metadata(&secrets_dir)?.permissions();
         let mut read_only_permissions = original_permissions.clone();
-        read_only_permissions.set_mode(0o500);
+        read_only_permissions.set_mode(/*mode*/ 0o500);
         fs::set_permissions(&secrets_dir, read_only_permissions)?;
         let read_result = (|| -> Result<_> {
             Ok((
                 backend.get(&SecretScope::Global, &name)?,
-                backend.list(None)?,
+                backend.list(/*scope_filter*/ None)?,
                 backend.delete(&SecretScope::Global, &SecretName::new("MISSING")?)?,
             ))
         })();
@@ -719,7 +735,7 @@ mod tests {
         let first_backend =
             LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring.clone());
         let second_backend = first_backend.clone();
-        let barrier = Arc::new(Barrier::new(3));
+        let barrier = Arc::new(Barrier::new(/*n*/ 3));
 
         let first_barrier = barrier.clone();
         let first = thread::spawn(move || {
@@ -758,14 +774,14 @@ mod tests {
     #[test]
     fn concurrent_set_and_delete_preserve_both_mutations() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
-        let block_next_load = Arc::new(AtomicBool::new(false));
-        let load_started = Arc::new(Barrier::new(2));
-        let load_release = Arc::new(Barrier::new(2));
+        let block_next_load = Arc::new(AtomicBool::new(/*v*/ false));
+        let (load_started_sender, load_started_receiver) = mpsc::channel();
+        let (load_release_sender, load_release_receiver) = mpsc::channel();
         let keyring = Arc::new(BlockingLoadKeyringStore {
             inner: MockKeyringStore::default(),
             block_next_load: block_next_load.clone(),
-            load_started: load_started.clone(),
-            load_release: load_release.clone(),
+            load_started: load_started_sender,
+            load_release: Arc::new(Mutex::new(load_release_receiver)),
         });
         let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
         let first_name = SecretName::new("FIRST")?;
@@ -773,12 +789,14 @@ mod tests {
         backend.set(&SecretScope::Global, &first_name, "old")?;
         backend.set(&SecretScope::Global, &second_name, "two")?;
 
-        block_next_load.store(true, Ordering::SeqCst);
+        block_next_load.store(/*val*/ true, Ordering::SeqCst);
         let set_backend = backend.clone();
         let set_name = first_name.clone();
         let set_thread =
             thread::spawn(move || set_backend.set(&SecretScope::Global, &set_name, "new"));
-        load_started.wait();
+        load_started_receiver
+            .recv_timeout(Duration::from_secs(/*secs*/ 5))
+            .expect("set writer must reach keyring load");
 
         let delete_backend = backend.clone();
         let delete_name = second_name.clone();
@@ -787,14 +805,16 @@ mod tests {
             let _ = delete_sender.send(delete_backend.delete(&SecretScope::Global, &delete_name));
         });
         let delete_completed_early = delete_receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_millis(/*millis*/ 100))
             .ok()
             .transpose()?;
-        load_release.wait();
+        load_release_sender.send(()).expect("release set writer");
         set_thread.join().expect("set writer")?;
         let deleted = match delete_completed_early {
             Some(deleted) => deleted,
-            None => delete_receiver.recv().expect("delete writer")?,
+            None => delete_receiver
+                .recv_timeout(Duration::from_secs(/*secs*/ 5))
+                .expect("delete writer")?,
         };
 
         assert!(deleted);
