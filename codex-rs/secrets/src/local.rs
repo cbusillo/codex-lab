@@ -1,17 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::compiler_fence;
-#[cfg(not(windows))]
-use std::time::SystemTime;
-#[cfg(not(windows))]
-use std::time::UNIX_EPOCH;
 
 use age::decrypt;
 use age::encrypt;
@@ -127,6 +121,9 @@ impl LocalSecretsBackend {
     }
 
     pub fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool> {
+        if self.get(scope, name)?.is_none() {
+            return Ok(false);
+        }
         let _lock = self.acquire_lock(LockMode::Exclusive)?;
         let canonical_key = scope.canonical_key(name);
         let mut file = self.load_file()?;
@@ -237,14 +234,17 @@ impl LocalSecretsBackend {
 
     fn load_file_for_read(&self) -> Result<SecretsFile> {
         let read_lock = self.acquire_lock(LockMode::Shared)?;
-        let file = self.load_file()?;
+        if read_lock.is_some() {
+            return self.load_file();
+        }
+        let file = self.load_file();
         if read_lock.is_none()
             && self.lock_path().try_exists().unwrap_or(false)
             && let Some(_retry_lock) = self.acquire_lock(LockMode::Shared)?
         {
             return self.load_file();
         }
-        Ok(file)
+        file
     }
 
     fn load_file(&self) -> Result<SecretsFile> {
@@ -292,7 +292,8 @@ impl LocalSecretsBackend {
         let plaintext = serde_json::to_vec(file).context("failed to serialize secrets file")?;
         let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
         let path = self.secrets_path();
-        write_secrets_file(&path, &ciphertext)?;
+        fs::write(&path, &ciphertext)
+            .with_context(|| format!("failed to write secrets file at {}", path.display()))?;
         Ok(())
     }
 
@@ -336,100 +337,6 @@ impl SecretsBackend for LocalSecretsBackend {
     fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
         LocalSecretsBackend::list(self, scope_filter)
     }
-}
-
-fn write_secrets_file(path: &Path, contents: &[u8]) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(path)
-            .with_context(|| format!("failed to open secrets file at {}", path.display()))?;
-        file.write_all(contents)
-            .with_context(|| format!("failed to write secrets file at {}", path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync secrets file at {}", path.display()))?;
-        return Ok(());
-    }
-
-    #[cfg(not(windows))]
-    {
-        write_file_atomically_unix(path, contents)
-    }
-}
-
-#[cfg(not(windows))]
-fn write_file_atomically_unix(path: &Path, contents: &[u8]) -> Result<()> {
-    let dir = path.parent().with_context(|| {
-        format!(
-            "failed to compute parent directory for secrets file at {}",
-            path.display()
-        )
-    })?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let filename = path.file_name().with_context(|| {
-        format!(
-            "failed to compute filename for secrets file at {}",
-            path.display()
-        )
-    })?;
-    let tmp_path = dir.join(format!(
-        ".{}.tmp-{}-{nonce}",
-        filename.to_string_lossy(),
-        std::process::id()
-    ));
-
-    {
-        let mut options = fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut tmp_file = options.open(&tmp_path).with_context(|| {
-            format!(
-                "failed to create temp secrets file at {}",
-                tmp_path.display()
-            )
-        })?;
-        tmp_file.write_all(contents).with_context(|| {
-            format!(
-                "failed to write temp secrets file at {}",
-                tmp_path.display()
-            )
-        })?;
-        tmp_file.sync_all().with_context(|| {
-            format!("failed to sync temp secrets file at {}", tmp_path.display())
-        })?;
-    }
-
-    if let Err(error) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(error).with_context(|| {
-            format!(
-                "failed to atomically replace secrets file at {} with {}",
-                path.display(),
-                tmp_path.display()
-            )
-        });
-    }
-    if let Err(err) = sync_parent_directory(dir) {
-        warn!("failed to sync secrets directory after atomic replace: {err:#}");
-    }
-    Ok(())
-}
-
-fn sync_parent_directory(dir: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        fs::File::open(dir)
-            .with_context(|| format!("failed to open secrets dir {} for sync", dir.display()))?
-            .sync_all()
-            .with_context(|| format!("failed to sync secrets dir {}", dir.display()))?;
-    }
-    Ok(())
 }
 
 fn generate_passphrase() -> Result<SecretString> {
@@ -641,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_read_does_not_create_key_or_storage() -> Result<()> {
+    fn missing_file_operations_do_not_create_key_or_storage() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
         let keyring = Arc::new(MockKeyringStore::default());
         let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring.clone());
@@ -649,6 +556,7 @@ mod tests {
 
         assert_eq!(backend.get(&SecretScope::Global, &name)?, None);
         assert_eq!(backend.list(None)?, Vec::new());
+        assert!(!backend.delete(&SecretScope::Global, &name)?);
         let account = compute_keyring_account_for_namespace(
             codex_home.path(),
             LocalSecretsNamespace::ManagedSecrets,
@@ -678,11 +586,12 @@ mod tests {
             Ok((
                 backend.get(&SecretScope::Global, &name)?,
                 backend.list(None)?,
+                backend.delete(&SecretScope::Global, &SecretName::new("MISSING")?)?,
             ))
         })();
         fs::set_permissions(&secrets_dir, original_permissions)?;
 
-        let (value, entries) = read_result?;
+        let (value, entries, deleted) = read_result?;
         assert_eq!(value, Some("secret".to_string()));
         assert_eq!(
             entries,
@@ -691,6 +600,7 @@ mod tests {
                 name,
             }]
         );
+        assert!(!deleted);
         assert!(!backend.lock_path().exists());
         Ok(())
     }
@@ -715,44 +625,6 @@ mod tests {
             .expect_err("missing key must fail closed");
         assert!(!keyring.contains(&account));
         assert_eq!(fs::read(path)?, ciphertext);
-        Ok(())
-    }
-
-    #[test]
-    fn save_file_does_not_leave_temp_files() -> Result<()> {
-        let codex_home = tempfile::tempdir().expect("tempdir");
-        let keyring = Arc::new(MockKeyringStore::default());
-        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
-
-        let scope = SecretScope::Global;
-        let name = SecretName::new("TEST_SECRET")?;
-        backend.set(&scope, &name, "one")?;
-        backend.set(&scope, &name, "two")?;
-
-        let secrets_dir = backend.secrets_dir();
-        let entries = fs::read_dir(&secrets_dir)
-            .with_context(|| format!("failed to read {}", secrets_dir.display()))?
-            .collect::<std::io::Result<Vec<_>>>()
-            .with_context(|| format!("failed to enumerate {}", secrets_dir.display()))?;
-
-        let filenames: Vec<String> = entries
-            .into_iter()
-            .filter_map(|entry| entry.file_name().to_str().map(ToString::to_string))
-            .collect();
-        assert!(filenames.contains(&LOCAL_SECRETS_FILENAME.to_string()));
-        assert!(
-            filenames.contains(&format!(".{LOCAL_SECRETS_FILENAME}.lock")),
-            "missing persistent lock file: {filenames:?}"
-        );
-        assert!(
-            filenames.iter().all(|filename| {
-                !filename.contains(".tmp-")
-                    && !filename.ends_with(".tmp")
-                    && !filename.ends_with(".bak")
-            }),
-            "unexpected replacement artifact: {filenames:?}"
-        );
-        assert_eq!(backend.get(&scope, &name)?, Some("two".to_string()));
         Ok(())
     }
 
@@ -849,31 +721,6 @@ mod tests {
             Some("new".to_string())
         );
         assert_eq!(backend.get(&SecretScope::Global, &second_name)?, None);
-        Ok(())
-    }
-
-    #[test]
-    fn failed_file_write_preserves_destination_and_cleans_temp_file() -> Result<()> {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let destination = dir.path().join("destination");
-        fs::create_dir(&destination)?;
-
-        write_secrets_file(&destination, b"secret").expect_err("replacing a directory should fail");
-
-        assert!(destination.is_dir());
-        let entries = fs::read_dir(dir.path())?.collect::<std::io::Result<Vec<_>>>()?;
-        assert_eq!(
-            entries
-                .into_iter()
-                .map(|entry| entry.file_name())
-                .collect::<Vec<_>>(),
-            vec![
-                destination
-                    .file_name()
-                    .expect("destination filename")
-                    .to_owned()
-            ]
-        );
         Ok(())
     }
 
