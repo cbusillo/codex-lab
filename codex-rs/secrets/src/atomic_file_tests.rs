@@ -1,24 +1,305 @@
 use std::fs;
+use std::path::Path;
 
 use pretty_assertions::assert_eq;
 
 use super::RepairOutcome;
 use super::TransactionKind;
+use super::TransactionPaths;
 use super::readable_path;
 use super::recover_failed_replace;
 use super::recover_interrupted_write;
 use super::recovery_artifacts_exist;
 use super::transaction_paths;
 use super::write_file_atomically;
+use super::write_transaction_marker;
 
-fn mark_transaction(
-    destination: &std::path::Path,
+const OLD: &[u8] = b"old";
+const NEW: &[u8] = b"new";
+const ZERO_MARKER: [u8; 74] = [0; 74];
+
+type Bytes = Option<&'static [u8]>;
+
+#[derive(Clone, Copy)]
+enum ExpectedRead {
+    Destination,
+    Temp,
+    Backup,
+    Error,
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedRecovery {
+    Success(RepairOutcome, Bytes),
+    Error,
+}
+
+#[derive(Clone, Copy)]
+struct Case(
+    &'static str,
+    TransactionKind,
+    Bytes,
+    Bytes,
+    Bytes,
+    ExpectedRead,
+    ExpectedRecovery,
+);
+
+#[derive(Debug, PartialEq, Eq)]
+struct Files {
+    destination: Option<Vec<u8>>,
+    temp: Option<Vec<u8>>,
+    backup: Option<Vec<u8>>,
+    marker: Option<Vec<u8>>,
+}
+
+fn read_if_present(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    path.try_exists()?
+        .then(|| fs::read(path))
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn files(destination: &Path, transaction: &TransactionPaths) -> anyhow::Result<Files> {
+    Ok(Files {
+        destination: read_if_present(destination)?,
+        temp: read_if_present(&transaction.temp)?,
+        backup: read_if_present(&transaction.backup)?,
+        marker: read_if_present(&transaction.marker)?,
+    })
+}
+
+fn stage(
+    destination: &Path,
     kind: TransactionKind,
-    id: &str,
-) -> anyhow::Result<super::TransactionPaths> {
-    let transaction = transaction_paths(destination, kind, id)?;
-    fs::write(&transaction.marker, b"")?;
+    destination_bytes: Bytes,
+    temp: Bytes,
+    backup: Bytes,
+) -> anyhow::Result<TransactionPaths> {
+    let transaction = transaction_paths(destination, kind, "a1-b2-c3")?;
+    for (path, contents) in [
+        (destination, destination_bytes),
+        (&transaction.temp, temp),
+        (&transaction.backup, backup),
+    ] {
+        if let Some(contents) = contents {
+            fs::write(path, contents)?;
+        }
+    }
+    let source = (kind == TransactionKind::ReplaceExisting).then_some(OLD);
+    write_transaction_marker(&transaction, source, NEW)?;
     Ok(transaction)
+}
+
+fn run_case(case: Case) -> anyhow::Result<()> {
+    let Case(name, kind, destination_bytes, temp, backup, expected_read, recovery) = case;
+    let dir = tempfile::tempdir()?;
+    let destination = dir.path().join("local.age");
+    let transaction = stage(&destination, kind, destination_bytes, temp, backup)?;
+    let before = files(&destination, &transaction)?;
+
+    match expected_read {
+        ExpectedRead::Destination => {
+            assert_eq!(readable_path(&destination)?, Some(destination.clone()))
+        }
+        ExpectedRead::Temp => {
+            assert_eq!(readable_path(&destination)?, Some(transaction.temp.clone()))
+        }
+        ExpectedRead::Backup => {
+            assert_eq!(
+                readable_path(&destination)?,
+                Some(transaction.backup.clone())
+            )
+        }
+        ExpectedRead::Error => {
+            readable_path(&destination).expect_err(name);
+        }
+    }
+    assert_eq!(files(&destination, &transaction)?, before, "{name}");
+
+    match recovery {
+        ExpectedRecovery::Success(expected_outcome, final_destination) => {
+            assert_eq!(recover_interrupted_write(&destination)?, expected_outcome);
+            assert_eq!(
+                files(&destination, &transaction)?,
+                Files {
+                    destination: final_destination.map(<[u8]>::to_vec),
+                    temp: None,
+                    backup: None,
+                    marker: None,
+                },
+                "{name}"
+            );
+        }
+        ExpectedRecovery::Error => {
+            recover_interrupted_write(&destination).expect_err(name);
+            assert_eq!(files(&destination, &transaction)?, before, "{name}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn marked_transactions_use_only_verified_generations() -> anyhow::Result<()> {
+    use ExpectedRead::Backup;
+    use ExpectedRead::Destination;
+    use ExpectedRead::Error;
+    use ExpectedRead::Temp;
+    use ExpectedRecovery::Error as RecoveryError;
+    use ExpectedRecovery::Success;
+    use RepairOutcome::Committed;
+    use RepairOutcome::Unchanged;
+    use TransactionKind::FirstPublish as First;
+    use TransactionKind::ReplaceExisting as Replace;
+
+    macro_rules! case {
+        ($name:literal, $kind:expr, $destination:expr, $temp:expr, $backup:expr, $read:expr, $recovery:expr) => {
+            Case($name, $kind, $destination, $temp, $backup, $read, $recovery)
+        };
+    }
+    let cases = [
+        case!(
+            "first destination",
+            First,
+            Some(NEW),
+            None,
+            None,
+            Destination,
+            Success(Committed, Some(NEW))
+        ),
+        case!(
+            "first temp",
+            First,
+            None,
+            Some(NEW),
+            None,
+            Temp,
+            Success(Committed, Some(NEW))
+        ),
+        case!("first empty", First, None, None, None, Error, RecoveryError),
+        case!(
+            "first destination temp",
+            First,
+            Some(NEW),
+            Some(NEW),
+            None,
+            Error,
+            RecoveryError
+        ),
+        case!(
+            "replace source destination",
+            Replace,
+            Some(OLD),
+            None,
+            None,
+            Destination,
+            Success(Unchanged, Some(OLD))
+        ),
+        case!(
+            "replace committed destination",
+            Replace,
+            Some(NEW),
+            None,
+            None,
+            Destination,
+            Success(Committed, Some(NEW))
+        ),
+        case!(
+            "replace destination temp",
+            Replace,
+            Some(OLD),
+            Some(NEW),
+            None,
+            Destination,
+            Success(Unchanged, Some(OLD))
+        ),
+        case!(
+            "replace destination backup",
+            Replace,
+            Some(NEW),
+            None,
+            Some(OLD),
+            Destination,
+            Success(Committed, Some(NEW))
+        ),
+        case!(
+            "replace temp backup",
+            Replace,
+            None,
+            Some(NEW),
+            Some(OLD),
+            Backup,
+            Success(Unchanged, Some(OLD))
+        ),
+        case!(
+            "replace backup only",
+            Replace,
+            None,
+            None,
+            Some(OLD),
+            Error,
+            RecoveryError
+        ),
+        case!(
+            "replace temp only",
+            Replace,
+            None,
+            Some(NEW),
+            None,
+            Error,
+            RecoveryError
+        ),
+        case!(
+            "replace all",
+            Replace,
+            Some(NEW),
+            Some(NEW),
+            Some(OLD),
+            Error,
+            RecoveryError
+        ),
+    ];
+    for case in cases {
+        run_case(case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn mismatched_generation_is_preserved() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let destination = dir.path().join("local.age");
+    let transaction = stage(
+        &destination,
+        TransactionKind::ReplaceExisting,
+        Some(b"foreign"),
+        /*temp*/ None,
+        Some(OLD),
+    )?;
+    let before = files(&destination, &transaction)?;
+
+    readable_path(&destination).expect_err("foreign generation must not be selected");
+    recover_interrupted_write(&destination).expect_err("foreign generation must be preserved");
+    assert_eq!(files(&destination, &transaction)?, before);
+    Ok(())
+}
+
+#[test]
+fn invalid_markers_are_preserved() -> anyhow::Result<()> {
+    for marker in [b"partial".as_slice(), ZERO_MARKER.as_slice()] {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("local.age");
+        let transaction =
+            transaction_paths(&destination, TransactionKind::FirstPublish, "a1-b2-c3")?;
+        fs::write(&transaction.temp, NEW)?;
+        fs::write(&transaction.marker, marker)?;
+        let before = files(&destination, &transaction)?;
+
+        readable_path(&destination).expect_err("invalid marker must fail closed");
+        recover_interrupted_write(&destination).expect_err("invalid marker must fail closed");
+        assert_eq!(files(&destination, &transaction)?, before);
+    }
+    Ok(())
 }
 
 #[test]
@@ -28,8 +309,8 @@ fn unmarked_artifacts_are_ignored_and_preserved() -> anyhow::Result<()> {
     let transaction =
         transaction_paths(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
     fs::write(&destination, b"current")?;
-    fs::write(&transaction.temp, b"new")?;
-    fs::write(&transaction.backup, b"old")?;
+    fs::write(&transaction.temp, NEW)?;
+    fs::write(&transaction.backup, OLD)?;
 
     assert_eq!(readable_path(&destination)?, Some(destination.clone()));
     assert_eq!(
@@ -37,174 +318,8 @@ fn unmarked_artifacts_are_ignored_and_preserved() -> anyhow::Result<()> {
         RepairOutcome::Current
     );
     assert!(!recovery_artifacts_exist(&destination)?);
-    assert_eq!(fs::read(&transaction.temp)?, b"new".to_vec());
-    assert_eq!(fs::read(&transaction.backup)?, b"old".to_vec());
-    Ok(())
-}
-
-#[test]
-fn marked_first_publish_is_readable_and_promoted() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::FirstPublish, "a1-b2-c3")?;
-    fs::write(&transaction.temp, b"new")?;
-
-    assert_eq!(readable_path(&destination)?, Some(transaction.temp));
-    assert_eq!(
-        recover_interrupted_write(&destination)?,
-        RepairOutcome::Committed
-    );
-    assert_eq!(fs::read(&destination)?, b"new".to_vec());
-    assert!(!recovery_artifacts_exist(&destination)?);
-    Ok(())
-}
-
-#[test]
-fn destination_and_temp_restore_unchanged_state() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&destination, b"old")?;
-    fs::write(&transaction.temp, b"new")?;
-
-    assert_eq!(readable_path(&destination)?, Some(destination.clone()));
-    assert_eq!(
-        recover_interrupted_write(&destination)?,
-        RepairOutcome::Unchanged
-    );
-    assert_eq!(fs::read(&destination)?, b"old".to_vec());
-    assert!(!recovery_artifacts_exist(&destination)?);
-    Ok(())
-}
-
-#[test]
-fn failed_replace_cleans_documented_unchanged_state() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&destination, b"old")?;
-    fs::write(&transaction.temp, b"new")?;
-
-    recover_failed_replace(&destination)?;
-
-    assert_eq!(fs::read(&destination)?, b"old".to_vec());
-    assert!(!recovery_artifacts_exist(&destination)?);
-    Ok(())
-}
-
-#[test]
-fn destination_and_backup_preserve_committed_state() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&destination, b"new")?;
-    fs::write(&transaction.backup, b"old")?;
-
-    assert_eq!(readable_path(&destination)?, Some(destination.clone()));
-    assert_eq!(
-        recover_interrupted_write(&destination)?,
-        RepairOutcome::Committed
-    );
-    assert_eq!(fs::read(&destination)?, b"new".to_vec());
-    assert!(!recovery_artifacts_exist(&destination)?);
-    Ok(())
-}
-
-#[test]
-fn temp_and_backup_restore_original_state() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&transaction.temp, b"new")?;
-    fs::write(&transaction.backup, b"old")?;
-
-    assert_eq!(readable_path(&destination)?, Some(transaction.backup));
-    assert_eq!(
-        recover_interrupted_write(&destination)?,
-        RepairOutcome::Unchanged
-    );
-    assert_eq!(fs::read(&destination)?, b"old".to_vec());
-    assert!(!recovery_artifacts_exist(&destination)?);
-    Ok(())
-}
-
-#[test]
-fn failed_replace_restores_documented_backup_state() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&transaction.temp, b"new")?;
-    fs::write(&transaction.backup, b"old")?;
-
-    recover_failed_replace(&destination)?;
-
-    assert_eq!(fs::read(&destination)?, b"old".to_vec());
-    assert!(!recovery_artifacts_exist(&destination)?);
-    Ok(())
-}
-
-#[test]
-fn backup_only_restores_original_state() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&transaction.backup, b"old")?;
-
-    assert_eq!(readable_path(&destination)?, Some(transaction.backup));
-    assert_eq!(
-        recover_interrupted_write(&destination)?,
-        RepairOutcome::Unchanged
-    );
-    assert_eq!(fs::read(&destination)?, b"old".to_vec());
-    assert!(!recovery_artifacts_exist(&destination)?);
-    Ok(())
-}
-
-#[test]
-fn replacement_temp_only_is_indeterminate_and_preserved() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&transaction.temp, b"new")?;
-
-    readable_path(&destination).expect_err("state must be rejected");
-    recover_interrupted_write(&destination).expect_err("state must be rejected");
-    assert_eq!(fs::read(&transaction.temp)?, b"new".to_vec());
-    assert!(transaction.marker.try_exists()?);
-    Ok(())
-}
-
-#[test]
-fn indeterminate_state_preserves_all_generations() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&destination, b"current")?;
-    fs::write(&transaction.temp, b"new")?;
-    fs::write(&transaction.backup, b"old")?;
-
-    let error = recover_interrupted_write(&destination).expect_err("state must be rejected");
-    assert!(error.to_string().contains("indeterminate"));
-    assert_eq!(fs::read(&destination)?, b"current".to_vec());
-    assert_eq!(fs::read(&transaction.temp)?, b"new".to_vec());
-    assert_eq!(fs::read(&transaction.backup)?, b"old".to_vec());
-    assert!(transaction.marker.try_exists()?);
-    Ok(())
-}
-
-#[test]
-fn failed_replace_rejects_undocumented_committed_topology() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let destination = dir.path().join("local.age");
-    let transaction = mark_transaction(&destination, TransactionKind::ReplaceExisting, "a1-b2-c3")?;
-    fs::write(&destination, b"new")?;
-    fs::write(&transaction.backup, b"old")?;
-
-    recover_failed_replace(&destination).expect_err("state must be rejected");
-
-    assert_eq!(fs::read(&destination)?, b"new".to_vec());
-    assert_eq!(fs::read(&transaction.backup)?, b"old".to_vec());
-    assert!(transaction.marker.try_exists()?);
+    assert_eq!(fs::read(&transaction.temp)?, NEW);
+    assert_eq!(fs::read(&transaction.backup)?, OLD);
     Ok(())
 }
 
@@ -212,15 +327,56 @@ fn failed_replace_rejects_undocumented_committed_topology() -> anyhow::Result<()
 fn multiple_marked_transactions_are_preserved() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let destination = dir.path().join("local.age");
-    let first = mark_transaction(&destination, TransactionKind::FirstPublish, "a1-b2-c3")?;
-    let second = mark_transaction(&destination, TransactionKind::FirstPublish, "d4-e5-f6")?;
-    fs::write(&first.temp, b"one")?;
-    fs::write(&second.temp, b"two")?;
+    let first = transaction_paths(&destination, TransactionKind::FirstPublish, "a1-b2-c3")?;
+    let second = transaction_paths(&destination, TransactionKind::FirstPublish, "d4-e5-f6")?;
+    fs::write(&first.temp, NEW)?;
+    fs::write(&second.temp, NEW)?;
+    write_transaction_marker(&first, /*source*/ None, NEW)?;
+    write_transaction_marker(&second, /*source*/ None, NEW)?;
 
-    let error = readable_path(&destination).expect_err("state must be rejected");
-    assert!(error.to_string().contains("multiple secrets transactions"));
+    readable_path(&destination).expect_err("multiple transactions must fail closed");
     assert!(first.marker.try_exists()?);
     assert!(second.marker.try_exists()?);
+    Ok(())
+}
+
+#[test]
+fn failed_replace_recovers_only_documented_states() -> anyhow::Result<()> {
+    for (destination_bytes, temp, backup, error_code, recovers) in [
+        (Some(OLD), Some(NEW), None, 5, true),
+        (None, Some(NEW), Some(OLD), 1177, true),
+        (None, Some(NEW), Some(OLD), 5, false),
+        (Some(NEW), None, Some(OLD), 1177, false),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("local.age");
+        let transaction = stage(
+            &destination,
+            TransactionKind::ReplaceExisting,
+            destination_bytes,
+            temp,
+            backup,
+        )?;
+        let before = files(&destination, &transaction)?;
+        let error = std::io::Error::from_raw_os_error(error_code);
+
+        if recovers {
+            recover_failed_replace(&destination, &error)?;
+            assert_eq!(
+                files(&destination, &transaction)?,
+                Files {
+                    destination: Some(OLD.to_vec()),
+                    temp: None,
+                    backup: None,
+                    marker: None,
+                }
+            );
+        } else {
+            recover_failed_replace(&destination, &error)
+                .expect_err("undocumented failure state must be preserved");
+            assert_eq!(files(&destination, &transaction)?, before);
+        }
+    }
     Ok(())
 }
 
@@ -234,18 +390,8 @@ fn failed_replace_preserves_destination_and_cleans_owned_artifacts() -> anyhow::
 
     assert!(destination.is_dir());
     let entries = fs::read_dir(dir.path())?.collect::<std::io::Result<Vec<_>>>()?;
-    assert_eq!(
-        entries
-            .into_iter()
-            .map(|entry| entry.file_name())
-            .collect::<Vec<_>>(),
-        vec![
-            destination
-                .file_name()
-                .expect("destination filename")
-                .to_owned()
-        ]
-    );
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path(), destination);
     Ok(())
 }
 
@@ -257,7 +403,7 @@ fn atomic_write_replaces_contents_without_artifacts() -> anyhow::Result<()> {
     write_file_atomically(&destination, b"one")?;
     write_file_atomically(&destination, b"two")?;
 
-    assert_eq!(fs::read(&destination)?, b"two".to_vec());
+    assert_eq!(fs::read(&destination)?, b"two");
     assert!(!recovery_artifacts_exist(&destination)?);
     let entries = fs::read_dir(dir.path())?.collect::<std::io::Result<Vec<_>>>()?;
     assert_eq!(entries.len(), 1);
@@ -281,7 +427,7 @@ fn atomic_write_hardens_permissions_on_create_and_replace() -> anyhow::Result<()
     fs::set_permissions(&destination, fs::Permissions::from_mode(/*mode*/ 0o644))?;
     write_file_atomically(&destination, b"two")?;
 
-    assert_eq!(fs::read(&destination)?, b"two".to_vec());
+    assert_eq!(fs::read(&destination)?, b"two");
     assert_eq!(
         fs::metadata(destination)?.permissions().mode() & 0o777,
         0o600

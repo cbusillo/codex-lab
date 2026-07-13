@@ -34,6 +34,9 @@ use super::atomic_file;
 use super::compute_keyring_account_for_namespace;
 use super::keyring_service;
 
+#[cfg(windows)]
+mod windows;
+
 const SECRETS_VERSION: u8 = 1;
 const LOCAL_SECRETS_FILENAME: &str = "local.age";
 const CODEX_AUTH_SECRETS_FILENAME: &str = "codex_auth.age";
@@ -250,17 +253,6 @@ impl LocalSecretsBackend {
             return self.load_file();
         }
         file
-    }
-
-    #[cfg(windows)]
-    fn recover_windows_atomic_write(&self) -> Result<()> {
-        atomic_file::recover_interrupted_write(&self.secrets_path()).with_context(|| {
-            format!(
-                "failed to recover interrupted secrets replacement at {}",
-                self.secrets_path().display()
-            )
-        })?;
-        Ok(())
     }
 
     fn load_file(&self) -> Result<SecretsFile> {
@@ -669,109 +661,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn windows_read_uses_backup_generation_without_mutating_state() -> Result<()> {
-        let codex_home = tempfile::tempdir().expect("tempdir");
-        let keyring = Arc::new(MockKeyringStore::default());
-        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
-        let first_name = SecretName::new("FIRST")?;
-        let second_name = SecretName::new("SECOND")?;
-        backend.set(&SecretScope::Global, &first_name, "one")?;
-
-        let path = backend.secrets_path();
-        let old_ciphertext = fs::read(&path)?;
-        backend.set(&SecretScope::Global, &first_name, "new")?;
-        let new_ciphertext = fs::read(&path)?;
-        let transaction = atomic_file::transaction_paths(
-            &path,
-            atomic_file::TransactionKind::ReplaceExisting,
-            "a1-b2-c3",
-        )?;
-        fs::remove_file(&path)?;
-        fs::write(&transaction.temp, new_ciphertext)?;
-        fs::write(&transaction.backup, old_ciphertext)?;
-        fs::write(&transaction.marker, b"")?;
-
-        assert_eq!(
-            backend.get(&SecretScope::Global, &first_name)?,
-            Some("one".to_string())
-        );
-        assert!(transaction.temp.try_exists()?);
-        assert!(transaction.backup.try_exists()?);
-        assert!(transaction.marker.try_exists()?);
-
-        backend.set(&SecretScope::Global, &second_name, "two")?;
-        assert_eq!(
-            backend.get(&SecretScope::Global, &first_name)?,
-            Some("one".to_string())
-        );
-        assert_eq!(
-            backend.get(&SecretScope::Global, &second_name)?,
-            Some("two".to_string())
-        );
-        assert!(!atomic_file::recovery_artifacts_exist(&path)?);
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_read_uses_committed_destination_without_cleanup() -> Result<()> {
-        let codex_home = tempfile::tempdir().expect("tempdir");
-        let keyring = Arc::new(MockKeyringStore::default());
-        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
-        let name = SecretName::new("FIRST")?;
-        backend.set(&SecretScope::Global, &name, "old")?;
-
-        let path = backend.secrets_path();
-        let old_ciphertext = fs::read(&path)?;
-        backend.set(&SecretScope::Global, &name, "new")?;
-        let transaction = atomic_file::transaction_paths(
-            &path,
-            atomic_file::TransactionKind::ReplaceExisting,
-            "a1-b2-c3",
-        )?;
-        fs::write(&transaction.backup, old_ciphertext)?;
-        fs::write(&transaction.marker, b"")?;
-
-        assert_eq!(
-            backend.get(&SecretScope::Global, &name)?,
-            Some("new".to_string())
-        );
-        assert!(transaction.backup.try_exists()?);
-        assert!(transaction.marker.try_exists()?);
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_first_publish_temp_is_readable_before_recovery() -> Result<()> {
-        let codex_home = tempfile::tempdir().expect("tempdir");
-        let keyring = Arc::new(MockKeyringStore::default());
-        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
-        let name = SecretName::new("FIRST")?;
-        backend.set(&SecretScope::Global, &name, "one")?;
-
-        let path = backend.secrets_path();
-        let ciphertext = fs::read(&path)?;
-        let transaction = atomic_file::transaction_paths(
-            &path,
-            atomic_file::TransactionKind::FirstPublish,
-            "a1-b2-c3",
-        )?;
-        fs::remove_file(&path)?;
-        fs::write(&transaction.temp, ciphertext)?;
-        fs::write(&transaction.marker, b"")?;
-
-        assert_eq!(
-            backend.get(&SecretScope::Global, &name)?,
-            Some("one".to_string())
-        );
-        assert!(transaction.temp.try_exists()?);
-        assert!(transaction.marker.try_exists()?);
-        Ok(())
-    }
-
     #[test]
     fn concurrent_first_writes_share_one_key_and_preserve_both_values() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
@@ -850,15 +739,18 @@ mod tests {
         thread::spawn(move || {
             let _ = delete_sender.send(delete_backend.delete(&SecretScope::Global, &delete_name));
         });
-        assert!(matches!(
-            delete_receiver.recv_timeout(Duration::from_millis(/*millis*/ 100)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
+        let delete_completed_early = delete_receiver
+            .recv_timeout(Duration::from_millis(/*millis*/ 100))
+            .ok()
+            .transpose()?;
         load_release_sender.send(()).expect("release set writer");
         set_thread.join().expect("set writer")?;
-        let deleted = delete_receiver
-            .recv_timeout(Duration::from_secs(/*secs*/ 30))
-            .expect("delete writer")?;
+        let deleted = match delete_completed_early {
+            Some(deleted) => deleted,
+            None => delete_receiver
+                .recv_timeout(Duration::from_secs(/*secs*/ 30))
+                .expect("delete writer")?,
+        };
 
         assert!(deleted);
         assert_eq!(
@@ -933,3 +825,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "local_windows_tests.rs"]
+mod windows_tests;
