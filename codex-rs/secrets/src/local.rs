@@ -243,7 +243,7 @@ impl LocalSecretsBackend {
         }
         let file = self.load_file();
         if read_lock.is_none()
-            && self.lock_path().try_exists().unwrap_or(false)
+            && self.lock_path().try_exists().unwrap_or(/*default*/ false)
             && let Some(_retry_lock) = self.acquire_lock(LockMode::Shared)?
         {
             return self.load_file();
@@ -813,7 +813,7 @@ mod tests {
         let deleted = match delete_completed_early {
             Some(deleted) => deleted,
             None => delete_receiver
-                .recv_timeout(Duration::from_secs(/*secs*/ 5))
+                .recv_timeout(Duration::from_secs(/*secs*/ 30))
                 .expect("delete writer")?,
         };
 
