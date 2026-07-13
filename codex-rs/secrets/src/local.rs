@@ -249,27 +249,37 @@ impl LocalSecretsBackend {
     }
 
     fn load_file(&self) -> Result<SecretsFile> {
-        let path = self.secrets_path();
-        if !path
-            .try_exists()
-            .with_context(|| format!("failed to inspect secrets file at {}", path.display()))?
-        {
+        let logical_path = self.secrets_path();
+        #[cfg(windows)]
+        let source_path = atomic_file::readable_path(&logical_path)?;
+        #[cfg(not(windows))]
+        let source_path = if logical_path.try_exists().with_context(|| {
+            format!(
+                "failed to inspect secrets file at {}",
+                logical_path.display()
+            )
+        })? {
+            Some(logical_path.clone())
+        } else {
+            None
+        };
+        let Some(source_path) = source_path else {
             return Ok(SecretsFile::new_empty());
-        }
+        };
 
-        let ciphertext = fs::read(&path)
-            .with_context(|| format!("failed to read secrets file at {}", path.display()))?;
+        let ciphertext = fs::read(&source_path)
+            .with_context(|| format!("failed to read secrets file at {}", source_path.display()))?;
         let passphrase = self.load_passphrase()?.with_context(|| {
             format!(
                 "secrets file exists at {} but its key is missing from the keyring",
-                path.display()
+                logical_path.display()
             )
         })?;
         let plaintext = decrypt_with_passphrase(&ciphertext, &passphrase)?;
         let mut parsed: SecretsFile = serde_json::from_slice(&plaintext).with_context(|| {
             format!(
                 "failed to deserialize decrypted secrets file at {}",
-                path.display()
+                source_path.display()
             )
         })?;
         if parsed.version == 0 {
@@ -808,3 +818,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "local_windows_tests.rs"]
+mod windows_tests;
