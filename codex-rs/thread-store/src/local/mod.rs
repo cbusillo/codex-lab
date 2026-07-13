@@ -5,6 +5,7 @@ mod list_threads;
 mod live_writer;
 mod read_thread;
 mod search_threads;
+mod thread_history_projection;
 mod unarchive_thread;
 mod update_thread_metadata;
 
@@ -16,7 +17,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::StateDbHandle;
-use codex_state::ThreadHistoryRepository;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
@@ -40,6 +40,7 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 use crate::UpdateThreadMetadataParams;
+use thread_history_projection::ThreadHistoryProjectionController;
 
 /// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
 ///
@@ -59,8 +60,7 @@ pub struct LocalThreadStore {
     pub(super) config: LocalThreadStoreConfig,
     live_recorders: Arc<Mutex<HashMap<ThreadId, LiveRecorderEntry>>>,
     state_db: Option<StateDbHandle>,
-    #[allow(dead_code)]
-    history_db: Arc<ThreadHistoryRepository>,
+    history_projection: Arc<ThreadHistoryProjectionController>,
 }
 
 struct LiveRecorderEntry {
@@ -101,12 +101,14 @@ impl std::fmt::Debug for LocalThreadStore {
 impl LocalThreadStore {
     /// Create a local store using an already initialized state DB handle.
     pub fn new(config: LocalThreadStoreConfig, state_db: Option<StateDbHandle>) -> Self {
-        let history_db = Arc::new(ThreadHistoryRepository::new(config.sqlite_home.clone()));
+        let history_projection = Arc::new(ThreadHistoryProjectionController::new(
+            config.sqlite_home.clone(),
+        ));
         Self {
             config,
             live_recorders: Arc::new(Mutex::new(HashMap::new())),
             state_db,
-            history_db,
+            history_projection,
         }
     }
 
@@ -348,13 +350,18 @@ mod tests {
         let cloned = store.clone();
 
         assert!(!history_path.exists());
-        assert!(Arc::ptr_eq(&store.history_db, &cloned.history_db));
+        assert!(Arc::ptr_eq(
+            &store.history_projection,
+            &cloned.history_projection
+        ));
     }
 
     #[tokio::test]
     async fn live_writer_lifecycle_writes_and_closes() {
         let home = TempDir::new().expect("temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let config = test_config(home.path());
+        let history_path = codex_state::thread_history_db_path(config.sqlite_home.as_path());
+        let store = LocalThreadStore::new(config, /*state_db*/ None);
         let thread_id = ThreadId::default();
 
         store
@@ -398,6 +405,7 @@ mod tests {
         assert!(
             matches!(err, ThreadStoreError::ThreadNotFound { thread_id: missing } if missing == thread_id)
         );
+        assert!(!history_path.exists());
     }
 
     #[tokio::test]
@@ -725,6 +733,17 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) if event.turn_id == "turn-1"
         ));
         assert!(!contents.contains("legacy event should not persist"));
+        assert_eq!(
+            store
+                .history_projection
+                .repository()
+                .checkpoint(&thread_id.to_string())
+                .await
+                .expect("projection checkpoint")
+                .expect("projection checkpoint row")
+                .projection_status,
+            codex_state::ThreadHistoryProjectionStatus::Dirty
+        );
     }
 
     #[tokio::test]

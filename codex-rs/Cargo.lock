@@ -4007,8 +4007,10 @@ dependencies = [
 name = "codex-thread-store"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
+ "codex-app-server-protocol",
  "codex-git-utils",
  "codex-install-context",
  "codex-protocol",
@@ -4018,6 +4020,7 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
