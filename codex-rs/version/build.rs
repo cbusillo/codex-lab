@@ -36,12 +36,15 @@ fn main() {
         "CODEX_BUILD_COMMIT",
         "CODEX_BUILD_DIRTY",
         "CODEX_BUILD_CHANNEL",
+        "PROFILE",
     ] {
         println!("cargo:rerun-if-env-changed={name}");
     }
 
     if let Some(repo_root) = repo_root_from_manifest() {
-        emit_git_rerun_paths(repo_root.as_path());
+        for path in git_rerun_paths(repo_root.as_path()) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
     }
 }
 
@@ -66,9 +69,17 @@ fn explicit_source_metadata() -> Option<SourceMetadata> {
     let commit = env::var("CODEX_BUILD_COMMIT").ok();
     let dirty = env::var("CODEX_BUILD_DIRTY").ok();
     let channel = env::var("CODEX_BUILD_CHANNEL").ok();
+    explicit_source_metadata_from_values(commit.as_deref(), dirty.as_deref(), channel.as_deref())
+}
+
+fn explicit_source_metadata_from_values(
+    commit: Option<&str>,
+    dirty: Option<&str>,
+    channel: Option<&str>,
+) -> Option<SourceMetadata> {
     match (commit, dirty, channel) {
         (Some(commit), Some(dirty), Some(channel)) => Some(
-            source_metadata(&commit, &dirty, &channel).unwrap_or_else(SourceMetadata::unavailable),
+            source_metadata(commit, dirty, channel).unwrap_or_else(SourceMetadata::unavailable),
         ),
         (None, None, None) => None,
         _ => Some(SourceMetadata::unavailable()),
@@ -125,7 +136,7 @@ fn git_dirty_state(repo_root: &Path) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
-        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .args(["status", "--porcelain", "--untracked-files=no"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -156,31 +167,32 @@ fn git_output<const N: usize>(repo_root: &Path, args: [&str; N]) -> Option<Strin
         .filter(|value| !value.is_empty())
 }
 
-fn emit_git_rerun_paths(repo_root: &Path) {
-    let Some(git_dir) = git_output(repo_root, ["rev-parse", "--git-dir"]) else {
-        return;
+fn git_rerun_paths(repo_root: &Path) -> Vec<PathBuf> {
+    let Some(head_path) = git_path(repo_root, "HEAD") else {
+        return Vec::new();
     };
-    let git_dir = PathBuf::from(git_dir);
-    let git_dir = if git_dir.is_absolute() {
-        git_dir
-    } else {
-        repo_root.join(git_dir)
-    };
-
-    let head_path = git_dir.join("HEAD");
-    for path in [
-        Some(head_path.clone()),
-        Some(git_dir.join("index")),
-        Some(git_dir.join("packed-refs")),
-        head_ref(&head_path).map(|git_ref| git_dir.join(git_ref)),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if path.exists() {
-            println!("cargo:rerun-if-changed={}", path.display());
-        }
+    let mut paths = vec![head_path.clone()];
+    paths.extend(git_path(repo_root, "index"));
+    paths.extend(git_path(repo_root, "packed-refs"));
+    paths.extend(head_ref(&head_path).and_then(|git_ref| git_path(repo_root, git_ref.as_str())));
+    if let Some(tracked_files) = git_output(repo_root, ["ls-files"]) {
+        paths.extend(
+            tracked_files
+                .lines()
+                .filter(|path| !path.is_empty())
+                .map(|path| repo_root.join(path)),
+        );
     }
+    paths
+}
+
+fn git_path(repo_root: &Path, path: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(git_output(repo_root, ["rev-parse", "--git-path", path])?);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        repo_root.join(path)
+    })
 }
 
 fn head_ref(head_path: &Path) -> Option<String> {
@@ -221,5 +233,130 @@ fn default_channel(build_profile: &str) -> &'static str {
         "release"
     } else {
         "dev"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn explicit_metadata_is_an_atomic_tuple() {
+        let complete = explicit_source_metadata_from_values(
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            Some("clean"),
+            Some("dev"),
+        )
+        .expect("explicit tuple");
+        assert_eq!(complete.dirty_state, "clean");
+
+        let partial = explicit_source_metadata_from_values(
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            /*dirty*/ None,
+            Some("dev"),
+        )
+        .expect("partial tuple must suppress git fallback");
+        assert_eq!(partial.source_commit, UNAVAILABLE);
+    }
+
+    #[test]
+    fn tracked_changes_are_dirty_and_watched() {
+        let repo = TestRepo::new();
+        repo.write("tracked.txt", "clean\n");
+        repo.git(["add", "tracked.txt"]);
+        repo.commit();
+
+        assert_eq!(git_dirty_state(repo.path()), Some("clean".to_string()));
+        assert!(git_rerun_paths(repo.path()).contains(&repo.path().join("tracked.txt")));
+
+        repo.write("tracked.txt", "dirty\n");
+        assert_eq!(git_dirty_state(repo.path()), Some("dirty".to_string()));
+    }
+
+    #[test]
+    fn linked_worktree_watches_common_branch_ref() {
+        let repo = TestRepo::new();
+        repo.write("tracked.txt", "clean\n");
+        repo.git(["add", "tracked.txt"]);
+        repo.commit();
+        let worktree = repo.path().with_extension("linked");
+        repo.git([
+            "worktree",
+            "add",
+            "-b",
+            "linked-test",
+            worktree.to_str().expect("UTF-8 test path"),
+        ]);
+
+        let branch_ref = git_path(worktree.as_path(), "refs/heads/linked-test")
+            .expect("linked worktree branch ref");
+        assert!(git_rerun_paths(worktree.as_path()).contains(&branch_ref));
+
+        repo.git([
+            "worktree",
+            "remove",
+            "--force",
+            worktree.to_str().expect("UTF-8 test path"),
+        ]);
+    }
+
+    struct TestRepo {
+        path: PathBuf,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "codex-build-provenance-{}-{id}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create test repo");
+            let repo = Self { path };
+            repo.git(["init", "--quiet"]);
+            repo
+        }
+
+        fn path(&self) -> &Path {
+            self.path.as_path()
+        }
+
+        fn write(&self, relative_path: &str, contents: &str) {
+            fs::write(self.path.join(relative_path), contents).expect("write test file");
+        }
+
+        fn commit(&self) {
+            self.git([
+                "-c",
+                "user.name=Codex Test",
+                "-c",
+                "user.email=codex@example.com",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ]);
+        }
+
+        fn git<const N: usize>(&self, args: [&str; N]) {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&self.path)
+                .args(args)
+                .status()
+                .expect("run git");
+            assert!(status.success());
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }

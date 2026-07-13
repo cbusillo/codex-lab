@@ -20,6 +20,15 @@ const BUILD_PROFILE: Option<&str> = option_env!("CODEX_BUILD_PROFILE");
 const BUILD_CHANNEL: Option<&str> = option_env!("CODEX_BUILD_CHANNEL");
 
 /// Versioned source and executable identity for the currently running binary.
+///
+/// The source fields form one atomic tuple: if commit, dirty state, or channel is missing or
+/// malformed, all three report `unavailable`. Git-derived dirty state is a build-time snapshot of
+/// tracked files only; ignored and untracked files are intentionally excluded. Source archives can
+/// provide the tuple through `CODEX_BUILD_COMMIT`, `CODEX_BUILD_DIRTY`, and
+/// `CODEX_BUILD_CHANNEL`; Bazel callers pass those variables with `--action_env`. The executable
+/// path comes from [`std::env::current_exe`], not `argv[0]`, and may expose local usernames or
+/// install paths. Keep that field behind explicit local diagnostics unless its disclosure is
+/// separately reviewed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildProvenance {
     pub schema_version: u32,
@@ -159,7 +168,7 @@ fn provenance_from_metadata(
             .unwrap_or_else(|| UNAVAILABLE.to_string()),
         build_channel: source.build_channel,
         executable_path: executable_path
-            .map(|path| path.to_string_lossy().into_owned())
+            .and_then(|path| path.into_os_string().into_string().ok())
             .filter(|path| !path.trim().is_empty())
             .unwrap_or_else(|| UNAVAILABLE.to_string()),
     }
@@ -222,6 +231,11 @@ fn max_semver<'a>(current: &'a str, candidate: &'a str) -> &'a str {
 #[cfg(test)]
 #[path = "provenance_tests.rs"]
 mod provenance_tests;
+
+#[cfg(test)]
+#[path = "../build.rs"]
+#[allow(dead_code)]
+mod build_script_tests;
 
 fn parse_semver_triplet(version: &str) -> Option<(u64, u64, u64)> {
     let trimmed = version.trim().trim_start_matches('v');

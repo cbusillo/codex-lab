@@ -35,7 +35,10 @@ fn clean_metadata_records_versioned_json() {
 #[test]
 fn missing_metadata_is_explicitly_unavailable() {
     assert_eq!(
-        provenance(None, None, None, None),
+        provenance(
+            /*source_commit*/ None, /*dirty_state*/ None, /*build_profile*/ None,
+            /*build_channel*/ None,
+        ),
         unavailable("unavailable")
     );
 }
@@ -70,6 +73,20 @@ fn malformed_or_partial_source_metadata_fails_as_an_atomic_tuple() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_executable_path_is_unavailable() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let provenance = provenance_from_metadata(
+        metadata(Some(COMMIT), Some("clean"), Some("debug"), Some("dev")),
+        Some(PathBuf::from(OsString::from_vec(vec![b'/', 0xff]))),
+    );
+
+    assert_eq!(provenance.executable_path, "unavailable");
+}
+
 fn provenance(
     source_commit: Option<&str>,
     dirty_state: Option<&str>,
@@ -78,7 +95,7 @@ fn provenance(
 ) -> BuildProvenance {
     provenance_from_metadata(
         metadata(source_commit, dirty_state, build_profile, build_channel),
-        None,
+        /*executable_path*/ None,
     )
 }
 
