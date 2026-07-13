@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use serde_json::Value;
+use serde_json::json;
 
 pub const CODE_VERSION: &str = {
     match option_env!("CODE_VERSION") {
@@ -9,6 +11,177 @@ pub const CODE_VERSION: &str = {
         None => env!("CARGO_PKG_VERSION"),
     }
 };
+
+pub const BUILD_PROVENANCE_SCHEMA_VERSION: u32 = 1;
+const UNAVAILABLE: &str = "unavailable";
+const BUILD_SOURCE_COMMIT: Option<&str> = option_env!("CODEX_BUILD_SOURCE_COMMIT");
+const BUILD_DIRTY_STATE: Option<&str> = option_env!("CODEX_BUILD_DIRTY_STATE");
+const BUILD_PROFILE: Option<&str> = option_env!("CODEX_BUILD_PROFILE");
+const BUILD_CHANNEL: Option<&str> = option_env!("CODEX_BUILD_CHANNEL");
+
+/// Versioned source and executable identity for the currently running binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildProvenance {
+    pub schema_version: u32,
+    pub version: String,
+    pub source_commit: String,
+    pub dirty_state: DirtyState,
+    pub build_profile: String,
+    pub build_channel: String,
+    pub executable_path: String,
+}
+
+impl BuildProvenance {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "schema_version": self.schema_version,
+            "version": self.version,
+            "source_commit": self.source_commit,
+            "dirty_state": self.dirty_state.as_str(),
+            "build_profile": self.build_profile,
+            "build_channel": self.build_channel,
+            "executable_path": self.executable_path,
+        })
+    }
+}
+
+/// Whether the binary was built from a clean, dirty, or unavailable source tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirtyState {
+    Clean,
+    Dirty,
+    Unavailable,
+}
+
+impl DirtyState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Dirty => "dirty",
+            Self::Unavailable => UNAVAILABLE,
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "clean" => Some(Self::Clean),
+            "dirty" => Some(Self::Dirty),
+            UNAVAILABLE => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+struct BuildProvenanceMetadata<'a> {
+    version: &'a str,
+    source_commit: Option<&'a str>,
+    dirty_state: Option<&'a str>,
+    build_profile: Option<&'a str>,
+    build_channel: Option<&'a str>,
+}
+
+struct SourceMetadata {
+    source_commit: String,
+    dirty_state: DirtyState,
+    build_channel: String,
+}
+
+impl SourceMetadata {
+    fn unavailable() -> Self {
+        Self {
+            source_commit: UNAVAILABLE.to_string(),
+            dirty_state: DirtyState::Unavailable,
+            build_channel: UNAVAILABLE.to_string(),
+        }
+    }
+
+    fn new(source_commit: &str, dirty_state: &str, build_channel: &str) -> Option<Self> {
+        let source_commit = normalized_commit(source_commit)?;
+        let dirty_state = DirtyState::parse(dirty_state)?;
+        let build_channel = normalized_value(build_channel)?;
+        if dirty_state == DirtyState::Unavailable || build_channel == UNAVAILABLE {
+            return None;
+        }
+
+        Some(Self {
+            source_commit,
+            dirty_state,
+            build_channel,
+        })
+    }
+
+    fn from_compile_env(
+        source_commit: Option<&str>,
+        dirty_state: Option<&str>,
+        build_channel: Option<&str>,
+    ) -> Self {
+        match (source_commit, dirty_state, build_channel) {
+            (Some(UNAVAILABLE), Some(UNAVAILABLE), Some(UNAVAILABLE)) => Self::unavailable(),
+            (Some(source_commit), Some(dirty_state), Some(build_channel)) => {
+                Self::new(source_commit, dirty_state, build_channel)
+                    .unwrap_or_else(Self::unavailable)
+            }
+            _ => Self::unavailable(),
+        }
+    }
+}
+
+/// Returns the build provenance for the currently running process.
+pub fn build_provenance() -> BuildProvenance {
+    provenance_from_metadata(
+        BuildProvenanceMetadata {
+            version: CODE_VERSION,
+            source_commit: BUILD_SOURCE_COMMIT,
+            dirty_state: BUILD_DIRTY_STATE,
+            build_profile: BUILD_PROFILE,
+            build_channel: BUILD_CHANNEL,
+        },
+        std::env::current_exe().ok(),
+    )
+}
+
+fn provenance_from_metadata(
+    metadata: BuildProvenanceMetadata<'_>,
+    executable_path: Option<PathBuf>,
+) -> BuildProvenance {
+    let source = SourceMetadata::from_compile_env(
+        metadata.source_commit,
+        metadata.dirty_state,
+        metadata.build_channel,
+    );
+
+    BuildProvenance {
+        schema_version: BUILD_PROVENANCE_SCHEMA_VERSION,
+        version: metadata.version.to_string(),
+        source_commit: source.source_commit,
+        dirty_state: source.dirty_state,
+        build_profile: normalized_value(metadata.build_profile.unwrap_or(UNAVAILABLE))
+            .unwrap_or_else(|| UNAVAILABLE.to_string()),
+        build_channel: source.build_channel,
+        executable_path: executable_path
+            .map(|path| path.to_string_lossy().into_owned())
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_else(|| UNAVAILABLE.to_string()),
+    }
+}
+
+fn normalized_commit(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value == UNAVAILABLE
+        || !matches!(value.len(), 40 | 64)
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+
+    Some(value.to_ascii_lowercase())
+}
+
+fn normalized_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_graphic()))
+        .then(|| value.to_string())
+}
 
 const ANNOUNCEMENT_TIP: &str = include_str!("../../../announcement_tip.toml");
 const MODELS_MANIFEST: &str = include_str!("../../models-manager/models.json");
@@ -45,6 +218,10 @@ fn max_semver<'a>(current: &'a str, candidate: &'a str) -> &'a str {
         current
     }
 }
+
+#[cfg(test)]
+#[path = "provenance_tests.rs"]
+mod provenance_tests;
 
 fn parse_semver_triplet(version: &str) -> Option<(u64, u64, u64)> {
     let trimmed = version.trim().trim_start_matches('v');

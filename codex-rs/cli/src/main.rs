@@ -220,6 +220,9 @@ enum DebugSubcommand {
     /// Render the raw model catalog as JSON.
     Models(DebugModelsCommand),
 
+    /// Report the running binary's build provenance.
+    Provenance(DebugProvenanceCommand),
+
     /// Tooling: helps debug the app server.
     AppServer(DebugAppServerCommand),
 
@@ -269,6 +272,13 @@ struct DebugModelsCommand {
     /// Skip refresh and dump only the bundled catalog shipped with this binary.
     #[arg(long = "bundled", default_value_t = false)]
     bundled: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DebugProvenanceCommand {
+    /// Render the provenance record as JSON for automation.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1428,6 +1438,14 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths, command_name: &'static str) -> 
                 )?;
                 run_debug_models_command(cmd, root_config_overrides).await?;
             }
+            DebugSubcommand::Provenance(cmd) => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug provenance",
+                )?;
+                run_debug_provenance_command(cmd)?;
+            }
             DebugSubcommand::AppServer(cmd) => {
                 reject_remote_mode_for_subcommand(
                     root_remote.as_deref(),
@@ -1920,6 +1938,24 @@ async fn run_debug_models_command(
 
     serde_json::to_writer(std::io::stdout(), &catalog)?;
     println!();
+    Ok(())
+}
+
+fn run_debug_provenance_command(cmd: DebugProvenanceCommand) -> anyhow::Result<()> {
+    let provenance = codex_version::build_provenance();
+    if cmd.json {
+        serde_json::to_writer(std::io::stdout(), &provenance.as_json())?;
+        println!();
+        return Ok(());
+    }
+
+    println!("Codex build provenance");
+    println!("  version: {}", provenance.version);
+    println!("  source commit: {}", provenance.source_commit);
+    println!("  dirty state: {}", provenance.dirty_state.as_str());
+    println!("  build profile: {}", provenance.build_profile);
+    println!("  build channel: {}", provenance.build_channel);
+    println!("  executable path: {}", provenance.executable_path);
     Ok(())
 }
 
@@ -2787,6 +2823,21 @@ mod tests {
         };
 
         assert!(cmd.bundled);
+    }
+
+    #[test]
+    fn debug_provenance_parses_json_flag() {
+        let cli = MultitoolCli::try_parse_from(["codex", "debug", "provenance", "--json"])
+            .expect("parse");
+
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand: DebugSubcommand::Provenance(cmd),
+        })) = cli.subcommand
+        else {
+            panic!("expected debug provenance subcommand");
+        };
+
+        assert!(cmd.json);
     }
 
     #[test]
