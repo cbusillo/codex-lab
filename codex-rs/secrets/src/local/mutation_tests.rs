@@ -4,7 +4,6 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Barrier;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -12,6 +11,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use codex_keyring_store::tests::MockKeyringStore;
+use fs2::FileExt;
 use pretty_assertions::assert_eq;
 
 use super::*;
@@ -36,6 +36,10 @@ impl Drop for PermissionRestoreGuard {
 #[test]
 fn manager_mutation_reports_whether_ciphertext_changed() -> Result<()> {
     let codex_home = tempfile::tempdir()?;
+    let secrets_path = codex_home
+        .path()
+        .join("secrets")
+        .join(CODEX_AUTH_SECRETS_FILENAME);
     let manager = SecretsManager::new_with_keyring_store_and_namespace(
         codex_home.path().to_path_buf(),
         SecretsBackendKind::Local,
@@ -49,37 +53,55 @@ fn manager_mutation_reports_whether_ciphertext_changed() -> Result<()> {
         Ok(SecretMutation::Set("one".to_string()))
     })?);
     assert_eq!(manager.get(&scope, &name)?, Some("one".to_string()));
+    let ciphertext = fs::read(&secrets_path)?;
     assert!(!manager.mutate(&scope, &name, |_| Ok(SecretMutation::Keep))?);
+    assert_eq!(fs::read(&secrets_path)?, ciphertext);
     assert!(!manager.mutate(&scope, &name, |_| {
         Ok(SecretMutation::Set("one".to_string()))
     })?);
-    assert!(manager.mutate(&scope, &name, |_| Ok(SecretMutation::Delete))?);
-    assert!(!manager.mutate(&scope, &name, |_| Ok(SecretMutation::Delete))?);
-    assert_eq!(manager.get(&scope, &name)?, None);
+    assert_eq!(fs::read(&secrets_path)?, ciphertext);
 
     let error = manager
         .mutate(&scope, &name, |_| Ok(SecretMutation::Set(String::new())))
         .expect_err("empty replacement must fail");
     assert!(error.to_string().contains("must not be empty"));
+    assert_eq!(manager.get(&scope, &name)?, Some("one".to_string()));
+    assert_eq!(fs::read(&secrets_path)?, ciphertext);
+
+    assert!(manager.mutate(&scope, &name, |_| Ok(SecretMutation::Delete))?);
+    assert!(!manager.mutate(&scope, &name, |_| Ok(SecretMutation::Delete))?);
+    assert_eq!(manager.get(&scope, &name)?, None);
     Ok(())
 }
 
 #[test]
 fn concurrent_mutations_observe_committed_updates() -> Result<()> {
     let codex_home = tempfile::tempdir()?;
-    let manager = SecretsManager::new_with_keyring_store_and_namespace(
+    let keyring_store = Arc::new(MockKeyringStore::default());
+    let first_manager = SecretsManager::new_with_keyring_store_and_namespace(
         codex_home.path().to_path_buf(),
         SecretsBackendKind::Local,
-        Arc::new(MockKeyringStore::default()),
+        keyring_store.clone(),
+        LocalSecretsNamespace::CodexAuth,
+    );
+    let second_manager = SecretsManager::new_with_keyring_store_and_namespace(
+        codex_home.path().to_path_buf(),
+        SecretsBackendKind::Local,
+        keyring_store.clone(),
+        LocalSecretsNamespace::CodexAuth,
+    );
+    let verifier = SecretsManager::new_with_keyring_store_and_namespace(
+        codex_home.path().to_path_buf(),
+        SecretsBackendKind::Local,
+        keyring_store,
         LocalSecretsNamespace::CodexAuth,
     );
     let scope = SecretScope::Global;
     let name = SecretName::new("LOGIN_STATE")?;
-    manager.set(&scope, &name, "0")?;
+    first_manager.set(&scope, &name, "0")?;
 
     let (first_started_sender, first_started_receiver) = mpsc::channel();
     let (first_release_sender, first_release_receiver) = mpsc::channel();
-    let first_manager = manager.clone();
     let first_scope = scope.clone();
     let first_name = name.clone();
     let first = thread::spawn(move || {
@@ -93,17 +115,25 @@ fn concurrent_mutations_observe_committed_updates() -> Result<()> {
         })
     });
     first_started_receiver.recv_timeout(Duration::from_secs(/*secs*/ 5))?;
+    let lock_path = codex_home
+        .path()
+        .join("secrets")
+        .join(format!(".{CODEX_AUTH_SECRETS_FILENAME}.lock"));
+    let competing_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    assert!(
+        FileExt::try_lock_shared(&competing_lock).is_err(),
+        "first mutation must hold the namespace lock"
+    );
 
-    let (second_started_sender, second_started_receiver) = mpsc::channel();
-    let second_manager = manager.clone();
+    let (second_attempt_sender, second_attempt_receiver) = mpsc::channel();
     let second_scope = scope.clone();
     let second_name = name.clone();
-    let second_ready = Arc::new(Barrier::new(/*n*/ 2));
-    let second_thread_ready = second_ready.clone();
     let second = thread::spawn(move || {
-        second_thread_ready.wait();
+        second_attempt_sender.send(())?;
         second_manager.mutate(&second_scope, &second_name, |current| {
-            second_started_sender.send(())?;
             let current = current
                 .context("second mutation expected an existing value")?
                 .parse::<u64>()?;
@@ -111,19 +141,84 @@ fn concurrent_mutations_observe_committed_updates() -> Result<()> {
         })
     });
 
-    second_ready.wait();
-    assert!(
-        second_started_receiver
-            .recv_timeout(Duration::from_millis(/*millis*/ 100))
-            .is_err(),
-        "second callback must wait for the first mutation to commit"
-    );
+    second_attempt_receiver.recv_timeout(Duration::from_secs(/*secs*/ 5))?;
     first_release_sender.send(())?;
     assert!(first.join().expect("first mutation thread")?);
-    second_started_receiver.recv_timeout(Duration::from_secs(/*secs*/ 5))?;
     assert!(second.join().expect("second mutation thread")?);
 
-    assert_eq!(manager.get(&scope, &name)?, Some("2".to_string()));
+    assert_eq!(verifier.get(&scope, &name)?, Some("2".to_string()));
+    Ok(())
+}
+
+#[test]
+fn mutation_callback_reentry_fails_without_blocking() -> Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let manager = SecretsManager::new_with_keyring_store_and_namespace(
+        codex_home.path().to_path_buf(),
+        SecretsBackendKind::Local,
+        Arc::new(MockKeyringStore::default()),
+        LocalSecretsNamespace::CodexAuth,
+    );
+    let scope = SecretScope::Global;
+    let name = SecretName::new("LOGIN_STATE")?;
+    manager.set(&scope, &name, "before")?;
+    let nested_manager = manager.clone();
+    let nested_scope = scope.clone();
+    let nested_name = name.clone();
+
+    let error = manager
+        .mutate(&scope, &name, |_| {
+            nested_manager.get(&nested_scope, &nested_name)?;
+            Ok(SecretMutation::Keep)
+        })
+        .expect_err("mutation callback reentry must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("must not access the same secrets backend")
+    );
+    assert_eq!(manager.get(&scope, &name)?, Some("before".to_string()));
+    Ok(())
+}
+
+#[test]
+fn mutation_callback_alias_reentry_fails_without_blocking() -> Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let keyring_store = Arc::new(MockKeyringStore::default());
+    let manager = SecretsManager::new_with_keyring_store_and_namespace(
+        codex_home.path().to_path_buf(),
+        SecretsBackendKind::Local,
+        keyring_store.clone(),
+        LocalSecretsNamespace::CodexAuth,
+    );
+    let alias_component = codex_home.path().join("alias");
+    fs::create_dir(&alias_component)?;
+    let alias_manager = SecretsManager::new_with_keyring_store_and_namespace(
+        alias_component.join(".."),
+        SecretsBackendKind::Local,
+        keyring_store,
+        LocalSecretsNamespace::CodexAuth,
+    );
+    let scope = SecretScope::Global;
+    let name = SecretName::new("LOGIN_STATE")?;
+    manager.set(&scope, &name, "before")?;
+    let nested_scope = scope.clone();
+    let nested_name = name.clone();
+
+    let error = manager
+        .mutate(&scope, &name, |_| {
+            alias_manager.get(&nested_scope, &nested_name)?;
+            Ok(SecretMutation::Keep)
+        })
+        .expect_err("aliased mutation callback reentry must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("must not access the same secrets backend")
+    );
+    assert_eq!(manager.get(&scope, &name)?, Some("before".to_string()));
     Ok(())
 }
 

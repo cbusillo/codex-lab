@@ -180,6 +180,7 @@ impl LocalSecretsBackend {
 
     fn acquire_lock(&self, mode: LockMode) -> Result<Option<fs::File>> {
         let path = self.lock_path();
+        mutation::ensure_backend_access_allowed(&path)?;
         match mode {
             LockMode::Shared => {
                 let file = match fs::OpenOptions::new().read(true).open(&path) {

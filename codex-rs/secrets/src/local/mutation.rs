@@ -1,3 +1,10 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+
+use anyhow::Context;
 use anyhow::Result;
 
 use super::LocalSecretsBackend;
@@ -5,6 +12,60 @@ use super::LockMode;
 use super::SecretMutation;
 use super::SecretName;
 use super::SecretScope;
+
+std::thread_local! {
+    static ACTIVE_MUTATION_CALLBACKS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+}
+
+pub(super) fn ensure_backend_access_allowed(lock_path: &Path) -> Result<()> {
+    let has_active_callback = ACTIVE_MUTATION_CALLBACKS.with(|active| !active.borrow().is_empty());
+    if !has_active_callback {
+        return Ok(());
+    }
+    let lock_identity = canonical_lock_identity(lock_path)?;
+    ACTIVE_MUTATION_CALLBACKS.with(|active| {
+        anyhow::ensure!(
+            !active.borrow().contains(&lock_identity),
+            "secret mutation callback must not access the same secrets backend"
+        );
+        Ok(())
+    })
+}
+
+struct MutationCallbackGuard {
+    lock_path: PathBuf,
+}
+
+impl MutationCallbackGuard {
+    fn enter(lock_path: PathBuf) -> Result<Self> {
+        let lock_path = canonical_lock_identity(&lock_path)?;
+        ACTIVE_MUTATION_CALLBACKS.with(|active| {
+            anyhow::ensure!(
+                active.borrow_mut().insert(lock_path.clone()),
+                "secret mutation callback must not re-enter the same secrets backend"
+            );
+            Ok(Self { lock_path })
+        })
+    }
+}
+
+fn canonical_lock_identity(lock_path: &Path) -> Result<PathBuf> {
+    fs::canonicalize(lock_path).with_context(|| {
+        format!(
+            "failed to resolve secrets lock identity at {}",
+            lock_path.display()
+        )
+    })
+}
+
+impl Drop for MutationCallbackGuard {
+    fn drop(&mut self) {
+        ACTIVE_MUTATION_CALLBACKS.with(|active| {
+            let removed = active.borrow_mut().remove(&self.lock_path);
+            debug_assert!(removed);
+        });
+    }
+}
 
 impl LocalSecretsBackend {
     pub fn mutate(
@@ -21,6 +82,7 @@ impl LocalSecretsBackend {
         let mut file = self.load_file()?;
         let mutation = {
             let current = file.secrets.get(&canonical_key).map(String::as_str);
+            let _callback_guard = MutationCallbackGuard::enter(self.lock_path())?;
             mutator(current)?
         };
 

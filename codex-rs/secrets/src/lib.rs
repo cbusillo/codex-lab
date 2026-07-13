@@ -81,6 +81,7 @@ pub struct SecretListEntry {
     pub name: SecretName,
 }
 
+#[non_exhaustive]
 pub enum SecretMutation {
     Keep,
     Set(String),
@@ -103,7 +104,10 @@ pub trait SecretsBackend: Send + Sync {
     /// Mutates one secret while the backend holds its write lock.
     ///
     /// Implementations must call `mutator` at most once and must not persist a
-    /// partial result when loading, mutation, or writing fails.
+    /// partial result when loading, mutation, or writing fails. The callback
+    /// must not access the same backend namespace, including from another
+    /// thread that it waits for, because the write lock remains held while the
+    /// callback runs.
     fn mutate(
         &self,
         _scope: &SecretScope,
@@ -175,6 +179,10 @@ impl SecretsManager {
         self.backend.list(scope_filter)
     }
 
+    /// Atomically mutates one secret.
+    ///
+    /// The callback must not call another method on this manager's backend
+    /// namespace, including from another thread that it waits for.
     pub fn mutate<F>(&self, scope: &SecretScope, name: &SecretName, mutator: F) -> Result<bool>
     where
         F: FnMut(Option<&str>) -> Result<SecretMutation>,
