@@ -13,6 +13,7 @@ usage() {
 Usage: scripts/local/install-codex-lab-dev.sh [options]
 
 Install a PATH launcher for dogfooding Codex Lab from this checkout.
+Requires Python 3.10 or newer.
 
 Options:
   --bin-dir DIR            Directory where codex-lab should be installed.
@@ -86,6 +87,12 @@ release)
 	;;
 esac
 
+python_bin="$(command -v python3 || true)"
+if [[ -z "$python_bin" ]] || ! python_bin="$("$python_bin" -c 'import pathlib, sys; sys.exit(1) if sys.version_info < (3, 10) else print(pathlib.Path(sys.executable).resolve())')"; then
+	echo "error: Python 3.10 or newer is required for the Codex Lab dev launcher" >&2
+	exit 1
+fi
+
 mkdir -p "$bin_dir"
 bin_dir="$(cd "$bin_dir" && pwd)"
 mkdir -p "$codex_lab_home"
@@ -108,6 +115,7 @@ $marker
 
 REPO_ROOT='$(printf "%s" "$repo_root" | sed "s/'/'\\\\''/g")'
 DEFAULT_CODEX_LAB_HOME='$(printf "%s" "$codex_lab_home" | sed "s/'/'\\\\''/g")'
+PYTHON_BIN='$(printf "%s" "$python_bin" | sed "s/'/'\\\\''/g")'
 TARGET_SUBDIR='$target_subdir'
 
 export CODEX_LAB_HOME="\${CODEX_LAB_HOME:-\$DEFAULT_CODEX_LAB_HOME}"
@@ -117,12 +125,17 @@ if ! command -v cargo >/dev/null 2>&1 && [ -f "\$HOME/.cargo/env" ]; then
   . "\$HOME/.cargo/env"
 fi
 
+export CODEX_LAB_CARGO_TARGET_SCOPE="\${CODEX_LAB_CARGO_TARGET_SCOPE:-worktree}"
 cargo_env="\$("\$REPO_ROOT/scripts/local/cargo-build-env.sh")"
 eval "\$cargo_env"
 unset cargo_env
 cargo build -p codex-cli --bin codex-lab ${cargo_profile_args[*]-} --manifest-path "\$REPO_ROOT/codex-rs/Cargo.toml" >/dev/null
 TARGET_ROOT="\${CARGO_TARGET_DIR:-\$REPO_ROOT/codex-rs/target}"
-exec "\$TARGET_ROOT/\$TARGET_SUBDIR/codex-lab" "\$@"
+candidate="\$("\$PYTHON_BIN" "\$REPO_ROOT/scripts/local/codex_lab_provenance.py" \\
+  --repo-root "\$REPO_ROOT" \\
+  --binary "\$TARGET_ROOT/\$TARGET_SUBDIR/codex-lab" \\
+  --artifact-root "\$CODEX_LAB_HOME/working")"
+exec "\$candidate" "\$@"
 EOF
 chmod 0755 "$tmp_path"
 mv "$tmp_path" "$shim_path"

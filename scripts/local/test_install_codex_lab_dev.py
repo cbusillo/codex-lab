@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -42,6 +43,10 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertIn(str(REPO_ROOT), contents)
             self.assertIn(str(lab_home), contents)
             self.assertIn("scripts/local/cargo-build-env.sh", contents)
+            self.assertIn("scripts/local/codex_lab_provenance.py", contents)
+            self.assertIn("CODEX_LAB_HOME/working", contents)
+            self.assertIn("CODEX_LAB_CARGO_TARGET_SCOPE", contents)
+            self.assertIn("PYTHON_BIN", contents)
             self.assertIn("cargo_env=", contents)
             self.assertIn("eval", contents)
             self.assertIn("Installed Codex Lab dev launcher", result.stdout)
@@ -55,6 +60,30 @@ class InstallCodexLabDevTest(unittest.TestCase):
             fake_bin = root / "fake-bin"
             artifact_root.mkdir()
             fake_bin.mkdir()
+            checkout = root / "checkout"
+            for relative_path in (
+                "scripts/local/cargo-build-env.sh",
+                "scripts/local/codex_lab_provenance.py",
+                "scripts/local/install-codex-lab-dev.sh",
+            ):
+                destination = checkout / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(REPO_ROOT / relative_path, destination)
+            subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "Codex Lab Test"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "codex-lab@example.invalid"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "test"], cwd=checkout, check=True
+            )
             fake_cargo = fake_bin / "cargo"
             fake_cargo.write_text(
                 dedent(
@@ -62,7 +91,27 @@ class InstallCodexLabDevTest(unittest.TestCase):
                     #!/bin/sh
                     set -eu
                     mkdir -p "$CARGO_TARGET_DIR/debug"
-                    printf '#!/bin/sh\nprintf '\''target=%%s\\n'\'' "$CARGO_TARGET_DIR"\n' >"$CARGO_TARGET_DIR/debug/codex-lab"
+                    cat >"$CARGO_TARGET_DIR/debug/codex-lab" <<'EOF'
+                    #!/usr/bin/env python3
+                    import json
+                    import os
+                    import sys
+                    from pathlib import Path
+
+                    executable = str(Path(__file__).resolve())
+                    if sys.argv[1:] == ["debug", "provenance", "--json"]:
+                        print(json.dumps({
+                            "schema_version": 1,
+                            "version": "test",
+                            "source_commit": os.environ["FAKE_BINARY_COMMIT"],
+                            "dirty_state": os.environ["FAKE_DIRTY_STATE"],
+                            "build_profile": "debug",
+                            "build_channel": "dev",
+                            "executable_path": executable,
+                        }))
+                    else:
+                        print(f"candidate={executable}")
+                    EOF
                     chmod +x "$CARGO_TARGET_DIR/debug/codex-lab"
                     """
                 ),
@@ -72,7 +121,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             subprocess.run(
                 [
-                    str(INSTALLER),
+                    str(checkout / "scripts/local/install-codex-lab-dev.sh"),
                     "--bin-dir",
                     str(bin_dir),
                     "--codex-lab-home",
@@ -85,13 +134,20 @@ class InstallCodexLabDevTest(unittest.TestCase):
             )
 
             launcher = bin_dir / "codex-lab"
+            source_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+            ).strip()
+            launcher_env = {
+                "CODEX_LAB_CARGO_TARGET_DIR": str(root / "target"),
+                "CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT": str(artifact_root),
+                "FAKE_BINARY_COMMIT": source_commit,
+                "FAKE_DIRTY_STATE": "clean",
+                "HOME": os.environ["HOME"],
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            }
             result = subprocess.run(
                 [str(launcher)],
-                env={
-                    "CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT": str(artifact_root),
-                    "HOME": os.environ["HOME"],
-                    "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-                },
+                env=launcher_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -99,7 +155,18 @@ class InstallCodexLabDevTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stdout)
-            self.assertIn(str(artifact_root / "local" / "codex-lab"), result.stdout)
+            candidate_root = lab_home / "working" / "dogfood"
+            self.assertIn(f"candidate={candidate_root.resolve()}", result.stdout)
+            self.assertNotIn("cargo-target", result.stdout)
+
+            stale = subprocess.run(
+                [str(launcher)],
+                env={**launcher_env, "FAKE_BINARY_COMMIT": "0" * 40},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("provenance stale", stale.stderr)
 
     def test_launcher_fails_when_cargo_env_helper_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -156,6 +223,29 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("refusing to replace non-managed launcher", result.stdout)
+
+    def test_requires_supported_python(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            fake_bin = Path(temp_dir_name) / "bin"
+            fake_bin.mkdir()
+            fake_python = fake_bin / "python3"
+            fake_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+
+            result = subprocess.run(
+                [str(INSTALLER), "--bin-dir", str(Path(temp_dir_name) / "output")],
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Python 3.10 or newer is required", result.stdout)
 
     def test_reports_missing_option_value(self) -> None:
         result = subprocess.run(
