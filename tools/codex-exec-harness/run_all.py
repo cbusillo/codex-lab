@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -102,7 +103,12 @@ def verify_provenance(binary_path: str) -> dict[str, object]:
     try:
         requested_binary = Path(binary_path).expanduser()
         if not requested_binary.is_absolute():
-            requested_binary = Path.cwd() / requested_binary
+            resolved_binary = shutil.which(binary_path)
+            requested_binary = (
+                Path(resolved_binary)
+                if resolved_binary is not None
+                else Path.cwd() / requested_binary
+            )
         binary_path = str(requested_binary.resolve(strict=False))
     except (OSError, RuntimeError, ValueError) as error:
         return unavailable_provenance(binary_path, f"invalid binary path: {error}")

@@ -24,6 +24,7 @@ SPEC.loader.exec_module(RUN_ALL)
 
 class RunAllReportTest(unittest.TestCase):
     def test_main_writes_aggregate_report(self) -> None:
+        requested_binary = str(Path("/tmp/requested-codex").resolve(strict=False))
         summaries = {
             "local-provider-config": {
                 "scenario": "local-provider-config",
@@ -69,6 +70,9 @@ class RunAllReportTest(unittest.TestCase):
             nonlocal provenance_calls
             if command[1] == str(RUN_ALL.PROVENANCE_HELPER):
                 provenance_calls += 1
+                self.assertEqual(
+                    requested_binary, command[command.index("--binary") + 1]
+                )
                 report = {
                     "schema_version": 1,
                     "status": "current",
@@ -108,12 +112,17 @@ class RunAllReportTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.json"
-            with mock.patch.object(RUN_ALL.subprocess, "run", side_effect=fake_run):
+            with (
+                mock.patch.object(
+                    RUN_ALL.shutil, "which", return_value=requested_binary
+                ),
+                mock.patch.object(RUN_ALL.subprocess, "run", side_effect=fake_run),
+            ):
                 with redirect_stdout(StringIO()):
                     returncode = RUN_ALL.main(
                         [
                             "--codex-bin",
-                            "/tmp/requested-codex",
+                            "codex",
                             "--output-root",
                             str(Path(tmp) / "runs"),
                             "--report-json",
