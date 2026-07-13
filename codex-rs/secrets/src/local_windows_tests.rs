@@ -27,7 +27,15 @@ fn interrupted_replace_reads_backup_then_recovers_before_mutation() -> Result<()
     fs::remove_file(&path)?;
     fs::write(&transaction.temp, &new_ciphertext)?;
     fs::write(&transaction.backup, &old_ciphertext)?;
-    atomic_file::write_transaction_marker(&transaction, Some(&old_ciphertext), &new_ciphertext)?;
+    let marker = atomic_file::MarkerRecord::new(
+        atomic_file::TransactionKind::ReplaceExisting,
+        Some(&old_ciphertext),
+        &new_ciphertext,
+    )?;
+    fs::write(
+        &transaction.marker,
+        marker.encode(atomic_file::TransactionKind::ReplaceExisting),
+    )?;
 
     assert_eq!(
         backend.get(&SecretScope::Global, &first_name)?,
@@ -46,6 +54,6 @@ fn interrupted_replace_reads_backup_then_recovers_before_mutation() -> Result<()
         backend.get(&SecretScope::Global, &second_name)?,
         Some("two".to_string())
     );
-    assert!(!atomic_file::recovery_artifacts_exist(&path)?);
+    assert!(!transaction.marker.try_exists()?);
     Ok(())
 }

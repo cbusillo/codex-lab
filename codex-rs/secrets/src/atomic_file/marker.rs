@@ -13,8 +13,7 @@ const VERSION: u8 = 1;
 const LEN: usize = 74;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct MarkerRecord {
-    pub(super) kind: TransactionKind,
+pub(crate) struct MarkerRecord {
     pub(super) source: [u8; 32],
     pub(super) replacement: [u8; 32],
 }
@@ -36,17 +35,16 @@ impl MarkerRecord {
             ),
         };
         Ok(Self {
-            kind,
             source,
             replacement: fingerprint(replacement),
         })
     }
 
-    pub(super) fn encode(self) -> [u8; LEN] {
+    pub(super) fn encode(self, kind: TransactionKind) -> [u8; LEN] {
         let mut bytes = [0; LEN];
         bytes[..8].copy_from_slice(&MAGIC);
         bytes[8] = VERSION;
-        bytes[9] = self.kind.marker_byte();
+        bytes[9] = kind.marker_byte();
         bytes[10..42].copy_from_slice(&self.source);
         bytes[42..].copy_from_slice(&self.replacement);
         bytes
@@ -78,7 +76,6 @@ impl MarkerRecord {
         let mut replacement = [0; 32];
         replacement.copy_from_slice(&bytes[42..]);
         Ok(Self {
-            kind,
             source,
             replacement,
         })

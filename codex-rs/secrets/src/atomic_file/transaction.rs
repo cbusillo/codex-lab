@@ -9,6 +9,7 @@ use super::marker::MarkerRecord;
 use super::marker::fingerprint_file;
 use super::move_file;
 use super::sync_file;
+#[cfg(windows)]
 use super::write_new_file;
 
 const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
@@ -118,10 +119,6 @@ pub(crate) fn readable_path(path: &Path) -> Result<Option<PathBuf>> {
     }))
 }
 
-pub(crate) fn recovery_artifacts_exist(path: &Path) -> Result<bool> {
-    Ok(find_transaction(path)?.is_some())
-}
-
 pub(crate) fn recover_interrupted_write(path: &Path) -> Result<RepairOutcome> {
     let Some(transaction) = find_transaction(path)? else {
         return if path.try_exists()? {
@@ -173,13 +170,14 @@ pub(super) fn recover_failed_replace(path: &Path, replace_error: &std::io::Error
     Ok(())
 }
 
+#[cfg(windows)]
 pub(crate) fn write_transaction_marker(
     transaction: &TransactionPaths,
     source: Option<&[u8]>,
     replacement: &[u8],
 ) -> Result<()> {
     let marker = MarkerRecord::new(transaction.kind, source, replacement)?;
-    write_new_file(&transaction.marker, &marker.encode()).with_context(|| {
+    write_new_file(&transaction.marker, &marker.encode(transaction.kind)).with_context(|| {
         format!(
             "failed to write secrets transaction marker {}",
             transaction.marker.display()
