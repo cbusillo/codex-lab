@@ -88,7 +88,7 @@ release)
 esac
 
 python_bin="$(command -v python3 || true)"
-if [[ -z "$python_bin" ]] || ! "$python_bin" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
+if [[ -z "$python_bin" ]] || ! python_bin="$("$python_bin" -c 'import pathlib, sys; sys.exit(1) if sys.version_info < (3, 10) else print(pathlib.Path(sys.executable).resolve())')"; then
 	echo "error: Python 3.10 or newer is required for the Codex Lab dev launcher" >&2
 	exit 1
 fi

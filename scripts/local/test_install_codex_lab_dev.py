@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -59,6 +60,30 @@ class InstallCodexLabDevTest(unittest.TestCase):
             fake_bin = root / "fake-bin"
             artifact_root.mkdir()
             fake_bin.mkdir()
+            checkout = root / "checkout"
+            for relative_path in (
+                "scripts/local/cargo-build-env.sh",
+                "scripts/local/codex_lab_provenance.py",
+                "scripts/local/install-codex-lab-dev.sh",
+            ):
+                destination = checkout / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(REPO_ROOT / relative_path, destination)
+            subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "Codex Lab Test"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "codex-lab@example.invalid"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "test"], cwd=checkout, check=True
+            )
             fake_cargo = fake_bin / "cargo"
             fake_cargo.write_text(
                 dedent(
@@ -78,7 +103,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
                         print(json.dumps({
                             "schema_version": 1,
                             "version": "test",
-                            "source_commit": os.environ["FAKE_SOURCE_COMMIT"],
+                            "source_commit": os.environ["FAKE_BINARY_COMMIT"],
                             "dirty_state": os.environ["FAKE_DIRTY_STATE"],
                             "build_profile": "debug",
                             "build_channel": "dev",
@@ -96,7 +121,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             subprocess.run(
                 [
-                    str(INSTALLER),
+                    str(checkout / "scripts/local/install-codex-lab-dev.sh"),
                     "--bin-dir",
                     str(bin_dir),
                     "--codex-lab-home",
@@ -110,27 +135,13 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             launcher = bin_dir / "codex-lab"
             source_commit = subprocess.check_output(
-                ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True
+                ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
             ).strip()
-            dirty_state = (
-                "dirty"
-                if subprocess.check_output(
-                    [
-                        "git",
-                        "-C",
-                        str(REPO_ROOT),
-                        "status",
-                        "--porcelain",
-                        "--untracked-files=no",
-                    ],
-                    text=True,
-                ).strip()
-                else "clean"
-            )
             launcher_env = {
+                "CODEX_LAB_CARGO_TARGET_DIR": str(root / "target"),
                 "CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT": str(artifact_root),
-                "FAKE_DIRTY_STATE": dirty_state,
-                "FAKE_SOURCE_COMMIT": source_commit,
+                "FAKE_BINARY_COMMIT": source_commit,
+                "FAKE_DIRTY_STATE": "clean",
                 "HOME": os.environ["HOME"],
                 "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
             }
@@ -150,7 +161,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             stale = subprocess.run(
                 [str(launcher)],
-                env={**launcher_env, "FAKE_SOURCE_COMMIT": "0" * 40},
+                env={**launcher_env, "FAKE_BINARY_COMMIT": "0" * 40},
                 capture_output=True,
                 text=True,
             )
@@ -223,7 +234,10 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             result = subprocess.run(
                 [str(INSTALLER), "--bin-dir", str(Path(temp_dir_name) / "output")],
-                env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}/usr/bin:/bin"},
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                },
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
