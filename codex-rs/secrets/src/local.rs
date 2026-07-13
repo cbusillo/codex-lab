@@ -34,6 +34,9 @@ use super::atomic_file;
 use super::compute_keyring_account_for_namespace;
 use super::keyring_service;
 
+#[cfg(windows)]
+mod windows;
+
 const SECRETS_VERSION: u8 = 1;
 const LOCAL_SECRETS_FILENAME: &str = "local.age";
 const CODEX_AUTH_SECRETS_FILENAME: &str = "codex_auth.age";
@@ -109,6 +112,8 @@ impl LocalSecretsBackend {
     pub fn set(&self, scope: &SecretScope, name: &SecretName, value: &str) -> Result<()> {
         anyhow::ensure!(!value.is_empty(), "secret value must not be empty");
         let _lock = self.acquire_lock(LockMode::Exclusive)?;
+        #[cfg(windows)]
+        self.recover_windows_atomic_write()?;
         let canonical_key = scope.canonical_key(name);
         let mut file = self.load_file()?;
         file.secrets.insert(canonical_key, value.to_string());
@@ -126,6 +131,8 @@ impl LocalSecretsBackend {
             return Ok(false);
         }
         let _lock = self.acquire_lock(LockMode::Exclusive)?;
+        #[cfg(windows)]
+        self.recover_windows_atomic_write()?;
         let canonical_key = scope.canonical_key(name);
         let mut file = self.load_file()?;
         let removed = file.secrets.remove(&canonical_key).is_some();

@@ -7,6 +7,20 @@ use anyhow::Result;
 
 use super::marker::MarkerRecord;
 use super::marker::fingerprint_file;
+use super::move_file;
+use super::sync_file;
+#[cfg(windows)]
+use super::write_new_file;
+
+const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepairOutcome {
+    Empty,
+    Current,
+    Unchanged,
+    Committed,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransactionKind {
@@ -22,7 +36,6 @@ impl TransactionKind {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn marker_byte(self) -> u8 {
         match self {
             Self::FirstPublish => 1,
@@ -44,7 +57,7 @@ pub(crate) struct TransactionPaths {
     pub(crate) marker: PathBuf,
     pub(crate) temp: PathBuf,
     pub(crate) backup: PathBuf,
-    kind: TransactionKind,
+    pub(crate) kind: TransactionKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +79,23 @@ enum ReadableGeneration {
     Backup,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryAction {
+    RemoveMarker,
+    SyncDestination,
+    PublishTemp,
+    DiscardTemp,
+    DiscardBackup,
+    RestoreBackupAndDiscardTemp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValidatedState {
+    readable: ReadableGeneration,
+    action: RecoveryAction,
+    outcome: RepairOutcome,
+}
+
 #[derive(Debug)]
 struct ActiveTransaction {
     paths: TransactionPaths,
@@ -81,11 +111,78 @@ pub(crate) fn readable_path(path: &Path) -> Result<Option<PathBuf>> {
         };
     };
     let state = transaction_state(path, &transaction.paths)?;
-    Ok(Some(match validate_state(path, &transaction, state)? {
+    let validated = validate_transaction_state(path, &transaction, state)?;
+    Ok(Some(match validated.readable {
         ReadableGeneration::Destination => path.to_path_buf(),
         ReadableGeneration::Temp => transaction.paths.temp,
         ReadableGeneration::Backup => transaction.paths.backup,
     }))
+}
+
+pub(crate) fn recover_interrupted_write(path: &Path) -> Result<RepairOutcome> {
+    let Some(transaction) = find_transaction(path)? else {
+        return if path.try_exists()? {
+            Ok(RepairOutcome::Current)
+        } else {
+            Ok(RepairOutcome::Empty)
+        };
+    };
+    let state = transaction_state(path, &transaction.paths)?;
+    let validated = validate_transaction_state(path, &transaction, state)?;
+    execute_recovery(path, &transaction.paths, validated)
+}
+
+pub(super) fn recover_failed_replace(path: &Path, replace_error: &std::io::Error) -> Result<()> {
+    let transaction = find_transaction(path)?.with_context(|| {
+        format!(
+            "ReplaceFileW failed without a transaction marker for {}",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        transaction.paths.kind == TransactionKind::ReplaceExisting,
+        "ReplaceFileW failed with a first-publish marker for {}",
+        path.display()
+    );
+    let state = transaction_state(path, &transaction.paths)?;
+    let validated = validate_transaction_state(path, &transaction, state)?;
+    let documented_failure = match validated.action {
+        RecoveryAction::DiscardTemp => true,
+        RecoveryAction::RestoreBackupAndDiscardTemp => {
+            replace_error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
+        }
+        RecoveryAction::RemoveMarker
+        | RecoveryAction::SyncDestination
+        | RecoveryAction::PublishTemp
+        | RecoveryAction::DiscardBackup => false,
+    };
+    if !documented_failure {
+        anyhow::bail!(
+            "ReplaceFileW reported failure in undocumented {state:?} state at {}; preserving {}, {}, {}, and {}",
+            path.display(),
+            path.display(),
+            transaction.paths.temp.display(),
+            transaction.paths.backup.display(),
+            transaction.paths.marker.display()
+        );
+    }
+    execute_recovery(path, &transaction.paths, validated)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn write_transaction_marker(
+    transaction: &TransactionPaths,
+    source: Option<&[u8]>,
+    replacement: &[u8],
+) -> Result<()> {
+    let marker = MarkerRecord::new(transaction.kind, source, replacement)?;
+    write_new_file(&transaction.marker, &marker.encode(transaction.kind)).with_context(|| {
+        format!(
+            "failed to write secrets transaction marker {}",
+            transaction.marker.display()
+        )
+    })
 }
 
 pub(crate) fn transaction_paths(
@@ -209,44 +306,74 @@ fn transaction_state(path: &Path, transaction: &TransactionPaths) -> Result<Tran
     )
 }
 
-fn validate_state(
+fn validate_transaction_state(
     path: &Path,
     transaction: &ActiveTransaction,
     state: TransactionState,
-) -> Result<ReadableGeneration> {
+) -> Result<ValidatedState> {
     let paths = &transaction.paths;
     let marker = transaction.marker;
-    match (paths.kind, state) {
+    let validated = match (paths.kind, state) {
         (TransactionKind::FirstPublish, TransactionState::Destination) => {
             ensure_generation(path, marker.replacement, paths)?;
-            Ok(ReadableGeneration::Destination)
+            ValidatedState {
+                readable: ReadableGeneration::Destination,
+                action: RecoveryAction::SyncDestination,
+                outcome: RepairOutcome::Committed,
+            }
         }
         (TransactionKind::FirstPublish, TransactionState::Temp) => {
             ensure_generation(&paths.temp, marker.replacement, paths)?;
-            Ok(ReadableGeneration::Temp)
+            ValidatedState {
+                readable: ReadableGeneration::Temp,
+                action: RecoveryAction::PublishTemp,
+                outcome: RepairOutcome::Committed,
+            }
         }
         (TransactionKind::ReplaceExisting, TransactionState::Destination) => {
             let actual = fingerprint_file(path)?;
-            if actual == marker.source || actual == marker.replacement {
-                Ok(ReadableGeneration::Destination)
+            if actual == marker.replacement {
+                ValidatedState {
+                    readable: ReadableGeneration::Destination,
+                    action: RecoveryAction::SyncDestination,
+                    outcome: RepairOutcome::Committed,
+                }
+            } else if actual == marker.source {
+                ValidatedState {
+                    readable: ReadableGeneration::Destination,
+                    action: RecoveryAction::RemoveMarker,
+                    outcome: RepairOutcome::Unchanged,
+                }
             } else {
-                generation_mismatch(path, paths)
+                return generation_mismatch(path, paths);
             }
         }
         (TransactionKind::ReplaceExisting, TransactionState::DestinationTemp) => {
             ensure_generation(path, marker.source, paths)?;
             ensure_generation(&paths.temp, marker.replacement, paths)?;
-            Ok(ReadableGeneration::Destination)
+            ValidatedState {
+                readable: ReadableGeneration::Destination,
+                action: RecoveryAction::DiscardTemp,
+                outcome: RepairOutcome::Unchanged,
+            }
         }
         (TransactionKind::ReplaceExisting, TransactionState::DestinationBackup) => {
             ensure_generation(path, marker.replacement, paths)?;
             ensure_generation(&paths.backup, marker.source, paths)?;
-            Ok(ReadableGeneration::Destination)
+            ValidatedState {
+                readable: ReadableGeneration::Destination,
+                action: RecoveryAction::DiscardBackup,
+                outcome: RepairOutcome::Committed,
+            }
         }
         (TransactionKind::ReplaceExisting, TransactionState::TempBackup) => {
             ensure_generation(&paths.temp, marker.replacement, paths)?;
             ensure_generation(&paths.backup, marker.source, paths)?;
-            Ok(ReadableGeneration::Backup)
+            ValidatedState {
+                readable: ReadableGeneration::Backup,
+                action: RecoveryAction::RestoreBackupAndDiscardTemp,
+                outcome: RepairOutcome::Unchanged,
+            }
         }
         (
             TransactionKind::FirstPublish,
@@ -263,8 +390,46 @@ fn validate_state(
             | TransactionState::Temp
             | TransactionState::Backup
             | TransactionState::All,
-        ) => indeterminate_transaction(path, paths, state),
+        ) => return indeterminate_transaction(path, paths, state),
+    };
+    Ok(validated)
+}
+
+fn execute_recovery(
+    path: &Path,
+    transaction: &TransactionPaths,
+    validated: ValidatedState,
+) -> Result<RepairOutcome> {
+    match validated.action {
+        RecoveryAction::RemoveMarker => {}
+        RecoveryAction::SyncDestination => sync_file(path)?,
+        RecoveryAction::PublishTemp => {
+            move_generation(&transaction.temp, path, "publish staged secrets file")?;
+            sync_file(path)?;
+        }
+        RecoveryAction::DiscardTemp => remove_owned_file(&transaction.temp)?,
+        RecoveryAction::DiscardBackup => {
+            sync_file(path)?;
+            remove_owned_file(&transaction.backup)?;
+        }
+        RecoveryAction::RestoreBackupAndDiscardTemp => {
+            move_generation(&transaction.backup, path, "restore secrets backup")?;
+            sync_file(path)?;
+            remove_owned_file(&transaction.temp)?;
+        }
     }
+    remove_owned_file(&transaction.marker)?;
+    Ok(validated.outcome)
+}
+
+fn move_generation(source: &Path, destination: &Path, action: &str) -> Result<()> {
+    move_file(source, destination).with_context(|| {
+        format!(
+            "failed to {action} {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 fn ensure_generation(
@@ -313,4 +478,13 @@ fn valid_transaction_id(id: &str) -> bool {
         (Some(process), Some(nanos), Some(sequence), None)
             if valid_part(process) && valid_part(nanos) && valid_part(sequence)
     )
+}
+
+fn remove_owned_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to remove transaction file {}", path.display())),
+    }
 }

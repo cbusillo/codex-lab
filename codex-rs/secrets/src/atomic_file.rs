@@ -19,20 +19,37 @@ mod marker;
 #[cfg(any(test, windows))]
 #[path = "atomic_file/transaction.rs"]
 mod transaction;
+#[cfg(windows)]
+#[path = "atomic_file/windows.rs"]
+mod windows;
 
 #[cfg(test)]
 pub(super) use marker::MarkerRecord;
 #[cfg(any(test, windows))]
+pub(super) use transaction::RepairOutcome;
+#[cfg(any(test, windows))]
 pub(super) use transaction::TransactionKind;
-#[cfg(test)]
+#[cfg(any(test, windows))]
 pub(super) use transaction::TransactionPaths;
 #[cfg(any(test, windows))]
 pub(crate) use transaction::readable_path;
-#[cfg(test)]
+#[cfg(any(test, windows))]
+use transaction::recover_failed_replace;
+#[cfg(any(test, windows))]
+pub(crate) use transaction::recover_interrupted_write;
+#[cfg(any(test, windows))]
 pub(super) use transaction::transaction_paths;
+#[cfg(windows)]
+pub(super) use transaction::write_transaction_marker;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(/*v*/ 0);
 
+#[cfg(windows)]
+pub(crate) fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    windows::write_file_atomically(path, contents)
+}
+
+#[cfg(not(windows))]
 pub(crate) fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     let dir = path.parent().with_context(|| {
         format!(
@@ -106,6 +123,68 @@ pub(crate) fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> 
             })
         }
     }
+}
+
+#[cfg(windows)]
+fn write_new_file(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(/*mode*/ 0o600);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create temp file at {}", path.display()))?;
+    let write_result = file
+        .write_all(contents)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("failed to write and sync temp file at {}", path.display()));
+    drop(file);
+    if let Err(error) = write_result {
+        if let Err(cleanup_error) = fs::remove_file(path)
+            && cleanup_error.kind() != std::io::ErrorKind::NotFound
+        {
+            anyhow::bail!(
+                "{error:#}; failed to remove incomplete temp file {}: {cleanup_error}",
+                path.display()
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(any(test, windows))]
+fn move_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::move_file(source, destination)
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::rename(source, destination)
+    }
+}
+
+#[cfg(any(test, windows))]
+fn sync_file(path: &Path) -> Result<()> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("failed to open committed secrets file {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync committed secrets file {}", path.display()))
+}
+
+#[cfg(windows)]
+fn next_transaction_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(/*default*/ 0, |duration| duration.as_nanos());
+    let sequence = NEXT_TEMP_ID.fetch_add(/*val*/ 1, Ordering::Relaxed);
+    let process = std::process::id();
+    format!("{process:x}-{nanos:x}-{sequence:x}")
 }
 
 #[cfg(test)]

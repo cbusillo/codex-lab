@@ -11,6 +11,7 @@ use super::TransactionKind;
 const MAGIC: [u8; 8] = *b"ECATOMIC";
 const VERSION: u8 = 1;
 const LEN: usize = 74;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MarkerRecord {
     pub(super) source: [u8; 32],
@@ -18,8 +19,7 @@ pub(crate) struct MarkerRecord {
 }
 
 impl MarkerRecord {
-    #[cfg(test)]
-    pub(crate) fn new(
+    pub(super) fn new(
         kind: TransactionKind,
         source: Option<&[u8]>,
         replacement: &[u8],
@@ -40,8 +40,7 @@ impl MarkerRecord {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn encode(self, kind: TransactionKind) -> [u8; LEN] {
+    pub(super) fn encode(self, kind: TransactionKind) -> [u8; LEN] {
         let mut bytes = [0; LEN];
         bytes[..8].copy_from_slice(&MAGIC);
         bytes[8] = VERSION;
