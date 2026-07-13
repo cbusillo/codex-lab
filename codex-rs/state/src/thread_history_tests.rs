@@ -292,6 +292,7 @@ async fn suffix_transaction_preserves_first_ordinals_and_rolls_back_atomically()
     repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![
                     turn(
@@ -316,6 +317,7 @@ async fn suffix_transaction_preserves_first_ordinals_and_rolls_back_atomically()
     repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![
                     turn(
@@ -399,6 +401,7 @@ async fn suffix_transaction_preserves_first_ordinals_and_rolls_back_atomically()
     let error = repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![
                     turn(
@@ -467,6 +470,7 @@ async fn checkpoint_fencing_rejects_rewind_and_source_replacement() {
     repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![
                     turn(
@@ -505,11 +509,19 @@ async fn checkpoint_fencing_rejects_rewind_and_source_replacement() {
         "fingerprint-2",
     );
     repository
-        .apply_suffix("thread-1", &destructive_suffix)
+        .apply_suffix(
+            "thread-1",
+            /*expected_generation*/ 0,
+            &destructive_suffix,
+        )
         .await
         .expect("apply destructive suffix");
     repository
-        .apply_suffix("thread-1", &destructive_suffix)
+        .apply_suffix(
+            "thread-1",
+            /*expected_generation*/ 0,
+            &destructive_suffix,
+        )
         .await
         .expect("exact replay should be idempotent");
 
@@ -529,14 +541,10 @@ async fn checkpoint_fencing_rejects_rewind_and_source_replacement() {
             .collect::<Vec<_>>(),
         vec!["turn-1"]
     );
-    let checkpoint = repository
-        .checkpoint("thread-1")
-        .await
-        .expect("checkpoint after replay");
-
     let rewind = repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(Vec::new(), /*next_rollout_ordinal*/ 5, "rewind"),
         )
         .await
@@ -545,6 +553,7 @@ async fn checkpoint_fencing_rejects_rewind_and_source_replacement() {
     let changed_fingerprint = repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(Vec::new(), /*next_rollout_ordinal*/ 6, "changed"),
         )
         .await
@@ -555,7 +564,20 @@ async fn checkpoint_fencing_rejects_rewind_and_source_replacement() {
             .contains("fingerprint changed")
     );
     let replacement = ThreadHistorySuffix {
-        mutations: Vec::new(),
+        mutations: vec![
+            turn(
+                "turn-replaced",
+                /*rollout_ordinal*/ 1,
+                ThreadHistoryTurnStatus::Completed,
+            ),
+            item(
+                "turn-replaced",
+                "item-replaced",
+                /*rollout_ordinal*/ 2,
+                /*item_created_at_ms*/ 20,
+                r#"{"replacement":true}"#,
+            ),
+        ],
         checkpoint: ThreadHistoryCheckpointUpdate {
             next_rollout_byte_offset: 700,
             next_rollout_ordinal: 7,
@@ -563,16 +585,82 @@ async fn checkpoint_fencing_rejects_rewind_and_source_replacement() {
         },
     };
     let source_error = repository
-        .apply_suffix("thread-1", &replacement)
+        .apply_suffix("thread-1", /*expected_generation*/ 0, &replacement)
         .await
         .expect_err("source replacement should require invalidation");
     assert!(source_error.to_string().contains("rollout source changed"));
+    let generation = repository
+        .begin_replacement("thread-1")
+        .await
+        .expect("invalidate projection");
+    let stale_suffix = suffix(Vec::new(), /*next_rollout_ordinal*/ 7, "stale-append");
+    let stale_append = repository
+        .apply_suffix("thread-1", generation, &stale_suffix)
+        .await
+        .expect_err("append must not race a full projection replacement");
+    assert!(
+        stale_append
+            .to_string()
+            .contains("replacement is in progress")
+    );
+    repository
+        .replace_projection("thread-1", generation, &replacement)
+        .await
+        .expect("replace projection");
+    assert_eq!(
+        repository
+            .turns_keyset(ThreadHistoryTurnsQuery {
+                thread_id: "thread-1",
+                cursor: None,
+                direction: ThreadHistoryPageDirection::Ascending,
+                limit: 10,
+            })
+            .await
+            .expect("replacement turns")
+            .into_iter()
+            .map(|turn| turn.turn_id)
+            .collect::<Vec<_>>(),
+        vec!["turn-replaced"]
+    );
+    assert_eq!(
+        repository
+            .items_keyset(ThreadHistoryItemsQuery {
+                thread_id: "thread-1",
+                turn_id: None,
+                cursor: None,
+                direction: ThreadHistoryPageDirection::Ascending,
+                limit: 10,
+            })
+            .await
+            .expect("replacement items")
+            .into_iter()
+            .map(|item| item.item_key)
+            .collect::<Vec<_>>(),
+        vec!["item-replaced"]
+    );
+    let newer_generation = repository
+        .begin_replacement("thread-1")
+        .await
+        .expect("invalidate replacement");
+    let stale = repository
+        .replace_projection("thread-1", generation, &replacement)
+        .await
+        .expect_err("stale replacement must not publish clean state");
+    assert!(stale.to_string().contains("stale thread history"));
     assert_eq!(
         repository
             .checkpoint("thread-1")
             .await
             .expect("checkpoint after rejected suffixes"),
-        checkpoint
+        Some(ThreadHistoryCheckpoint {
+            thread_id: "thread-1".to_string(),
+            next_rollout_byte_offset: 700,
+            next_rollout_ordinal: 7,
+            rollout_source_id: None,
+            rollout_fingerprint: None,
+            projection_generation: newer_generation,
+            projection_status: ThreadHistoryProjectionStatus::Dirty,
+        })
     );
     let _ = tokio::fs::remove_dir_all(sqlite_home).await;
 }
@@ -584,6 +672,7 @@ async fn active_target_uses_latest_in_progress_turn_and_fails_when_none_remain()
     repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![
                     turn(
@@ -631,6 +720,7 @@ async fn active_target_uses_latest_in_progress_turn_and_fails_when_none_remain()
     repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![
                     ThreadHistoryMutation::UpsertTurn(ThreadHistoryTurnUpsert {
@@ -665,6 +755,7 @@ async fn active_target_uses_latest_in_progress_turn_and_fails_when_none_remain()
     let error = repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![ThreadHistoryMutation::UpsertItem(ThreadHistoryItemUpsert {
                     target: ThreadHistoryTurnTarget::Active,
@@ -697,6 +788,7 @@ async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![
                     turn(
@@ -824,6 +916,7 @@ async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 1,
             &suffix(
                 vec![ThreadHistoryMutation::RemoveLatestTurns {
                     rollout_ordinal: 30,
@@ -855,6 +948,7 @@ async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     repository
         .apply_suffix(
             "thread-2",
+            /*expected_generation*/ 0,
             &suffix(
                 vec![
                     turn(
@@ -928,6 +1022,7 @@ async fn keyset_cleanup_dirty_state_and_integer_boundaries_are_safe() {
     let overflow = repository
         .apply_suffix(
             "thread-1",
+            /*expected_generation*/ 0,
             &ThreadHistorySuffix {
                 mutations: Vec::new(),
                 checkpoint: ThreadHistoryCheckpointUpdate {

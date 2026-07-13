@@ -181,6 +181,7 @@ impl ThreadHistoryRepository {
     pub async fn apply_suffix(
         &self,
         thread_id: &str,
+        expected_generation: u64,
         suffix: &ThreadHistorySuffix,
     ) -> anyhow::Result<()> {
         ensure_nonempty(thread_id, "thread_id")?;
@@ -200,31 +201,19 @@ impl ThreadHistoryRepository {
             suffix.checkpoint.next_rollout_ordinal,
             "next_rollout_ordinal",
         )?;
-        let mut previous_ordinal = None;
-        for mutation in &suffix.mutations {
-            let ordinal = mutation.rollout_ordinal();
-            if ordinal < 0 {
-                bail!("thread history mutation ordinal must be non-negative: {ordinal}");
-            }
-            if previous_ordinal.is_some_and(|previous| ordinal <= previous) {
-                bail!("thread history suffix mutations must have strictly increasing ordinals");
-            }
-            if ordinal >= next_ordinal {
-                bail!(
-                    "thread history mutation ordinal {ordinal} must precede checkpoint {next_ordinal}"
-                );
-            }
-            previous_ordinal = Some(ordinal);
-        }
+        ensure_valid_suffix(suffix, next_ordinal)?;
 
         let pool = self.pool().await?;
         let mut transaction = pool.begin().await?;
+        let mut should_apply_mutations = true;
         let existing_checkpoint = sqlx::query(
             r#"
 SELECT next_rollout_byte_offset,
        next_rollout_ordinal,
        rollout_source_id,
-       rollout_fingerprint
+       rollout_fingerprint,
+       projection_generation,
+       projection_status
 FROM thread_history_projection_state
 WHERE thread_id = ?
             "#,
@@ -240,6 +229,18 @@ WHERE thread_id = ?
                 existing_checkpoint.try_get("rollout_source_id")?;
             let existing_fingerprint: Option<String> =
                 existing_checkpoint.try_get("rollout_fingerprint")?;
+            let existing_generation: i64 = existing_checkpoint.try_get("projection_generation")?;
+            let existing_status: String = existing_checkpoint.try_get("projection_status")?;
+            if sqlite_unsigned(existing_generation, "projection_generation")? != expected_generation
+            {
+                bail!("stale thread history projection generation");
+            }
+            if existing_byte_offset > 0
+                && existing_source_id.is_none()
+                && existing_status == ThreadHistoryProjectionStatus::Dirty.as_str()
+            {
+                bail!("thread history projection replacement is in progress");
+            }
             if existing_source_id.as_deref().is_some_and(|source_id| {
                 source_id != suffix.checkpoint.source.rollout_source_id.as_str()
             }) {
@@ -252,34 +253,18 @@ WHERE thread_id = ?
                 if existing_fingerprint.as_deref()
                     == Some(suffix.checkpoint.source.rollout_fingerprint.as_str())
                 {
-                    transaction.commit().await?;
-                    return Ok(());
-                }
-                bail!("thread history checkpoint fingerprint changed without advancing");
-            }
-        }
-        for mutation in &suffix.mutations {
-            match mutation {
-                ThreadHistoryMutation::UpsertTurn(turn) => {
-                    upsert_turn(&mut transaction, thread_id, turn).await?;
-                }
-                ThreadHistoryMutation::UpsertItem(item) => {
-                    upsert_item(&mut transaction, thread_id, item).await?;
-                }
-                ThreadHistoryMutation::RemoveLatestTurns { count, .. } => {
-                    if *count > 0 {
-                        sqlx::query(
-                            "DELETE FROM thread_turns WHERE rowid IN (SELECT rowid FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal DESC LIMIT ?)",
-                        )
-                        .bind(thread_id)
-                        .bind(i64::from(*count))
-                        .execute(&mut *transaction)
-                        .await?;
-                    }
+                    should_apply_mutations = false;
+                } else {
+                    bail!("thread history checkpoint fingerprint changed without advancing");
                 }
             }
+        } else if expected_generation != 0 {
+            bail!("stale thread history projection generation");
         }
-        sqlx::query(
+        if should_apply_mutations {
+            apply_mutations(&mut transaction, thread_id, suffix).await?;
+        }
+        let result = sqlx::query(
             r#"
 INSERT INTO thread_history_projection_state (
     thread_id,
@@ -287,14 +272,16 @@ INSERT INTO thread_history_projection_state (
     next_rollout_ordinal,
     rollout_source_id,
     rollout_fingerprint,
+    projection_generation,
     projection_status
-) VALUES (?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(thread_id) DO UPDATE SET
     next_rollout_byte_offset = excluded.next_rollout_byte_offset,
     next_rollout_ordinal = excluded.next_rollout_ordinal,
     rollout_source_id = excluded.rollout_source_id,
     rollout_fingerprint = excluded.rollout_fingerprint,
     projection_status = excluded.projection_status
+WHERE thread_history_projection_state.projection_generation = excluded.projection_generation
             "#,
         )
         .bind(thread_id)
@@ -302,9 +289,85 @@ ON CONFLICT(thread_id) DO UPDATE SET
         .bind(next_ordinal)
         .bind(suffix.checkpoint.source.rollout_source_id.as_str())
         .bind(suffix.checkpoint.source.rollout_fingerprint.as_str())
+        .bind(sqlite_integer(
+            expected_generation,
+            "projection_generation",
+        )?)
         .bind(ThreadHistoryProjectionStatus::Clean.as_str())
         .execute(&mut *transaction)
         .await?;
+        if result.rows_affected() != 1 {
+            bail!("stale thread history projection generation");
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn replace_projection(
+        &self,
+        thread_id: &str,
+        expected_generation: u64,
+        suffix: &ThreadHistorySuffix,
+    ) -> anyhow::Result<()> {
+        ensure_nonempty(thread_id, "thread_id")?;
+        ensure_nonempty(
+            suffix.checkpoint.source.rollout_source_id.as_str(),
+            "rollout_source_id",
+        )?;
+        ensure_nonempty(
+            suffix.checkpoint.source.rollout_fingerprint.as_str(),
+            "rollout_fingerprint",
+        )?;
+        let next_byte_offset = sqlite_integer(
+            suffix.checkpoint.next_rollout_byte_offset,
+            "next_rollout_byte_offset",
+        )?;
+        let next_ordinal = sqlite_integer(
+            suffix.checkpoint.next_rollout_ordinal,
+            "next_rollout_ordinal",
+        )?;
+        ensure_valid_suffix(suffix, next_ordinal)?;
+        let generation = sqlite_integer(expected_generation, "projection_generation")?;
+
+        let pool = self.pool().await?;
+        let mut transaction = pool.begin().await?;
+        let current_generation: Option<i64> = sqlx::query_scalar(
+            "SELECT projection_generation FROM thread_history_projection_state WHERE thread_id = ?",
+        )
+        .bind(thread_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if current_generation != Some(generation) {
+            bail!("stale thread history projection generation");
+        }
+        sqlx::query("DELETE FROM thread_turns WHERE thread_id = ?")
+            .bind(thread_id)
+            .execute(&mut *transaction)
+            .await?;
+        apply_mutations(&mut transaction, thread_id, suffix).await?;
+        let result = sqlx::query(
+            r#"
+UPDATE thread_history_projection_state
+SET next_rollout_byte_offset = ?,
+    next_rollout_ordinal = ?,
+    rollout_source_id = ?,
+    rollout_fingerprint = ?,
+    projection_status = ?
+WHERE thread_id = ? AND projection_generation = ?
+            "#,
+        )
+        .bind(next_byte_offset)
+        .bind(next_ordinal)
+        .bind(suffix.checkpoint.source.rollout_source_id.as_str())
+        .bind(suffix.checkpoint.source.rollout_fingerprint.as_str())
+        .bind(ThreadHistoryProjectionStatus::Clean.as_str())
+        .bind(thread_id)
+        .bind(generation)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() != 1 {
+            bail!("stale thread history projection generation");
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -346,6 +409,43 @@ ON CONFLICT(thread_id) DO NOTHING
             r#"
 UPDATE thread_history_projection_state
 SET projection_generation = projection_generation + 1,
+    projection_status = ?
+WHERE thread_id = ? AND projection_generation < ?
+RETURNING projection_generation
+            "#,
+        )
+        .bind(ThreadHistoryProjectionStatus::Dirty.as_str())
+        .bind(thread_id)
+        .bind(i64::MAX)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let generation = generation.context("thread history projection generation overflow")?;
+        transaction.commit().await?;
+        sqlite_unsigned(generation, "projection_generation")
+    }
+
+    pub async fn begin_replacement(&self, thread_id: &str) -> anyhow::Result<u64> {
+        ensure_nonempty(thread_id, "thread_id")?;
+        let pool = self.pool().await?;
+        let mut transaction = pool.begin().await?;
+        sqlx::query(
+            r#"
+INSERT INTO thread_history_projection_state (
+    thread_id, next_rollout_byte_offset, next_rollout_ordinal, projection_status
+) VALUES (?, 0, 0, ?)
+ON CONFLICT(thread_id) DO NOTHING
+            "#,
+        )
+        .bind(thread_id)
+        .bind(ThreadHistoryProjectionStatus::Dirty.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        let generation: Option<i64> = sqlx::query_scalar(
+            r#"
+UPDATE thread_history_projection_state
+SET projection_generation = projection_generation + 1,
+    rollout_source_id = NULL,
+    rollout_fingerprint = NULL,
     projection_status = ?
 WHERE thread_id = ? AND projection_generation < ?
 RETURNING projection_generation
@@ -517,6 +617,55 @@ WHERE thread_id = ?
             })
             .await
     }
+}
+
+fn ensure_valid_suffix(suffix: &ThreadHistorySuffix, next_ordinal: i64) -> anyhow::Result<()> {
+    let mut previous_ordinal = None;
+    for mutation in &suffix.mutations {
+        let ordinal = mutation.rollout_ordinal();
+        if ordinal < 0 {
+            bail!("thread history mutation ordinal must be non-negative: {ordinal}");
+        }
+        if previous_ordinal.is_some_and(|previous| ordinal <= previous) {
+            bail!("thread history suffix mutations must have strictly increasing ordinals");
+        }
+        if ordinal >= next_ordinal {
+            bail!(
+                "thread history mutation ordinal {ordinal} must precede checkpoint {next_ordinal}"
+            );
+        }
+        previous_ordinal = Some(ordinal);
+    }
+    Ok(())
+}
+
+async fn apply_mutations(
+    connection: &mut SqliteConnection,
+    thread_id: &str,
+    suffix: &ThreadHistorySuffix,
+) -> anyhow::Result<()> {
+    for mutation in &suffix.mutations {
+        match mutation {
+            ThreadHistoryMutation::UpsertTurn(turn) => {
+                upsert_turn(connection, thread_id, turn).await?;
+            }
+            ThreadHistoryMutation::UpsertItem(item) => {
+                upsert_item(connection, thread_id, item).await?;
+            }
+            ThreadHistoryMutation::RemoveLatestTurns { count, .. } => {
+                if *count > 0 {
+                    sqlx::query(
+                        "DELETE FROM thread_turns WHERE rowid IN (SELECT rowid FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal DESC LIMIT ?)",
+                    )
+                    .bind(thread_id)
+                    .bind(i64::from(*count))
+                    .execute(&mut *connection)
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn upsert_turn(
