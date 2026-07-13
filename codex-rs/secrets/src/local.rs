@@ -118,7 +118,7 @@ impl LocalSecretsBackend {
     }
 
     pub fn get(&self, scope: &SecretScope, name: &SecretName) -> Result<Option<String>> {
-        if !self.secrets_path().exists() {
+        if !self.secrets_file_exists()? {
             return Ok(None);
         }
         let _lock = self.acquire_lock(LockMode::Shared)?;
@@ -139,7 +139,7 @@ impl LocalSecretsBackend {
     }
 
     pub fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
-        if !self.secrets_path().exists() {
+        if !self.secrets_file_exists()? {
             return Ok(Vec::new());
         }
         let _lock = self.acquire_lock(LockMode::Shared)?;
@@ -173,6 +173,12 @@ impl LocalSecretsBackend {
             .join(format!(".{}.lock", self.namespace.filename()))
     }
 
+    fn secrets_file_exists(&self) -> Result<bool> {
+        let path = self.secrets_path();
+        path.try_exists()
+            .with_context(|| format!("failed to inspect secrets file at {}", path.display()))
+    }
+
     fn acquire_lock(&self, mode: LockMode) -> Result<fs::File> {
         let dir = self.secrets_dir();
         fs::create_dir_all(&dir)
@@ -195,7 +201,10 @@ impl LocalSecretsBackend {
 
     fn load_file(&self) -> Result<SecretsFile> {
         let path = self.secrets_path();
-        if !path.exists() {
+        if !path
+            .try_exists()
+            .with_context(|| format!("failed to inspect secrets file at {}", path.display()))?
+        {
             return Ok(SecretsFile::new_empty());
         }
 
@@ -326,6 +335,7 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     }
 
     if let Err(error) = replace_file(&tmp_path, path) {
+        #[cfg(not(windows))]
         let _ = fs::remove_file(&tmp_path);
         return Err(error).with_context(|| {
             format!(
@@ -348,11 +358,10 @@ fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        match replace_file_windows(src, dst) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => fs::rename(src, dst),
-            Err(err) => Err(err),
+        if !dst.try_exists()? {
+            return fs::rename(src, dst);
         }
+        replace_file_windows(src, dst)
     }
 }
 
@@ -360,8 +369,6 @@ fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
 fn replace_file_windows(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
-
-    const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x0000_0002;
 
     unsafe extern "system" {
         fn ReplaceFileW(
@@ -374,6 +381,8 @@ fn replace_file_windows(src: &Path, dst: &Path) -> std::io::Result<()> {
         ) -> i32;
     }
 
+    let dst = dst.canonicalize()?;
+    let src = src.canonicalize()?;
     let dst_wide: Vec<u16> = dst.as_os_str().encode_wide().chain(Some(0)).collect();
     let src_wide: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
     let replaced = unsafe {
@@ -381,7 +390,7 @@ fn replace_file_windows(src: &Path, dst: &Path) -> std::io::Result<()> {
             dst_wide.as_ptr(),
             src_wide.as_ptr(),
             std::ptr::null(),
-            REPLACEFILE_IGNORE_MERGE_ERRORS,
+            0,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
@@ -470,6 +479,8 @@ mod tests {
     use keyring::Error as KeyringError;
     use pretty_assertions::assert_eq;
     use std::sync::Barrier;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -487,6 +498,46 @@ mod tests {
             let loaded = self.inner.load(service, account)?;
             if loaded.is_none() {
                 thread::sleep(Duration::from_millis(50));
+            }
+            Ok(loaded)
+        }
+
+        fn save(
+            &self,
+            service: &str,
+            account: &str,
+            value: &str,
+        ) -> std::result::Result<(), CredentialStoreError> {
+            self.inner.save(service, account, value)
+        }
+
+        fn delete(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> std::result::Result<bool, CredentialStoreError> {
+            self.inner.delete(service, account)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct BlockingLoadKeyringStore {
+        inner: MockKeyringStore,
+        block_next_load: Arc<AtomicBool>,
+        load_started: Arc<Barrier>,
+        load_release: Arc<Barrier>,
+    }
+
+    impl KeyringStore for BlockingLoadKeyringStore {
+        fn load(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> std::result::Result<Option<String>, CredentialStoreError> {
+            let loaded = self.inner.load(service, account)?;
+            if self.block_next_load.swap(false, Ordering::SeqCst) {
+                self.load_started.wait();
+                self.load_release.wait();
             }
             Ok(loaded)
         }
@@ -556,6 +607,47 @@ mod tests {
                 .contains("failed to load secrets key from keyring"),
             "unexpected error: {error:#}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_file_read_does_not_create_key_or_storage() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring.clone());
+        let name = SecretName::new("TEST_SECRET")?;
+
+        assert_eq!(backend.get(&SecretScope::Global, &name)?, None);
+        let account = compute_keyring_account_for_namespace(
+            codex_home.path(),
+            LocalSecretsNamespace::ManagedSecrets,
+        );
+        assert!(!keyring.contains(&account));
+        assert!(!backend.secrets_path().exists());
+        assert!(!backend.lock_path().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_key_for_existing_file_preserves_ciphertext() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring.clone());
+        let name = SecretName::new("TEST_SECRET")?;
+        backend.set(&SecretScope::Global, &name, "secret")?;
+        let path = backend.secrets_path();
+        let ciphertext = fs::read(&path)?;
+        let account = compute_keyring_account_for_namespace(
+            codex_home.path(),
+            LocalSecretsNamespace::ManagedSecrets,
+        );
+        assert!(keyring.delete(keyring_service(), &account)?);
+
+        backend
+            .get(&SecretScope::Global, &name)
+            .expect_err("missing key must fail closed");
+        assert!(!keyring.contains(&account));
+        assert_eq!(fs::read(path)?, ciphertext);
         Ok(())
     }
 
@@ -635,6 +727,57 @@ mod tests {
             backend.get(&SecretScope::Global, &SecretName::new("SECOND")?)?,
             Some("two".to_string())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_set_and_delete_preserve_both_mutations() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let block_next_load = Arc::new(AtomicBool::new(false));
+        let load_started = Arc::new(Barrier::new(2));
+        let load_release = Arc::new(Barrier::new(2));
+        let keyring = Arc::new(BlockingLoadKeyringStore {
+            inner: MockKeyringStore::default(),
+            block_next_load: block_next_load.clone(),
+            load_started: load_started.clone(),
+            load_release: load_release.clone(),
+        });
+        let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
+        let first_name = SecretName::new("FIRST")?;
+        let second_name = SecretName::new("SECOND")?;
+        backend.set(&SecretScope::Global, &first_name, "old")?;
+        backend.set(&SecretScope::Global, &second_name, "two")?;
+
+        block_next_load.store(true, Ordering::SeqCst);
+        let set_backend = backend.clone();
+        let set_name = first_name.clone();
+        let set_thread =
+            thread::spawn(move || set_backend.set(&SecretScope::Global, &set_name, "new"));
+        load_started.wait();
+
+        let delete_backend = backend.clone();
+        let delete_name = second_name.clone();
+        let (delete_sender, delete_receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = delete_sender.send(delete_backend.delete(&SecretScope::Global, &delete_name));
+        });
+        let delete_completed_early = delete_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .ok()
+            .transpose()?;
+        load_release.wait();
+        set_thread.join().expect("set writer")?;
+        let deleted = match delete_completed_early {
+            Some(deleted) => deleted,
+            None => delete_receiver.recv().expect("delete writer")?,
+        };
+
+        assert!(deleted);
+        assert_eq!(
+            backend.get(&SecretScope::Global, &first_name)?,
+            Some("new".to_string())
+        );
+        assert_eq!(backend.get(&SecretScope::Global, &second_name)?, None);
         Ok(())
     }
 
