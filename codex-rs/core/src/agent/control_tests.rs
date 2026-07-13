@@ -3262,8 +3262,13 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
         .expect("tree shutdown after subtree resume should succeed");
 }
 
-async fn harness_with_external_descendant()
--> (AgentControlHarness, ThreadId, ThreadId, StateDbHandle) {
+async fn harness_with_external_descendant() -> (
+    AgentControlHarness,
+    ThreadId,
+    ThreadId,
+    ThreadId,
+    StateDbHandle,
+) {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;
 
@@ -3307,12 +3312,57 @@ async fn harness_with_external_descendant()
         .expect("sqlite state db should be available")
         .clone();
 
-    (harness, child_thread_id, external_thread_id, state_db)
+    (
+        harness,
+        parent_thread_id,
+        child_thread_id,
+        external_thread_id,
+        state_db,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_v2_agent_metadata_preserves_internal_identity_and_skips_external_edge() {
+    tokio::spawn(async {
+        let (harness, parent_thread_id, child_thread_id, external_thread_id, _state_db) =
+            harness_with_external_descendant().await;
+        let expected_metadata = harness
+            .control
+            .state
+            .agent_metadata_for_thread(child_thread_id)
+            .expect("spawned child metadata should exist");
+        let fresh_control = harness.manager.agent_control();
+
+        fresh_control
+            .restore_v2_agent_metadata(&harness.config, parent_thread_id)
+            .await;
+
+        let restored_metadata = fresh_control
+            .state
+            .agent_metadata_for_thread(child_thread_id)
+            .expect("persisted child metadata should be restored");
+        assert_eq!(restored_metadata.agent_id, Some(child_thread_id));
+        assert_eq!(restored_metadata.agent_path, expected_metadata.agent_path);
+        assert_eq!(
+            restored_metadata.agent_nickname,
+            expected_metadata.agent_nickname
+        );
+        assert_eq!(restored_metadata.agent_role, expected_metadata.agent_role);
+        assert_eq!(restored_metadata.last_task_message, None);
+        assert!(
+            fresh_control
+                .state
+                .agent_metadata_for_thread(external_thread_id)
+                .is_none()
+        );
+    })
+    .await
+    .expect("metadata restore task should complete");
 }
 
 #[tokio::test]
 async fn close_agent_closes_completed_external_descendant_edges() {
-    let (harness, child_thread_id, external_thread_id, state_db) =
+    let (harness, _parent_thread_id, child_thread_id, external_thread_id, state_db) =
         harness_with_external_descendant().await;
     harness.control.update_external_agent_status(
         external_thread_id,
@@ -3364,7 +3414,7 @@ async fn close_agent_closes_completed_external_descendant_edges() {
 
 #[tokio::test]
 async fn close_agent_closes_running_external_descendant_edges_without_releasing_runtime() {
-    let (harness, child_thread_id, external_thread_id, state_db) =
+    let (harness, _parent_thread_id, child_thread_id, external_thread_id, state_db) =
         harness_with_external_descendant().await;
 
     let _ = harness
