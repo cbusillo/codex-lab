@@ -128,9 +128,6 @@ impl LocalSecretsBackend {
     }
 
     pub fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool> {
-        if !self.secrets_path().exists() {
-            return Ok(false);
-        }
         let _lock = self.acquire_lock(LockMode::Exclusive)?;
         let canonical_key = scope.canonical_key(name);
         let mut file = self.load_file()?;
