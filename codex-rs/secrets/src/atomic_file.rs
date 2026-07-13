@@ -13,6 +13,24 @@ use anyhow::Result;
 #[cfg(unix)]
 use tracing::warn;
 
+#[cfg(any(test, windows))]
+#[path = "atomic_file/marker.rs"]
+mod marker;
+#[cfg(any(test, windows))]
+#[path = "atomic_file/transaction.rs"]
+mod transaction;
+
+#[cfg(test)]
+pub(super) use marker::MarkerRecord;
+#[cfg(any(test, windows))]
+pub(super) use transaction::TransactionKind;
+#[cfg(test)]
+pub(super) use transaction::TransactionPaths;
+#[cfg(any(test, windows))]
+pub(crate) use transaction::readable_path;
+#[cfg(test)]
+pub(super) use transaction::transaction_paths;
+
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(/*v*/ 0);
 
 pub(crate) fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
