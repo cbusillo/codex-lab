@@ -114,6 +114,7 @@ fn access_token_prepares_are_idempotent_and_preserve_legacy() -> anyhow::Result<
         fs::write(temp.path().join("auth.json"), &auth_bytes)?;
         let accounts_bytes = seed_accounts_file(temp.path())?;
         let document = prepare(temp.path(), File, keyring.clone())?;
+        assert_eq!(document.accounts.accounts.len(), 1);
         let encrypted_bytes = fs::read(temp.path().join("secrets/codex_auth.age"))?;
         let result = prepare_encrypted_aggregate(temp.path(), File, keyring)?;
         assert_eq!(result, PreparedMigration::AlreadyEncrypted(document));
@@ -134,6 +135,7 @@ fn access_token_prepares_are_idempotent_and_preserve_legacy() -> anyhow::Result<
 fn no_source_and_ephemeral_paths_do_not_write() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let keyring = Arc::new(MockKeyringStore::default());
+    fs::write(temp.path().join("auth_accounts.json"), " \n")?;
     let result = prepare_encrypted_aggregate(temp.path(), File, keyring.clone())?;
     assert_eq!(result, PreparedMigration::Nothing);
     assert!(!temp.path().join("secrets/codex_auth.age").exists());
@@ -265,9 +267,12 @@ fn stale_or_orphaned_aggregate_fails_without_overwrite() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let keyring = Arc::new(MockKeyringStore::default());
     seed_auth_file(temp.path())?;
+    seed_accounts_file_with_key(temp.path(), "sk-mismatch")?;
+    let encrypted_path = temp.path().join("secrets/codex_auth.age");
+    assert!(prepare_encrypted_aggregate(temp.path(), File, keyring.clone()).is_err());
+    assert!(!encrypted_path.exists());
     seed_accounts_file(temp.path())?;
     prepare_encrypted_aggregate(temp.path(), File, keyring.clone())?;
-    let encrypted_path = temp.path().join("secrets/codex_auth.age");
     let encrypted_bytes = fs::read(&encrypted_path)?;
     fs::write(
         temp.path().join("auth.json"),
@@ -279,10 +284,7 @@ fn stale_or_orphaned_aggregate_fails_without_overwrite() -> anyhow::Result<()> {
     seed_accounts_file_with_key(temp.path(), "sk-updated")?;
     let err = prepare_encrypted_aggregate(temp.path(), File, keyring.clone())
         .expect_err("stale aggregate must fail");
-    assert!(
-        err.to_string()
-            .contains("does not match current legacy sources")
-    );
+    assert!(err.to_string().contains("current legacy sources"));
     fs::remove_file(temp.path().join("auth.json"))?;
     fs::remove_file(temp.path().join("auth_accounts.json"))?;
     let err = prepare_encrypted_aggregate(temp.path(), File, keyring)

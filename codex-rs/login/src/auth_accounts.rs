@@ -114,7 +114,8 @@ pub(crate) fn read_accounts_file_for_migration(
                     parsed.version
                 )));
             }
-            Ok((parsed, true))
+            let catalog_present = parsed != AccountsFile::default();
+            Ok((parsed, catalog_present))
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok((AccountsFile::default(), false)),
         Err(err) => Err(err),
