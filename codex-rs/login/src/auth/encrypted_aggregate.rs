@@ -69,17 +69,18 @@ pub(crate) enum DocumentOrigin {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PreparedMigration {
     Nothing,
+    Deferred,
     AlreadyEncrypted(LoginAggregateV1),
     Prepared(LoginAggregateV1),
 }
 
-/// Prepare an encrypted aggregate while leaving legacy auth sources authoritative.
+/// Activate the verified encrypted shadow when the current legacy sources form
+/// a consistent aggregate.
 ///
-/// This writes the encrypted aggregate plus the local-secrets lock metadata and,
-/// when absent, its namespaced keyring encryption key. It never deletes,
-/// rewrites, or activates `auth.json`, the keyring auth entry, or
-/// `auth_accounts.json`.
-pub(crate) fn prepare_encrypted_aggregate(
+/// Activation and trusted legacy mutations share the same secrets lock. A
+/// pre-existing aggregate remains strict, while a first activation is deferred
+/// when the legacy sources cannot yet form a consistent snapshot.
+pub(crate) fn activate_encrypted_aggregate(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
@@ -90,60 +91,109 @@ pub(crate) fn prepare_encrypted_aggregate(
 
     let manager = secrets_manager(codex_home, keyring_store.clone());
     let name = aggregate_secret_name()?;
-    let existing = manager
-        .get(&SecretScope::Global, &name)
-        .map_err(secret_err)?
-        .map(|raw| parse_document(&raw))
-        .transpose()?;
-    let candidate = read_legacy_document(codex_home, mode, keyring_store)?;
-
-    if let Some(existing) = existing {
-        let Some(candidate) = candidate else {
-            return Err(stale_document_error());
-        };
-        if existing != candidate {
-            return Err(stale_document_error());
-        }
-        return Ok(PreparedMigration::AlreadyEncrypted(existing));
-    }
-
-    let Some(document) = candidate else {
-        return Ok(PreparedMigration::Nothing);
-    };
-    let serialized = serde_json::to_string(&document).map_err(io::Error::other)?;
-    let mut raced_existing = None;
-    manager
-        .mutate(&SecretScope::Global, &name, |current| {
-            let Some(current) = current else {
-                return Ok(SecretMutation::Set(serialized.clone()));
+    let mut activation = None;
+    let mut initial_activation = false;
+    let mutation_result = manager.mutate(&SecretScope::Global, &name, |current| {
+        let mutation = if let Some(current) = current {
+            let existing = parse_document(current)?;
+            let candidate = match read_legacy_document(codex_home, mode, keyring_store.clone()) {
+                Ok(Some(candidate)) => candidate,
+                Ok(None) => return Err(stale_document_error().into()),
+                Err(_) => {
+                    activation = Some(PreparedMigration::Deferred);
+                    return Ok(SecretMutation::Keep);
+                }
             };
-            let current = parse_document(current)?;
-            if current != document {
+            if existing != candidate {
                 return Err(stale_document_error().into());
             }
-            raced_existing = Some(current);
-            Ok(SecretMutation::Keep)
+            activation = Some(PreparedMigration::AlreadyEncrypted(existing));
+            SecretMutation::Keep
+        } else {
+            initial_activation = true;
+            let candidate = match assemble_legacy_document(codex_home, mode, keyring_store.clone())
+            {
+                Ok(candidate) => candidate,
+                Err(_) => {
+                    activation = Some(PreparedMigration::Deferred);
+                    return Ok(SecretMutation::Keep);
+                }
+            };
+            let Some(document) = candidate else {
+                activation = Some(PreparedMigration::Nothing);
+                return Ok(SecretMutation::Keep);
+            };
+            if validate_active_account(&document).is_err() {
+                activation = Some(PreparedMigration::Deferred);
+                return Ok(SecretMutation::Keep);
+            }
+            let serialized = serde_json::to_string(&document).map_err(io::Error::other)?;
+            activation = Some(PreparedMigration::Prepared(document));
+            SecretMutation::Set(serialized)
+        };
+        Ok(mutation)
+    });
+    if let Err(error) = mutation_result {
+        if initial_activation {
+            return Ok(PreparedMigration::Deferred);
+        }
+        return Err(secret_err(error));
+    }
+    activation.ok_or_else(|| io::Error::other("encrypted login activation did not run"))
+}
+
+/// Run a trusted legacy mutation while invalidating any verified encrypted
+/// aggregate under the same secrets lock.
+///
+/// Legacy auth sources remain authoritative during this activation stage. A
+/// corrupt encrypted aggregate blocks the mutation instead of being deleted,
+/// while a valid aggregate is removed only after the legacy mutation succeeds.
+pub(crate) fn with_invalidated_encrypted_aggregate<T>(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+    mutation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    if mode == AuthCredentialsStoreMode::Ephemeral {
+        return mutation();
+    }
+
+    let manager = secrets_manager(codex_home, keyring_store);
+    let name = aggregate_secret_name()?;
+    let mut mutation = Some(mutation);
+    let mut result = None;
+    manager
+        .mutate(&SecretScope::Global, &name, |current| {
+            if let Some(current) = current {
+                parse_document(current)?;
+            }
+            let mutation = mutation
+                .take()
+                .ok_or_else(|| io::Error::other("legacy login mutation ran more than once"))?;
+            result = Some(mutation()?);
+            Ok(if current.is_some() {
+                SecretMutation::Delete
+            } else {
+                SecretMutation::Keep
+            })
         })
         .map_err(secret_err)?;
-    if let Some(existing) = raced_existing {
-        return Ok(PreparedMigration::AlreadyEncrypted(existing));
-    }
-
-    let verified = manager
-        .get(&SecretScope::Global, &name)
-        .map_err(secret_err)?
-        .ok_or_else(|| io::Error::other("encrypted login aggregate missing after write"))?;
-    let verified = parse_document(&verified)?;
-    if verified != document {
-        return Err(io::Error::other(
-            "encrypted login aggregate read-back verification failed",
-        ));
-    }
-
-    Ok(PreparedMigration::Prepared(document))
+    result.ok_or_else(|| io::Error::other("legacy login mutation did not run"))
 }
 
 fn read_legacy_document(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> io::Result<Option<LoginAggregateV1>> {
+    let document = assemble_legacy_document(codex_home, mode, keyring_store)?;
+    if let Some(document) = document.as_ref() {
+        validate_active_account(document)?;
+    }
+    Ok(document)
+}
+
+fn assemble_legacy_document(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
@@ -166,7 +216,7 @@ fn read_legacy_document(
         active_auth,
         accounts,
     };
-    validate_document(&document)?;
+    validate_document_envelope(&document)?;
     Ok(Some(document))
 }
 
@@ -196,6 +246,11 @@ fn parse_document(raw: &str) -> io::Result<LoginAggregateV1> {
 }
 
 fn validate_document(document: &LoginAggregateV1) -> io::Result<()> {
+    validate_document_envelope(document)?;
+    validate_active_account(document)
+}
+
+fn validate_document_envelope(document: &LoginAggregateV1) -> io::Result<()> {
     if document.version != LOGIN_AGGREGATE_VERSION {
         return Err(io::Error::other(format!(
             "unsupported encrypted login aggregate version {}",
@@ -240,7 +295,7 @@ fn validate_document(document: &LoginAggregateV1) -> io::Result<()> {
             "encrypted login aggregate has no legacy source",
         ));
     }
-    validate_active_account(document)
+    Ok(())
 }
 
 fn validate_active_account(document: &LoginAggregateV1) -> io::Result<()> {
