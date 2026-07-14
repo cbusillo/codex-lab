@@ -513,5 +513,14 @@ pub(crate) fn save_activated_auth_with_keyring_store(
 }
 
 #[cfg(test)]
+pub(crate) fn delete_activated_auth_with_keyring_store(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<bool> {
+    create_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store).delete()
+}
+
+#[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;

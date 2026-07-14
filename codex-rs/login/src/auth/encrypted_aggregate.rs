@@ -98,14 +98,19 @@ pub(crate) fn activate_encrypted_aggregate(
             let existing = parse_document(current)?;
             let candidate = match read_legacy_document(codex_home, mode, keyring_store.clone()) {
                 Ok(Some(candidate)) => candidate,
-                Ok(None) => return Err(stale_document_error().into()),
+                Ok(None) => {
+                    activation = Some(PreparedMigration::Nothing);
+                    return Ok(SecretMutation::Delete);
+                }
                 Err(_) => {
                     activation = Some(PreparedMigration::Deferred);
                     return Ok(SecretMutation::Keep);
                 }
             };
             if existing != candidate {
-                return Err(stale_document_error().into());
+                let serialized = serde_json::to_string(&candidate).map_err(io::Error::other)?;
+                activation = Some(PreparedMigration::Prepared(candidate));
+                return Ok(SecretMutation::Set(serialized));
             }
             activation = Some(PreparedMigration::AlreadyEncrypted(existing));
             SecretMutation::Keep
@@ -330,10 +335,6 @@ fn validate_active_account(document: &LoginAggregateV1) -> io::Result<()> {
         ));
     }
     Ok(())
-}
-
-fn stale_document_error() -> io::Error {
-    io::Error::other("encrypted login aggregate does not match current legacy sources")
 }
 
 fn secret_err(error: impl std::fmt::Display) -> io::Error {

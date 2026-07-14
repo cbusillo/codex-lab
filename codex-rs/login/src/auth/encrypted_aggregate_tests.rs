@@ -27,6 +27,7 @@ use super::encrypted_aggregate::LoginAggregateV1;
 use super::encrypted_aggregate::PreparedMigration;
 use super::encrypted_aggregate::activate_encrypted_aggregate;
 use super::storage::auth_keyring_account_for_tests;
+use super::storage::delete_activated_auth_with_keyring_store;
 use super::storage::load_activated_auth_with_keyring_store;
 use super::storage::load_auth_with_keyring_store;
 use super::storage::save_activated_auth_with_keyring_store;
@@ -296,7 +297,7 @@ fn invalid_existing_documents_are_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn stale_or_orphaned_aggregate_fails_without_overwrite() -> anyhow::Result<()> {
+fn valid_drift_refreshes_shadow_and_orphaned_shadow_is_deleted() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let keyring = Arc::new(MockKeyringStore::default());
     seed_auth_file(temp.path())?;
@@ -318,15 +319,22 @@ fn stale_or_orphaned_aggregate_fails_without_overwrite() -> anyhow::Result<()> {
         }))?,
     )?;
     seed_accounts_file_with_key(temp.path(), "sk-updated")?;
-    let err = activate_encrypted_aggregate(temp.path(), File, keyring.clone())
-        .expect_err("stale aggregate must fail");
-    assert!(err.to_string().contains("current legacy sources"));
+    let loaded = load_activated_auth_with_keyring_store(temp.path(), File, keyring.clone())?
+        .expect("updated legacy auth should load");
+    assert_eq!(loaded.openai_api_key.as_deref(), Some("sk-updated"));
+    let refreshed = load_aggregate(temp.path(), keyring.clone())?;
+    assert_eq!(
+        refreshed
+            .active_auth
+            .as_ref()
+            .and_then(|auth| auth.openai_api_key.as_deref()),
+        Some("sk-updated")
+    );
+    assert_ne!(fs::read(&encrypted_path)?, encrypted_bytes);
     fs::remove_file(temp.path().join("auth.json"))?;
     fs::remove_file(temp.path().join("auth_accounts.json"))?;
-    let err = activate_encrypted_aggregate(temp.path(), File, keyring)
-        .expect_err("orphaned aggregate must fail");
-    assert!(err.to_string().contains("current legacy sources"));
-    assert_eq!(fs::read(encrypted_path)?, encrypted_bytes);
+    assert!(load_activated_auth_with_keyring_store(temp.path(), File, keyring.clone())?.is_none());
+    assert!(load_raw_aggregate(temp.path(), keyring)?.is_none());
     Ok(())
 }
 
@@ -465,6 +473,51 @@ fn trusted_writes_invalidate_shadow_until_next_load() -> anyhow::Result<()> {
     let aggregate = load_aggregate(temp.path(), keyring)?;
     assert_eq!(aggregate.active_auth, Some(updated_auth));
     assert_eq!(aggregate.accounts, accounts);
+    Ok(())
+}
+
+#[test]
+fn activated_delete_cannot_resurrect_legacy_auth() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let keyring = Arc::new(MockKeyringStore::default());
+    seed_auth_file(temp.path())?;
+    seed_accounts_file(temp.path())?;
+    load_activated_auth_with_keyring_store(temp.path(), File, keyring.clone())?
+        .expect("legacy auth should load");
+
+    assert!(delete_activated_auth_with_keyring_store(
+        temp.path(),
+        File,
+        keyring.clone()
+    )?);
+    assert!(!temp.path().join("auth.json").exists());
+    assert!(load_raw_aggregate(temp.path(), keyring.clone())?.is_none());
+    assert!(load_activated_auth_with_keyring_store(temp.path(), File, keyring.clone())?.is_none());
+    assert_eq!(load_aggregate(temp.path(), keyring)?.active_auth, None);
+    Ok(())
+}
+
+#[test]
+fn failed_legacy_mutation_preserves_valid_shadow() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let keyring = Arc::new(MockKeyringStore::default());
+    seed_auth_file(temp.path())?;
+    seed_accounts_file(temp.path())?;
+    load_activated_auth_with_keyring_store(temp.path(), File, keyring.clone())?
+        .expect("legacy auth should load");
+    let aggregate = load_raw_aggregate(temp.path(), keyring.clone())?.expect("aggregate");
+
+    fs::remove_file(temp.path().join("auth.json"))?;
+    fs::create_dir(temp.path().join("auth.json"))?;
+    let updated_auth: AuthDotJson = serde_json::from_value(json!({
+        "OPENAI_API_KEY": "sk-updated",
+        "auth_mode": "apikey"
+    }))?;
+    assert!(
+        save_activated_auth_with_keyring_store(temp.path(), &updated_auth, File, keyring.clone())
+            .is_err()
+    );
+    assert_eq!(load_raw_aggregate(temp.path(), keyring)?, Some(aggregate));
     Ok(())
 }
 
