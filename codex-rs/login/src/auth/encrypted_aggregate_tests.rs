@@ -135,7 +135,7 @@ fn access_token_prepares_are_idempotent_and_preserve_legacy() -> anyhow::Result<
 fn no_source_and_ephemeral_paths_do_not_write() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let keyring = Arc::new(MockKeyringStore::default());
-    fs::write(temp.path().join("auth_accounts.json"), " \n")?;
+    fs::write(temp.path().join("auth_accounts.json"), "{\"version\":1}")?;
     let result = prepare_encrypted_aggregate(temp.path(), File, keyring.clone())?;
     assert_eq!(result, PreparedMigration::Nothing);
     assert!(!temp.path().join("secrets/codex_auth.age").exists());
