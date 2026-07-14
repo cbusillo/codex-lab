@@ -3,6 +3,8 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_keyring_store::DefaultKeyringStore;
+use codex_keyring_store::KeyringStore;
 use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
@@ -14,8 +16,10 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::auth::AuthDotJson;
+use crate::auth::encrypted_aggregate::with_invalidated_encrypted_aggregate;
 use crate::auth::save_auth;
 
 const ACCOUNTS_FILE_NAME: &str = "auth_accounts.json";
@@ -82,14 +86,18 @@ fn accounts_file_path_for_mode(
     accounts_file_path(codex_home)
 }
 
-fn read_accounts_file(path: &Path) -> io::Result<AccountsFile> {
+fn read_accounts_file(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<AccountsFile> {
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
     match File::open(path) {
         Ok(mut file) => {
             let mut contents = String::new();
             file.read_to_string(&mut contents)?;
             let (parsed, repaired) = parse_accounts_file(&contents)?;
             if repaired {
-                write_accounts_file(path, &parsed)?;
+                write_accounts_file(codex_home, auth_credentials_store_mode, &parsed)?;
             }
             Ok(parsed)
         }
@@ -98,7 +106,6 @@ fn read_accounts_file(path: &Path) -> io::Result<AccountsFile> {
     }
 }
 
-#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
 pub(crate) fn read_accounts_file_for_migration(
     codex_home: &Path,
 ) -> io::Result<(AccountsFile, bool)> {
@@ -151,7 +158,51 @@ fn parse_accounts_file(contents: &str) -> io::Result<(AccountsFile, bool)> {
     }
 }
 
-fn write_accounts_file(path: &Path, data: &AccountsFile) -> io::Result<()> {
+fn write_accounts_file(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    data: &AccountsFile,
+) -> io::Result<()> {
+    let keyring_store: Arc<dyn KeyringStore> = Arc::new(DefaultKeyringStore);
+    write_accounts_file_with_keyring_store(
+        codex_home,
+        auth_credentials_store_mode,
+        data,
+        keyring_store,
+    )
+}
+
+fn write_accounts_file_with_keyring_store(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    data: &AccountsFile,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> io::Result<()> {
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
+    with_invalidated_encrypted_aggregate(
+        codex_home,
+        auth_credentials_store_mode,
+        keyring_store,
+        || write_accounts_file_legacy(&path, data),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn write_accounts_file_with_keyring_store_for_tests(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    data: &AccountsFile,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> io::Result<()> {
+    write_accounts_file_with_keyring_store(
+        codex_home,
+        auth_credentials_store_mode,
+        data,
+        keyring_store,
+    )
+}
+
+fn write_accounts_file_legacy(path: &Path, data: &AccountsFile) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -392,8 +443,7 @@ pub fn list_accounts(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<Vec<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let data = read_accounts_file(&path)?;
+    let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
     Ok(data.accounts)
 }
 
@@ -401,8 +451,7 @@ pub fn get_active_account_id(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<Option<String>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let data = read_accounts_file(&path)?;
+    let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
     Ok(data.active_account_id)
 }
 
@@ -411,8 +460,7 @@ pub fn find_account(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     account_id: &str,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let data = read_accounts_file(&path)?;
+    let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
     Ok(data.accounts.into_iter().find(|acc| acc.id == account_id))
 }
 
@@ -440,8 +488,7 @@ pub fn find_chatgpt_account_by_tokens(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     tokens: &TokenData,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let data = read_accounts_file(&path)?;
+    let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
     Ok(find_preferred_matching_account(&data, |account| {
         match_chatgpt_account(account, tokens)
     }))
@@ -452,8 +499,7 @@ pub fn find_api_key_account_by_key(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     api_key: &str,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let data = read_accounts_file(&path)?;
+    let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
     Ok(find_preferred_matching_account(&data, |account| {
         match_api_key_account(account, api_key)
     }))
@@ -510,15 +556,14 @@ pub fn update_account_last_refresh(
     account_id: &str,
     last_refresh: DateTime<Utc>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let mut data = read_accounts_file(&path)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == account_id) else {
         return Ok(None);
     };
     account.last_refresh = Some(last_refresh);
     let updated = account.clone();
-    write_accounts_file(&path, &data)?;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(Some(updated))
 }
 
@@ -527,8 +572,7 @@ pub fn set_active_account_id(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     account_id: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let mut data = read_accounts_file(&path)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let mut updated = None;
     if let Some(id) = account_id
@@ -540,7 +584,7 @@ pub fn set_active_account_id(
     } else {
         data.active_account_id = None;
     }
-    write_accounts_file(&path, &data)?;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(updated)
 }
 
@@ -639,8 +683,7 @@ pub fn remove_account(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     account_id: &str,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let mut data = read_accounts_file(&path)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let removed = if let Some(pos) = data.accounts.iter().position(|acc| acc.id == account_id) {
         Some(data.accounts.remove(pos))
@@ -656,7 +699,7 @@ pub fn remove_account(
         select_fallback_active_account(&mut data);
     }
 
-    write_accounts_file(&path, &data)?;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(removed)
 }
 
@@ -675,8 +718,7 @@ pub fn remove_account_matching_credentials(
     openai_api_key: Option<&str>,
     tokens: Option<&TokenData>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let mut data = read_accounts_file(&path)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let removed = match mode {
         AuthMode::ApiKey => openai_api_key.and_then(|api_key| {
@@ -702,7 +744,7 @@ pub fn remove_account_matching_credentials(
         select_fallback_active_account(&mut data);
     }
 
-    write_accounts_file(&path, &data)?;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(removed)
 }
 
@@ -713,8 +755,7 @@ pub fn upsert_api_key_account(
     label: Option<String>,
     make_active: bool,
 ) -> io::Result<StoredAccount> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let data = read_accounts_file(&path)?;
+    let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let new_account = StoredAccount {
         id: next_id(),
@@ -737,7 +778,7 @@ pub fn upsert_api_key_account(
         }
     }
 
-    write_accounts_file(&path, &data)?;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(stored)
 }
 
@@ -747,8 +788,7 @@ pub(crate) fn insert_api_key_account_if_missing(
     api_key: String,
     label: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let mut data = read_accounts_file(&path)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     if data
         .accounts
@@ -770,7 +810,7 @@ pub(crate) fn insert_api_key_account_if_missing(
     };
     touch_account(&mut account, false);
     data.accounts.push(account.clone());
-    write_accounts_file(&path, &data)?;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(Some(account))
 }
 
@@ -782,8 +822,7 @@ pub fn upsert_chatgpt_account(
     label: Option<String>,
     make_active: bool,
 ) -> io::Result<StoredAccount> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let data = read_accounts_file(&path)?;
+    let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let new_account = StoredAccount {
         id: next_id(),
@@ -806,7 +845,7 @@ pub fn upsert_chatgpt_account(
         }
     }
 
-    write_accounts_file(&path, &data)?;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(stored)
 }
 
@@ -817,8 +856,7 @@ pub(crate) fn insert_chatgpt_account_if_missing(
     last_refresh: DateTime<Utc>,
     label: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
-    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
-    let mut data = read_accounts_file(&path)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     if data
         .accounts
@@ -840,7 +878,7 @@ pub(crate) fn insert_chatgpt_account_if_missing(
     };
     touch_account(&mut account, false);
     data.accounts.push(account.clone());
-    write_accounts_file(&path, &data)?;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(Some(account))
 }
 

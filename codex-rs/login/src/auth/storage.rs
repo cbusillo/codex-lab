@@ -28,6 +28,10 @@ use codex_keyring_store::KeyringStore;
 use codex_protocol::account::PlanType as AccountPlanType;
 use once_cell::sync::Lazy;
 
+use super::encrypted_aggregate::PreparedMigration;
+use super::encrypted_aggregate::activate_encrypted_aggregate;
+use super::encrypted_aggregate::with_invalidated_encrypted_aggregate;
+
 /// Expected structure for $CODEX_HOME/auth.json.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct AuthDotJson {
@@ -103,8 +107,44 @@ pub(super) trait AuthStorageBackend: Debug + Send + Sync {
     fn delete(&self) -> std::io::Result<bool>;
 }
 
+#[derive(Clone, Debug)]
+struct AggregateAwareAuthStorage {
+    codex_home: PathBuf,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+    legacy: Arc<dyn AuthStorageBackend>,
+}
+
+impl AuthStorageBackend for AggregateAwareAuthStorage {
+    fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
+        match activate_encrypted_aggregate(&self.codex_home, self.mode, self.keyring_store.clone())?
+        {
+            PreparedMigration::AlreadyEncrypted(document)
+            | PreparedMigration::Prepared(document) => Ok(document.active_auth),
+            PreparedMigration::Deferred | PreparedMigration::Nothing => self.legacy.load(),
+        }
+    }
+
+    fn save(&self, auth: &AuthDotJson) -> std::io::Result<()> {
+        with_invalidated_encrypted_aggregate(
+            &self.codex_home,
+            self.mode,
+            self.keyring_store.clone(),
+            || self.legacy.save(auth),
+        )
+    }
+
+    fn delete(&self) -> std::io::Result<bool> {
+        with_invalidated_encrypted_aggregate(
+            &self.codex_home,
+            self.mode,
+            self.keyring_store.clone(),
+            || self.legacy.delete(),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
 pub(crate) enum AuthStorageSource {
     File,
     Keyring,
@@ -356,6 +396,27 @@ fn create_auth_storage_with_keyring_store(
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
 ) -> Arc<dyn AuthStorageBackend> {
+    let legacy = create_legacy_auth_storage_with_keyring_store(
+        codex_home.clone(),
+        mode,
+        keyring_store.clone(),
+    );
+    if mode == AuthCredentialsStoreMode::Ephemeral {
+        return legacy;
+    }
+    Arc::new(AggregateAwareAuthStorage {
+        codex_home,
+        mode,
+        keyring_store,
+        legacy,
+    })
+}
+
+fn create_legacy_auth_storage_with_keyring_store(
+    codex_home: PathBuf,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> Arc<dyn AuthStorageBackend> {
     match mode {
         AuthCredentialsStoreMode::File => Arc::new(FileAuthStorage::new(codex_home)),
         AuthCredentialsStoreMode::Keyring => {
@@ -372,10 +433,19 @@ pub(crate) fn load_auth_with_keyring_store(
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
 ) -> std::io::Result<Option<AuthDotJson>> {
+    create_legacy_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store)
+        .load()
+}
+
+#[cfg(test)]
+pub(crate) fn load_activated_auth_with_keyring_store(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<Option<AuthDotJson>> {
     create_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store).load()
 }
 
-#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
 pub(crate) fn load_auth_for_migration(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
@@ -407,7 +477,6 @@ pub(crate) fn load_auth_for_migration(
     }
 }
 
-#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
 fn auth_with_source(
     auth: std::io::Result<Option<AuthDotJson>>,
     source: AuthStorageSource,
@@ -429,7 +498,27 @@ pub(crate) fn save_auth_with_keyring_store(
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
 ) -> std::io::Result<()> {
+    create_legacy_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store)
+        .save(auth)
+}
+
+#[cfg(test)]
+pub(crate) fn save_activated_auth_with_keyring_store(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<()> {
     create_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store).save(auth)
+}
+
+#[cfg(test)]
+pub(crate) fn delete_activated_auth_with_keyring_store(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<bool> {
+    create_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store).delete()
 }
 
 #[cfg(test)]
