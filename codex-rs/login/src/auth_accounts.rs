@@ -19,6 +19,7 @@ use crate::auth::AuthDotJson;
 use crate::auth::save_auth;
 
 const ACCOUNTS_FILE_NAME: &str = "auth_accounts.json";
+pub(crate) const ACCOUNTS_FILE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredAccount {
@@ -45,15 +46,15 @@ pub struct StoredAccount {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
-struct AccountsFile {
+pub(crate) struct AccountsFile {
     #[serde(default = "default_version")]
-    version: u32,
+    pub(crate) version: u32,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    active_account_id: Option<String>,
+    pub(crate) active_account_id: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    accounts: Vec<StoredAccount>,
+    pub(crate) accounts: Vec<StoredAccount>,
 }
 
 impl Default for AccountsFile {
@@ -67,7 +68,7 @@ impl Default for AccountsFile {
 }
 
 fn default_version() -> u32 {
-    1
+    ACCOUNTS_FILE_VERSION
 }
 
 fn accounts_file_path(codex_home: &Path) -> PathBuf {
@@ -93,6 +94,28 @@ fn read_accounts_file(path: &Path) -> io::Result<AccountsFile> {
             Ok(parsed)
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(AccountsFile::default()),
+        Err(err) => Err(err),
+    }
+}
+
+pub(crate) fn read_accounts_file_for_migration(
+    codex_home: &Path,
+) -> io::Result<(AccountsFile, bool)> {
+    let path = accounts_file_path(codex_home);
+    match File::open(path) {
+        Ok(mut file) => {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents)?;
+            let (parsed, _repaired) = parse_accounts_file(&contents)?;
+            if parsed.version != ACCOUNTS_FILE_VERSION {
+                return Err(io::Error::other(format!(
+                    "unsupported auth accounts version {}",
+                    parsed.version
+                )));
+            }
+            Ok((parsed, true))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok((AccountsFile::default(), false)),
         Err(err) => Err(err),
     }
 }

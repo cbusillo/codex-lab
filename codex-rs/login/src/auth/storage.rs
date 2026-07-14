@@ -103,6 +103,12 @@ pub(super) trait AuthStorageBackend: Debug + Send + Sync {
     fn delete(&self) -> std::io::Result<bool>;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthStorageSource {
+    File,
+    Keyring,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct FileAuthStorage {
     codex_home: PathBuf,
@@ -357,6 +363,70 @@ fn create_auth_storage_with_keyring_store(
         AuthCredentialsStoreMode::Auto => Arc::new(AutoAuthStorage::new(codex_home, keyring_store)),
         AuthCredentialsStoreMode::Ephemeral => Arc::new(EphemeralAuthStorage::new(codex_home)),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn load_auth_with_keyring_store(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<Option<AuthDotJson>> {
+    create_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store).load()
+}
+
+pub(crate) fn load_auth_for_migration(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<(Option<AuthDotJson>, Option<AuthStorageSource>)> {
+    match mode {
+        AuthCredentialsStoreMode::File => auth_with_source(
+            FileAuthStorage::new(codex_home.to_path_buf()).load(),
+            AuthStorageSource::File,
+        ),
+        AuthCredentialsStoreMode::Keyring => auth_with_source(
+            KeyringAuthStorage::new(codex_home.to_path_buf(), keyring_store).load(),
+            AuthStorageSource::Keyring,
+        ),
+        AuthCredentialsStoreMode::Auto => {
+            let keyring_storage = KeyringAuthStorage::new(codex_home.to_path_buf(), keyring_store);
+            match keyring_storage.load() {
+                Ok(Some(auth)) => Ok((Some(auth), Some(AuthStorageSource::Keyring))),
+                Ok(None) => auth_with_source(
+                    FileAuthStorage::new(codex_home.to_path_buf()).load(),
+                    AuthStorageSource::File,
+                ),
+                Err(err) => Err(std::io::Error::other(format!(
+                    "failed to load CLI auth from keyring for encrypted migration: {err}"
+                ))),
+            }
+        }
+        AuthCredentialsStoreMode::Ephemeral => Ok((None, None)),
+    }
+}
+
+fn auth_with_source(
+    auth: std::io::Result<Option<AuthDotJson>>,
+    source: AuthStorageSource,
+) -> std::io::Result<(Option<AuthDotJson>, Option<AuthStorageSource>)> {
+    let auth = auth?;
+    let resolved_source = auth.as_ref().map(|_| source);
+    Ok((auth, resolved_source))
+}
+
+#[cfg(test)]
+pub(crate) fn auth_keyring_account_for_tests(codex_home: &Path) -> std::io::Result<String> {
+    compute_store_key(codex_home)
+}
+
+#[cfg(test)]
+pub(crate) fn save_auth_with_keyring_store(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<()> {
+    create_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store).save(auth)
 }
 
 #[cfg(test)]
