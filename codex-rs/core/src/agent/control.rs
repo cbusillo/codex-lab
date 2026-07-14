@@ -96,6 +96,23 @@ pub(crate) struct AgentControl {
     state: Arc<AgentRegistry>,
 }
 
+#[derive(Clone)]
+pub(crate) struct WeakAgentControl {
+    session_id: SessionId,
+    manager: Weak<ThreadManagerState>,
+    state: Weak<AgentRegistry>,
+}
+
+impl WeakAgentControl {
+    pub(crate) fn upgrade(&self) -> Option<AgentControl> {
+        Some(AgentControl {
+            session_id: self.session_id,
+            manager: self.manager.clone(),
+            state: self.state.upgrade()?,
+        })
+    }
+}
+
 impl AgentControl {
     /// Construct a new `AgentControl` that can spawn/message agents via the given manager state.
     pub(crate) fn new(manager: Weak<ThreadManagerState>) -> Self {
@@ -112,6 +129,19 @@ impl AgentControl {
 
     pub(crate) fn session_id(&self) -> SessionId {
         self.session_id
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakAgentControl {
+        WeakAgentControl {
+            session_id: self.session_id,
+            manager: self.manager.clone(),
+            state: Arc::downgrade(&self.state),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_registry_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
     }
 
     /// Send rich user input items to an existing agent thread.

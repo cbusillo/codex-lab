@@ -220,12 +220,17 @@ async fn cold_root_resume_restores_agent_identity_and_reloads_target_on_followup
 
     resumed.submit_turn(FOLLOWUP_PROMPT).await?;
 
-    assert!(
-        followup_child_request
-            .requests()
-            .iter()
-            .any(|request| request.body_contains_text(FOLLOWUP_TASK))
-    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !followup_child_request
+        .requests()
+        .iter()
+        .any(|request| request.body_contains_text(FOLLOWUP_TASK))
+    {
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for restored worker follow-up");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
     resumed
         .thread_manager
         .get_thread(worker_thread_id)

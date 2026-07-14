@@ -1,4 +1,6 @@
 use super::*;
+use crate::path_utils;
+use std::path::Path;
 
 impl AgentControl {
     /// Restore persisted V2 agent identities without reopening their runtimes.
@@ -6,15 +8,33 @@ impl AgentControl {
         &self,
         config: &Config,
         root_thread_id: ThreadId,
+        root_rollout_path: Option<&Path>,
     ) {
-        self.state.register_root_thread(root_thread_id);
-
         let Ok(state) = self.upgrade() else {
             return;
         };
         let Some(state_db) = state.state_db() else {
             return;
         };
+        let Some(root_rollout_path) = root_rollout_path else {
+            return;
+        };
+        let root_metadata = match state_db.get_thread(root_thread_id).await {
+            Ok(Some(root_metadata)) => root_metadata,
+            Ok(None) => return,
+            Err(err) => {
+                warn!("failed to validate persisted V2 root {root_thread_id}: {err}");
+                return;
+            }
+        };
+        if !path_utils::paths_match_after_normalization(
+            &root_metadata.rollout_path,
+            root_rollout_path,
+        ) {
+            return;
+        }
+        self.state.register_root_thread(root_thread_id);
+
         let descendant_ids = match state_db
             .list_thread_spawn_descendants_with_status(
                 root_thread_id,
@@ -63,6 +83,23 @@ impl AgentControl {
                     continue;
                 }
             };
+            let Some(rollout_path) = stored_thread.rollout_path.as_ref() else {
+                warn!("failed to restore V2 agent metadata for {thread_id}: rollout is missing");
+                continue;
+            };
+            match tokio::fs::try_exists(rollout_path).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        "failed to restore V2 agent metadata for {thread_id}: rollout does not exist"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    warn!("failed to validate V2 agent rollout for {thread_id}: {err}");
+                    continue;
+                }
+            }
             let restore_result = (|| {
                 let stored_agent_path = stored_thread
                     .agent_path
@@ -73,18 +110,20 @@ impl AgentControl {
                         CodexErr::InvalidRequest(format!("invalid stored agent path: {err}"))
                     })?;
                 let mut reservation = self.state.reserve_spawn_slot(/*max_threads*/ None)?;
-                let mut metadata = self.prepare_agent_metadata(
-                    &mut reservation,
-                    config,
-                    stored_agent_path.or_else(|| stored_thread.source.get_agent_path()),
-                    stored_thread
-                        .agent_role
-                        .or_else(|| stored_thread.source.get_agent_role()),
-                    stored_thread
-                        .agent_nickname
-                        .or_else(|| stored_thread.source.get_nickname()),
-                )?;
-                metadata.agent_id = Some(thread_id);
+                let metadata = AgentMetadata {
+                    agent_id: Some(thread_id),
+                    ..self.prepare_agent_metadata(
+                        &mut reservation,
+                        config,
+                        stored_agent_path.or_else(|| stored_thread.source.get_agent_path()),
+                        stored_thread
+                            .agent_role
+                            .or_else(|| stored_thread.source.get_agent_role()),
+                        stored_thread
+                            .agent_nickname
+                            .or_else(|| stored_thread.source.get_nickname()),
+                    )?
+                };
                 reservation.commit(metadata);
                 Ok::<(), CodexErr>(())
             })();
