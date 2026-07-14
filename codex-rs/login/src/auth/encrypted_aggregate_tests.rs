@@ -62,7 +62,12 @@ fn prepare_records_source_and_preserves_legacy_credentials() -> anyhow::Result<(
         let auth_bytes = (!keyring_backed)
             .then(|| fs::read(temp.path().join("auth.json")))
             .transpose()?;
-        let accounts_bytes = seed_accounts_file_with_key(temp.path(), api_key)?;
+        let catalog_key = if mode == AuthCredentialsStoreMode::File {
+            api_key
+        } else {
+            "sk-stale"
+        };
+        let accounts_bytes = seed_accounts_file_with_key(temp.path(), catalog_key)?;
         let document = prepare(temp.path(), mode, keyring.clone())?;
         assert!(temp.path().join("secrets/codex_auth.age").exists());
         assert_eq!(document.provenance.store_mode, mode);
@@ -138,12 +143,17 @@ fn second_prepare_returns_already_encrypted_without_touching_legacy() -> anyhow:
 }
 
 #[test]
-fn no_legacy_sources_returns_nothing() -> anyhow::Result<()> {
+fn modes_without_persisted_input_perform_no_io() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let keyring = Arc::new(MockKeyringStore::default());
-    let result = prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring)?;
+    let result =
+        prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring.clone())?;
     assert_eq!(result, PreparedMigration::Nothing);
     assert!(!temp.path().join("secrets/codex_auth.age").exists());
+    let home = temp.path().join("missing-home");
+    let result = prepare_encrypted_aggregate(&home, AuthCredentialsStoreMode::Ephemeral, keyring)?;
+    assert_eq!(result, PreparedMigration::Nothing);
+    assert!(!home.exists());
     Ok(())
 }
 
@@ -177,17 +187,6 @@ fn accounts_only_prepares_without_active_auth() -> anyhow::Result<()> {
         document.accounts.active_account_id.as_deref(),
         Some("acct-file")
     );
-    Ok(())
-}
-
-#[test]
-fn ephemeral_mode_performs_no_io() -> anyhow::Result<()> {
-    let temp = TempDir::new()?;
-    let home = temp.path().join("missing-home");
-    let keyring = Arc::new(MockKeyringStore::default());
-    let result = prepare_encrypted_aggregate(&home, AuthCredentialsStoreMode::Ephemeral, keyring)?;
-    assert_eq!(result, PreparedMigration::Nothing);
-    assert!(!home.exists());
     Ok(())
 }
 
@@ -264,7 +263,6 @@ fn invalid_existing_documents_are_rejected() -> anyhow::Result<()> {
             "unknown field",
         ),
     ];
-
     for (document, expected_error) in cases {
         let temp = TempDir::new()?;
         let keyring = Arc::new(MockKeyringStore::default());
@@ -292,10 +290,8 @@ fn stale_encrypted_aggregate_fails_without_overwrite() -> anyhow::Result<()> {
         }))?,
     )?;
     seed_accounts_file_with_key(temp.path(), "sk-updated")?;
-
     let err = prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring)
         .expect_err("stale aggregate must fail");
-
     assert!(
         err.to_string()
             .contains("does not match current legacy sources")
@@ -364,7 +360,8 @@ fn seed_accounts_file_with_key(home: &Path, api_key: &str) -> anyhow::Result<Vec
             "id": "acct-file",
             "mode": "apikey",
             "label": "File account",
-            "openai_api_key": api_key
+            "openai_api_key": api_key,
+            "last_refresh": "2025-01-01T00:00:00Z"
         }]
     });
     let bytes = serde_json::to_vec_pretty(&accounts)?;

@@ -26,27 +26,27 @@ const LOGIN_AGGREGATE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LoginAggregateV1 {
-    pub version: u32,
-    pub provenance: AggregateProvenance,
+pub(crate) struct LoginAggregateV1 {
+    pub(crate) version: u32,
+    pub(crate) provenance: AggregateProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_auth: Option<AuthDotJson>,
+    pub(crate) active_auth: Option<AuthDotJson>,
     pub(crate) accounts: AccountsFile,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AggregateProvenance {
-    pub store_mode: AuthCredentialsStoreMode,
+pub(crate) struct AggregateProvenance {
+    pub(crate) store_mode: AuthCredentialsStoreMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_auth_source: Option<AggregateAuthSource>,
-    pub catalog_present: bool,
-    pub assembled_from: DocumentOrigin,
+    pub(crate) active_auth_source: Option<AggregateAuthSource>,
+    pub(crate) catalog_present: bool,
+    pub(crate) assembled_from: DocumentOrigin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AggregateAuthSource {
+pub(crate) enum AggregateAuthSource {
     File,
     Keyring,
 }
@@ -62,12 +62,12 @@ impl From<AuthStorageSource> for AggregateAuthSource {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DocumentOrigin {
+pub(crate) enum DocumentOrigin {
     LegacyMigration,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum PreparedMigration {
+pub(crate) enum PreparedMigration {
     Nothing,
     AlreadyEncrypted(LoginAggregateV1),
     Prepared(LoginAggregateV1),
@@ -79,7 +79,7 @@ pub enum PreparedMigration {
 /// when absent, its namespaced keyring encryption key. It never deletes,
 /// rewrites, or activates `auth.json`, the keyring auth entry, or
 /// `auth_accounts.json`.
-pub fn prepare_encrypted_aggregate(
+pub(crate) fn prepare_encrypted_aggregate(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
@@ -240,13 +240,11 @@ fn validate_document(document: &LoginAggregateV1) -> io::Result<()> {
             "encrypted login aggregate has no legacy source",
         ));
     }
-    validate_active_account(document.active_auth.as_ref(), &document.accounts)
+    validate_active_account(document)
 }
 
-fn validate_active_account(
-    active_auth: Option<&AuthDotJson>,
-    accounts: &AccountsFile,
-) -> io::Result<()> {
+fn validate_active_account(document: &LoginAggregateV1) -> io::Result<()> {
+    let accounts = &document.accounts;
     let Some(active_account_id) = accounts.active_account_id.as_deref() else {
         return Ok(());
     };
@@ -255,7 +253,10 @@ fn validate_active_account(
         .iter()
         .find(|account| account.id == active_account_id)
         .ok_or_else(|| io::Error::other("active auth account is missing from the catalog"))?;
-    let Some(active_auth) = active_auth else {
+    let Some(active_auth) = document.active_auth.as_ref() else {
+        return Ok(());
+    };
+    if document.provenance.store_mode != AuthCredentialsStoreMode::File {
         return Ok(());
     };
     if active_auth
@@ -264,7 +265,6 @@ fn validate_active_account(
         .is_some_and(|mode| mode != &active_account.mode)
         || active_auth.openai_api_key != active_account.openai_api_key
         || active_auth.tokens != active_account.tokens
-        || active_auth.last_refresh != active_account.last_refresh
     {
         return Err(io::Error::other(
             "active auth does not match the active account catalog entry",

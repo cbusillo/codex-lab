@@ -104,6 +104,7 @@ pub(super) trait AuthStorageBackend: Debug + Send + Sync {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
 pub(crate) enum AuthStorageSource {
     File,
     Keyring,
@@ -374,6 +375,7 @@ pub(crate) fn load_auth_with_keyring_store(
     create_auth_storage_with_keyring_store(codex_home.to_path_buf(), mode, keyring_store).load()
 }
 
+#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
 pub(crate) fn load_auth_for_migration(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
@@ -405,6 +407,7 @@ pub(crate) fn load_auth_for_migration(
     }
 }
 
+#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
 fn auth_with_source(
     auth: std::io::Result<Option<AuthDotJson>>,
     source: AuthStorageSource,

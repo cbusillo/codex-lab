@@ -98,6 +98,7 @@ fn read_accounts_file(path: &Path) -> io::Result<AccountsFile> {
     }
 }
 
+#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
 pub(crate) fn read_accounts_file_for_migration(
     codex_home: &Path,
 ) -> io::Result<(AccountsFile, bool)> {
