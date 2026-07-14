@@ -1,5 +1,6 @@
 use crate::SkillsManager;
 use crate::agent::AgentControl;
+use crate::agent::control::WeakAgentControl;
 use crate::attestation::AttestationProvider;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
@@ -7,6 +8,7 @@ use crate::config::ThreadStoreConfig;
 use crate::environment_selection::default_thread_environment_selections;
 use crate::environment_selection::resolve_environment_selections;
 use crate::mcp::McpManager;
+use crate::path_utils;
 use crate::rollout::truncation;
 use crate::session::Codex;
 use crate::session::CodexSpawnArgs;
@@ -70,8 +72,10 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -202,6 +206,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
 /// function to require an `Arc<&Self>`.
 pub(crate) struct ThreadManagerState {
     threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
+    root_agent_controls: Mutex<HashMap<(ThreadId, Option<PathBuf>), WeakAgentControl>>,
     thread_created_tx: broadcast::Sender<ThreadId>,
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
@@ -313,6 +318,7 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                root_agent_controls: Mutex::new(HashMap::new()),
                 thread_created_tx,
                 models_manager: build_models_manager(config, auth_manager.clone()),
                 environment_manager,
@@ -433,6 +439,7 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                root_agent_controls: Mutex::new(HashMap::new()),
                 thread_created_tx,
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
                     .models_manager(codex_home, /*config_model_catalog*/ None),
@@ -765,11 +772,38 @@ impl ThreadManager {
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         let session_provenance = initial_history.get_resumed_session_provenance();
+        let resumed_v2_root = match &initial_history {
+            InitialHistory::Resumed(resumed)
+                if initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
+                    && !session_source.is_non_root_agent() =>
+            {
+                Some(resumed)
+            }
+            _ => None,
+        };
+        let agent_control = resumed_v2_root.map_or_else(
+            || self.agent_control(),
+            |resumed| {
+                self.agent_control_for_root(
+                    resumed.conversation_id,
+                    resumed.rollout_path.as_deref(),
+                )
+            },
+        );
+        if let Some(resumed) = resumed_v2_root {
+            agent_control
+                .restore_v2_agent_metadata(
+                    &config,
+                    resumed.conversation_id,
+                    resumed.rollout_path.as_deref(),
+                )
+                .await;
+        }
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
             auth_manager,
-            self.agent_control(),
+            agent_control,
             session_source,
             session_provenance,
             /*parent_thread_id*/ None,
@@ -1021,6 +1055,15 @@ impl ThreadManager {
         AgentControl::new(Arc::downgrade(&self.state))
     }
 
+    pub(crate) fn agent_control_for_root(
+        &self,
+        root_thread_id: ThreadId,
+        rollout_path: Option<&Path>,
+    ) -> AgentControl {
+        self.state
+            .agent_control_for_root(root_thread_id, rollout_path)
+    }
+
     #[cfg(test)]
     pub(crate) fn captured_ops(&self) -> Vec<(ThreadId, Op)> {
         self.state
@@ -1032,6 +1075,42 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    fn agent_control_for_root(
+        self: &Arc<Self>,
+        root_thread_id: ThreadId,
+        rollout_path: Option<&Path>,
+    ) -> AgentControl {
+        let key = root_agent_control_key(root_thread_id, rollout_path);
+        let mut controls = self
+            .root_agent_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        controls.retain(|_, control| control.upgrade().is_some());
+        if let Some(control) = controls.get(&key).and_then(WeakAgentControl::upgrade) {
+            return control;
+        }
+        let control = AgentControl::new(Arc::downgrade(self));
+        controls.insert(key, control.downgrade());
+        control
+    }
+
+    fn remember_root_agent_control(
+        &self,
+        root_thread_id: ThreadId,
+        rollout_path: Option<&Path>,
+        agent_control: &AgentControl,
+    ) {
+        let mut controls = self
+            .root_agent_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        controls.retain(|_, control| control.upgrade().is_some());
+        controls.insert(
+            root_agent_control_key(root_thread_id, rollout_path),
+            agent_control.downgrade(),
+        );
+    }
+
     pub(crate) fn state_db(&self) -> Option<StateDbHandle> {
         self.state_db.clone()
     }
@@ -1378,6 +1457,8 @@ impl ThreadManagerState {
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
+        let root_agent_control =
+            (!session_source.is_non_root_agent()).then(|| agent_control.clone());
         if let InitialHistory::Resumed(resumed) = &initial_history {
             let mut threads = self.threads.write().await;
             if let Some(thread) = threads.get(&resumed.conversation_id).cloned() {
@@ -1450,6 +1531,10 @@ impl ThreadManagerState {
         let new_thread = self
             .finalize_thread_spawn(codex, thread_id, tracked_session_source)
             .await?;
+        if let Some(agent_control) = root_agent_control.as_ref() {
+            let rollout_path = new_thread.thread.rollout_path();
+            self.remember_root_agent_control(thread_id, rollout_path.as_deref(), agent_control);
+        }
         if is_resumed_thread {
             new_thread.thread.emit_thread_resume_lifecycle().await;
         }
@@ -1532,6 +1617,16 @@ impl ThreadManagerState {
             .map(|thread| thread.codex.session.services.rollout_thread_trace.clone())
             .unwrap_or_else(codex_rollout_trace::ThreadTraceContext::disabled)
     }
+}
+
+fn root_agent_control_key(
+    root_thread_id: ThreadId,
+    rollout_path: Option<&Path>,
+) -> (ThreadId, Option<PathBuf>) {
+    let rollout_path = rollout_path.map(|path| {
+        path_utils::normalize_for_path_comparison(path).unwrap_or_else(|_| path.to_path_buf())
+    });
+    (root_thread_id, rollout_path)
 }
 
 fn stored_thread_to_initial_history(

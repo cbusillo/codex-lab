@@ -92,6 +92,20 @@ fn register_session_root_skips_threads_with_explicit_parent() {
     assert_eq!(control.state.agent_id_for_path(&AgentPath::root()), None);
 }
 
+#[tokio::test]
+async fn thread_manager_reuses_root_agent_control_for_same_rollout() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, root_thread) = harness.start_thread().await;
+    let rollout_path = root_thread.rollout_path().expect("root rollout path");
+    let session_control = root_thread.codex.session.services.agent_control.clone();
+
+    let retained_control = harness
+        .manager
+        .agent_control_for_root(root_thread_id, Some(&rollout_path));
+
+    assert!(retained_control.shares_registry_with(&session_control));
+}
+
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,
@@ -577,8 +591,14 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
     ));
 }
 
-#[tokio::test]
-async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ensure_v2_agent_loaded_reloads_unloaded_ancestor_chain() {
+    tokio::spawn(ensure_v2_agent_loaded_reloads_unloaded_ancestor_chain_case())
+        .await
+        .expect("ancestor reload task should complete");
+}
+
+async fn ensure_v2_agent_loaded_reloads_unloaded_ancestor_chain_case() {
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
@@ -600,6 +620,7 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     };
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;
     let agent_path = AgentPath::try_from("/root/worker").expect("agent path");
+    let grandchild_path = AgentPath::try_from("/root/worker/grandchild").expect("grandchild path");
     let spawned_agent = harness
         .control
         .spawn_agent_with_metadata(
@@ -619,11 +640,35 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         )
         .await
         .expect("spawn_agent should succeed");
+    let spawned_grandchild = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("hello grandchild"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: spawned_agent.thread_id,
+                depth: 2,
+                agent_path: Some(grandchild_path.clone()),
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                parent_thread_id: Some(spawned_agent.thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("grandchild spawn should succeed");
     let child_thread = harness
         .manager
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("child thread should exist");
+    let grandchild_thread = harness
+        .manager
+        .get_thread(spawned_grandchild.thread_id)
+        .await
+        .expect("grandchild thread should exist");
     child_thread
         .inject_response_items(vec![assistant_message(
             "child persisted",
@@ -631,11 +676,29 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         )])
         .await
         .expect("child rollout should persist with v2 metadata");
+    grandchild_thread
+        .inject_response_items(vec![assistant_message(
+            "grandchild persisted",
+            Some(MessagePhase::FinalAnswer),
+        )])
+        .await
+        .expect("grandchild rollout should persist with v2 metadata");
+    grandchild_thread
+        .shutdown_and_wait()
+        .await
+        .expect("grandchild thread should shut down");
     child_thread
         .shutdown_and_wait()
         .await
         .expect("child thread should shut down");
 
+    assert!(
+        harness
+            .manager
+            .remove_thread(&spawned_grandchild.thread_id)
+            .await
+            .is_some()
+    );
     assert!(
         harness
             .manager
@@ -651,29 +714,34 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
 
     harness
         .control
-        .ensure_v2_agent_loaded(harness.config.clone(), spawned_agent.thread_id)
+        .ensure_v2_agent_loaded(harness.config.clone(), spawned_grandchild.thread_id)
         .await
-        .expect("known v2 agent should reload");
+        .expect("known v2 grandchild should reload with its parent");
     let _ = harness
         .manager
         .get_thread(spawned_agent.thread_id)
         .await
-        .expect("reloaded child thread should exist");
+        .expect("ancestor thread should reload first");
+    let _ = harness
+        .manager
+        .get_thread(spawned_grandchild.thread_id)
+        .await
+        .expect("reloaded grandchild thread should exist");
 
     let communication = InterAgentCommunication::new(
         AgentPath::root(),
-        agent_path,
+        grandchild_path,
         Vec::new(),
         "hello after reload".to_string(),
         /*trigger_turn*/ false,
     );
     harness
         .control
-        .send_inter_agent_communication(spawned_agent.thread_id, communication.clone())
+        .send_inter_agent_communication(spawned_grandchild.thread_id, communication.clone())
         .await
         .expect("send_inter_agent_communication should succeed after reload");
     let expected = (
-        spawned_agent.thread_id,
+        spawned_grandchild.thread_id,
         Op::InterAgentCommunication { communication },
     );
     let captured = harness
@@ -3262,10 +3330,21 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
         .expect("tree shutdown after subtree resume should succeed");
 }
 
-async fn harness_with_external_descendant()
--> (AgentControlHarness, ThreadId, ThreadId, StateDbHandle) {
+async fn harness_with_external_descendant() -> (
+    AgentControlHarness,
+    ThreadId,
+    ThreadId,
+    ThreadId,
+    std::path::PathBuf,
+    StateDbHandle,
+) {
     let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    persist_thread_for_tree_resume(&parent_thread, "parent persisted").await;
+    let parent_rollout_path = parent_thread
+        .rollout_path()
+        .expect("parent rollout path should exist");
+    let child_agent_path = AgentPath::try_from("/root/explorer").expect("child agent path");
 
     let child_thread_id = harness
         .control
@@ -3275,7 +3354,7 @@ async fn harness_with_external_descendant()
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth: 1,
-                agent_path: None,
+                agent_path: Some(child_agent_path),
                 agent_nickname: None,
                 agent_role: Some("explorer".to_string()),
             })),
@@ -3307,13 +3386,127 @@ async fn harness_with_external_descendant()
         .expect("sqlite state db should be available")
         .clone();
 
-    (harness, child_thread_id, external_thread_id, state_db)
+    (
+        harness,
+        parent_thread_id,
+        child_thread_id,
+        external_thread_id,
+        parent_rollout_path,
+        state_db,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_v2_agent_metadata_preserves_internal_identity_and_skips_external_edge() {
+    tokio::spawn(async {
+        let (
+            harness,
+            parent_thread_id,
+            child_thread_id,
+            external_thread_id,
+            parent_rollout_path,
+            state_db,
+        ) = harness_with_external_descendant().await;
+        let mut persisted_metadata = state_db
+            .get_thread(child_thread_id)
+            .await
+            .expect("child metadata query should succeed")
+            .expect("child metadata should exist");
+        persisted_metadata.agent_nickname = Some("durable-explorer".to_string());
+        persisted_metadata.agent_role = Some("durable-role".to_string());
+        state_db
+            .upsert_thread(&persisted_metadata)
+            .await
+            .expect("fixed child metadata should persist");
+        let fresh_control = harness.manager.agent_control();
+
+        fresh_control
+            .restore_v2_agent_metadata(
+                &harness.config,
+                parent_thread_id,
+                Some(&parent_rollout_path),
+            )
+            .await;
+
+        let restored_metadata = fresh_control
+            .state
+            .agent_metadata_for_thread(child_thread_id)
+            .expect("persisted child metadata should be restored");
+        assert_eq!(restored_metadata.agent_id, Some(child_thread_id));
+        assert_eq!(
+            restored_metadata.agent_path.as_ref(),
+            Some(&AgentPath::try_from("/root/explorer").expect("agent path"))
+        );
+        assert_eq!(
+            restored_metadata.agent_nickname.as_deref(),
+            Some("durable-explorer")
+        );
+        assert_eq!(
+            restored_metadata.agent_role.as_deref(),
+            Some("durable-role")
+        );
+        assert_eq!(restored_metadata.last_task_message, None);
+        assert!(
+            fresh_control
+                .state
+                .agent_metadata_for_thread(external_thread_id)
+                .is_none()
+        );
+
+        let copied_rollout_control = harness.manager.agent_control();
+        let copied_rollout_path = parent_rollout_path.with_extension("copy");
+        copied_rollout_control
+            .restore_v2_agent_metadata(
+                &harness.config,
+                parent_thread_id,
+                Some(&copied_rollout_path),
+            )
+            .await;
+        assert!(
+            copied_rollout_control
+                .state
+                .agent_metadata_for_thread(child_thread_id)
+                .is_none()
+        );
+
+        let child_rollout_path = state_db
+            .get_thread(child_thread_id)
+            .await
+            .expect("child metadata query should succeed")
+            .expect("child metadata should exist")
+            .rollout_path;
+        tokio::fs::remove_file(child_rollout_path)
+            .await
+            .expect("child rollout should be removable");
+        let missing_rollout_control = harness.manager.agent_control();
+        missing_rollout_control
+            .restore_v2_agent_metadata(
+                &harness.config,
+                parent_thread_id,
+                Some(&parent_rollout_path),
+            )
+            .await;
+        assert!(
+            missing_rollout_control
+                .state
+                .agent_metadata_for_thread(child_thread_id)
+                .is_none()
+        );
+    })
+    .await
+    .expect("metadata restore task should complete");
 }
 
 #[tokio::test]
 async fn close_agent_closes_completed_external_descendant_edges() {
-    let (harness, child_thread_id, external_thread_id, state_db) =
-        harness_with_external_descendant().await;
+    let (
+        harness,
+        _parent_thread_id,
+        child_thread_id,
+        external_thread_id,
+        _parent_rollout_path,
+        state_db,
+    ) = harness_with_external_descendant().await;
     harness.control.update_external_agent_status(
         external_thread_id,
         AgentStatus::Completed(Some("external done".to_string())),
@@ -3364,8 +3557,14 @@ async fn close_agent_closes_completed_external_descendant_edges() {
 
 #[tokio::test]
 async fn close_agent_closes_running_external_descendant_edges_without_releasing_runtime() {
-    let (harness, child_thread_id, external_thread_id, state_db) =
-        harness_with_external_descendant().await;
+    let (
+        harness,
+        _parent_thread_id,
+        child_thread_id,
+        external_thread_id,
+        _parent_rollout_path,
+        state_db,
+    ) = harness_with_external_descendant().await;
 
     let _ = harness
         .control

@@ -216,6 +216,14 @@ impl AgentControl {
         let parent_thread_id = initial_history
             .get_resumed_parent_thread_id()
             .or(stored_parent_thread_id);
+        if let Some(parent_thread_id) = parent_thread_id
+            && matches!(
+                state.get_thread(parent_thread_id).await,
+                Err(CodexErr::ThreadNotFound(_))
+            )
+        {
+            Box::pin(self.ensure_v2_agent_loaded(config.clone(), parent_thread_id)).await?;
+        }
         let inherited_shell_snapshot = self
             .inherited_shell_snapshot_for_source(&state, Some(&session_source))
             .await;
