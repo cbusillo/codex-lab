@@ -3344,6 +3344,7 @@ async fn harness_with_external_descendant() -> (
     let parent_rollout_path = parent_thread
         .rollout_path()
         .expect("parent rollout path should exist");
+    let child_agent_path = AgentPath::try_from("/root/explorer").expect("child agent path");
 
     let child_thread_id = harness
         .control
@@ -3353,7 +3354,7 @@ async fn harness_with_external_descendant() -> (
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth: 1,
-                agent_path: None,
+                agent_path: Some(child_agent_path),
                 agent_nickname: None,
                 agent_role: Some("explorer".to_string()),
             })),

@@ -217,7 +217,10 @@ impl AgentControl {
             .get_resumed_parent_thread_id()
             .or(stored_parent_thread_id);
         if let Some(parent_thread_id) = parent_thread_id
-            && state.get_thread(parent_thread_id).await.is_err()
+            && matches!(
+                state.get_thread(parent_thread_id).await,
+                Err(CodexErr::ThreadNotFound(_))
+            )
         {
             Box::pin(self.ensure_v2_agent_loaded(config.clone(), parent_thread_id)).await?;
         }
