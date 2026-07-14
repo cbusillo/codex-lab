@@ -248,15 +248,19 @@ fn validate_active_account(document: &LoginAggregateV1) -> io::Result<()> {
     let Some(active_account_id) = accounts.active_account_id.as_deref() else {
         return Ok(());
     };
+    if document.active_auth.as_ref().is_some_and(|active_auth| {
+        document.provenance.store_mode != AuthCredentialsStoreMode::File
+            || active_auth.agent_identity.is_some()
+            || active_auth.personal_access_token.is_some()
+    }) {
+        return Ok(());
+    }
     let active_account = accounts
         .accounts
         .iter()
         .find(|account| account.id == active_account_id)
         .ok_or_else(|| io::Error::other("active auth account is missing from the catalog"))?;
     let Some(active_auth) = document.active_auth.as_ref() else {
-        return Ok(());
-    };
-    if document.provenance.store_mode != AuthCredentialsStoreMode::File {
         return Ok(());
     };
     if active_auth

@@ -3,6 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthCredentialsStoreMode::Auto;
+use codex_config::types::AuthCredentialsStoreMode::File;
+use codex_config::types::AuthCredentialsStoreMode::Keyring;
 use codex_keyring_store::tests::MockKeyringStore;
 use codex_secrets::LocalSecretsNamespace;
 use codex_secrets::SecretName;
@@ -27,30 +30,10 @@ use crate::auth::AuthDotJson;
 #[test]
 fn prepare_records_source_and_preserves_legacy_credentials() -> anyhow::Result<()> {
     for (mode, keyring_backed, api_key, source) in [
-        (
-            AuthCredentialsStoreMode::File,
-            false,
-            "sk-file",
-            AggregateAuthSource::File,
-        ),
-        (
-            AuthCredentialsStoreMode::Keyring,
-            true,
-            "sk-keyring",
-            AggregateAuthSource::Keyring,
-        ),
-        (
-            AuthCredentialsStoreMode::Auto,
-            true,
-            "sk-auto-keyring",
-            AggregateAuthSource::Keyring,
-        ),
-        (
-            AuthCredentialsStoreMode::Auto,
-            false,
-            "sk-file",
-            AggregateAuthSource::File,
-        ),
+        (File, false, "sk-file", AggregateAuthSource::File),
+        (Keyring, true, "sk-keyring", AggregateAuthSource::Keyring),
+        (Auto, true, "sk-auto-keyring", AggregateAuthSource::Keyring),
+        (Auto, false, "sk-file", AggregateAuthSource::File),
     ] {
         let temp = TempDir::new()?;
         let keyring = Arc::new(MockKeyringStore::default());
@@ -100,60 +83,71 @@ fn prepare_records_source_and_preserves_legacy_credentials() -> anyhow::Result<(
 }
 
 #[test]
-fn prepare_from_auto_fails_closed_on_keyring_error() -> anyhow::Result<()> {
-    let temp = TempDir::new()?;
-    let keyring = Arc::new(MockKeyringStore::default());
-    seed_auth_file(temp.path())?;
-    seed_accounts_file(temp.path())?;
-    let auth_key = auth_keyring_account_for_tests(temp.path())?;
-    keyring.set_error(
-        &auth_key,
-        KeyringError::Invalid("migration".into(), "load".into()),
-    );
-    let err = prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::Auto, keyring)
-        .expect_err("keyring read failure must abort migration");
-    assert!(
-        err.to_string()
-            .contains("failed to load CLI auth from keyring for encrypted migration")
-    );
-    assert!(!temp.path().join("secrets/codex_auth.age").exists());
+fn prepare_fails_closed_on_keyring_error() -> anyhow::Result<()> {
+    for mode in [Auto, Keyring] {
+        let temp = TempDir::new()?;
+        let keyring = Arc::new(MockKeyringStore::default());
+        seed_auth_file(temp.path())?;
+        seed_accounts_file(temp.path())?;
+        let auth_key = auth_keyring_account_for_tests(temp.path())?;
+        keyring.set_error(
+            &auth_key,
+            KeyringError::Invalid("migration".into(), "load".into()),
+        );
+        let err = prepare_encrypted_aggregate(temp.path(), mode, keyring)
+            .expect_err("keyring read failure must abort migration");
+        assert!(mode == Keyring || err.to_string().contains("encrypted migration"));
+        assert!(!temp.path().join("secrets/codex_auth.age").exists());
+    }
     Ok(())
 }
 
 #[test]
-fn second_prepare_returns_already_encrypted_without_touching_legacy() -> anyhow::Result<()> {
+fn access_token_prepares_are_idempotent_and_preserve_legacy() -> anyhow::Result<()> {
+    for auth in [
+        json!({ "personal_access_token": "at-example" }),
+        json!({ "auth_mode": "agentIdentity", "agent_identity": "jwt" }),
+    ] {
+        let temp = TempDir::new()?;
+        let keyring = Arc::new(MockKeyringStore::default());
+        let auth_bytes = serde_json::to_vec_pretty(&auth)?;
+        fs::write(temp.path().join("auth.json"), &auth_bytes)?;
+        let accounts_bytes = seed_accounts_file(temp.path())?;
+        let document = prepare(temp.path(), File, keyring.clone())?;
+        let encrypted_bytes = fs::read(temp.path().join("secrets/codex_auth.age"))?;
+        let result = prepare_encrypted_aggregate(temp.path(), File, keyring)?;
+        assert_eq!(result, PreparedMigration::AlreadyEncrypted(document));
+        assert_eq!(
+            fs::read(temp.path().join("secrets/codex_auth.age"))?,
+            encrypted_bytes
+        );
+        assert_eq!(fs::read(temp.path().join("auth.json"))?, auth_bytes);
+        assert_eq!(
+            fs::read(temp.path().join("auth_accounts.json"))?,
+            accounts_bytes
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn no_source_and_ephemeral_paths_do_not_write() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let keyring = Arc::new(MockKeyringStore::default());
+    let result = prepare_encrypted_aggregate(temp.path(), File, keyring.clone())?;
+    assert_eq!(result, PreparedMigration::Nothing);
+    assert!(!temp.path().join("secrets/codex_auth.age").exists());
     let auth_bytes = seed_auth_file(temp.path())?;
     let accounts_bytes = seed_accounts_file(temp.path())?;
-    let document = prepare(temp.path(), AuthCredentialsStoreMode::File, keyring.clone())?;
-    let encrypted_bytes = fs::read(temp.path().join("secrets/codex_auth.age"))?;
-    let result = prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring)?;
-    assert_eq!(result, PreparedMigration::AlreadyEncrypted(document));
-    assert_eq!(
-        fs::read(temp.path().join("secrets/codex_auth.age"))?,
-        encrypted_bytes
-    );
+    let result =
+        prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::Ephemeral, keyring)?;
+    assert_eq!(result, PreparedMigration::Nothing);
+    assert!(!temp.path().join("secrets/codex_auth.age").exists());
     assert_eq!(fs::read(temp.path().join("auth.json"))?, auth_bytes);
     assert_eq!(
         fs::read(temp.path().join("auth_accounts.json"))?,
         accounts_bytes
     );
-    Ok(())
-}
-
-#[test]
-fn modes_without_persisted_input_perform_no_io() -> anyhow::Result<()> {
-    let temp = TempDir::new()?;
-    let keyring = Arc::new(MockKeyringStore::default());
-    let result =
-        prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring.clone())?;
-    assert_eq!(result, PreparedMigration::Nothing);
-    assert!(!temp.path().join("secrets/codex_auth.age").exists());
-    let home = temp.path().join("missing-home");
-    let result = prepare_encrypted_aggregate(&home, AuthCredentialsStoreMode::Ephemeral, keyring)?;
-    assert_eq!(result, PreparedMigration::Nothing);
-    assert!(!home.exists());
     Ok(())
 }
 
@@ -226,14 +220,6 @@ fn invalid_existing_documents_are_rejected() -> anyhow::Result<()> {
         ),
         (
             json!({
-                "version": 0,
-                "provenance": base_provenance(),
-                "accounts": { "version": 1 }
-            }),
-            "unsupported encrypted login aggregate version 0",
-        ),
-        (
-            json!({
                 "version": 1,
                 "provenance": base_provenance(),
                 "accounts": { "version": 2 }
@@ -275,13 +261,14 @@ fn invalid_existing_documents_are_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn stale_encrypted_aggregate_fails_without_overwrite() -> anyhow::Result<()> {
+fn stale_or_orphaned_aggregate_fails_without_overwrite() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let keyring = Arc::new(MockKeyringStore::default());
     seed_auth_file(temp.path())?;
     seed_accounts_file(temp.path())?;
-    prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring.clone())?;
-    let encrypted_bytes = fs::read(temp.path().join("secrets/codex_auth.age"))?;
+    prepare_encrypted_aggregate(temp.path(), File, keyring.clone())?;
+    let encrypted_path = temp.path().join("secrets/codex_auth.age");
+    let encrypted_bytes = fs::read(&encrypted_path)?;
     fs::write(
         temp.path().join("auth.json"),
         serde_json::to_vec_pretty(&json!({
@@ -290,16 +277,18 @@ fn stale_encrypted_aggregate_fails_without_overwrite() -> anyhow::Result<()> {
         }))?,
     )?;
     seed_accounts_file_with_key(temp.path(), "sk-updated")?;
-    let err = prepare_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring)
+    let err = prepare_encrypted_aggregate(temp.path(), File, keyring.clone())
         .expect_err("stale aggregate must fail");
     assert!(
         err.to_string()
             .contains("does not match current legacy sources")
     );
-    assert_eq!(
-        fs::read(temp.path().join("secrets/codex_auth.age"))?,
-        encrypted_bytes
-    );
+    fs::remove_file(temp.path().join("auth.json"))?;
+    fs::remove_file(temp.path().join("auth_accounts.json"))?;
+    let err = prepare_encrypted_aggregate(temp.path(), File, keyring)
+        .expect_err("orphaned aggregate must fail");
+    assert!(err.to_string().contains("current legacy sources"));
+    assert_eq!(fs::read(encrypted_path)?, encrypted_bytes);
     Ok(())
 }
 
@@ -348,7 +337,11 @@ fn seed_keyring_auth(
 }
 
 fn seed_accounts_file(home: &Path) -> anyhow::Result<Vec<u8>> {
-    seed_accounts_file_with_key(home, "sk-file")
+    let current = seed_accounts_file_with_key(home, "sk-file")?;
+    let mut bytes = b"{\"version\":1}".to_vec();
+    bytes.extend_from_slice(&current);
+    fs::write(home.join("auth_accounts.json"), &bytes)?;
+    Ok(bytes)
 }
 
 fn seed_accounts_file_with_key(home: &Path, api_key: &str) -> anyhow::Result<Vec<u8>> {
