@@ -3407,11 +3407,17 @@ async fn restore_v2_agent_metadata_preserves_internal_identity_and_skips_externa
             parent_rollout_path,
             state_db,
         ) = harness_with_external_descendant().await;
-        let expected_metadata = harness
-            .control
-            .state
-            .agent_metadata_for_thread(child_thread_id)
-            .expect("spawned child metadata should exist");
+        let mut persisted_metadata = state_db
+            .get_thread(child_thread_id)
+            .await
+            .expect("child metadata query should succeed")
+            .expect("child metadata should exist");
+        persisted_metadata.agent_nickname = Some("durable-explorer".to_string());
+        persisted_metadata.agent_role = Some("durable-role".to_string());
+        state_db
+            .upsert_thread(&persisted_metadata)
+            .await
+            .expect("fixed child metadata should persist");
         let fresh_control = harness.manager.agent_control();
 
         fresh_control
@@ -3427,12 +3433,18 @@ async fn restore_v2_agent_metadata_preserves_internal_identity_and_skips_externa
             .agent_metadata_for_thread(child_thread_id)
             .expect("persisted child metadata should be restored");
         assert_eq!(restored_metadata.agent_id, Some(child_thread_id));
-        assert_eq!(restored_metadata.agent_path, expected_metadata.agent_path);
         assert_eq!(
-            restored_metadata.agent_nickname,
-            expected_metadata.agent_nickname
+            restored_metadata.agent_path.as_ref(),
+            Some(&AgentPath::try_from("/root/explorer").expect("agent path"))
         );
-        assert_eq!(restored_metadata.agent_role, expected_metadata.agent_role);
+        assert_eq!(
+            restored_metadata.agent_nickname.as_deref(),
+            Some("durable-explorer")
+        );
+        assert_eq!(
+            restored_metadata.agent_role.as_deref(),
+            Some("durable-role")
+        );
         assert_eq!(restored_metadata.last_task_message, None);
         assert!(
             fresh_control
