@@ -1,6 +1,8 @@
 mod access_token;
 mod agent_identity;
 pub mod default_client;
+#[allow(dead_code, reason = "used by encrypted aggregate activation follow-up")]
+pub(crate) mod encrypted_aggregate;
 pub mod error;
 mod personal_access_token;
 mod storage;
@@ -9,6 +11,10 @@ mod util;
 mod external_bearer;
 mod manager;
 mod revoke;
+
+#[cfg(test)]
+#[path = "encrypted_aggregate_tests.rs"]
+mod encrypted_aggregate_tests;
 
 pub use error::RefreshTokenFailedError;
 pub use error::RefreshTokenFailedReason;
