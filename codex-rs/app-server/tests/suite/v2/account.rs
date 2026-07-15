@@ -1346,7 +1346,6 @@ async fn explicit_token_refresh_updates_auth_for_loaded_thread() -> Result<()> {
         .expect(1)
         .mount(&refresh_server)
         .await;
-
     let codex_home = TempDir::new()?;
     create_config_toml(
         codex_home.path(),
@@ -1368,7 +1367,6 @@ async fn explicit_token_refresh_updates_auth_for_loaded_thread() -> Result<()> {
             .last_refresh(Some(Utc::now())),
         AuthCredentialsStoreMode::File,
     )?;
-
     let refresh_url = format!("{}/oauth/token", refresh_server.uri());
     let mut mcp = TestAppServer::new_with_env(
         codex_home.path(),
@@ -1387,10 +1385,8 @@ async fn explicit_token_refresh_updates_auth_for_loaded_thread() -> Result<()> {
         codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
             .is_some()
     );
-
     let thread_id = start_mock_model_thread(&mut mcp).await?;
     complete_text_turn(&mut mcp, &thread_id, "Use the old token").await?;
-
     let request_id = mcp
         .send_get_account_request(GetAccountParams {
             refresh_token: true,
@@ -1411,9 +1407,7 @@ async fn explicit_token_refresh_updates_auth_for_loaded_thread() -> Result<()> {
     assert_eq!(persisted_tokens.access_token, "new-access-token");
     assert_eq!(persisted_tokens.refresh_token, "new-refresh-token");
     assert!(codex_home.path().join("secrets/codex_auth.age").exists());
-
     complete_text_turn(&mut mcp, &thread_id, "Use the refreshed token").await?;
-
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(
@@ -1493,7 +1487,6 @@ async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0].id, fallback.id);
     assert!(codex_home.path().join("secrets/codex_auth.age").exists());
-
     run_text_turn(&mut mcp, &thread_id, "Use logged out auth").await?;
 
     let requests = response_mock.requests();
@@ -1507,7 +1500,6 @@ async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
         requests[0].header("x-codex-window-id"),
         requests[1].header("x-codex-window-id")
     );
-
     drop(mcp);
     let mut restarted =
         TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;

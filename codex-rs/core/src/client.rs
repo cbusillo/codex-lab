@@ -964,11 +964,12 @@ impl ModelClient {
                 .api_provider_for_auth(auth.as_ref())
                 .await?;
             let api_auth = self.state.provider.api_auth_for_auth(auth.as_ref()).await?;
-            let attestation_header = if generate_attestation {
-                self.generate_attestation_header_for(auth.as_ref()).await
-            } else {
-                None
-            };
+            let attestation_header =
+                if generate_attestation && self.state.provider.supports_attestation() {
+                    self.generate_attestation_header_for(auth.as_ref()).await
+                } else {
+                    None
+                };
             if self.current_auth_revision() == auth_revision {
                 return Ok(CurrentClientSetup {
                     auth,
@@ -1320,7 +1321,7 @@ impl ModelClientSession {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
-        loop {
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
             let client_setup = self.current_stable_client_setup().await.map_err(|err| {
                 ApiError::Stream(format!(
                     "failed to build websocket prewarm client setup: {err}"
@@ -1369,6 +1370,7 @@ impl ModelClientSession {
                 .set_connection_reused(/*connection_reused*/ false);
             return Ok(());
         }
+        Err(ApiError::Stream("authentication changed repeatedly".into()))
     }
     /// Returns a websocket connection for this turn.
     #[instrument(
@@ -1497,7 +1499,7 @@ impl ModelClientSession {
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
         let mut pending_retry = PendingUnauthorizedRetry::default();
-        loop {
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
             let client_setup = self.current_stable_client_setup().await?;
             let auth_revision = client_setup.auth_revision;
             let transport = ReqwestTransport::new(build_reqwest_client());
@@ -1588,6 +1590,7 @@ impl ModelClientSession {
                 }
             }
         }
+        Err(CodexErr::Fatal("authentication changed repeatedly".into()))
     }
 
     /// Streams a turn via the Responses API over WebSocket transport.
@@ -1624,7 +1627,7 @@ impl ModelClientSession {
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
         let mut pending_retry = PendingUnauthorizedRetry::default();
-        loop {
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
             let client_setup = self.current_stable_client_setup().await?;
             let auth_revision = client_setup.auth_revision;
             let request_auth_context = AuthRequestTelemetryContext::new(
@@ -1754,6 +1757,7 @@ impl ModelClientSession {
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
         }
+        Err(CodexErr::Fatal("authentication changed repeatedly".into()))
     }
 
     /// Builds request and SSE telemetry for streaming API calls.
