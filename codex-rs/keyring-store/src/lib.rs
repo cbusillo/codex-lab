@@ -3,6 +3,10 @@ use keyring::Error as KeyringError;
 use std::error::Error;
 use std::fmt;
 use std::fmt::Debug;
+#[cfg(debug_assertions)]
+use std::sync::Arc;
+#[cfg(debug_assertions)]
+use std::sync::OnceLock;
 use tracing::trace;
 
 #[derive(Debug)]
@@ -45,11 +49,23 @@ pub trait KeyringStore: Debug + Send + Sync {
     fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError>;
 }
 
+#[cfg(debug_assertions)]
+static DEFAULT_KEYRING_STORE_OVERRIDE: OnceLock<Arc<dyn KeyringStore>> = OnceLock::new();
+
+#[cfg(debug_assertions)]
+pub fn set_default_keyring_store_for_tests(keyring_store: Arc<dyn KeyringStore>) -> bool {
+    DEFAULT_KEYRING_STORE_OVERRIDE.set(keyring_store).is_ok()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultKeyringStore;
 
 impl KeyringStore for DefaultKeyringStore {
     fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError> {
+        #[cfg(debug_assertions)]
+        if let Some(keyring_store) = DEFAULT_KEYRING_STORE_OVERRIDE.get() {
+            return keyring_store.load(service, account);
+        }
         trace!("keyring.load start, service={service}, account={account}");
         let entry = Entry::new(service, account).map_err(CredentialStoreError::new)?;
         match entry.get_password() {
@@ -69,6 +85,10 @@ impl KeyringStore for DefaultKeyringStore {
     }
 
     fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError> {
+        #[cfg(debug_assertions)]
+        if let Some(keyring_store) = DEFAULT_KEYRING_STORE_OVERRIDE.get() {
+            return keyring_store.save(service, account, value);
+        }
         trace!(
             "keyring.save start, service={service}, account={account}, value_len={}",
             value.len()
@@ -87,6 +107,10 @@ impl KeyringStore for DefaultKeyringStore {
     }
 
     fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
+        #[cfg(debug_assertions)]
+        if let Some(keyring_store) = DEFAULT_KEYRING_STORE_OVERRIDE.get() {
+            return keyring_store.delete(service, account);
+        }
         trace!("keyring.delete start, service={service}, account={account}");
         let entry = Entry::new(service, account).map_err(CredentialStoreError::new)?;
         match entry.delete_credential() {
@@ -113,9 +137,29 @@ pub mod tests {
     use keyring::credential::CredentialApi as _;
     use keyring::mock::MockCredential;
     use std::collections::HashMap;
+    #[cfg(debug_assertions)]
+    use std::fs::OpenOptions;
+    #[cfg(debug_assertions)]
+    use std::io::Write;
+    #[cfg(all(debug_assertions, unix))]
+    use std::os::unix::fs::DirBuilderExt;
+    #[cfg(all(debug_assertions, unix))]
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(all(debug_assertions, unix))]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(debug_assertions)]
+    use std::path::Path;
+    #[cfg(debug_assertions)]
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
+    #[cfg(debug_assertions)]
+    use std::sync::OnceLock;
     use std::sync::PoisonError;
+    #[cfg(debug_assertions)]
+    use std::sync::atomic::AtomicU64;
+    #[cfg(debug_assertions)]
+    use std::sync::atomic::Ordering;
 
     #[derive(Default, Clone, Debug)]
     pub struct MockKeyringStore {
@@ -222,5 +266,258 @@ pub mod tests {
             guard.remove(account);
             Ok(removed)
         }
+    }
+
+    #[cfg(debug_assertions)]
+    static SHARED_TEST_KEYRING_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+    #[cfg(debug_assertions)]
+    #[derive(Debug)]
+    pub struct HermeticTestKeyringStore {
+        fallback: MockKeyringStore,
+        persisted_root: Option<PathBuf>,
+        next_temp_file_id: AtomicU64,
+    }
+
+    #[cfg(debug_assertions)]
+    impl Default for HermeticTestKeyringStore {
+        fn default() -> Self {
+            Self {
+                fallback: MockKeyringStore::default(),
+                persisted_root: None,
+                next_temp_file_id: AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    impl HermeticTestKeyringStore {
+        pub fn persisted(root: PathBuf) -> Self {
+            Self {
+                persisted_root: Some(root),
+                ..Self::default()
+            }
+        }
+
+        fn entry_path(&self, service: &str, account: &str) -> Option<PathBuf> {
+            self.persisted_root.as_ref().map(|root| {
+                root.join(encoded_path_component(service))
+                    .join(encoded_path_component(account))
+            })
+        }
+
+        fn load_value(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<String>, CredentialStoreError> {
+            let Some(path) = self.entry_path(service, account) else {
+                return self.fallback.load(service, account);
+            };
+            match std::fs::read(path) {
+                Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|error| {
+                    CredentialStoreError::new(KeyringError::BadEncoding(error.into_bytes()))
+                }),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(file_store_error(error)),
+            }
+        }
+
+        fn save_value(
+            &self,
+            service: &str,
+            account: &str,
+            value: &str,
+        ) -> Result<(), CredentialStoreError> {
+            let Some(path) = self.entry_path(service, account) else {
+                return self.fallback.save(service, account, value);
+            };
+            if let Some(root) = self.persisted_root.as_deref() {
+                secure_directory(root)?;
+            }
+            let parent = path.parent().ok_or_else(|| {
+                file_store_error(std::io::Error::other("test keyring path has no parent"))
+            })?;
+            secure_directory(parent)?;
+            let temp_file_id = self.next_temp_file_id.fetch_add(1, Ordering::Relaxed);
+            let process_id = std::process::id();
+            let encoded_account = encoded_path_component(account);
+            let temp_path = parent.join(format!(
+                ".{process_id}.{temp_file_id}.{encoded_account}.tmp"
+            ));
+            let mut open_options = OpenOptions::new();
+            open_options.create_new(true).write(true);
+            #[cfg(unix)]
+            open_options.mode(0o600);
+            let mut temp_file = open_options.open(&temp_path).map_err(file_store_error)?;
+            temp_file
+                .write_all(value.as_bytes())
+                .map_err(file_store_error)?;
+            temp_file.sync_all().map_err(file_store_error)?;
+            drop(temp_file);
+            if let Err(error) = replace_file(&temp_path, &path) {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(file_store_error(error));
+            }
+            Ok(())
+        }
+
+        fn delete_value(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
+            let Some(path) = self.entry_path(service, account) else {
+                return self.fallback.delete(service, account);
+            };
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(file_store_error(error)),
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    impl KeyringStore for HermeticTestKeyringStore {
+        fn load(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<String>, CredentialStoreError> {
+            self.load_value(service, account)
+        }
+
+        fn save(
+            &self,
+            service: &str,
+            account: &str,
+            value: &str,
+        ) -> Result<(), CredentialStoreError> {
+            self.save_value(service, account, value)
+        }
+
+        fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
+            self.delete_value(service, account)
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn encoded_path_component(value: &str) -> String {
+        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(value.len() * 2);
+        for byte in value.as_bytes() {
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+        }
+        encoded
+    }
+
+    #[cfg(debug_assertions)]
+    fn file_store_error(error: std::io::Error) -> CredentialStoreError {
+        CredentialStoreError::new(KeyringError::PlatformFailure(Box::new(error)))
+    }
+
+    #[cfg(debug_assertions)]
+    fn secure_directory(path: &Path) -> Result<(), CredentialStoreError> {
+        #[cfg(unix)]
+        {
+            let mut dir_builder = std::fs::DirBuilder::new();
+            dir_builder.recursive(true).mode(0o700);
+            dir_builder.create(path).map_err(file_store_error)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .map_err(file_store_error)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(path).map_err(file_store_error)?;
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(source, destination)
+        }
+        #[cfg(windows)]
+        {
+            match replace_file_windows(source, destination) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(source, destination)
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    #[cfg(all(debug_assertions, windows))]
+    fn replace_file_windows(source: &Path, destination: &Path) -> std::io::Result<()> {
+        use std::ffi::c_void;
+        use std::os::windows::ffi::OsStrExt;
+
+        const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x0000_0002;
+
+        unsafe extern "system" {
+            fn ReplaceFileW(
+                replaced_file_name: *const u16,
+                replacement_file_name: *const u16,
+                backup_file_name: *const u16,
+                replace_flags: u32,
+                exclude: *mut c_void,
+                reserved: *mut c_void,
+            ) -> i32;
+        }
+
+        let destination_wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let replaced = unsafe {
+            ReplaceFileW(
+                destination_wide.as_ptr(),
+                source_wide.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_IGNORE_MERGE_ERRORS,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if replaced == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn shared_test_keyring_root() -> &'static Path {
+        SHARED_TEST_KEYRING_ROOT
+            .get_or_init(|| {
+                let process_id = std::process::id();
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let root = std::env::temp_dir().join(format!(
+                    "codex-app-server-test-keyring-{process_id}-{timestamp}"
+                ));
+                #[cfg(unix)]
+                {
+                    let mut dir_builder = std::fs::DirBuilder::new();
+                    dir_builder.mode(0o700);
+                    dir_builder
+                        .create(&root)
+                        .expect("create shared app-server test keyring root");
+                }
+                #[cfg(not(unix))]
+                std::fs::create_dir(&root).expect("create shared app-server test keyring root");
+                root
+            })
+            .as_path()
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn install_persisted_default_test_keyring_store(root: &Path) -> bool {
+        super::set_default_keyring_store_for_tests(Arc::new(HermeticTestKeyringStore::persisted(
+            root.to_path_buf(),
+        )))
     }
 }

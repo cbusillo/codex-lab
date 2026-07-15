@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+use app_test_support::USE_TEST_KEYRING_STORE_ARG;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
 use base64::Engine;
@@ -18,6 +19,8 @@ use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+#[cfg(debug_assertions)]
+use codex_keyring_store::tests::shared_test_keyring_root;
 use futures::SinkExt;
 use futures::StreamExt;
 use hmac::Hmac;
@@ -390,12 +393,18 @@ pub(super) async fn spawn_websocket_server_with_args(
     cmd.arg("--listen")
         .arg(listen_url)
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        .arg(USE_TEST_KEYRING_STORE_ARG)
         .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("CODEX_LAB_HOME", codex_home)
         .env("RUST_LOG", "warn");
+    #[cfg(debug_assertions)]
+    cmd.env(
+        "CODEX_APP_SERVER_TEST_KEYRING_DIR",
+        shared_test_keyring_root(),
+    );
     let mut process = cmd
         .kill_on_drop(true)
         .spawn()
@@ -526,12 +535,18 @@ async fn run_websocket_server_to_completion_with_args(
     cmd.arg("--listen")
         .arg(listen_url)
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        .arg(USE_TEST_KEYRING_STORE_ARG)
         .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("CODEX_LAB_HOME", codex_home)
         .env("RUST_LOG", "warn");
+    #[cfg(debug_assertions)]
+    cmd.env(
+        "CODEX_APP_SERVER_TEST_KEYRING_DIR",
+        shared_test_keyring_root(),
+    );
     timeout(DEFAULT_READ_TIMEOUT, cmd.output())
         .await
         .context("timed out waiting for websocket app-server to exit")?
