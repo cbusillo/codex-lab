@@ -48,6 +48,10 @@ mod tests {
     use crate::ListTurnsParams;
     use crate::SortDirection;
     use crate::StoredTurnItemsView;
+    use crate::ThreadPersistenceMetadata;
+    use codex_protocol::models::BaseInstructions;
+    use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::protocol::SessionSource;
 
     #[tokio::test]
     async fn default_turn_pagination_methods_return_unsupported() {
@@ -90,6 +94,60 @@ mod tests {
                     operation: "list_items"
                 }
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_update_sets_and_clears_reasoning_effort() {
+        let store = InMemoryThreadStore::default();
+        let thread_id = ThreadId::new();
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create thread");
+
+        for (reasoning_effort, expected) in [
+            (
+                Some(Some(ReasoningEffort::High)),
+                Some(ReasoningEffort::High),
+            ),
+            (Some(None), None),
+        ] {
+            let stored = store
+                .update_thread_metadata(UpdateThreadMetadataParams {
+                    thread_id,
+                    patch: ThreadMetadataPatch {
+                        reasoning_effort,
+                        ..Default::default()
+                    },
+                    include_archived: false,
+                })
+                .await
+                .expect("update metadata");
+            assert_eq!(stored.reasoning_effort, expected);
+        }
+    }
+
+    fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
+        CreateThreadParams {
+            session_id: thread_id.into(),
+            thread_id,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Exec,
+            session_provenance: None,
+            thread_source: None,
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            multi_agent_version: None,
+            history_mode: ThreadHistoryMode::Legacy,
+            initial_window_id: "019b0000-0000-7000-8000-000000000000".to_string(),
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(std::env::current_dir().expect("current directory")),
+                model_provider: "test-provider".to_string(),
+                history_mode: ThreadHistoryMode::Legacy,
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
         }
     }
 }

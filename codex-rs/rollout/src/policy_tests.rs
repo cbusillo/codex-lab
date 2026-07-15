@@ -1,9 +1,17 @@
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::Settings;
 use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::BackgroundAutoReviewStatus;
 use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
 use codex_protocol::protocol::EventMsg;
@@ -14,6 +22,8 @@ use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::UserInput;
 use pretty_assertions::assert_eq;
@@ -110,5 +120,43 @@ fn legacy_special_and_always_persisted_events_keep_their_policy() {
     for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
         assert!(should_persist_event_msg(&plan, history_mode));
         assert!(should_persist_event_msg(&rollback, history_mode));
+    }
+}
+
+#[test]
+fn thread_settings_applied_is_persisted_in_all_history_modes() {
+    let event = EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
+        thread_settings: ThreadSettingsSnapshot {
+            model: "gpt-5.2-codex".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            service_tier: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: ApprovalsReviewer::User,
+            permission_profile: PermissionProfile::workspace_write(),
+            active_permission_profile: None,
+            cwd: std::env::current_dir()
+                .expect("current directory")
+                .try_into()
+                .expect("absolute settings cwd"),
+            reasoning_effort: Some(ReasoningEffort::High),
+            reasoning_summary: Some(ReasoningSummary::Auto),
+            personality: None,
+            collaboration_mode: CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: "gpt-5.2-codex".to_string(),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    developer_instructions: None,
+                },
+            },
+        },
+    });
+
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        assert!(should_persist_event_msg(&event, history_mode));
+        assert_eq!(
+            persisted_rollout_items(&[RolloutItem::EventMsg(event.clone())], history_mode,).len(),
+            1
+        );
     }
 }

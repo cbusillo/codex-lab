@@ -524,7 +524,7 @@ mod tests {
         let cwd = std::env::current_dir()
             .expect("current directory")
             .join("updated/workspace");
-        let item = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+        let mut item = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
             ThreadSettingsAppliedEvent {
                 thread_settings: ThreadSettingsSnapshot {
                     model: "gpt-5.2-codex".to_string(),
@@ -563,6 +563,13 @@ mod tests {
             serde_json::to_string(&permission_profile)
                 .expect("permission profile should serialize")
         );
+
+        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+            panic!("thread settings applied item");
+        };
+        event.thread_settings.reasoning_effort = None;
+        apply_rollout_item(&mut metadata, &item, "test-provider");
+        assert_eq!(metadata.reasoning_effort, None);
     }
 
     #[test]
