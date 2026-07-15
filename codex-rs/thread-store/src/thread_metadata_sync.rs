@@ -565,10 +565,16 @@ mod tests {
         assert_eq!(update.patch.approval_mode, Some(AskForApproval::Never));
         assert_eq!(update.patch.permission_profile, Some(permission_profile));
 
-        let compatibility_meta = RolloutItem::SessionMeta(session_meta(thread_id));
+        let mut compatibility_meta = session_meta(thread_id);
+        compatibility_meta.meta.model_provider = Some("initial-provider".to_string());
+        compatibility_meta.meta.cwd = std::path::PathBuf::from("/initial/workspace");
         let replay = ThreadMetadataSync::for_resume(&resume_params(
             thread_id,
-            vec![item.clone(), compatibility_meta],
+            vec![
+                item.clone(),
+                RolloutItem::SessionMeta(compatibility_meta),
+                stale_turn_context(),
+            ],
         ));
         let replay_update = replay
             .take_pending_update()
@@ -576,6 +582,11 @@ mod tests {
         assert_eq!(
             replay_update.patch.model_provider.as_deref(),
             Some("updated-provider")
+        );
+        assert_eq!(replay_update.patch.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(
+            replay_update.patch.reasoning_effort,
+            Some(Some(ReasoningEffort::Ultra))
         );
         assert_eq!(replay_update.patch.cwd, Some(cwd));
 
@@ -682,6 +693,29 @@ mod tests {
             },
             git: None,
         }
+    }
+
+    fn stale_turn_context() -> RolloutItem {
+        RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
+            turn_id: Some("stale-turn".to_string()),
+            cwd: std::path::PathBuf::from("/stale/workspace"),
+            environments: None,
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::OnRequest,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "stale-model".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            realtime_active: None,
+            effort: Some(ReasoningEffort::Low),
+            summary: ReasoningSummary::Auto,
+        })
     }
 
     fn goal_update(thread_id: ThreadId, objective: &str) -> ThreadGoalUpdatedEvent {

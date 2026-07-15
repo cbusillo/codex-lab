@@ -11,21 +11,49 @@ use codex_protocol::protocol::user_message_preview;
 use serde::Serialize;
 use serde_json::Value;
 
-/// Apply a rollout item to the metadata structure.
-pub fn apply_rollout_item(
+/// Apply ordered rollout items while preserving durable settings-snapshot authority.
+pub fn apply_rollout_items_to_metadata(
     metadata: &mut ThreadMetadata,
-    item: &RolloutItem,
+    items: &[RolloutItem],
     default_provider: &str,
 ) {
-    match item {
-        RolloutItem::SessionMeta(meta_line) => apply_session_meta_from_item(metadata, meta_line),
-        RolloutItem::TurnContext(turn_ctx) => apply_turn_context(metadata, turn_ctx),
-        RolloutItem::EventMsg(event) => apply_event_msg(metadata, event),
-        RolloutItem::ResponseItem(item) => apply_response_item(metadata, item),
-        RolloutItem::Compacted(_) => {}
+    let mut projection = ThreadMetadataProjection::default();
+    for item in items {
+        projection.apply_item(metadata, item, default_provider);
     }
-    if metadata.model_provider.is_empty() {
-        metadata.model_provider = default_provider.to_string();
+}
+
+#[derive(Default)]
+struct ThreadMetadataProjection {
+    settings_snapshot_seen: bool,
+}
+
+impl ThreadMetadataProjection {
+    fn apply_item(
+        &mut self,
+        metadata: &mut ThreadMetadata,
+        item: &RolloutItem,
+        default_provider: &str,
+    ) {
+        match item {
+            RolloutItem::SessionMeta(meta_line) => {
+                apply_session_meta_from_item(metadata, meta_line)
+            }
+            RolloutItem::TurnContext(turn_ctx) if !self.settings_snapshot_seen => {
+                apply_turn_context(metadata, turn_ctx);
+            }
+            RolloutItem::EventMsg(event) => {
+                apply_event_msg(metadata, event);
+                if matches!(event, EventMsg::ThreadSettingsApplied(_)) {
+                    self.settings_snapshot_seen = true;
+                }
+            }
+            RolloutItem::ResponseItem(item) => apply_response_item(metadata, item),
+            RolloutItem::TurnContext(_) | RolloutItem::Compacted(_) => {}
+        }
+        if metadata.model_provider.is_empty() {
+            metadata.model_provider = default_provider.to_string();
+        }
     }
 }
 
@@ -160,7 +188,7 @@ pub(crate) fn enum_to_string<T: Serialize>(value: &T) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_rollout_item;
+    use super::apply_rollout_items_to_metadata;
     use crate::model::ThreadMetadata;
     use chrono::DateTime;
     use chrono::Utc;
@@ -198,6 +226,14 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    fn apply_rollout_item(
+        metadata: &mut ThreadMetadata,
+        item: &RolloutItem,
+        default_provider: &str,
+    ) {
+        apply_rollout_items_to_metadata(metadata, std::slice::from_ref(item), default_provider);
+    }
 
     #[test]
     fn response_item_user_messages_do_not_set_title_or_first_user_message() {
@@ -566,18 +602,28 @@ mod tests {
                 .expect("permission profile should serialize")
         );
 
-        let thread_id = metadata.id;
-        apply_rollout_item(
-            &mut metadata,
-            &matching_session_meta(
-                thread_id,
-                PathBuf::from("/initial/workspace"),
-                "initial-provider",
-            ),
+        let mut replayed_metadata = metadata_for_test();
+        let replayed_thread_id = replayed_metadata.id;
+        apply_rollout_items_to_metadata(
+            &mut replayed_metadata,
+            &[
+                item.clone(),
+                matching_session_meta(
+                    replayed_thread_id,
+                    PathBuf::from("/initial/workspace"),
+                    "initial-provider",
+                ),
+                stale_turn_context(),
+            ],
             "test-provider",
         );
-        assert_eq!(metadata.model_provider, "updated-provider");
-        assert_eq!(metadata.cwd, cwd);
+        assert_eq!(replayed_metadata.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(replayed_metadata.model_provider, "updated-provider");
+        assert_eq!(
+            replayed_metadata.reasoning_effort,
+            Some(ReasoningEffort::Ultra)
+        );
+        assert_eq!(replayed_metadata.cwd, cwd);
 
         let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
             panic!("thread settings applied item");
@@ -724,6 +770,29 @@ mod tests {
                 history_mode: ThreadHistoryMode::Legacy,
             },
             git: None,
+        })
+    }
+
+    fn stale_turn_context() -> RolloutItem {
+        RolloutItem::TurnContext(TurnContextItem {
+            turn_id: Some("stale-turn".to_string()),
+            cwd: PathBuf::from("/stale/workspace"),
+            environments: None,
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::OnRequest,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "stale-model".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            realtime_active: None,
+            effort: Some(ReasoningEffort::Low),
+            summary: codex_protocol::config_types::ReasoningSummary::Auto,
         })
     }
 }

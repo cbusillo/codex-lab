@@ -830,9 +830,7 @@ ON CONFLICT(id) DO UPDATE SET
             .clone()
             .unwrap_or_else(|| builder.build(&self.default_provider));
         metadata.rollout_path = builder.rollout_path.clone();
-        for item in items {
-            apply_rollout_item(&mut metadata, item, &self.default_provider);
-        }
+        crate::apply_rollout_items_to_metadata(&mut metadata, items, &self.default_provider);
         if let Some(existing_metadata) = existing_metadata.as_ref() {
             metadata.prefer_existing_git_info(existing_metadata);
         }
