@@ -64,13 +64,15 @@ fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &Sessi
     metadata.agent_role = meta_line.meta.agent_role.clone();
     metadata.agent_path = meta_line.meta.agent_path.clone();
     metadata.history_mode = meta_line.meta.history_mode;
-    if let Some(provider) = meta_line.meta.model_provider.as_deref() {
+    if metadata.model_provider.is_empty()
+        && let Some(provider) = meta_line.meta.model_provider.as_deref()
+    {
         metadata.model_provider = provider.to_string();
     }
     if !meta_line.meta.cli_version.is_empty() {
         metadata.cli_version = meta_line.meta.cli_version.clone();
     }
-    if !meta_line.meta.cwd.as_os_str().is_empty() {
+    if metadata.cwd.as_os_str().is_empty() && !meta_line.meta.cwd.as_os_str().is_empty() {
         metadata.cwd = meta_line.meta.cwd.clone();
     }
     if let Some(git) = meta_line.git.as_ref() {
@@ -564,6 +566,19 @@ mod tests {
                 .expect("permission profile should serialize")
         );
 
+        let thread_id = metadata.id;
+        apply_rollout_item(
+            &mut metadata,
+            &matching_session_meta(
+                thread_id,
+                PathBuf::from("/initial/workspace"),
+                "initial-provider",
+            ),
+            "test-provider",
+        );
+        assert_eq!(metadata.model_provider, "updated-provider");
+        assert_eq!(metadata.cwd, cwd);
+
         let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
             panic!("thread settings applied item");
         };
@@ -677,5 +692,38 @@ mod tests {
         other.title = "world".to_string();
         let diffs = base.diff_fields(&other);
         assert_eq!(diffs, vec!["title", "tokens_used"]);
+    }
+
+    fn matching_session_meta(
+        thread_id: ThreadId,
+        cwd: PathBuf,
+        model_provider: &str,
+    ) -> RolloutItem {
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                session_id: thread_id.into(),
+                id: thread_id,
+                forked_from_id: None,
+                parent_thread_id: None,
+                timestamp: "2026-02-26T00:00:00.000Z".to_string(),
+                cwd,
+                originator: "codex_cli_rs".to_string(),
+                cli_version: "0.0.0".to_string(),
+                source: SessionSource::Cli,
+                session_provenance: None,
+                thread_source: None,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+                model_provider: Some(model_provider.to_string()),
+                base_instructions: None,
+                dynamic_tools: None,
+                memory_mode: None,
+                multi_agent_version: None,
+                context_window: None,
+                history_mode: ThreadHistoryMode::Legacy,
+            },
+            git: None,
+        })
     }
 }

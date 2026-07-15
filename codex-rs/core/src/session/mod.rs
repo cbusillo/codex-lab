@@ -1301,10 +1301,19 @@ impl Session {
                     state.set_token_info(Some(info));
                 }
 
-                // If persisting, persist all rollout items as-is (the store filters).
-                if !rollout_items.is_empty() {
-                    self.persist_rollout_items(&rollout_items).await;
-                }
+                // Forked history belongs to the source thread. Preserve it for transcript
+                // reconstruction, but replace inherited settings snapshots with one snapshot of
+                // the child configuration so metadata replay cannot restore the parent's model.
+                rollout_items.retain(|item| {
+                    !matches!(
+                        item,
+                        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+                    )
+                });
+                rollout_items.push(RolloutItem::EventMsg(
+                    handlers::thread_settings_applied_event(self).await,
+                ));
+                self.persist_rollout_items(&rollout_items).await;
 
                 // Forked threads should remain file-backed immediately after startup.
                 self.ensure_rollout_materialized().await;

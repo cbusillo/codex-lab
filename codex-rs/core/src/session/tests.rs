@@ -467,6 +467,59 @@ async fn fork_assigns_only_top_level_response_item_ids_before_replay() {
 }
 
 #[tokio::test]
+async fn fork_replaces_inherited_thread_settings_with_child_snapshot() {
+    let (mut session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let rollout_path = attach_thread_persistence(
+        Arc::get_mut(&mut session).expect("session should be uniquely owned"),
+    )
+    .await;
+    let EventMsg::ThreadSettingsApplied(expected_event) =
+        handlers::thread_settings_applied_event(&session).await
+    else {
+        panic!("thread settings applied event");
+    };
+    let expected = expected_event.thread_settings.clone();
+    let mut inherited = expected_event;
+    inherited.thread_settings.model = "parent-model".to_string();
+    inherited.thread_settings.model_provider_id = "parent-provider".to_string();
+
+    session
+        .record_initial_history(InitialHistory::Forked(vec![RolloutItem::EventMsg(
+            EventMsg::ThreadSettingsApplied(inherited),
+        )]))
+        .await;
+    session.flush_rollout().await.expect("rollout should flush");
+
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let persisted_settings = resumed
+        .history
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(&event.thread_settings)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(persisted_settings.len(), 1);
+    assert_eq!(persisted_settings[0].model, expected.model);
+    assert_eq!(
+        persisted_settings[0].model_provider_id,
+        expected.model_provider_id
+    );
+    assert_eq!(
+        persisted_settings[0].reasoning_effort,
+        expected.reasoning_effort
+    );
+}
+
+#[tokio::test]
 async fn resume_does_not_backfill_legacy_response_item_ids() {
     let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
 

@@ -45,6 +45,7 @@ async fn fork_thread_twice_drops_to_first_message() {
     let codex = test.codex.clone();
     let thread_manager = test.thread_manager.clone();
     let config_for_fork = test.config.clone();
+    let expected_fork_model = test.session_configured.model.clone();
 
     // Send three user messages; wait for three completed turns.
     for text in ["first", "second", "third"] {
@@ -113,9 +114,11 @@ async fn fork_thread_twice_drops_to_first_message() {
 
     // GetHistory on fork1 flushed; the file is ready.
     let fork1_items = read_rollout_items(&fork1_path);
-    pretty_assertions::assert_eq!(
-        serde_json::to_value(&fork1_items).unwrap(),
-        serde_json::to_value(&expected_after_first).unwrap()
+    assert_fork_rollout(
+        &expected_after_first,
+        &fork1_items,
+        expected_fork_model.as_str(),
+        config_for_fork.model_provider_id.as_str(),
     );
 
     // Fork again with n=0 → drops the (new) last user message, leaving only the first.
@@ -143,9 +146,32 @@ async fn fork_thread_twice_drops_to_first_message() {
         .unwrap_or(0);
     let expected_after_second: Vec<RolloutItem> = fork1_items[..cut_last_on_fork1].to_vec();
     let fork2_items = read_rollout_items(&fork2_path);
+    assert_fork_rollout(
+        &expected_after_second,
+        &fork2_items,
+        expected_fork_model.as_str(),
+        config_for_fork.model_provider_id.as_str(),
+    );
+}
+
+fn assert_fork_rollout(
+    expected_history: &[RolloutItem],
+    actual: &[RolloutItem],
+    expected_model: &str,
+    expected_model_provider: &str,
+) {
+    let (settings_item, actual_history) = actual.split_last().expect("fork settings snapshot");
     pretty_assertions::assert_eq!(
-        serde_json::to_value(&fork2_items).unwrap(),
-        serde_json::to_value(&expected_after_second).unwrap()
+        serde_json::to_value(actual_history).unwrap(),
+        serde_json::to_value(expected_history).unwrap()
+    );
+    let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = settings_item else {
+        panic!("fork should end with a thread settings snapshot");
+    };
+    assert_eq!(event.thread_settings.model, expected_model);
+    assert_eq!(
+        event.thread_settings.model_provider_id,
+        expected_model_provider
     );
 }
 

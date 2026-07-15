@@ -34,6 +34,7 @@ const THREAD_UPDATED_AT_TOUCH_INTERVAL: Duration = Duration::from_millis(50);
 pub(crate) struct ThreadMetadataSync {
     thread_id: ThreadId,
     cwd_seen: bool,
+    settings_snapshot_seen: bool,
     preview_seen: bool,
     first_user_message_seen: bool,
     title_seen: bool,
@@ -80,6 +81,7 @@ impl ThreadMetadataSync {
         Self {
             thread_id: params.thread_id,
             cwd_seen: !cwd.as_os_str().is_empty(),
+            settings_snapshot_seen: false,
             preview_seen: false,
             first_user_message_seen: false,
             title_seen: false,
@@ -99,6 +101,7 @@ impl ThreadMetadataSync {
                 .cwd
                 .as_ref()
                 .is_some_and(|cwd| !cwd.as_os_str().is_empty()),
+            settings_snapshot_seen: false,
             preview_seen: false,
             first_user_message_seen: false,
             title_seen: false,
@@ -206,7 +209,8 @@ impl ThreadMetadataSync {
                     update.agent_nickname = Some(meta_line.meta.agent_nickname.clone());
                     update.agent_role = Some(meta_line.meta.agent_role.clone());
                     update.agent_path = Some(meta_line.meta.agent_path.clone());
-                    if let Some(model_provider) = meta_line.meta.model_provider.clone()
+                    if !self.settings_snapshot_seen
+                        && let Some(model_provider) = meta_line.meta.model_provider.clone()
                         && !model_provider.is_empty()
                     {
                         update.model_provider = Some(model_provider);
@@ -214,7 +218,7 @@ impl ThreadMetadataSync {
                     if !meta_line.meta.cli_version.is_empty() {
                         update.cli_version = Some(meta_line.meta.cli_version.clone());
                     }
-                    if !meta_line.meta.cwd.as_os_str().is_empty() {
+                    if !self.settings_snapshot_seen && !meta_line.meta.cwd.as_os_str().is_empty() {
                         self.cwd_seen = true;
                         update.cwd = Some(meta_line.meta.cwd.clone());
                     }
@@ -227,7 +231,7 @@ impl ThreadMetadataSync {
                         update.memory_mode = Some(memory_mode);
                     }
                 }
-                RolloutItem::TurnContext(turn_ctx) => {
+                RolloutItem::TurnContext(turn_ctx) if !self.settings_snapshot_seen => {
                     if !self.cwd_seen && !turn_ctx.cwd.as_os_str().is_empty() {
                         self.cwd_seen = true;
                         update.cwd = Some(turn_ctx.cwd.clone());
@@ -265,6 +269,7 @@ impl ThreadMetadataSync {
                 RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
                     let settings = &event.thread_settings;
                     self.cwd_seen = true;
+                    self.settings_snapshot_seen = true;
                     update.model = Some(settings.model.clone());
                     update.model_provider = Some(settings.model_provider_id.clone());
                     update.reasoning_effort = Some(settings.reasoning_effort.clone());
@@ -273,6 +278,7 @@ impl ThreadMetadataSync {
                     update.permission_profile = Some(settings.permission_profile.clone());
                 }
                 RolloutItem::SessionMeta(_)
+                | RolloutItem::TurnContext(_)
                 | RolloutItem::EventMsg(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::Compacted(_) => {}
@@ -555,9 +561,23 @@ mod tests {
             update.patch.reasoning_effort,
             Some(Some(ReasoningEffort::Ultra))
         );
-        assert_eq!(update.patch.cwd, Some(cwd));
+        assert_eq!(update.patch.cwd, Some(cwd.clone()));
         assert_eq!(update.patch.approval_mode, Some(AskForApproval::Never));
         assert_eq!(update.patch.permission_profile, Some(permission_profile));
+
+        let compatibility_meta = RolloutItem::SessionMeta(session_meta(thread_id));
+        let replay = ThreadMetadataSync::for_resume(&resume_params(
+            thread_id,
+            vec![item.clone(), compatibility_meta],
+        ));
+        let replay_update = replay
+            .take_pending_update()
+            .expect("replayed settings metadata update");
+        assert_eq!(
+            replay_update.patch.model_provider.as_deref(),
+            Some("updated-provider")
+        );
+        assert_eq!(replay_update.patch.cwd, Some(cwd));
 
         let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
             panic!("thread settings applied item");
