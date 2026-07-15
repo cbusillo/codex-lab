@@ -52,23 +52,20 @@ pub fn extract_thread_resume_model_settings(
     items: &[RolloutItem],
 ) -> ThreadResumeModelSettings {
     let mut settings = ThreadResumeModelSettings::default();
-    let mut active_turn_id = None;
-    let mut settings_updated_during_turn = None;
+    let mut skip_next_turn_context = false;
     for item in items {
         match item {
-            RolloutItem::SessionMeta(meta_line) if meta_line.meta.id == thread_id => {
+            RolloutItem::SessionMeta(meta_line)
+                if meta_line.meta.id == thread_id && settings.model_provider.is_none() =>
+            {
                 if let Some(model_provider) = meta_line.meta.model_provider.as_ref() {
                     settings.model_provider = Some(model_provider.clone());
                 }
             }
             RolloutItem::TurnContext(turn_context) => {
-                if settings_updated_during_turn
-                    .as_ref()
-                    .is_some_and(|turn_id| turn_context.turn_id.as_ref() == Some(turn_id))
-                {
+                if std::mem::take(&mut skip_next_turn_context) {
                     continue;
                 }
-                settings_updated_during_turn = None;
                 settings.model = Some(turn_context.model.clone());
                 settings.reasoning_effort = match turn_context.effort.clone() {
                     Some(reasoning_effort) => ThreadResumeReasoningEffort::Set(reasoning_effort),
@@ -76,26 +73,13 @@ pub fn extract_thread_resume_model_settings(
                 };
             }
             RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
-                settings_updated_during_turn = active_turn_id.clone();
+                skip_next_turn_context = true;
                 settings.model = Some(event.thread_settings.model.clone());
                 settings.model_provider = Some(event.thread_settings.model_provider_id.clone());
                 settings.reasoning_effort = match event.thread_settings.reasoning_effort.clone() {
                     Some(reasoning_effort) => ThreadResumeReasoningEffort::Set(reasoning_effort),
                     None => ThreadResumeReasoningEffort::Cleared,
                 };
-            }
-            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                active_turn_id = Some(event.turn_id.clone());
-            }
-            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
-                if active_turn_id.as_deref() == Some(event.turn_id.as_str()) {
-                    active_turn_id = None;
-                }
-            }
-            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
-                if event.turn_id.is_none() || active_turn_id.as_ref() == event.turn_id.as_ref() {
-                    active_turn_id = None;
-                }
             }
             RolloutItem::SessionMeta(_)
             | RolloutItem::ResponseItem(_)
@@ -672,6 +656,7 @@ mod tests {
         let saved = extract_thread_resume_model_settings(
             metadata.id,
             &[
+                item,
                 RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
                     trace_id: None,
@@ -679,11 +664,19 @@ mod tests {
                     model_context_window: None,
                     collaboration_mode_kind: ModeKind::Default,
                 })),
-                item,
                 stale_turn_context,
+                RolloutItem::SessionMeta(SessionMetaLine {
+                    meta: SessionMeta {
+                        id: metadata.id,
+                        model_provider: Some("stale-provider".to_string()),
+                        ..Default::default()
+                    },
+                    git: None,
+                }),
             ],
         );
         assert_eq!(saved.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(saved.model_provider.as_deref(), Some("updated-provider"));
         assert_eq!(saved.reasoning_effort, ThreadResumeReasoningEffort::Cleared);
     }
 

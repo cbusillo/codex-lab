@@ -30,22 +30,23 @@ pub(super) fn resume_model_settings_for_overrides(
     config: &Config,
     harness_overrides: &ConfigOverrides,
 ) -> crate::app_server_session::ResumeModelSettings {
-    let has_layer_override = config
-        .config_layer_stack
-        .layers_high_to_low()
-        .into_iter()
-        .any(|layer| {
-            matches!(
-                &layer.name,
-                ConfigLayerSource::SessionFlags
-                    | ConfigLayerSource::User {
-                        profile: Some(_),
-                        ..
-                    }
-            ) && ["model", "model_provider", "model_reasoning_effort"]
-                .iter()
-                .any(|key| layer.config.get(*key).is_some())
-        });
+    let has_layer_override = config.config_lock_toml.is_some()
+        || config
+            .config_layer_stack
+            .layers_high_to_low()
+            .into_iter()
+            .any(|layer| {
+                matches!(
+                    &layer.name,
+                    ConfigLayerSource::SessionFlags
+                        | ConfigLayerSource::User {
+                            profile: Some(_),
+                            ..
+                        }
+                ) && ["model", "model_provider", "model_reasoning_effort"]
+                    .iter()
+                    .any(|key| layer.config.get(*key).is_some())
+            });
     if harness_overrides.model.is_some()
         || harness_overrides.model_provider.is_some()
         || has_layer_override
@@ -1231,6 +1232,7 @@ mod tests {
     use super::*;
     use crate::app::test_support::app_enabled_in_effective_config;
     use crate::app::test_support::make_test_app;
+    use crate::app_server_session::ResumeModelSettings;
     use crate::legacy_core::config::edit::ConfigEdit;
     use crate::test_support::PathBufExt;
     use codex_config::ConfigLayerEntry;
@@ -1263,7 +1265,7 @@ mod tests {
 
         assert_eq!(
             app.resume_model_settings(),
-            crate::app_server_session::ResumeModelSettings::RestoreFromThread
+            ResumeModelSettings::RestoreFromThread
         );
         let profile_dir = tempdir().expect("profile tempdir");
         let profile_path = profile_dir.path().join("work.config.toml").abs();
@@ -1271,22 +1273,16 @@ mod tests {
             .parse::<codex_config::ProfileV2Name>()
             .expect("valid profile name");
         for (key, expected) in [
-            (
-                "model",
-                crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
-            ),
+            ("model", ResumeModelSettings::OverrideFromCurrentConfig),
             (
                 "model_provider",
-                crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
+                ResumeModelSettings::OverrideFromCurrentConfig,
             ),
             (
                 "model_reasoning_effort",
-                crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
+                ResumeModelSettings::OverrideFromCurrentConfig,
             ),
-            (
-                "sandbox_mode",
-                crate::app_server_session::ResumeModelSettings::RestoreFromThread,
-            ),
+            ("sandbox_mode", ResumeModelSettings::RestoreFromThread),
         ] {
             let config = TomlValue::Table(toml::map::Map::from_iter([(
                 key.to_string(),
@@ -1320,13 +1316,24 @@ mod tests {
         );
         assert_eq!(
             app.resume_model_settings(),
-            crate::app_server_session::ResumeModelSettings::RestoreFromThread
+            ResumeModelSettings::RestoreFromThread
+        );
+
+        app.config.config_lock_toml =
+            Some(Arc::new(codex_config::config_toml::ConfigLockfileToml {
+                version: 1,
+                codex_version: String::new(),
+                config: Default::default(),
+            }));
+        assert_eq!(
+            app.resume_model_settings(),
+            ResumeModelSettings::OverrideFromCurrentConfig
         );
 
         app.harness_overrides.model_provider = Some("custom-provider".to_string());
         assert_eq!(
             app.resume_model_settings(),
-            crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig
+            ResumeModelSettings::OverrideFromCurrentConfig
         );
     }
 

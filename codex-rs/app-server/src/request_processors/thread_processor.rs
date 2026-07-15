@@ -202,22 +202,23 @@ fn has_model_resume_override(
 }
 
 fn config_has_explicit_model_resume_override(config: &Config) -> bool {
-    config
-        .config_layer_stack
-        .layers_high_to_low()
-        .into_iter()
-        .any(|layer| {
-            matches!(
-                &layer.name,
-                ConfigLayerSource::SessionFlags
-                    | ConfigLayerSource::User {
-                        profile: Some(_),
-                        ..
-                    }
-            ) && ["model", "model_provider", "model_reasoning_effort"]
-                .iter()
-                .any(|key| layer.config.get(*key).is_some())
-        })
+    config.config_lock_toml.is_some()
+        || config
+            .config_layer_stack
+            .layers_high_to_low()
+            .into_iter()
+            .any(|layer| {
+                matches!(
+                    &layer.name,
+                    ConfigLayerSource::SessionFlags
+                        | ConfigLayerSource::User {
+                            profile: Some(_),
+                            ..
+                        }
+                ) && ["model", "model_provider", "model_reasoning_effort"]
+                    .iter()
+                    .any(|key| layer.config.get(*key).is_some())
+            })
 }
 
 fn validate_dynamic_tools(tools: &[ApiDynamicToolSpec]) -> Result<(), String> {
