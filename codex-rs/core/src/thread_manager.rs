@@ -474,17 +474,6 @@ impl ThreadManager {
 
     pub async fn reload_auth_for_loaded_threads(&self) {
         self.state.auth_manager.reload().await;
-        let threads = self.state.threads.read().await;
-        for thread in threads.values() {
-            if !thread.session_source.is_internal() {
-                thread
-                    .codex
-                    .session
-                    .services
-                    .model_client
-                    .advance_window_generation();
-            }
-        }
     }
 
     pub fn skills_manager(&self) -> Arc<SkillsManager> {

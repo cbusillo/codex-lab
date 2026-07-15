@@ -7,6 +7,8 @@ use codex_app_server::run_main_with_transport_options;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_config::LoaderOverrides;
+#[cfg(debug_assertions)]
+use codex_keyring_store::tests::install_persisted_default_test_keyring_store;
 use codex_protocol::protocol::SessionSource;
 use codex_utils_cli::CliConfigOverrides;
 use std::path::PathBuf;
@@ -15,6 +17,8 @@ use std::path::PathBuf;
 // managed config file without writing to /etc.
 const MANAGED_CONFIG_PATH_ENV_VAR: &str = "CODEX_APP_SERVER_MANAGED_CONFIG_PATH";
 const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
+#[cfg(debug_assertions)]
+const TEST_KEYRING_DIR_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_KEYRING_DIR";
 
 #[derive(Debug, Parser)]
 #[command(version)]
@@ -80,6 +84,13 @@ fn main() -> anyhow::Result<()> {
         let transport = listen;
         let auth = auth.try_into_settings()?;
         let mut runtime_options = AppServerRuntimeOptions::default();
+        #[cfg(debug_assertions)]
+        if let Some(test_keyring_dir) = std::env::var_os(TEST_KEYRING_DIR_ENV_VAR) {
+            anyhow::ensure!(
+                install_persisted_default_test_keyring_store(&PathBuf::from(test_keyring_dir)),
+                "test keyring store was already configured"
+            );
+        }
         #[cfg(debug_assertions)]
         if disable_plugin_startup_tasks_for_tests {
             runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;

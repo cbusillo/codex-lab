@@ -1710,6 +1710,10 @@ impl AuthManager {
         self.auth_change_tx.subscribe()
     }
 
+    pub fn auth_revision(&self) -> u64 {
+        *self.auth_change_tx.borrow()
+    }
+
     pub fn refresh_failure_for_auth(&self, auth: &CodexAuth) -> Option<RefreshTokenFailedError> {
         self.inner.read().ok().and_then(|cached| {
             cached

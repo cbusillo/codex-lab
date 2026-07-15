@@ -800,12 +800,7 @@ fn remove_account_matching_credentials_removes_api_key_or_chatgpt_account() {
         )
         .expect("remove api key")
     );
-    assert_eq!(
-        Some(chatgpt.id.as_str()),
-        get_active_account_id(temp.path())
-            .expect("active id")
-            .as_deref()
-    );
+    assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
     let removed_chatgpt = remove_account_matching_credentials(
         temp.path(),
         AuthMode::Chatgpt,
@@ -822,7 +817,7 @@ fn remove_account_matching_credentials_removes_api_key_or_chatgpt_account() {
 }
 
 #[test]
-fn remove_account_matching_credentials_promotes_remaining_account() {
+fn remove_account_matching_credentials_clears_active_account_and_preserves_remaining_account() {
     let temp = TempDir::new().expect("tempdir");
     let active_tokens = make_chatgpt_tokens(Some("acct-active"), Some("active@example.com"));
     let active = upsert_chatgpt_account(
@@ -851,16 +846,11 @@ fn remove_account_matching_credentials_promotes_remaining_account() {
         )
         .expect("remove active chatgpt")
     );
+    assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
     assert_eq!(
-        Some(fallback.id.as_str()),
-        get_active_account_id(temp.path())
-            .expect("active id")
-            .as_deref()
+        Some(fallback.clone()),
+        find_account(temp.path(), &fallback.id).expect("find remaining account")
     );
-    let promoted = find_account(temp.path(), &fallback.id)
-        .expect("find promoted account")
-        .expect("promoted account");
-    assert!(promoted.last_used_at.is_some());
 }
 
 #[test]

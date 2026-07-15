@@ -13,7 +13,9 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::RequestId;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_login::AuthDotJson;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
+use codex_login::save_auth;
 use pretty_assertions::assert_eq;
 use std::path::Path;
 use tempfile::TempDir;
@@ -181,12 +183,24 @@ async fn get_auth_status_with_personal_access_token_omits_token() -> Result<()> 
         .mount(&server)
         .await;
 
+    save_auth(
+        codex_home.path(),
+        &AuthDotJson {
+            auth_mode: None,
+            openai_api_key: None,
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: Some("at-test-token".to_string()),
+        },
+        AuthCredentialsStoreMode::File,
+    )?;
+
     let authapi_base_url = server.uri();
     let mut mcp = TestAppServer::new_with_env(
         codex_home.path(),
         &[
             ("OPENAI_API_KEY", None),
-            ("CODEX_ACCESS_TOKEN", Some("at-test-token")),
             ("CODEX_AUTHAPI_BASE_URL", Some(authapi_base_url.as_str())),
         ],
     )

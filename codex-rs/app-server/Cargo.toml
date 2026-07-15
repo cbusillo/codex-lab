@@ -59,6 +59,7 @@ codex-file-search = { workspace = true }
 codex-chatgpt = { workspace = true }
 codex-login = { workspace = true }
 codex-image-generation-extension = { workspace = true }
+codex-keyring-store = { workspace = true }
 codex-memories-extension = { workspace = true }
 codex-web-search-extension = { workspace = true }
 codex-memories-write = { workspace = true }
@@ -116,6 +117,7 @@ codex-model-provider-info = { workspace = true }
 codex-code-bridge-service = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 core_test_support = { workspace = true }
+ctor = { workspace = true }
 flate2 = { workspace = true }
 hmac = { workspace = true }
 opentelemetry = { workspace = true }

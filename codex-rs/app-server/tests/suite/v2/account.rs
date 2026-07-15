@@ -668,7 +668,7 @@ async fn chatgpt_auth_tokens_login_refreshes_auth_for_loaded_thread() -> Result<
         requests[1].header("authorization"),
         Some(format!("Bearer {updated_access_token}"))
     );
-    assert_ne!(
+    assert_eq!(
         requests[0].header("x-codex-window-id"),
         requests[1].header("x-codex-window-id")
     );
@@ -769,7 +769,7 @@ async fn chatgpt_device_code_login_refreshes_auth_for_loaded_thread() -> Result<
         requests[1].header("authorization"),
         Some("Bearer access-token-123".to_string())
     );
-    assert_ne!(
+    assert_eq!(
         requests[0].header("x-codex-window-id"),
         requests[1].header("x-codex-window-id")
     );
@@ -1322,6 +1322,113 @@ async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> 
 }
 
 #[tokio::test]
+async fn explicit_token_refresh_updates_auth_for_loaded_thread() -> Result<()> {
+    let model_server = MockServer::start().await;
+    let response_mock = responses::mount_sse_sequence(
+        &model_server,
+        vec![
+            create_final_assistant_message_sse_response("Old token turn")?,
+            create_final_assistant_message_sse_response("Refreshed token turn")?,
+        ],
+    )
+    .await;
+    let refresh_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token"
+        })))
+        .expect(1)
+        .mount(&refresh_server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            base_url: Some(format!("{}/v1", model_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    write_models_cache(codex_home.path())?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("old-access-token")
+            .refresh_token("old-refresh-token")
+            .account_id(WORKSPACE_ID_INITIAL)
+            .chatgpt_account_id(WORKSPACE_ID_INITIAL)
+            .email("user@example.com")
+            .plan_type("pro")
+            .last_refresh(Some(Utc::now())),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let refresh_url = format!("{}/oauth/token", refresh_server.uri());
+    let mut mcp = TestAppServer::new_with_env(
+        codex_home.path(),
+        &[
+            ("OPENAI_API_KEY", None),
+            (
+                REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+                Some(refresh_url.as_str()),
+            ),
+        ],
+    )
+    .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    assert!(codex_home.path().join("secrets/codex_auth.age").exists());
+    assert!(
+        codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+            .is_some()
+    );
+
+    let thread_id = start_mock_model_thread(&mut mcp).await?;
+    complete_text_turn(&mut mcp, &thread_id, "Use the old token").await?;
+
+    let request_id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: true,
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let _: GetAccountResponse = to_response(response)?;
+    let persisted_auth =
+        codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+            .expect("refresh should preserve managed auth");
+    let persisted_tokens = persisted_auth
+        .tokens
+        .expect("refresh should preserve ChatGPT tokens");
+    assert_eq!(persisted_tokens.access_token, "new-access-token");
+    assert_eq!(persisted_tokens.refresh_token, "new-refresh-token");
+    assert!(codex_home.path().join("secrets/codex_auth.age").exists());
+
+    complete_text_turn(&mut mcp, &thread_id, "Use the refreshed token").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer old-access-token".to_string())
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some("Bearer new-access-token".to_string())
+    );
+    assert_eq!(
+        requests[0].header("x-codex-window-id"),
+        requests[1].header("x-codex-window-id")
+    );
+    refresh_server.verify().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
     let mock_server = MockServer::start().await;
     let response_mock = responses::mount_sse_sequence(
@@ -1343,11 +1450,19 @@ async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
         },
     )?;
     write_models_cache(codex_home.path())?;
+    let fallback = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        "sk-fallback".to_string(),
+        Some("fallback".to_string()),
+        /*make_active*/ false,
+    )?;
     login_with_api_key(codex_home.path(), "sk-old", AuthCredentialsStoreMode::File)?;
 
     let mut mcp =
         TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    assert!(codex_home.path().join("secrets/codex_auth.age").exists());
 
     let thread_id = start_mock_model_thread(&mut mcp).await?;
     complete_text_turn(&mut mcp, &thread_id, "Use logged in auth").await?;
@@ -1365,6 +1480,16 @@ async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
     )
     .await??;
 
+    assert!(!codex_home.path().join("auth.json").exists());
+    assert_eq!(
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)?,
+        None
+    );
+    let accounts = codex_login::list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, fallback.id);
+    assert!(codex_home.path().join("secrets/codex_auth.age").exists());
+
     run_text_turn(&mut mcp, &thread_id, "Use logged out auth").await?;
 
     let requests = response_mock.requests();
@@ -1373,13 +1498,44 @@ async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
         requests[0].header("authorization"),
         Some("Bearer sk-old".to_string())
     );
-    assert_ne!(
-        requests[1].header("authorization"),
-        Some("Bearer sk-old".to_string())
-    );
-    assert_ne!(
+    assert_eq!(requests[1].header("authorization"), None);
+    assert_eq!(
         requests[0].header("x-codex-window-id"),
         requests[1].header("x-codex-window-id")
+    );
+
+    drop(mcp);
+    let mut restarted =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, restarted.initialize()).await??;
+    let account_request_id = restarted
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let account_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        restarted.read_stream_until_response_message(RequestId::Integer(account_request_id)),
+    )
+    .await??;
+    assert_eq!(
+        to_response::<GetAccountResponse>(account_response)?,
+        GetAccountResponse {
+            account: None,
+            requires_openai_auth: true,
+        }
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)?,
+        None
+    );
+    assert_eq!(
+        codex_login::list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?,
+        vec![fallback]
+    );
+    assert_eq!(
+        codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?,
+        None
     );
 
     Ok(())

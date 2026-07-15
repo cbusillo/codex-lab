@@ -85,10 +85,33 @@ fn test_model_client_with_base_url(
     parent_thread_id: Option<ThreadId>,
     base_url: &str,
 ) -> ModelClient {
+    test_model_client_with_base_url_and_auth_manager(
+        session_source,
+        parent_thread_id,
+        base_url,
+        /*auth_manager*/ None,
+    )
+}
+
+fn test_model_client_with_auth_manager(auth_manager: Arc<AuthManager>) -> ModelClient {
+    test_model_client_with_base_url_and_auth_manager(
+        SessionSource::Exec,
+        /*parent_thread_id*/ None,
+        "https://example.com/v1",
+        Some(auth_manager),
+    )
+}
+
+fn test_model_client_with_base_url_and_auth_manager(
+    session_source: SessionSource,
+    parent_thread_id: Option<ThreadId>,
+    base_url: &str,
+    auth_manager: Option<Arc<AuthManager>>,
+) -> ModelClient {
     let provider = create_oss_provider_with_base_url(base_url, WireApi::Responses);
     let thread_id = ThreadId::new();
     ModelClient::new(
-        /*auth_manager*/ None,
+        auth_manager,
         thread_id.into(),
         thread_id,
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
@@ -340,6 +363,59 @@ fn build_ws_client_metadata_includes_window_lineage_and_turn_metadata() {
             ),
         ])
     );
+}
+
+#[tokio::test]
+async fn advancing_window_generation_resets_websocket_and_preserves_turn_state() {
+    let client = test_model_client(SessionSource::Exec);
+    let mut session = client.new_session();
+    session.websocket_session.model_slug = Some("stale-model".to_string());
+    assert!(
+        session
+            .turn_state
+            .set("stale-turn-state".to_string())
+            .is_ok()
+    );
+
+    client.advance_window_generation();
+    session
+        .preconnect_websocket(&test_session_telemetry(), &test_model_info())
+        .await
+        .expect("generation sync should not require a WebSocket connection");
+    assert_eq!(session.websocket_session.model_slug, None);
+    assert_eq!(
+        session.turn_state.get().map(String::as_str),
+        Some("stale-turn-state")
+    );
+    drop(session);
+
+    let (cached, _) = client.take_cached_websocket_session();
+    assert_eq!(cached.model_slug, None);
+}
+
+#[tokio::test]
+async fn auth_revision_resets_checked_out_websocket_and_turn_state() {
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-old"));
+    let client = test_model_client_with_auth_manager(Arc::clone(&auth_manager));
+    let window_id = client.current_window_id();
+    let mut session = client.new_session();
+    session.websocket_session.model_slug = Some("stale-model".to_string());
+    assert!(
+        session
+            .turn_state
+            .set("stale-turn-state".to_string())
+            .is_ok()
+    );
+
+    auth_manager.reload().await;
+    session
+        .preconnect_websocket(&test_session_telemetry(), &test_model_info())
+        .await
+        .expect("auth sync should not require a WebSocket connection");
+
+    assert_eq!(session.websocket_session.model_slug, None);
+    assert_eq!(session.turn_state.get(), None);
+    assert_eq!(client.current_window_id(), window_id);
 }
 
 #[tokio::test]
