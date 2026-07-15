@@ -96,11 +96,6 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL
     }
 
-    /// Returns whether requests made through this provider should include attestation.
-    fn supports_attestation(&self) -> bool {
-        false
-    }
-
     /// Returns the provider-scoped auth manager, when this provider uses one.
     ///
     /// TODO(celia-oai): Make auth manager access internal to this crate so callers
@@ -111,6 +106,13 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
 
     /// Returns the current provider-scoped auth value, if one is configured.
     async fn auth(&self) -> Option<CodexAuth>;
+
+    async fn auth_with_revision(&self) -> (Option<CodexAuth>, u64) {
+        match self.auth_manager() {
+            Some(auth_manager) => auth_manager.auth_with_revision().await,
+            None => (self.auth().await, 0),
+        }
+    }
 
     /// Returns the current app-visible account state for this provider.
     fn account_state(&self) -> ProviderAccountResult;
@@ -131,6 +133,20 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     async fn api_auth(&self) -> codex_protocol::error::Result<SharedAuthProvider> {
         let auth = self.auth().await;
         resolve_provider_auth(auth.as_ref(), self.info())
+    }
+
+    async fn api_provider_for_auth(
+        &self,
+        _auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<Provider> {
+        self.api_provider().await
+    }
+
+    async fn api_auth_for_auth(
+        &self,
+        _auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<SharedAuthProvider> {
+        self.api_auth().await
     }
 
     /// Creates the model manager implementation appropriate for this provider.
@@ -183,18 +199,25 @@ impl ModelProvider for ConfiguredModelProvider {
         self.auth_manager.clone()
     }
 
-    fn supports_attestation(&self) -> bool {
-        self.auth_manager
-            .as_ref()
-            .and_then(|auth_manager| auth_manager.auth_cached())
-            .is_some_and(|auth| auth.is_chatgpt_auth())
-    }
-
     async fn auth(&self) -> Option<CodexAuth> {
         match self.auth_manager.as_ref() {
             Some(auth_manager) => auth_manager.auth().await,
             None => None,
         }
+    }
+
+    async fn api_provider_for_auth(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<Provider> {
+        self.info.to_api_provider(auth.map(CodexAuth::auth_mode))
+    }
+
+    async fn api_auth_for_auth(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<SharedAuthProvider> {
+        resolve_provider_auth(auth, &self.info)
     }
 
     fn account_state(&self) -> ProviderAccountResult {

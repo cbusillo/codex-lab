@@ -155,6 +155,7 @@ const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
+const MAX_CLIENT_SETUP_ATTEMPTS: usize = 3;
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
@@ -189,7 +190,6 @@ struct ModelClientState {
     enable_request_compression: bool,
     include_timing_metrics: bool,
     beta_features_header: Option<String>,
-    include_attestation: bool,
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     disable_websockets: AtomicBool,
     cached_websocket_session: StdMutex<WebsocketSession>,
@@ -203,6 +203,7 @@ struct CurrentClientSetup {
     auth: Option<CodexAuth>,
     api_provider: ApiProvider,
     api_auth: SharedAuthProvider,
+    attestation_header: Option<HeaderValue>,
     auth_revision: u64,
 }
 
@@ -357,7 +358,6 @@ impl ModelClient {
             .is_some_and(|manager| manager.codex_api_key_env_enabled());
         let auth_env_telemetry =
             collect_auth_env_telemetry(model_provider.info(), codex_api_key_env_enabled);
-        let include_attestation = model_provider.supports_attestation();
         let auth_revision = model_provider
             .auth_manager()
             .as_ref()
@@ -377,7 +377,6 @@ impl ModelClient {
                 enable_request_compression,
                 include_timing_metrics,
                 beta_features_header,
-                include_attestation,
                 attestation_provider,
                 disable_websockets: AtomicBool::new(false),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
@@ -559,7 +558,9 @@ impl ModelClient {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
-        let client_setup = self.current_client_setup().await?;
+        let client_setup = self
+            .current_client_setup(/*generate_attestation*/ true)
+            .await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
@@ -621,7 +622,7 @@ impl ModelClient {
             Some(self.state.session_id.to_string()),
             Some(self.state.thread_id.to_string()),
         ));
-        if let Some(header_value) = self.generate_attestation_header_for().await {
+        if let Some(header_value) = client_setup.attestation_header.clone() {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
         add_responses_lite_header(&mut extra_headers, model_info.use_responses_lite);
@@ -649,8 +650,10 @@ impl ModelClient {
     ) -> Result<RealtimeWebrtcCallStart> {
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
-        let client_setup = self.current_client_setup().await?;
-        if let Some(header_value) = self.generate_attestation_header_for().await {
+        let client_setup = self
+            .current_client_setup(/*generate_attestation*/ true)
+            .await?;
+        if let Some(header_value) = client_setup.attestation_header.clone() {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
         let mut sideband_headers = extra_headers.clone();
@@ -687,7 +690,9 @@ impl ModelClient {
             return Ok(Vec::new());
         }
 
-        let client_setup = self.current_client_setup().await?;
+        let client_setup = self
+            .current_client_setup(/*generate_attestation*/ false)
+            .await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
@@ -796,8 +801,11 @@ impl ModelClient {
         client_metadata
     }
 
-    async fn generate_attestation_header_for(&self) -> Option<HeaderValue> {
-        if !self.state.include_attestation {
+    async fn generate_attestation_header_for(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> Option<HeaderValue> {
+        if !auth.is_some_and(CodexAuth::is_chatgpt_auth) {
             return None;
         }
 
@@ -947,21 +955,31 @@ impl ModelClient {
     ///
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
-    async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
-        loop {
-            let auth_revision = self.current_auth_revision();
-            let auth = self.state.provider.auth().await;
-            let api_provider = self.state.provider.api_provider().await?;
-            let api_auth = self.state.provider.api_auth().await?;
+    async fn current_client_setup(&self, generate_attestation: bool) -> Result<CurrentClientSetup> {
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
+            let (auth, auth_revision) = self.state.provider.auth_with_revision().await;
+            let api_provider = self
+                .state
+                .provider
+                .api_provider_for_auth(auth.as_ref())
+                .await?;
+            let api_auth = self.state.provider.api_auth_for_auth(auth.as_ref()).await?;
+            let attestation_header = if generate_attestation {
+                self.generate_attestation_header_for(auth.as_ref()).await
+            } else {
+                None
+            };
             if self.current_auth_revision() == auth_revision {
                 return Ok(CurrentClientSetup {
                     auth,
                     api_provider,
                     api_auth,
+                    attestation_header,
                     auth_revision,
                 });
             }
         }
+        Err(CodexErr::Fatal("authentication changed repeatedly".into()))
     }
 
     /// Opens a websocket connection using the same header and telemetry wiring as normal turns.
@@ -974,15 +992,19 @@ impl ModelClient {
         session_telemetry: &SessionTelemetry,
         api_provider: codex_api::Provider,
         api_auth: SharedAuthProvider,
+        attestation_header: Option<HeaderValue>,
         model_slug: &str,
         turn_state: Option<Arc<OnceLock<String>>>,
         turn_metadata_header: Option<&str>,
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
-        let headers = self
-            .build_websocket_headers(model_slug, turn_state.as_ref(), turn_metadata_header)
-            .await;
+        let headers = self.build_websocket_headers(
+            model_slug,
+            turn_state.as_ref(),
+            turn_metadata_header,
+            attestation_header,
+        );
         let websocket_telemetry = ModelClientSession::build_websocket_telemetry(
             session_telemetry,
             auth_context,
@@ -1059,11 +1081,12 @@ impl ModelClient {
     ///
     /// Callers should pass the current turn-state lock when available so sticky-routing state is
     /// replayed on reconnect within the same turn.
-    async fn build_websocket_headers(
+    fn build_websocket_headers(
         &self,
         model_slug: &str,
         turn_state: Option<&Arc<OnceLock<String>>>,
         turn_metadata_header: Option<&str>,
+        attestation_header: Option<HeaderValue>,
     ) -> ApiHeaderMap {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let session_id = self.state.session_id.to_string();
@@ -1081,7 +1104,7 @@ impl ModelClient {
         headers.extend(codex_login::default_client::requested_model_headers(
             model_slug,
         ));
-        if let Some(header_value) = self.generate_attestation_header_for().await {
+        if let Some(header_value) = attestation_header {
             headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
         headers.insert(
@@ -1127,13 +1150,17 @@ impl ModelClientSession {
     }
 
     async fn current_stable_client_setup(&mut self) -> Result<CurrentClientSetup> {
-        loop {
-            let client_setup = self.client.current_client_setup().await?;
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
+            let client_setup = self
+                .client
+                .current_client_setup(/*generate_attestation*/ true)
+                .await?;
             self.sync_session_epoch();
             if self.auth_revision == client_setup.auth_revision {
                 return Ok(client_setup);
             }
         }
+        Err(CodexErr::Fatal("authentication changed repeatedly".into()))
     }
 
     fn reset_websocket_session(&mut self) {
@@ -1151,12 +1178,13 @@ impl ModelClientSession {
     ///
     /// Keeping option construction in one place ensures request-scoped headers are consistent
     /// regardless of transport choice.
-    async fn build_responses_options(
+    fn build_responses_options(
         &self,
         model_slug: &str,
         turn_metadata_header: Option<&str>,
         compression: Compression,
         use_responses_lite: bool,
+        attestation_header: Option<&HeaderValue>,
     ) -> ApiResponsesOptions {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let session_id = self.client.state.session_id.to_string();
@@ -1175,8 +1203,8 @@ impl ModelClientSession {
                 headers.extend(codex_login::default_client::requested_model_headers(
                     model_slug,
                 ));
-                if let Some(header_value) = self.client.generate_attestation_header_for().await {
-                    headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+                if let Some(header_value) = attestation_header {
+                    headers.insert(X_OAI_ATTESTATION_HEADER, header_value.clone());
                 }
                 add_responses_lite_header(&mut headers, use_responses_lite);
                 headers
@@ -1323,6 +1351,7 @@ impl ModelClientSession {
                     session_telemetry,
                     client_setup.api_provider,
                     client_setup.api_auth,
+                    client_setup.attestation_header,
                     &model_info.slug,
                     Some(Arc::clone(&self.turn_state)),
                     /*turn_metadata_header*/ None,
@@ -1390,6 +1419,7 @@ impl ModelClientSession {
                     session_telemetry,
                     api_provider,
                     api_auth,
+                    options.extra_headers.get(X_OAI_ATTESTATION_HEADER).cloned(),
                     model_slug,
                     Some(turn_state),
                     turn_metadata_header,
@@ -1483,14 +1513,13 @@ impl ModelClientSession {
                 self.client.state.auth_env_telemetry.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
-            let mut options = self
-                .build_responses_options(
-                    &model_info.slug,
-                    turn_metadata_header,
-                    compression,
-                    model_info.use_responses_lite,
-                )
-                .await;
+            let mut options = self.build_responses_options(
+                &model_info.slug,
+                turn_metadata_header,
+                compression,
+                model_info.use_responses_lite,
+                client_setup.attestation_header.as_ref(),
+            );
 
             let mut request = self.client.build_responses_request(
                 &client_setup.api_provider,
@@ -1605,14 +1634,13 @@ impl ModelClientSession {
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
 
-            let options = self
-                .build_responses_options(
-                    &model_info.slug,
-                    turn_metadata_header,
-                    compression,
-                    model_info.use_responses_lite,
-                )
-                .await;
+            let options = self.build_responses_options(
+                &model_info.slug,
+                turn_metadata_header,
+                compression,
+                model_info.use_responses_lite,
+                client_setup.attestation_header.as_ref(),
+            );
             let mut request = self.client.build_responses_request(
                 &client_setup.api_provider,
                 prompt,

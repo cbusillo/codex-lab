@@ -995,11 +995,7 @@ impl AccountRequestProcessor {
         if self.auth_manager.is_external_chatgpt_auth_active() {
             return RefreshTokenRequestOutcome::NotAttemptedOrSucceeded;
         }
-        if !do_refresh {
-            return RefreshTokenRequestOutcome::NotAttemptedOrSucceeded;
-        }
-
-        if let Err(err) = self.auth_manager.refresh_token().await {
+        if do_refresh && let Err(err) = self.auth_manager.refresh_token().await {
             let failed_reason = err.failed_reason();
             if failed_reason.is_none() {
                 tracing::warn!("failed to refresh token while getting account: {err}");

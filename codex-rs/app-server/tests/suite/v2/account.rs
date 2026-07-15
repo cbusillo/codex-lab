@@ -1317,6 +1317,10 @@ async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> 
         requests[1].header("authorization"),
         Some("Bearer sk-new".to_string())
     );
+    assert_eq!(
+        requests[0].header("x-codex-window-id"),
+        requests[1].header("x-codex-window-id")
+    );
 
     Ok(())
 }
@@ -1615,6 +1619,10 @@ async fn switch_active_account_refreshes_auth_for_loaded_thread() -> Result<()> 
     assert_eq!(
         requests[1].header("authorization"),
         Some("Bearer sk-second".to_string())
+    );
+    assert_eq!(
+        requests[0].header("x-codex-window-id"),
+        requests[1].header("x-codex-window-id")
     );
 
     Ok(())
@@ -1943,6 +1951,10 @@ async fn remove_active_account_refreshes_fallback_auth_for_loaded_thread() -> Re
     assert_eq!(
         requests[1].header("authorization"),
         Some("Bearer sk-fallback".to_string())
+    );
+    assert_eq!(
+        requests[0].header("x-codex-window-id"),
+        requests[1].header("x-codex-window-id")
     );
 
     Ok(())
