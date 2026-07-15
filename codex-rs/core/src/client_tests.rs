@@ -366,14 +366,12 @@ fn advancing_window_generation_resets_websocket_and_preserves_turn_state() {
         .turn_state
         .set("stale-turn-state".to_string())
         .expect("turn state should be empty");
-
     client.advance_window_generation();
     session.sync_session_epoch();
     assert_eq!(session.websocket_session.model_slug, None);
     let turn_state = session.turn_state.get().map(String::as_str);
     assert_eq!(turn_state, Some("stale-turn-state"));
     drop(session);
-
     let (cached, _) = client.take_cached_websocket_session();
     assert_eq!(cached.model_slug, None);
 }
@@ -389,13 +387,11 @@ async fn auth_revision_resets_checked_out_websocket_and_turn_state() {
         .turn_state
         .set("stale-turn-state".to_string())
         .expect("turn state should be empty");
-
     auth_manager.reload().await;
     session.sync_session_epoch();
     assert_eq!(session.websocket_session.model_slug, None);
     assert_eq!(session.turn_state.get(), None);
     assert_eq!(client.current_window_id(), window_id);
-
     session.websocket_session.model_slug = Some("current-model".to_string());
     session
         .turn_state
@@ -722,14 +718,12 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() 
         .current_client_setup(/*generate_attestation*/ true)
         .await
         .expect("ChatGPT setup should resolve");
-
     let headers = model_client.build_websocket_headers(
         "gpt-5.6-luna",
         /*turn_state*/ None,
         /*turn_metadata_header*/ None,
         client_setup.attestation_header,
     );
-
     assert_eq!(
         headers
             .get(crate::attestation::X_OAI_ATTESTATION_HEADER)
@@ -741,7 +735,6 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() 
         headers.get("version").and_then(|value| value.to_str().ok()),
         Some("0.144.0")
     );
-
     auth_manager
         .expect("ChatGPT setup should use an auth manager")
         .reload()

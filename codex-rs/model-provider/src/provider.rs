@@ -205,13 +205,10 @@ impl ModelProvider for ConfiguredModelProvider {
     }
 
     fn supports_attestation(&self) -> bool {
-        self.info.env_key.is_none()
-            && self.info.experimental_bearer_token.is_none()
-            && self
-                .auth_manager
-                .as_ref()
-                .and_then(|auth_manager| auth_manager.auth_cached())
-                .is_some_and(|auth| auth.is_chatgpt_auth())
+        self.auth_manager
+            .as_ref()
+            .and_then(|auth_manager| auth_manager.auth_cached())
+            .is_some_and(|auth| auth.is_chatgpt_auth())
     }
 
     async fn auth(&self) -> Option<CodexAuth> {
@@ -634,7 +631,7 @@ mod tests {
                 CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             )),
         );
-        assert!(!provider.supports_attestation());
+        assert!(provider.auth_manager().is_none() && !provider.supports_attestation());
 
         let manager =
             provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);

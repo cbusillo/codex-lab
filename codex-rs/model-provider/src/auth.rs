@@ -70,6 +70,7 @@ pub(crate) fn auth_manager_for_provider(
     provider: &ModelProviderInfo,
 ) -> Option<Arc<AuthManager>> {
     match provider.auth.clone() {
+        _ if provider.env_key.is_some() || provider.experimental_bearer_token.is_some() => None,
         Some(config) => Some(AuthManager::external_bearer_only(config)),
         None => auth_manager,
     }
