@@ -31,7 +31,7 @@ const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 /// this endpoint only when it decides a remote refresh should happen.
 #[async_trait]
 pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
-    /// Returns whether this provider can authenticate command-scoped requests.
+    /// Returns whether this provider owns credentials for remote model requests.
     fn has_command_auth(&self) -> bool;
 
     /// Returns whether the currently resolved auth can use Codex backend-only models.

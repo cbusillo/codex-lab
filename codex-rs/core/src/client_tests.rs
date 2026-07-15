@@ -77,18 +77,24 @@ fn test_model_client_with_parent(
     session_source: SessionSource,
     parent_thread_id: Option<ThreadId>,
 ) -> ModelClient {
-    test_model_client_with_base_url(session_source, parent_thread_id, "https://example.com/v1")
+    test_model_client_with_base_url(
+        session_source,
+        parent_thread_id,
+        "https://example.com/v1",
+        /*auth_manager*/ None,
+    )
 }
 
 fn test_model_client_with_base_url(
     session_source: SessionSource,
     parent_thread_id: Option<ThreadId>,
     base_url: &str,
+    auth_manager: Option<Arc<AuthManager>>,
 ) -> ModelClient {
     let provider = create_oss_provider_with_base_url(base_url, WireApi::Responses);
     let thread_id = ThreadId::new();
     ModelClient::new(
-        /*auth_manager*/ None,
+        auth_manager,
         thread_id.into(),
         thread_id,
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
@@ -100,6 +106,15 @@ fn test_model_client_with_base_url(
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
         /*attestation_provider*/ None,
+    )
+}
+
+fn test_model_client_with_auth_manager(auth_manager: Arc<AuthManager>) -> ModelClient {
+    test_model_client_with_base_url(
+        SessionSource::Exec,
+        /*parent_thread_id*/ None,
+        "https://example.com/v1",
+        Some(auth_manager),
     )
 }
 
@@ -342,6 +357,68 @@ fn build_ws_client_metadata_includes_window_lineage_and_turn_metadata() {
     );
 }
 
+#[test]
+fn advancing_window_generation_resets_websocket_and_preserves_turn_state() {
+    let client = test_model_client(SessionSource::Exec);
+    let mut session = client.new_session();
+    session.websocket_session.model_slug = Some("stale-model".to_string());
+    session
+        .turn_state
+        .set("stale-turn-state".to_string())
+        .expect("turn state should be empty");
+    client.advance_window_generation();
+    session.sync_session_epoch();
+    assert_eq!(session.websocket_session.model_slug, None);
+    let turn_state = session.turn_state.get().map(String::as_str);
+    assert_eq!(turn_state, Some("stale-turn-state"));
+    drop(session);
+    let (cached, _) = client.take_cached_websocket_session();
+    assert_eq!(cached.model_slug, None);
+}
+
+#[tokio::test]
+async fn auth_revision_resets_checked_out_websocket_and_turn_state() {
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-old"));
+    let client = test_model_client_with_auth_manager(Arc::clone(&auth_manager));
+    let window_id = client.current_window_id();
+    let mut session = client.new_session();
+    session.websocket_session.model_slug = Some("stale-model".to_string());
+    session
+        .turn_state
+        .set("stale-turn-state".to_string())
+        .expect("turn state should be empty");
+    auth_manager.reload().await;
+    session.sync_session_epoch();
+    assert_eq!(session.websocket_session.model_slug, None);
+    assert_eq!(session.turn_state.get(), None);
+    assert_eq!(client.current_window_id(), window_id);
+    session.websocket_session.model_slug = Some("current-model".to_string());
+    session
+        .turn_state
+        .set("current-turn-state".to_string())
+        .expect("cleared turn state should be empty");
+    auth_manager.reload().await;
+    session.sync_session_epoch();
+    assert_eq!(
+        session.websocket_session.model_slug.as_deref(),
+        Some("current-model")
+    );
+    let turn_state = session.turn_state.get().map(String::as_str);
+    assert_eq!(turn_state, Some("current-turn-state"));
+}
+
+#[tokio::test]
+async fn auth_revision_clears_cached_websocket_session() {
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-old"));
+    let client = test_model_client_with_auth_manager(Arc::clone(&auth_manager));
+    let mut session = client.new_session();
+    session.websocket_session.model_slug = Some("stale-model".to_string());
+    drop(session);
+    auth_manager.reload().await;
+    let session = client.new_session();
+    assert_eq!(session.websocket_session.model_slug, None);
+}
+
 #[tokio::test]
 async fn summarize_memories_returns_empty_for_empty_input() {
     let client = test_model_client(SessionSource::Cli);
@@ -372,6 +449,7 @@ async fn summarize_memories_maps_ultra_and_uses_model_headers() {
         SessionSource::Cli,
         /*parent_thread_id*/ None,
         &format!("{}/v1", server.uri()),
+        /*auth_manager*/ None,
     );
     let mut model_info = test_model_info();
     model_info.slug = "gpt-5.6-luna".to_string();
@@ -580,7 +658,7 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
 
 fn model_client_with_counting_attestation(
     include_attestation: bool,
-) -> (ModelClient, Arc<AtomicUsize>) {
+) -> (ModelClient, Option<Arc<AuthManager>>, Arc<AtomicUsize>) {
     #[derive(Debug)]
     struct CountingAttestationProvider {
         calls: Arc<AtomicUsize>,
@@ -614,7 +692,7 @@ fn model_client_with_counting_attestation(
         )
     };
     let model_client = ModelClient::new(
-        auth_manager,
+        auth_manager.clone(),
         SessionId::new(),
         ThreadId::new(),
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
@@ -629,22 +707,23 @@ fn model_client_with_counting_attestation(
             calls: attestation_calls.clone(),
         })),
     );
-    (model_client, attestation_calls)
+    (model_client, auth_manager, attestation_calls)
 }
 
 #[tokio::test]
 async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() {
-    let (model_client, attestation_calls) =
+    let (model_client, auth_manager, attestation_calls) =
         model_client_with_counting_attestation(/*include_attestation*/ true);
-
-    let headers = model_client
-        .build_websocket_headers(
-            "gpt-5.6-luna",
-            /*turn_state*/ None,
-            /*turn_metadata_header*/ None,
-        )
-        .await;
-
+    let client_setup = model_client
+        .current_client_setup(/*generate_attestation*/ true)
+        .await
+        .expect("ChatGPT setup should resolve");
+    let headers = model_client.build_websocket_headers(
+        "gpt-5.6-luna",
+        /*turn_state*/ None,
+        /*turn_metadata_header*/ None,
+        client_setup.attestation_header,
+    );
     assert_eq!(
         headers
             .get(crate::attestation::X_OAI_ATTESTATION_HEADER)
@@ -656,6 +735,16 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() 
         headers.get("version").and_then(|value| value.to_str().ok()),
         Some("0.144.0")
     );
+    auth_manager
+        .expect("ChatGPT setup should use an auth manager")
+        .reload()
+        .await;
+    let logged_out_setup = model_client
+        .current_client_setup(/*generate_attestation*/ true)
+        .await
+        .expect("logged-out setup should resolve");
+    assert_eq!(logged_out_setup.attestation_header, None);
+    assert_eq!(attestation_calls.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -672,19 +761,19 @@ fn ultra_reasoning_uses_max_for_requests() {
 
 #[tokio::test]
 async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
-    let (model_client, attestation_calls) =
+    let (model_client, _auth_manager, attestation_calls) =
         model_client_with_counting_attestation(/*include_attestation*/ false);
     let mut response_headers = http::HeaderMap::new();
 
-    if let Some(header_value) = model_client.generate_attestation_header_for().await {
+    if let Some(header_value) = model_client.generate_attestation_header_for(None).await {
         response_headers.insert(crate::attestation::X_OAI_ATTESTATION_HEADER, header_value);
     }
     let mut compaction_headers = http::HeaderMap::new();
-    if let Some(header_value) = model_client.generate_attestation_header_for().await {
+    if let Some(header_value) = model_client.generate_attestation_header_for(None).await {
         compaction_headers.insert(crate::attestation::X_OAI_ATTESTATION_HEADER, header_value);
     }
     let mut realtime_headers = http::HeaderMap::new();
-    if let Some(header_value) = model_client.generate_attestation_header_for().await {
+    if let Some(header_value) = model_client.generate_attestation_header_for(None).await {
         realtime_headers.insert(crate::attestation::X_OAI_ATTESTATION_HEADER, header_value);
     }
 

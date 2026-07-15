@@ -112,6 +112,13 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// Returns the current provider-scoped auth value, if one is configured.
     async fn auth(&self) -> Option<CodexAuth>;
 
+    async fn auth_with_revision(&self) -> (Option<CodexAuth>, u64) {
+        match self.auth_manager() {
+            Some(auth_manager) => auth_manager.auth_with_revision().await,
+            None => (self.auth().await, 0),
+        }
+    }
+
     /// Returns the current app-visible account state for this provider.
     fn account_state(&self) -> ProviderAccountResult;
 
@@ -131,6 +138,20 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     async fn api_auth(&self) -> codex_protocol::error::Result<SharedAuthProvider> {
         let auth = self.auth().await;
         resolve_provider_auth(auth.as_ref(), self.info())
+    }
+
+    async fn api_provider_for_auth(
+        &self,
+        _auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<Provider> {
+        self.api_provider().await
+    }
+
+    async fn api_auth_for_auth(
+        &self,
+        _auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<SharedAuthProvider> {
+        self.api_auth().await
     }
 
     /// Creates the model manager implementation appropriate for this provider.
@@ -195,6 +216,20 @@ impl ModelProvider for ConfiguredModelProvider {
             Some(auth_manager) => auth_manager.auth().await,
             None => None,
         }
+    }
+
+    async fn api_provider_for_auth(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<Provider> {
+        self.info.to_api_provider(auth.map(CodexAuth::auth_mode))
+    }
+
+    async fn api_auth_for_auth(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<SharedAuthProvider> {
+        resolve_provider_auth(auth, &self.info)
     }
 
     fn account_state(&self) -> ProviderAccountResult {
@@ -596,6 +631,7 @@ mod tests {
                 CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             )),
         );
+        assert!(provider.auth_manager().is_none() && !provider.supports_attestation());
 
         let manager =
             provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);

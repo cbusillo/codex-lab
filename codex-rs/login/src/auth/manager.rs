@@ -1556,6 +1556,7 @@ pub struct AuthManager {
     chatgpt_base_url: Option<String>,
     refresh_lock: Semaphore,
     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
+    external_api_key_token: RwLock<Option<String>>,
 }
 
 /// Configuration view required to construct a shared [`AuthManager`].
@@ -1632,6 +1633,7 @@ impl AuthManager {
             chatgpt_base_url,
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
+            external_api_key_token: RwLock::new(None),
         }
     }
 
@@ -1653,6 +1655,7 @@ impl AuthManager {
             chatgpt_base_url: None,
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
+            external_api_key_token: RwLock::new(None),
         })
     }
 
@@ -1673,6 +1676,7 @@ impl AuthManager {
             chatgpt_base_url: None,
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
+            external_api_key_token: RwLock::new(None),
         })
     }
 
@@ -1693,6 +1697,7 @@ impl AuthManager {
             external_auth: RwLock::new(Some(
                 Arc::new(BearerTokenRefresher::new(config)) as Arc<dyn ExternalAuth>
             )),
+            external_api_key_token: RwLock::new(None),
         })
     }
 
@@ -1710,6 +1715,10 @@ impl AuthManager {
         self.auth_change_tx.subscribe()
     }
 
+    pub fn auth_revision(&self) -> u64 {
+        *self.auth_change_tx.borrow()
+    }
+
     pub fn refresh_failure_for_auth(&self, auth: &CodexAuth) -> Option<RefreshTokenFailedError> {
         self.inner.read().ok().and_then(|cached| {
             cached
@@ -1724,18 +1733,24 @@ impl AuthManager {
     /// For managed ChatGPT auth that needs a proactive refresh, first performs
     /// a guarded reload and then refreshes only if the on-disk auth is unchanged.
     pub async fn auth(&self) -> Option<CodexAuth> {
-        if let Some(auth) = self.resolve_external_api_key_auth().await {
-            return Some(auth);
+        self.auth_with_revision().await.0
+    }
+
+    pub async fn auth_with_revision(&self) -> (Option<CodexAuth>, u64) {
+        if let Some((auth, revision)) = self.resolve_external_api_key_auth().await {
+            return (Some(auth), revision);
         }
 
-        let auth = self.auth_cached()?;
-        if Self::should_refresh_proactively(&auth)
+        let auth = self.auth_cached();
+        if auth.as_ref().is_some_and(Self::should_refresh_proactively)
             && let Err(err) = self.refresh_token().await
         {
             tracing::error!("Failed to refresh token: {}", err);
-            return Some(auth);
         }
-        self.auth_cached()
+        self.inner.read().map_or_else(
+            |_| (None, self.auth_revision()),
+            |cached| (cached.auth.clone(), self.auth_revision()),
+        )
     }
 
     /// Force a reload of the auth information from auth.json. Returns
@@ -1863,6 +1878,9 @@ impl AuthManager {
     }
 
     pub fn set_external_auth(&self, external_auth: Arc<dyn ExternalAuth>) {
+        if external_auth.auth_mode() != AuthMode::ApiKey {
+            self.set_external_api_key_token(None);
+        }
         if let Ok(mut guard) = self.external_auth.write() {
             *guard = Some(external_auth);
         }
@@ -1872,6 +1890,7 @@ impl AuthManager {
         if let Ok(mut guard) = self.external_auth.write() {
             *guard = None;
         }
+        self.set_external_api_key_token(None);
     }
 
     pub fn set_forced_chatgpt_workspace_id(&self, workspace_id: Option<Vec<String>>) {
@@ -1958,7 +1977,7 @@ impl AuthManager {
         self.external_auth_mode() == Some(AuthMode::ApiKey)
     }
 
-    async fn resolve_external_api_key_auth(&self) -> Option<CodexAuth> {
+    async fn resolve_external_api_key_auth(&self) -> Option<(CodexAuth, u64)> {
         if !self.has_external_api_key_auth() {
             return None;
         }
@@ -1966,13 +1985,32 @@ impl AuthManager {
         let external_auth = self.external_auth()?;
 
         match external_auth.resolve().await {
-            Ok(Some(tokens)) => Some(CodexAuth::from_api_key(&tokens.access_token)),
-            Ok(None) => None,
+            Ok(Some(tokens)) => {
+                let revision = self.set_external_api_key_token(Some(&tokens.access_token));
+                Some((CodexAuth::from_api_key(&tokens.access_token), revision))
+            }
+            Ok(None) => {
+                self.set_external_api_key_token(None);
+                None
+            }
             Err(err) => {
+                self.set_external_api_key_token(None);
                 tracing::error!("Failed to resolve external API key auth: {err}");
                 None
             }
         }
+    }
+
+    fn set_external_api_key_token(&self, token: Option<&str>) -> u64 {
+        let Ok(mut guard) = self.external_api_key_token.write() else {
+            return self.auth_revision();
+        };
+        let token = token.map(str::to_string);
+        if *guard != token {
+            *guard = token;
+            self.auth_change_tx.send_modify(|revision| *revision += 1);
+        }
+        self.auth_revision()
     }
 
     /// Attempt to refresh the token by first performing a guarded reload. Auth
@@ -2164,6 +2202,7 @@ impl AuthManager {
             .await
             .map_err(RefreshTokenError::Transient)?;
         if external_auth.auth_mode() == AuthMode::ApiKey {
+            self.set_external_api_key_token(Some(&refreshed.access_token));
             return Ok(());
         }
         let Some(chatgpt_metadata) = refreshed.chatgpt_metadata() else {

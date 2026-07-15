@@ -741,7 +741,7 @@ pub fn remove_account_matching_credentials(
             .as_ref()
             .is_some_and(|active| active == &removed.id)
     {
-        select_fallback_active_account(&mut data);
+        data.active_account_id = None;
     }
 
     write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;

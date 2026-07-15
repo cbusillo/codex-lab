@@ -155,6 +155,7 @@ const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
+const MAX_CLIENT_SETUP_ATTEMPTS: usize = 3;
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
@@ -179,6 +180,7 @@ struct ModelClientState {
     session_id: SessionId,
     thread_id: ThreadId,
     window_generation: AtomicU64,
+    auth_revision: AtomicU64,
     installation_id: String,
     provider: SharedModelProvider,
     auth_env_telemetry: AuthEnvTelemetry,
@@ -188,7 +190,6 @@ struct ModelClientState {
     enable_request_compression: bool,
     include_timing_metrics: bool,
     beta_features_header: Option<String>,
-    include_attestation: bool,
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     disable_websockets: AtomicBool,
     cached_websocket_session: StdMutex<WebsocketSession>,
@@ -202,6 +203,14 @@ struct CurrentClientSetup {
     auth: Option<CodexAuth>,
     api_provider: ApiProvider,
     api_auth: SharedAuthProvider,
+    attestation_header: Option<HeaderValue>,
+    auth_revision: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ModelClientSessionEpoch {
+    window_generation: u64,
+    auth_revision: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -248,6 +257,8 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    window_generation: u64,
+    auth_revision: u64,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -347,12 +358,16 @@ impl ModelClient {
             .is_some_and(|manager| manager.codex_api_key_env_enabled());
         let auth_env_telemetry =
             collect_auth_env_telemetry(model_provider.info(), codex_api_key_env_enabled);
-        let include_attestation = model_provider.supports_attestation();
+        let auth_revision = model_provider
+            .auth_manager()
+            .as_ref()
+            .map_or(0, |manager| manager.auth_revision());
         Self {
             state: Arc::new(ModelClientState {
                 session_id,
                 thread_id,
                 window_generation: AtomicU64::new(0),
+                auth_revision: AtomicU64::new(auth_revision),
                 installation_id,
                 provider: model_provider,
                 auth_env_telemetry,
@@ -362,7 +377,6 @@ impl ModelClient {
                 enable_request_compression,
                 include_timing_metrics,
                 beta_features_header,
-                include_attestation,
                 attestation_provider,
                 disable_websockets: AtomicBool::new(false),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
@@ -390,9 +404,12 @@ impl ModelClient {
     /// This constructor does not perform network I/O itself; the session opens a websocket lazily
     /// when the first stream request is issued.
     pub fn new_session(&self) -> ModelClientSession {
+        let (websocket_session, epoch) = self.take_cached_websocket_session();
         ModelClientSession {
             client: self.clone(),
-            websocket_session: self.take_cached_websocket_session(),
+            websocket_session,
+            window_generation: epoch.window_generation,
+            auth_revision: epoch.auth_revision,
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -402,15 +419,25 @@ impl ModelClient {
     }
 
     pub(crate) fn set_window_generation(&self, window_generation: u64) {
+        let mut cached_websocket_session = self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.state
             .window_generation
             .store(window_generation, Ordering::Relaxed);
-        self.store_cached_websocket_session(WebsocketSession::default());
+        *cached_websocket_session = WebsocketSession::default();
     }
 
     pub(crate) fn advance_window_generation(&self) {
+        let mut cached_websocket_session = self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.state.window_generation.fetch_add(1, Ordering::Relaxed);
-        self.store_cached_websocket_session(WebsocketSession::default());
+        *cached_websocket_session = WebsocketSession::default();
     }
 
     pub(crate) fn current_window_id(&self) -> String {
@@ -419,13 +446,50 @@ impl ModelClient {
         format!("{thread_id}:{window_generation}")
     }
 
-    fn take_cached_websocket_session(&self) -> WebsocketSession {
+    fn current_auth_revision(&self) -> u64 {
+        self.state
+            .provider
+            .auth_manager()
+            .as_ref()
+            .map_or(0, |manager| manager.auth_revision())
+    }
+
+    fn sync_auth_revision_locked(&self, cached_websocket_session: &mut WebsocketSession) -> u64 {
+        let auth_revision = self.current_auth_revision();
+        if self.state.auth_revision.load(Ordering::Relaxed) != auth_revision {
+            self.state
+                .auth_revision
+                .store(auth_revision, Ordering::Relaxed);
+            *cached_websocket_session = WebsocketSession::default();
+        }
+        auth_revision
+    }
+
+    fn take_cached_websocket_session(&self) -> (WebsocketSession, ModelClientSessionEpoch) {
         let mut cached_websocket_session = self
             .state
             .cached_websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::mem::take(&mut *cached_websocket_session)
+        let auth_revision = self.sync_auth_revision_locked(&mut cached_websocket_session);
+        let epoch = ModelClientSessionEpoch {
+            window_generation: self.state.window_generation.load(Ordering::Relaxed),
+            auth_revision,
+        };
+        (std::mem::take(&mut *cached_websocket_session), epoch)
+    }
+
+    fn current_session_epoch(&self) -> ModelClientSessionEpoch {
+        let mut cached_websocket_session = self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let auth_revision = self.sync_auth_revision_locked(&mut cached_websocket_session);
+        ModelClientSessionEpoch {
+            window_generation: self.state.window_generation.load(Ordering::Relaxed),
+            auth_revision,
+        }
     }
 
     fn store_cached_websocket_session(&self, websocket_session: WebsocketSession) {
@@ -434,6 +498,24 @@ impl ModelClient {
             .cached_websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = websocket_session;
+    }
+
+    fn store_cached_websocket_session_for_epoch(
+        &self,
+        epoch: ModelClientSessionEpoch,
+        websocket_session: WebsocketSession,
+    ) {
+        let mut cached_websocket_session = self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let auth_revision = self.sync_auth_revision_locked(&mut cached_websocket_session);
+        if self.state.window_generation.load(Ordering::Relaxed) == epoch.window_generation
+            && auth_revision == epoch.auth_revision
+        {
+            *cached_websocket_session = websocket_session;
+        }
     }
 
     pub(crate) fn force_http_fallback(
@@ -476,7 +558,9 @@ impl ModelClient {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
-        let client_setup = self.current_client_setup().await?;
+        let client_setup = self
+            .current_client_setup(/*generate_attestation*/ true)
+            .await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
@@ -538,7 +622,7 @@ impl ModelClient {
             Some(self.state.session_id.to_string()),
             Some(self.state.thread_id.to_string()),
         ));
-        if let Some(header_value) = self.generate_attestation_header_for().await {
+        if let Some(header_value) = client_setup.attestation_header.clone() {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
         add_responses_lite_header(&mut extra_headers, model_info.use_responses_lite);
@@ -566,8 +650,10 @@ impl ModelClient {
     ) -> Result<RealtimeWebrtcCallStart> {
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
-        let client_setup = self.current_client_setup().await?;
-        if let Some(header_value) = self.generate_attestation_header_for().await {
+        let client_setup = self
+            .current_client_setup(/*generate_attestation*/ true)
+            .await?;
+        if let Some(header_value) = client_setup.attestation_header.clone() {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
         let mut sideband_headers = extra_headers.clone();
@@ -604,7 +690,9 @@ impl ModelClient {
             return Ok(Vec::new());
         }
 
-        let client_setup = self.current_client_setup().await?;
+        let client_setup = self
+            .current_client_setup(/*generate_attestation*/ false)
+            .await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
@@ -713,8 +801,11 @@ impl ModelClient {
         client_metadata
     }
 
-    async fn generate_attestation_header_for(&self) -> Option<HeaderValue> {
-        if !self.state.include_attestation {
+    async fn generate_attestation_header_for(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> Option<HeaderValue> {
+        if !auth.is_some_and(CodexAuth::is_chatgpt_auth) {
             return None;
         }
 
@@ -864,15 +955,32 @@ impl ModelClient {
     ///
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
-    async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
-        let auth = self.state.provider.auth().await;
-        let api_provider = self.state.provider.api_provider().await?;
-        let api_auth = self.state.provider.api_auth().await?;
-        Ok(CurrentClientSetup {
-            auth,
-            api_provider,
-            api_auth,
-        })
+    async fn current_client_setup(&self, generate_attestation: bool) -> Result<CurrentClientSetup> {
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
+            let (auth, auth_revision) = self.state.provider.auth_with_revision().await;
+            let api_provider = self
+                .state
+                .provider
+                .api_provider_for_auth(auth.as_ref())
+                .await?;
+            let api_auth = self.state.provider.api_auth_for_auth(auth.as_ref()).await?;
+            let attestation_header =
+                if generate_attestation && self.state.provider.supports_attestation() {
+                    self.generate_attestation_header_for(auth.as_ref()).await
+                } else {
+                    None
+                };
+            if self.current_auth_revision() == auth_revision {
+                return Ok(CurrentClientSetup {
+                    auth,
+                    api_provider,
+                    api_auth,
+                    attestation_header,
+                    auth_revision,
+                });
+            }
+        }
+        Err(CodexErr::Fatal("authentication changed repeatedly".into()))
     }
 
     /// Opens a websocket connection using the same header and telemetry wiring as normal turns.
@@ -885,15 +993,19 @@ impl ModelClient {
         session_telemetry: &SessionTelemetry,
         api_provider: codex_api::Provider,
         api_auth: SharedAuthProvider,
+        attestation_header: Option<HeaderValue>,
         model_slug: &str,
         turn_state: Option<Arc<OnceLock<String>>>,
         turn_metadata_header: Option<&str>,
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
-        let headers = self
-            .build_websocket_headers(model_slug, turn_state.as_ref(), turn_metadata_header)
-            .await;
+        let headers = self.build_websocket_headers(
+            model_slug,
+            turn_state.as_ref(),
+            turn_metadata_header,
+            attestation_header,
+        );
         let websocket_telemetry = ModelClientSession::build_websocket_telemetry(
             session_telemetry,
             auth_context,
@@ -970,11 +1082,12 @@ impl ModelClient {
     ///
     /// Callers should pass the current turn-state lock when available so sticky-routing state is
     /// replayed on reconnect within the same turn.
-    async fn build_websocket_headers(
+    fn build_websocket_headers(
         &self,
         model_slug: &str,
         turn_state: Option<&Arc<OnceLock<String>>>,
         turn_metadata_header: Option<&str>,
+        attestation_header: Option<HeaderValue>,
     ) -> ApiHeaderMap {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let session_id = self.state.session_id.to_string();
@@ -992,7 +1105,7 @@ impl ModelClient {
         headers.extend(codex_login::default_client::requested_model_headers(
             model_slug,
         ));
-        if let Some(header_value) = self.generate_attestation_header_for().await {
+        if let Some(header_value) = attestation_header {
             headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
         headers.insert(
@@ -1012,12 +1125,45 @@ impl ModelClient {
 impl Drop for ModelClientSession {
     fn drop(&mut self) {
         let websocket_session = std::mem::take(&mut self.websocket_session);
-        self.client
-            .store_cached_websocket_session(websocket_session);
+        self.client.store_cached_websocket_session_for_epoch(
+            ModelClientSessionEpoch {
+                window_generation: self.window_generation,
+                auth_revision: self.auth_revision,
+            },
+            websocket_session,
+        );
     }
 }
 
 impl ModelClientSession {
+    fn sync_session_epoch(&mut self) {
+        let epoch = self.client.current_session_epoch();
+        let window_changed = self.window_generation != epoch.window_generation;
+        let auth_changed = self.auth_revision != epoch.auth_revision;
+        if window_changed || auth_changed {
+            self.reset_websocket_session();
+        }
+        if auth_changed {
+            self.turn_state = Arc::new(OnceLock::new());
+        }
+        self.window_generation = epoch.window_generation;
+        self.auth_revision = epoch.auth_revision;
+    }
+
+    async fn current_stable_client_setup(&mut self) -> Result<CurrentClientSetup> {
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
+            let client_setup = self
+                .client
+                .current_client_setup(/*generate_attestation*/ true)
+                .await?;
+            self.sync_session_epoch();
+            if self.auth_revision == client_setup.auth_revision {
+                return Ok(client_setup);
+            }
+        }
+        Err(CodexErr::Fatal("authentication changed repeatedly".into()))
+    }
+
     fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
         self.websocket_session.model_slug = None;
@@ -1033,12 +1179,13 @@ impl ModelClientSession {
     ///
     /// Keeping option construction in one place ensures request-scoped headers are consistent
     /// regardless of transport choice.
-    async fn build_responses_options(
+    fn build_responses_options(
         &self,
         model_slug: &str,
         turn_metadata_header: Option<&str>,
         compression: Compression,
         use_responses_lite: bool,
+        attestation_header: Option<&HeaderValue>,
     ) -> ApiResponsesOptions {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let session_id = self.client.state.session_id.to_string();
@@ -1057,8 +1204,8 @@ impl ModelClientSession {
                 headers.extend(codex_login::default_client::requested_model_headers(
                     model_slug,
                 ));
-                if let Some(header_value) = self.client.generate_attestation_header_for().await {
-                    headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+                if let Some(header_value) = attestation_header {
+                    headers.insert(X_OAI_ATTESTATION_HEADER, header_value.clone());
                 }
                 add_responses_lite_header(&mut headers, use_responses_lite);
                 headers
@@ -1170,46 +1317,60 @@ impl ModelClientSession {
         session_telemetry: &SessionTelemetry,
         model_info: &ModelInfo,
     ) -> std::result::Result<(), ApiError> {
+        self.sync_session_epoch();
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
-        if self.websocket_session.connection.is_some()
-            && self.websocket_session.model_slug.as_deref() == Some(model_info.slug.as_str())
-        {
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
+            let client_setup = self.current_stable_client_setup().await.map_err(|err| {
+                ApiError::Stream(format!(
+                    "failed to build websocket prewarm client setup: {err}"
+                ))
+            })?;
+            if self.client.current_auth_revision() != client_setup.auth_revision {
+                self.sync_session_epoch();
+                continue;
+            }
+            if self.websocket_session.connection.is_some()
+                && self.websocket_session.model_slug.as_deref() == Some(model_info.slug.as_str())
+            {
+                return Ok(());
+            }
+            if self.websocket_session.connection.is_some() {
+                self.reset_websocket_session();
+            }
+
+            let auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                PendingUnauthorizedRetry::default(),
+            );
+            let auth_revision = client_setup.auth_revision;
+            let connection = self
+                .client
+                .connect_websocket(
+                    session_telemetry,
+                    client_setup.api_provider,
+                    client_setup.api_auth,
+                    client_setup.attestation_header,
+                    &model_info.slug,
+                    Some(Arc::clone(&self.turn_state)),
+                    /*turn_metadata_header*/ None,
+                    auth_context,
+                    RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
+                )
+                .await?;
+            if self.client.current_auth_revision() != auth_revision {
+                self.sync_session_epoch();
+                continue;
+            }
+            self.websocket_session.connection = Some(connection);
+            self.websocket_session.model_slug = Some(model_info.slug.clone());
+            self.websocket_session
+                .set_connection_reused(/*connection_reused*/ false);
             return Ok(());
         }
-        if self.websocket_session.connection.is_some() {
-            self.reset_websocket_session();
-        }
-
-        let client_setup = self.client.current_client_setup().await.map_err(|err| {
-            ApiError::Stream(format!(
-                "failed to build websocket prewarm client setup: {err}"
-            ))
-        })?;
-        let auth_context = AuthRequestTelemetryContext::new(
-            client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-            client_setup.api_auth.as_ref(),
-            PendingUnauthorizedRetry::default(),
-        );
-        let connection = self
-            .client
-            .connect_websocket(
-                session_telemetry,
-                client_setup.api_provider,
-                client_setup.api_auth,
-                &model_info.slug,
-                Some(Arc::clone(&self.turn_state)),
-                /*turn_metadata_header*/ None,
-                auth_context,
-                RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
-            )
-            .await?;
-        self.websocket_session.connection = Some(connection);
-        self.websocket_session.model_slug = Some(model_info.slug.clone());
-        self.websocket_session
-            .set_connection_reused(/*connection_reused*/ false);
-        Ok(())
+        Err(ApiError::Stream("authentication changed repeatedly".into()))
     }
     /// Returns a websocket connection for this turn.
     #[instrument(
@@ -1260,6 +1421,7 @@ impl ModelClientSession {
                     session_telemetry,
                     api_provider,
                     api_auth,
+                    options.extra_headers.get(X_OAI_ATTESTATION_HEADER).cloned(),
                     model_slug,
                     Some(turn_state),
                     turn_metadata_header,
@@ -1322,7 +1484,7 @@ impl ModelClientSession {
         )
     )]
     async fn stream_responses_api(
-        &self,
+        &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -1337,8 +1499,9 @@ impl ModelClientSession {
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
         let mut pending_retry = PendingUnauthorizedRetry::default();
-        loop {
-            let client_setup = self.client.current_client_setup().await?;
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
+            let client_setup = self.current_stable_client_setup().await?;
+            let auth_revision = client_setup.auth_revision;
             let transport = ReqwestTransport::new(build_reqwest_client());
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
@@ -1352,14 +1515,13 @@ impl ModelClientSession {
                 self.client.state.auth_env_telemetry.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
-            let mut options = self
-                .build_responses_options(
-                    &model_info.slug,
-                    turn_metadata_header,
-                    compression,
-                    model_info.use_responses_lite,
-                )
-                .await;
+            let mut options = self.build_responses_options(
+                &model_info.slug,
+                turn_metadata_header,
+                compression,
+                model_info.use_responses_lite,
+                client_setup.attestation_header.as_ref(),
+            );
 
             let mut request = self.client.build_responses_request(
                 &client_setup.api_provider,
@@ -1371,6 +1533,10 @@ impl ModelClientSession {
             )?;
             self.client
                 .prepare_response_items_for_request(&mut request.input);
+            if self.client.current_auth_revision() != auth_revision {
+                self.sync_session_epoch();
+                continue;
+            }
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
@@ -1424,6 +1590,7 @@ impl ModelClientSession {
                 }
             }
         }
+        Err(CodexErr::Fatal("authentication changed repeatedly".into()))
     }
 
     /// Streams a turn via the Responses API over WebSocket transport.
@@ -1460,8 +1627,9 @@ impl ModelClientSession {
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
         let mut pending_retry = PendingUnauthorizedRetry::default();
-        loop {
-            let client_setup = self.client.current_client_setup().await?;
+        for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
+            let client_setup = self.current_stable_client_setup().await?;
+            let auth_revision = client_setup.auth_revision;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -1469,14 +1637,13 @@ impl ModelClientSession {
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
 
-            let options = self
-                .build_responses_options(
-                    &model_info.slug,
-                    turn_metadata_header,
-                    compression,
-                    model_info.use_responses_lite,
-                )
-                .await;
+            let options = self.build_responses_options(
+                &model_info.slug,
+                turn_metadata_header,
+                compression,
+                model_info.use_responses_lite,
+                client_setup.attestation_header.as_ref(),
+            );
             let mut request = self.client.build_responses_request(
                 &client_setup.api_provider,
                 prompt,
@@ -1540,6 +1707,10 @@ impl ModelClientSession {
 
             let (mut ws_request, previous_response_id_from_untraced_warmup) =
                 self.prepare_websocket_request(ws_payload, &request);
+            if self.client.current_auth_revision() != auth_revision {
+                self.sync_session_epoch();
+                continue;
+            }
             let inference_trace_attempt = if warmup {
                 // Prewarm sends `generate=false`; it is connection setup, not a
                 // model inference attempt that should appear in rollout traces.
@@ -1586,6 +1757,7 @@ impl ModelClientSession {
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
         }
+        Err(CodexErr::Fatal("authentication changed repeatedly".into()))
     }
 
     /// Builds request and SSE telemetry for streaming API calls.
@@ -1634,6 +1806,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         turn_metadata_header: Option<&str>,
     ) -> Result<()> {
+        self.sync_session_epoch();
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
@@ -1698,6 +1871,7 @@ impl ModelClientSession {
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        self.sync_session_epoch();
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {

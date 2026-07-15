@@ -605,6 +605,7 @@ async fn external_bearer_only_auth_manager_uses_cached_provider_token() {
         .auth()
         .await
         .and_then(|auth| auth.api_key().map(str::to_string));
+    let revision = manager.auth_revision();
     let second = manager
         .auth()
         .await
@@ -612,6 +613,7 @@ async fn external_bearer_only_auth_manager_uses_cached_provider_token() {
 
     assert_eq!(first.as_deref(), Some("provider-token"));
     assert_eq!(second.as_deref(), Some("provider-token"));
+    assert_eq!(manager.auth_revision(), revision);
     assert_eq!(manager.auth_mode(), Some(AuthMode::ApiKey));
     assert_eq!(manager.get_api_auth_mode(), Some(ApiAuthMode::ApiKey));
 }
@@ -654,6 +656,7 @@ async fn unauthorized_recovery_uses_external_refresh_for_bearer_manager() {
         .auth()
         .await
         .and_then(|auth| auth.api_key().map(str::to_string));
+    let initial_revision = manager.auth_revision();
     let mut recovery = manager.unauthorized_recovery();
 
     assert!(recovery.has_next());
@@ -672,6 +675,7 @@ async fn unauthorized_recovery_uses_external_refresh_for_bearer_manager() {
         .and_then(|auth| auth.api_key().map(str::to_string));
     assert_eq!(initial_token.as_deref(), Some("provider-token"));
     assert_eq!(refreshed_token.as_deref(), Some("refreshed-provider-token"));
+    assert!(manager.auth_revision() > initial_revision);
 }
 
 struct ProviderAuthScript {
