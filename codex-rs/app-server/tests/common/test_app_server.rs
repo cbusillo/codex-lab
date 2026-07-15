@@ -114,6 +114,7 @@ use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::WindowsSandboxSetupStartParams;
+#[cfg(debug_assertions)]
 use codex_keyring_store::tests::shared_test_keyring_root;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
 use tokio::process::Command;
@@ -132,25 +133,23 @@ pub struct TestAppServer {
 
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
 pub const DISABLE_PLUGIN_STARTUP_TASKS_ARG: &str = "--disable-plugin-startup-tasks-for-tests";
+pub const USE_TEST_KEYRING_STORE_ARG: &str = "--use-test-keyring-store";
+const DEFAULT_TEST_ARGS: &[&str] = &[DISABLE_PLUGIN_STARTUP_TASKS_ARG, USE_TEST_KEYRING_STORE_ARG];
+const PLUGIN_STARTUP_TEST_ARGS: &[&str] = &[USE_TEST_KEYRING_STORE_ARG];
 const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
+#[cfg(debug_assertions)]
 const TEST_KEYRING_DIR_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_KEYRING_DIR";
 
 impl TestAppServer {
     pub async fn new(codex_home: &Path) -> anyhow::Result<Self> {
-        Self::new_with_env_and_args(codex_home, &[], &[DISABLE_PLUGIN_STARTUP_TASKS_ARG]).await
+        Self::new_with_env_and_args(codex_home, &[], DEFAULT_TEST_ARGS).await
     }
 
     pub async fn new_with_cwd(codex_home: &Path, cwd: &Path) -> anyhow::Result<Self> {
         let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
             .context("should find binary for codex-app-server")?;
-        Self::new_with_program_env_args_and_cwd(
-            codex_home,
-            &program,
-            &[],
-            &[DISABLE_PLUGIN_STARTUP_TASKS_ARG],
-            cwd,
-        )
-        .await
+        Self::new_with_program_env_args_and_cwd(codex_home, &program, &[], DEFAULT_TEST_ARGS, cwd)
+            .await
     }
 
     pub async fn new_without_managed_config(codex_home: &Path) -> anyhow::Result<Self> {
@@ -167,18 +166,18 @@ impl TestAppServer {
     }
 
     pub async fn new_with_plugin_startup_tasks(codex_home: &Path) -> anyhow::Result<Self> {
-        Self::new_with_env_and_args(codex_home, &[], &[]).await
+        Self::new_with_env_and_args(codex_home, &[], PLUGIN_STARTUP_TEST_ARGS).await
     }
 
     pub async fn new_with_env_and_plugin_startup_tasks(
         codex_home: &Path,
         env_overrides: &[(&str, Option<&str>)],
     ) -> anyhow::Result<Self> {
-        Self::new_with_env_and_args(codex_home, env_overrides, &[]).await
+        Self::new_with_env_and_args(codex_home, env_overrides, PLUGIN_STARTUP_TEST_ARGS).await
     }
 
     pub async fn new_with_args(codex_home: &Path, args: &[&str]) -> anyhow::Result<Self> {
-        let mut all_args = vec![DISABLE_PLUGIN_STARTUP_TASKS_ARG];
+        let mut all_args = DEFAULT_TEST_ARGS.to_vec();
         all_args.extend_from_slice(args);
         Self::new_with_env_and_args(codex_home, &[], &all_args).await
     }
@@ -192,12 +191,7 @@ impl TestAppServer {
         codex_home: &Path,
         env_overrides: &[(&str, Option<&str>)],
     ) -> anyhow::Result<Self> {
-        Self::new_with_env_and_args(
-            codex_home,
-            env_overrides,
-            &[DISABLE_PLUGIN_STARTUP_TASKS_ARG],
-        )
-        .await
+        Self::new_with_env_and_args(codex_home, env_overrides, DEFAULT_TEST_ARGS).await
     }
 
     pub async fn new_with_program_and_env(
@@ -205,13 +199,8 @@ impl TestAppServer {
         program: &Path,
         env_overrides: &[(&str, Option<&str>)],
     ) -> anyhow::Result<Self> {
-        Self::new_with_program_env_and_args(
-            codex_home,
-            program,
-            env_overrides,
-            &[DISABLE_PLUGIN_STARTUP_TASKS_ARG],
-        )
-        .await
+        Self::new_with_program_env_and_args(codex_home, program, env_overrides, DEFAULT_TEST_ARGS)
+            .await
     }
 
     async fn new_with_env_and_args(
@@ -260,6 +249,7 @@ impl TestAppServer {
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             codex_home.join("managed_config.toml"),
         );
+        #[cfg(debug_assertions)]
         cmd.env(TEST_KEYRING_DIR_ENV_VAR, shared_test_keyring_root());
         cmd.env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR);
         cmd.args(args);

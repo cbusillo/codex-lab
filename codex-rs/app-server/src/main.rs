@@ -57,6 +57,12 @@ struct AppServerArgs {
     #[arg(long = "disable-plugin-startup-tasks-for-tests", hide = true)]
     disable_plugin_startup_tasks_for_tests: bool,
 
+    /// Hidden debug-only test hook used to redirect credential storage away
+    /// from the host keyring.
+    #[cfg(debug_assertions)]
+    #[arg(long = "use-test-keyring-store", hide = true)]
+    use_test_keyring_store: bool,
+
     /// Enable remote control for this app-server process.
     #[arg(long = "remote-control", hide = true)]
     remote_control: bool,
@@ -72,6 +78,8 @@ fn main() -> anyhow::Result<()> {
             strict_config,
             #[cfg(debug_assertions)]
             disable_plugin_startup_tasks_for_tests,
+            #[cfg(debug_assertions)]
+            use_test_keyring_store,
             remote_control,
         } = AppServerArgs::parse();
         let loader_overrides = if disable_managed_config_from_debug_env() {
@@ -85,7 +93,12 @@ fn main() -> anyhow::Result<()> {
         let auth = auth.try_into_settings()?;
         let mut runtime_options = AppServerRuntimeOptions::default();
         #[cfg(debug_assertions)]
-        if let Some(test_keyring_dir) = std::env::var_os(TEST_KEYRING_DIR_ENV_VAR) {
+        if use_test_keyring_store {
+            let test_keyring_dir = std::env::var_os(TEST_KEYRING_DIR_ENV_VAR).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{TEST_KEYRING_DIR_ENV_VAR} must be set when --use-test-keyring-store is used"
+                )
+            })?;
             anyhow::ensure!(
                 install_persisted_default_test_keyring_store(&PathBuf::from(test_keyring_dir)),
                 "test keyring store was already configured"

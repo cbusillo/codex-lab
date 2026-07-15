@@ -138,6 +138,16 @@ pub mod tests {
     use keyring::mock::MockCredential;
     use std::collections::HashMap;
     #[cfg(debug_assertions)]
+    use std::fs::OpenOptions;
+    #[cfg(debug_assertions)]
+    use std::io::Write;
+    #[cfg(all(debug_assertions, unix))]
+    use std::os::unix::fs::DirBuilderExt;
+    #[cfg(all(debug_assertions, unix))]
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(all(debug_assertions, unix))]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(debug_assertions)]
     use std::path::Path;
     #[cfg(debug_assertions)]
     use std::path::PathBuf;
@@ -259,8 +269,6 @@ pub mod tests {
     }
 
     #[cfg(debug_assertions)]
-    const TEST_SECRETS_PASSPHRASE: &str = "codex-app-server-integration-test-passphrase";
-    #[cfg(debug_assertions)]
     static SHARED_TEST_KEYRING_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
     #[cfg(debug_assertions)]
@@ -324,25 +332,30 @@ pub mod tests {
             let Some(path) = self.entry_path(service, account) else {
                 return self.fallback.save(service, account, value);
             };
+            if let Some(root) = self.persisted_root.as_deref() {
+                secure_directory(root)?;
+            }
             let parent = path.parent().ok_or_else(|| {
                 file_store_error(std::io::Error::other("test keyring path has no parent"))
             })?;
-            std::fs::create_dir_all(parent).map_err(file_store_error)?;
+            secure_directory(parent)?;
             let temp_file_id = self.next_temp_file_id.fetch_add(1, Ordering::Relaxed);
             let process_id = std::process::id();
             let encoded_account = encoded_path_component(account);
             let temp_path = parent.join(format!(
                 ".{process_id}.{temp_file_id}.{encoded_account}.tmp"
             ));
-            std::fs::write(&temp_path, value).map_err(file_store_error)?;
-            #[cfg(windows)]
-            if let Err(error) = std::fs::remove_file(&path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                let _ = std::fs::remove_file(&temp_path);
-                return Err(file_store_error(error));
-            }
-            if let Err(error) = std::fs::rename(&temp_path, &path) {
+            let mut open_options = OpenOptions::new();
+            open_options.create_new(true).write(true);
+            #[cfg(unix)]
+            open_options.mode(0o600);
+            let mut temp_file = open_options.open(&temp_path).map_err(file_store_error)?;
+            temp_file
+                .write_all(value.as_bytes())
+                .map_err(file_store_error)?;
+            temp_file.sync_all().map_err(file_store_error)?;
+            drop(temp_file);
+            if let Err(error) = replace_file(&temp_path, &path) {
                 let _ = std::fs::remove_file(&temp_path);
                 return Err(file_store_error(error));
             }
@@ -368,12 +381,7 @@ pub mod tests {
             service: &str,
             account: &str,
         ) -> Result<Option<String>, CredentialStoreError> {
-            let value = self.load_value(service, account)?;
-            if service == "codex" && account.starts_with("secrets|") && value.is_none() {
-                self.save_value(service, account, TEST_SECRETS_PASSPHRASE)?;
-                return Ok(Some(TEST_SECRETS_PASSPHRASE.to_string()));
-            }
-            Ok(value)
+            self.load_value(service, account)
         }
 
         fn save(
@@ -407,6 +415,79 @@ pub mod tests {
     }
 
     #[cfg(debug_assertions)]
+    fn secure_directory(path: &Path) -> Result<(), CredentialStoreError> {
+        #[cfg(unix)]
+        {
+            let mut dir_builder = std::fs::DirBuilder::new();
+            dir_builder.recursive(true).mode(0o700);
+            dir_builder.create(path).map_err(file_store_error)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .map_err(file_store_error)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(path).map_err(file_store_error)?;
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(source, destination)
+        }
+        #[cfg(windows)]
+        {
+            match replace_file_windows(source, destination) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(source, destination)
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    #[cfg(all(debug_assertions, windows))]
+    fn replace_file_windows(source: &Path, destination: &Path) -> std::io::Result<()> {
+        use std::ffi::c_void;
+        use std::os::windows::ffi::OsStrExt;
+
+        const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x0000_0002;
+
+        unsafe extern "system" {
+            fn ReplaceFileW(
+                replaced_file_name: *const u16,
+                replacement_file_name: *const u16,
+                backup_file_name: *const u16,
+                replace_flags: u32,
+                exclude: *mut c_void,
+                reserved: *mut c_void,
+            ) -> i32;
+        }
+
+        let destination_wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let replaced = unsafe {
+            ReplaceFileW(
+                destination_wide.as_ptr(),
+                source_wide.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_IGNORE_MERGE_ERRORS,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if replaced == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
     pub fn shared_test_keyring_root() -> &'static Path {
         SHARED_TEST_KEYRING_ROOT
             .get_or_init(|| {
@@ -415,9 +496,20 @@ pub mod tests {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos();
-                std::env::temp_dir().join(format!(
+                let root = std::env::temp_dir().join(format!(
                     "codex-app-server-test-keyring-{process_id}-{timestamp}"
-                ))
+                ));
+                #[cfg(unix)]
+                {
+                    let mut dir_builder = std::fs::DirBuilder::new();
+                    dir_builder.mode(0o700);
+                    dir_builder
+                        .create(&root)
+                        .expect("create shared app-server test keyring root");
+                }
+                #[cfg(not(unix))]
+                std::fs::create_dir(&root).expect("create shared app-server test keyring root");
+                root
             })
             .as_path()
     }

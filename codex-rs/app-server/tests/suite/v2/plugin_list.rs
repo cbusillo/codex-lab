@@ -21,6 +21,7 @@ use codex_app_server_protocol::PluginSummary;
 use codex_app_server_protocol::RequestId;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::set_project_trust_level;
+use codex_login::load_auth_dot_json;
 use codex_protocol::config_types::TrustLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use flate2::Compression;
@@ -1475,6 +1476,14 @@ async fn app_server_startup_sync_downloads_remote_installed_plugin_bundles() -> 
             .chatgpt_account_id("account-123"),
         AuthCredentialsStoreMode::File,
     )?;
+    assert!(load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?.is_some());
+    assert!(
+        codex_home
+            .path()
+            .join("secrets")
+            .join("codex_auth.age")
+            .is_file()
+    );
 
     let bundle_url = mount_remote_plugin_bundle(
         &server,
@@ -1504,7 +1513,12 @@ async fn app_server_startup_sync_downloads_remote_installed_plugin_bundles() -> 
         .join("plugins/cache/openai-curated-remote/linear/1.2.3");
     let mut mcp = TestAppServer::new_with_env_and_plugin_startup_tasks(
         codex_home.path(),
-        &[(TEST_ALLOW_HTTP_REMOTE_PLUGIN_BUNDLE_DOWNLOADS, Some("1"))],
+        &[
+            ("OPENAI_API_KEY", None),
+            ("CODEX_API_KEY", None),
+            ("CODEX_ACCESS_TOKEN", None),
+            (TEST_ALLOW_HTTP_REMOTE_PLUGIN_BUNDLE_DOWNLOADS, Some("1")),
+        ],
     )
     .await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
