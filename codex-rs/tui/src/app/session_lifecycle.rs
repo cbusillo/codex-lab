@@ -422,7 +422,7 @@ impl App {
         }
 
         let (session, turns, live_attached) = match app_server
-            .resume_thread(self.config.clone(), thread_id)
+            .resume_thread(self.config.clone(), thread_id, self.resume_model_settings())
             .await
         {
             Ok(started) => (started.session, started.turns, true),
@@ -2126,7 +2126,14 @@ impl App {
             self.chat_widget.rollout_path().as_deref(),
         );
         match app_server
-            .resume_thread(resume_config.clone(), target_session.thread_id)
+            .resume_thread(
+                resume_config.clone(),
+                target_session.thread_id,
+                config_persistence::resume_model_settings_for_overrides(
+                    &resume_config,
+                    &self.harness_overrides,
+                ),
+            )
             .await
         {
             Ok(resumed) => {

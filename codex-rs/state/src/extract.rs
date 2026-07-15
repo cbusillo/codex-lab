@@ -1,6 +1,8 @@
 use crate::model::ThreadMetadata;
+use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMetaLine;
@@ -10,6 +12,21 @@ use codex_protocol::protocol::strip_user_message_prefix;
 use codex_protocol::protocol::user_message_preview;
 use serde::Serialize;
 use serde_json::Value;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadResumeModelSettings {
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub reasoning_effort: ThreadResumeReasoningEffort,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ThreadResumeReasoningEffort {
+    #[default]
+    Unspecified,
+    Set(ReasoningEffort),
+    Cleared,
+}
 
 /// Apply a rollout item to the metadata structure.
 pub fn apply_rollout_item(
@@ -29,12 +46,75 @@ pub fn apply_rollout_item(
     }
 }
 
+/// Extract the saved model settings directly from canonical rollout history.
+pub fn extract_thread_resume_model_settings(
+    thread_id: ThreadId,
+    items: &[RolloutItem],
+) -> ThreadResumeModelSettings {
+    let mut settings = ThreadResumeModelSettings::default();
+    let mut active_turn_id = None;
+    let mut settings_updated_during_turn = None;
+    for item in items {
+        match item {
+            RolloutItem::SessionMeta(meta_line) if meta_line.meta.id == thread_id => {
+                if let Some(model_provider) = meta_line.meta.model_provider.as_ref() {
+                    settings.model_provider = Some(model_provider.clone());
+                }
+            }
+            RolloutItem::TurnContext(turn_context) => {
+                if settings_updated_during_turn
+                    .as_ref()
+                    .is_some_and(|turn_id| turn_context.turn_id.as_ref() == Some(turn_id))
+                {
+                    continue;
+                }
+                settings_updated_during_turn = None;
+                settings.model = Some(turn_context.model.clone());
+                settings.reasoning_effort = match turn_context.effort.clone() {
+                    Some(reasoning_effort) => ThreadResumeReasoningEffort::Set(reasoning_effort),
+                    None => ThreadResumeReasoningEffort::Cleared,
+                };
+            }
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                settings_updated_during_turn = active_turn_id.clone();
+                settings.model = Some(event.thread_settings.model.clone());
+                settings.model_provider = Some(event.thread_settings.model_provider_id.clone());
+                settings.reasoning_effort = match event.thread_settings.reasoning_effort.clone() {
+                    Some(reasoning_effort) => ThreadResumeReasoningEffort::Set(reasoning_effort),
+                    None => ThreadResumeReasoningEffort::Cleared,
+                };
+            }
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                active_turn_id = Some(event.turn_id.clone());
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                if active_turn_id.as_deref() == Some(event.turn_id.as_str()) {
+                    active_turn_id = None;
+                }
+            }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
+                if event.turn_id.is_none() || active_turn_id.as_ref() == event.turn_id.as_ref() {
+                    active_turn_id = None;
+                }
+            }
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::EventMsg(_) => {}
+        }
+    }
+    settings
+}
+
 /// Return whether this rollout item can mutate thread metadata stored in SQLite.
 pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
     match item {
         RolloutItem::SessionMeta(_) | RolloutItem::TurnContext(_) => true,
         RolloutItem::EventMsg(
-            EventMsg::TokenCount(_) | EventMsg::UserMessage(_) | EventMsg::ThreadGoalUpdated(_),
+            EventMsg::TokenCount(_)
+            | EventMsg::UserMessage(_)
+            | EventMsg::ThreadGoalUpdated(_)
+            | EventMsg::ThreadSettingsApplied(_),
         ) => true,
         RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
             if matches!(&event.item, TurnItem::UserMessage(_)) =>
@@ -109,6 +189,16 @@ fn apply_event_msg(metadata: &mut ThreadMetadata, event: &EventMsg) {
                 set_preview_if_empty(metadata, Some(objective.to_string()));
             }
         }
+        EventMsg::ThreadSettingsApplied(event) => {
+            let settings = &event.thread_settings;
+            metadata.model = Some(settings.model.clone());
+            metadata.model_provider = settings.model_provider_id.clone();
+            metadata.reasoning_effort = settings.reasoning_effort.clone();
+            metadata.cwd = settings.cwd.clone().into_path_buf();
+            metadata.sandbox_policy =
+                serde_json::to_string(&settings.permission_profile).unwrap_or_default();
+            metadata.approval_mode = enum_to_string(&settings.approval_policy);
+        }
         _ => {}
     }
 }
@@ -145,11 +235,19 @@ pub(crate) fn enum_to_string<T: Serialize>(value: &T) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::ThreadResumeReasoningEffort;
     use super::apply_rollout_item;
+    use super::extract_thread_resume_model_settings;
+    use super::rollout_item_affects_thread_metadata;
     use crate::model::ThreadMetadata;
     use chrono::DateTime;
     use chrono::Utc;
     use codex_protocol::ThreadId;
+    use codex_protocol::config_types::ApprovalsReviewer;
+    use codex_protocol::config_types::CollaborationMode;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::config_types::ReasoningSummary;
+    use codex_protocol::config_types::Settings;
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
     use codex_protocol::models::ContentItem;
@@ -168,7 +266,10 @@ mod tests {
     use codex_protocol::protocol::ThreadGoalStatus;
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
     use codex_protocol::protocol::ThreadHistoryMode;
+    use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+    use codex_protocol::protocol::ThreadSettingsSnapshot;
     use codex_protocol::protocol::TurnContextItem;
+    use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::USER_MESSAGE_BEGIN;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_protocol::user_input::UserInput;
@@ -495,6 +596,95 @@ mod tests {
 
         assert_eq!(metadata.model.as_deref(), Some("gpt-5"));
         assert_eq!(metadata.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn thread_settings_applied_updates_resume_metadata() {
+        let mut metadata = metadata_for_test();
+        let permission_profile = PermissionProfile::workspace_write();
+        let cwd = std::env::current_dir()
+            .expect("current directory")
+            .join("updated/workspace");
+        let mut item = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            ThreadSettingsAppliedEvent {
+                thread_settings: ThreadSettingsSnapshot {
+                    model: "gpt-5.2-codex".to_string(),
+                    model_provider_id: "updated-provider".to_string(),
+                    service_tier: None,
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: ApprovalsReviewer::User,
+                    permission_profile: permission_profile.clone(),
+                    active_permission_profile: None,
+                    cwd: cwd.clone().try_into().expect("absolute settings cwd"),
+                    reasoning_effort: Some(ReasoningEffort::Ultra),
+                    reasoning_summary: Some(ReasoningSummary::Auto),
+                    personality: None,
+                    collaboration_mode: CollaborationMode {
+                        mode: ModeKind::Default,
+                        settings: Settings {
+                            model: "gpt-5.2-codex".to_string(),
+                            reasoning_effort: Some(ReasoningEffort::Ultra),
+                            developer_instructions: None,
+                        },
+                    },
+                },
+            },
+        ));
+
+        assert!(rollout_item_affects_thread_metadata(&item));
+        apply_rollout_item(&mut metadata, &item, "test-provider");
+
+        assert_eq!(metadata.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(metadata.model_provider, "updated-provider");
+        assert_eq!(metadata.reasoning_effort, Some(ReasoningEffort::Ultra));
+        assert_eq!(metadata.cwd, cwd);
+        assert_eq!(metadata.approval_mode, "never");
+        assert_eq!(
+            metadata.sandbox_policy,
+            serde_json::to_string(&permission_profile)
+                .expect("permission profile should serialize")
+        );
+
+        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+            panic!("thread settings applied item");
+        };
+        event.thread_settings.reasoning_effort = None;
+        let stale_turn_context = RolloutItem::TurnContext(TurnContextItem {
+            turn_id: Some("turn-1".to_string()),
+            cwd: PathBuf::from("/fallback/workspace"),
+            environments: None,
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::OnRequest,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "stale-model".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            realtime_active: None,
+            effort: Some(ReasoningEffort::High),
+            summary: ReasoningSummary::Auto,
+        });
+        let saved = extract_thread_resume_model_settings(
+            metadata.id,
+            &[
+                RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                    turn_id: "turn-1".to_string(),
+                    trace_id: None,
+                    started_at: None,
+                    model_context_window: None,
+                    collaboration_mode_kind: ModeKind::Default,
+                })),
+                item,
+                stale_turn_context,
+            ],
+        );
+        assert_eq!(saved.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(saved.reasoning_effort, ThreadResumeReasoningEffort::Cleared);
     }
 
     #[test]
