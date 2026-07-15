@@ -948,6 +948,12 @@ mod tests {
             .expect("set permission profile");
 
         assert_eq!(thread.permission_profile, PermissionProfile::Disabled);
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(metadata.reasoning_effort, Some(ReasoningEffort::Ultra));
         let thread = store
             .update_thread_metadata(UpdateThreadMetadataParams {
                 thread_id,
