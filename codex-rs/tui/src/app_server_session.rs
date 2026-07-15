@@ -190,12 +190,6 @@ pub(crate) enum ThreadParamsMode {
     Remote,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResumeModelSettings {
-    OverrideFromCurrentConfig,
-    RestoreFromThread,
-}
-
 impl ThreadParamsMode {
     fn model_provider_from_config(self, config: &Config) -> Option<String> {
         match self {
@@ -425,14 +419,9 @@ impl AppServerSession {
         &mut self,
         config: Config,
         thread_id: ThreadId,
-        model_settings: ResumeModelSettings,
     ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
-        let session_config = if model_settings == ResumeModelSettings::RestoreFromThread {
-            config.clone()
-        } else {
-            self.session_config_with_effective_service_tier(&config)
-        };
+        let session_config = self.session_config_with_effective_service_tier(&config);
         let response: ThreadResumeResponse = self
             .client
             .request_typed(ClientRequest::ThreadResume {
@@ -442,7 +431,6 @@ impl AppServerSession {
                     thread_id,
                     self.thread_params_mode(),
                     self.remote_cwd_override.as_deref(),
-                    model_settings,
                 ),
             })
             .await
@@ -1510,7 +1498,6 @@ fn thread_resume_params_from_config(
     thread_id: ThreadId,
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
-    model_settings: ResumeModelSettings,
 ) -> ThreadResumeParams {
     let permissions = permissions_selection_from_config(&config, thread_params_mode);
     let sandbox = permissions
@@ -1522,26 +1509,10 @@ fn thread_resume_params_from_config(
             )
         })
         .flatten();
-    let mut config_overrides = config_request_overrides_from_config(&config);
-    if model_settings == ResumeModelSettings::RestoreFromThread
-        && let Some(overrides) = config_overrides.as_mut()
-    {
-        overrides.remove("model_reasoning_effort");
-        if overrides.is_empty() {
-            config_overrides = None;
-        }
-    }
-    let (model, model_provider) = match model_settings {
-        ResumeModelSettings::OverrideFromCurrentConfig => (
-            config.model.clone(),
-            thread_params_mode.model_provider_from_config(&config),
-        ),
-        ResumeModelSettings::RestoreFromThread => (None, None),
-    };
     ThreadResumeParams {
         thread_id: thread_id.to_string(),
-        model,
-        model_provider,
+        model: config.model.clone(),
+        model_provider: thread_params_mode.model_provider_from_config(&config),
         service_tier: service_tier_override_from_config(&config),
         cwd: thread_cwd_from_config(&config, thread_params_mode, remote_cwd_override),
         runtime_workspace_roots: Some(config.workspace_roots.clone()),
@@ -1549,7 +1520,7 @@ fn thread_resume_params_from_config(
         approvals_reviewer: approvals_reviewer_override_from_config(&config),
         sandbox,
         permissions,
-        config: config_overrides,
+        config: config_request_overrides_from_config(&config),
         developer_instructions: with_terminal_visualization_instructions(
             &config, /*control_instructions*/ None,
         ),
@@ -2111,7 +2082,6 @@ mod tests {
             thread_id,
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
-            ResumeModelSettings::OverrideFromCurrentConfig,
         );
         let fork = thread_fork_params_from_config(
             config,
@@ -2229,7 +2199,6 @@ mod tests {
             thread_id,
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
-            ResumeModelSettings::OverrideFromCurrentConfig,
         );
         let fork = thread_fork_params_from_config(
             config,
@@ -2281,7 +2250,6 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
-            ResumeModelSettings::OverrideFromCurrentConfig,
         );
         let fork = thread_fork_params_from_config(
             config,
@@ -2306,33 +2274,6 @@ mod tests {
         assert_eq!(start.config, Some(expected_config.clone()));
         assert_eq!(resume.config, Some(expected_config.clone()));
         assert_eq!(fork.config, Some(expected_config));
-    }
-
-    #[tokio::test]
-    async fn thread_resume_params_can_restore_persisted_model_settings() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let mut config = build_config(&temp_dir).await;
-        config.model = Some("configured-model".to_string());
-        config.model_provider_id = "configured-provider".to_string();
-        config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
-        config.model_reasoning_summary = Some(ReasoningSummary::Detailed);
-
-        let params = thread_resume_params_from_config(
-            config,
-            ThreadId::new(),
-            ThreadParamsMode::Embedded,
-            /*remote_cwd_override*/ None,
-            ResumeModelSettings::RestoreFromThread,
-        );
-
-        assert_eq!(params.model, None);
-        assert_eq!(params.model_provider, None);
-        let overrides = params.config.expect("non-model overrides");
-        assert!(!overrides.contains_key("model_reasoning_effort"));
-        assert_eq!(
-            overrides.get("model_reasoning_summary"),
-            Some(&serde_json::Value::String("detailed".to_string()))
-        );
     }
 
     #[tokio::test]
@@ -2396,7 +2337,6 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
-            ResumeModelSettings::OverrideFromCurrentConfig,
         );
         let control_fork = thread_fork_params_from_config(
             config.clone(),
@@ -2426,7 +2366,6 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
-            ResumeModelSettings::OverrideFromCurrentConfig,
         );
         let treatment_fork = thread_fork_params_from_config(
             config,

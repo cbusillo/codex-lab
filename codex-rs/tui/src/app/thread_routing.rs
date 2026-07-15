@@ -1220,7 +1220,7 @@ impl App {
         }
 
         match app_server
-            .resume_thread(self.config.clone(), thread_id, self.resume_model_settings())
+            .resume_thread(self.config.clone(), thread_id)
             .await
         {
             Ok(started) => {
