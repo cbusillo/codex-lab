@@ -84,9 +84,6 @@ pub enum ThreadResumeReasoningEffort {
 }
 
 /// Extract durable saved model settings from canonical rollout history.
-///
-/// Turn contexts seed legacy histories until the first explicit settings event. After that,
-/// temporary per-turn settings and stale compaction baselines cannot replace the durable choice.
 pub fn extract_thread_resume_model_settings(
     thread_id: ThreadId,
     items: &[RolloutItem],
@@ -122,11 +119,7 @@ pub fn extract_thread_resume_model_settings(
                     .clone()
                     .map_or(Cleared, Set);
             }
-            RolloutItem::SessionMeta(_)
-            | RolloutItem::TurnContext(_)
-            | RolloutItem::ResponseItem(_)
-            | RolloutItem::Compacted(_)
-            | RolloutItem::EventMsg(_) => {}
+            _ => {}
         }
     }
     settings
@@ -642,13 +635,31 @@ mod tests {
         let cwd = std::env::current_dir()
             .expect("current directory")
             .join("updated/workspace");
-        let mut item = thread_settings_item(
-            "gpt-5.2-codex",
-            "updated-provider",
-            Some(ReasoningEffort::Ultra),
-            cwd.clone(),
-            permission_profile.clone(),
-        );
+        let mut item = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            ThreadSettingsAppliedEvent {
+                thread_settings: ThreadSettingsSnapshot {
+                    model: "gpt-5.2-codex".to_string(),
+                    model_provider_id: "updated-provider".to_string(),
+                    service_tier: None,
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: ApprovalsReviewer::User,
+                    permission_profile: permission_profile.clone(),
+                    active_permission_profile: None,
+                    cwd: cwd.clone().try_into().expect("absolute settings cwd"),
+                    reasoning_effort: Some(ReasoningEffort::Ultra),
+                    reasoning_summary: Some(ReasoningSummary::Auto),
+                    personality: None,
+                    collaboration_mode: CollaborationMode {
+                        mode: ModeKind::Default,
+                        settings: Settings {
+                            model: "gpt-5.2-codex".to_string(),
+                            reasoning_effort: Some(ReasoningEffort::Ultra),
+                            developer_instructions: None,
+                        },
+                    },
+                },
+            },
+        ));
 
         assert!(super::rollout_item_affects_thread_metadata(&item));
         apply_rollout_item(&mut metadata, &item, "test-provider");
@@ -742,6 +753,17 @@ mod tests {
             },
             git: None,
         });
+
+        let settings = super::extract_thread_resume_model_settings(
+            thread_id,
+            std::slice::from_ref(&initial_meta),
+        );
+        assert_eq!(settings.model, None);
+        assert_eq!(settings.model_provider.as_deref(), Some("initial-provider"));
+        assert_eq!(
+            settings.reasoning_effort,
+            super::ThreadResumeReasoningEffort::Unspecified
+        );
 
         let legacy = super::extract_thread_resume_model_settings(
             thread_id,

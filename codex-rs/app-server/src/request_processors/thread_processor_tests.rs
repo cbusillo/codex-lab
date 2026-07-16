@@ -718,6 +718,30 @@ mod thread_processor_behavior_tests {
         );
     }
 
+    #[test]
+    fn model_resume_override_layers_require_explicit_model_source() {
+        let layer_config = |key: &str| {
+            TomlValue::Table(toml::map::Map::from_iter([(
+                key.to_string(),
+                TomlValue::String("value".to_string()),
+            )]))
+        };
+        let user_source = |profile| ConfigLayerSource::User {
+            file: test_path_buf("/tmp/config.toml").abs(),
+            profile,
+        };
+        let flags = ConfigLayerSource::SessionFlags;
+        let model = layer_config("model");
+        let sandbox = layer_config("sandbox_mode");
+        assert!(model_resume_override_in_layer(&flags, &model));
+        assert!(model_resume_override_in_layer(
+            &user_source(Some("work".to_string())),
+            &model
+        ));
+        assert!(!model_resume_override_in_layer(&user_source(None), &model));
+        assert!(!model_resume_override_in_layer(&flags, &sandbox));
+    }
+
     fn test_thread_metadata(
         model: Option<&str>,
         reasoning_effort: Option<ReasoningEffort>,
