@@ -84,7 +84,16 @@ pub(super) async fn read_thread(
             message: format!("no rollout found for thread id {thread_id}"),
         })?;
 
-    let mut thread = read_thread_from_rollout_path(store, path).await?;
+    let mut thread = read_thread_from_rollout_path(store, path.clone()).await?;
+    if thread.thread_id != thread_id {
+        return Err(ThreadStoreError::Internal {
+            message: format!(
+                "thread metadata id mismatch for rollout path `{}`: expected {thread_id}, found {}",
+                path.display(),
+                thread.thread_id
+            ),
+        });
+    }
     if !params.include_archived && thread.archived_at.is_some() {
         return Err(ThreadStoreError::InvalidRequest {
             message: format!("thread {} is archived", thread.thread_id),
@@ -1103,6 +1112,37 @@ mod tests {
         let history = thread.history.expect("history should load");
         assert_eq!(history.thread_id, thread_id);
         assert_eq!(history.items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn read_thread_rejects_rollout_whose_session_id_mismatches_filename() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let requested_uuid = Uuid::from_u128(232);
+        let requested_thread_id =
+            ThreadId::from_string(&requested_uuid.to_string()).expect("valid thread id");
+        let actual_uuid = Uuid::from_u128(233);
+        let actual_path = write_session_file(home.path(), "2025-01-03T12-00-00", actual_uuid)
+            .expect("session file");
+        let requested_path = actual_path.with_file_name(format!(
+            "rollout-2025-01-03T12-00-00-{requested_uuid}.jsonl"
+        ));
+        std::fs::rename(actual_path, &requested_path).expect("rename mismatched session file");
+
+        let err = store
+            .read_thread(ReadThreadParams {
+                thread_id: requested_thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect_err("mismatched session id should be rejected");
+        assert!(matches!(
+            err,
+            ThreadStoreError::Internal { message }
+                if message.contains(&requested_thread_id.to_string())
+                    && message.contains(&actual_uuid.to_string())
+        ));
     }
 
     #[tokio::test]
