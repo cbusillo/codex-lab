@@ -11,7 +11,6 @@ use codex_protocol::protocol::user_message_preview;
 use serde::Serialize;
 use serde_json::Value;
 
-/// Apply ordered rollout items while preserving durable settings-snapshot authority.
 pub fn apply_rollout_items_to_metadata(
     metadata: &mut ThreadMetadata,
     items: &[RolloutItem],
@@ -21,15 +20,13 @@ pub fn apply_rollout_items_to_metadata(
     projection.apply_items(metadata, items, default_provider);
 }
 
-/// Ordered metadata projection state for one complete or incrementally owned rollout stream.
-/// Resume callers must seed it from complete history before applying new batches.
+/// Stateful ordered metadata projector; seed it from complete history before incremental use.
 #[derive(Debug, Default)]
 pub struct ThreadMetadataProjection {
     settings_snapshot_seen: bool,
 }
 
 impl ThreadMetadataProjection {
-    /// Apply the next ordered rollout items while preserving snapshot authority across batches.
     pub fn apply_items(
         &mut self,
         metadata: &mut ThreadMetadata,
@@ -49,7 +46,7 @@ impl ThreadMetadataProjection {
     ) {
         match item {
             RolloutItem::SessionMeta(meta_line) => {
-                apply_session_meta_from_item(metadata, meta_line)
+                apply_session_meta(metadata, meta_line, self.settings_snapshot_seen)
             }
             RolloutItem::TurnContext(turn_ctx) if !self.settings_snapshot_seen => {
                 apply_turn_context(metadata, turn_ctx);
@@ -69,7 +66,6 @@ impl ThreadMetadataProjection {
     }
 }
 
-/// Return whether this rollout item can mutate thread metadata stored in SQLite.
 pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
     match item {
         RolloutItem::SessionMeta(_) | RolloutItem::TurnContext(_) => true,
@@ -90,7 +86,11 @@ pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
     }
 }
 
-fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &SessionMetaLine) {
+fn apply_session_meta(
+    metadata: &mut ThreadMetadata,
+    meta_line: &SessionMetaLine,
+    snapshot_seen: bool,
+) {
     if metadata.id != meta_line.meta.id {
         // Ignore session_meta lines that don't match the canonical thread ID,
         // e.g., forked rollouts that embed the source session metadata.
@@ -104,15 +104,16 @@ fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &Sessi
     metadata.agent_role = meta_line.meta.agent_role.clone();
     metadata.agent_path = meta_line.meta.agent_path.clone();
     metadata.history_mode = meta_line.meta.history_mode;
-    if metadata.model_provider.is_empty()
+    if !snapshot_seen
         && let Some(provider) = meta_line.meta.model_provider.as_deref()
+        && !provider.is_empty()
     {
         metadata.model_provider = provider.to_string();
     }
     if !meta_line.meta.cli_version.is_empty() {
         metadata.cli_version = meta_line.meta.cli_version.clone();
     }
-    if metadata.cwd.as_os_str().is_empty() && !meta_line.meta.cwd.as_os_str().is_empty() {
+    if !snapshot_seen && !meta_line.meta.cwd.as_os_str().is_empty() {
         metadata.cwd = meta_line.meta.cwd.clone();
     }
     if let Some(git) = meta_line.git.as_ref() {
@@ -683,7 +684,7 @@ mod tests {
                     agent_path: None,
                     agent_nickname: None,
                     agent_role: None,
-                    model_provider: Some("openai".to_string()),
+                    model_provider: Some("latest-provider".to_string()),
                     base_instructions: None,
                     dynamic_tools: None,
                     memory_mode: None,
@@ -698,6 +699,8 @@ mod tests {
 
         assert_eq!(metadata.model, None);
         assert_eq!(metadata.reasoning_effort, None);
+        assert_eq!(metadata.model_provider, "latest-provider");
+        assert_eq!(metadata.cwd, PathBuf::from("/workspace"));
     }
 
     #[test]
