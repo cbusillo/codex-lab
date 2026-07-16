@@ -5,6 +5,7 @@
 //! loop.
 
 use super::*;
+use codex_config::ConfigLayerSource;
 #[cfg(target_os = "windows")]
 use codex_utils_approval_presets::ApprovalPreset;
 
@@ -22,6 +23,37 @@ async fn build_config_on_runtime_worker(
         Ok(build_result) => build_result.wrap_err(error_context),
         Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
         Err(err) => Err(err).wrap_err_with(|| format!("{error_context} task failed")),
+    }
+}
+
+pub(super) fn resume_model_settings_for_overrides(
+    config: &Config,
+    harness_overrides: &ConfigOverrides,
+) -> crate::app_server_session::ResumeModelSettings {
+    let has_layer_override = config.config_lock_toml.is_some()
+        || config
+            .config_layer_stack
+            .layers_high_to_low()
+            .into_iter()
+            .any(|layer| {
+                matches!(
+                    &layer.name,
+                    ConfigLayerSource::SessionFlags
+                        | ConfigLayerSource::User {
+                            profile: Some(_),
+                            ..
+                        }
+                ) && ["model", "model_provider", "model_reasoning_effort"]
+                    .iter()
+                    .any(|key| layer.config.get(*key).is_some())
+            });
+    if harness_overrides.model.is_some()
+        || harness_overrides.model_provider.is_some()
+        || has_layer_override
+    {
+        crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig
+    } else {
+        crate::app_server_session::ResumeModelSettings::RestoreFromThread
     }
 }
 
@@ -861,6 +893,10 @@ impl App {
         self.chat_widget.set_reasoning_effort(effort);
     }
 
+    pub(super) fn resume_model_settings(&self) -> crate::app_server_session::ResumeModelSettings {
+        resume_model_settings_for_overrides(&self.config, &self.harness_overrides)
+    }
+
     pub(super) fn on_update_personality(&mut self, personality: Personality) {
         self.config.personality = Some(personality);
         self.chat_widget.set_personality(personality);
@@ -1196,8 +1232,11 @@ mod tests {
     use super::*;
     use crate::app::test_support::app_enabled_in_effective_config;
     use crate::app::test_support::make_test_app;
+    use crate::app_server_session::ResumeModelSettings;
     use crate::legacy_core::config::edit::ConfigEdit;
     use crate::test_support::PathBufExt;
+    use codex_config::ConfigLayerEntry;
+    use codex_config::ConfigLayerStack;
     use codex_protocol::models::PermissionProfile;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
@@ -1217,6 +1256,84 @@ mod tests {
         assert_eq!(
             app.config.model_reasoning_effort,
             Some(ReasoningEffortConfig::High)
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_model_settings_preserves_only_explicit_model_overrides() {
+        let mut app = make_test_app().await;
+
+        assert_eq!(
+            app.resume_model_settings(),
+            ResumeModelSettings::RestoreFromThread
+        );
+        let profile_dir = tempdir().expect("profile tempdir");
+        let profile_path = profile_dir.path().join("work.config.toml").abs();
+        let profile = "work"
+            .parse::<codex_config::ProfileV2Name>()
+            .expect("valid profile name");
+        for (key, expected) in [
+            ("model", ResumeModelSettings::OverrideFromCurrentConfig),
+            (
+                "model_provider",
+                ResumeModelSettings::OverrideFromCurrentConfig,
+            ),
+            (
+                "model_reasoning_effort",
+                ResumeModelSettings::OverrideFromCurrentConfig,
+            ),
+            ("sandbox_mode", ResumeModelSettings::RestoreFromThread),
+        ] {
+            let config = TomlValue::Table(toml::map::Map::from_iter([(
+                key.to_string(),
+                TomlValue::String("value".to_string()),
+            )]));
+            app.config.config_layer_stack = ConfigLayerStack::new(
+                vec![ConfigLayerEntry::new(
+                    ConfigLayerSource::SessionFlags,
+                    config.clone(),
+                )],
+                Default::default(),
+                Default::default(),
+            )
+            .expect("session flags layer stack");
+            assert_eq!(app.resume_model_settings(), expected);
+
+            app.config.config_layer_stack = ConfigLayerStack::default().with_user_config_profile(
+                &profile_path,
+                Some(&profile),
+                config,
+            );
+            assert_eq!(app.resume_model_settings(), expected);
+        }
+
+        app.config.config_layer_stack = ConfigLayerStack::default().with_user_config(
+            &profile_path,
+            TomlValue::Table(toml::map::Map::from_iter([(
+                "model_reasoning_effort".to_string(),
+                TomlValue::String("high".to_string()),
+            )])),
+        );
+        assert_eq!(
+            app.resume_model_settings(),
+            ResumeModelSettings::RestoreFromThread
+        );
+
+        app.config.config_lock_toml =
+            Some(Arc::new(codex_config::config_toml::ConfigLockfileToml {
+                version: 1,
+                codex_version: String::new(),
+                config: Default::default(),
+            }));
+        assert_eq!(
+            app.resume_model_settings(),
+            ResumeModelSettings::OverrideFromCurrentConfig
+        );
+
+        app.harness_overrides.model_provider = Some("custom-provider".to_string());
+        assert_eq!(
+            app.resume_model_settings(),
+            ResumeModelSettings::OverrideFromCurrentConfig
         );
     }
 
