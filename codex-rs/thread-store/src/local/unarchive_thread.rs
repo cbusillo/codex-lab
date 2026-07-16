@@ -21,15 +21,7 @@ pub(super) async fn unarchive_thread(
     let thread_id = params.thread_id;
     let state_db_ctx = store.state_db().await;
     if let Some(state_db) = state_db_ctx.as_ref()
-        && let Some(metadata) =
-            state_db
-                .get_thread(thread_id)
-                .await
-                .map_err(|err| ThreadStoreError::Internal {
-                    message: format!(
-                        "failed to read archived thread metadata for {thread_id}: {err}"
-                    ),
-                })?
+        && let Ok(Some(metadata)) = state_db.get_thread(thread_id).await
         && metadata.archived_at.is_some()
         && rollout_path_is_external(
             store.config.codex_home.as_path(),
@@ -43,29 +35,22 @@ pub(super) async fn unarchive_thread(
             /*include_archived*/ true,
             /*include_history*/ false,
         )
-        .await?;
-        if thread.thread_id != thread_id {
-            return Err(ThreadStoreError::Internal {
-                message: format!(
-                    "thread metadata id mismatch for rollout path `{}`: expected {thread_id}, found {}",
-                    metadata.rollout_path.display(),
-                    thread.thread_id
-                ),
-            });
-        }
-        state_db
-            .mark_unarchived(thread_id, metadata.rollout_path.as_path())
-            .await
-            .map_err(|err| ThreadStoreError::Internal {
-                message: format!("failed to unarchive external thread {thread_id}: {err}"),
-            })?;
-        return read_thread::read_thread_by_rollout_path(
-            store,
-            metadata.rollout_path,
-            /*include_archived*/ false,
-            /*include_history*/ false,
-        )
         .await;
+        if thread.is_ok_and(|thread| thread.thread_id == thread_id) {
+            state_db
+                .mark_unarchived(thread_id, metadata.rollout_path.as_path())
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to unarchive external thread {thread_id}: {err}"),
+                })?;
+            return read_thread::read_thread_by_rollout_path(
+                store,
+                metadata.rollout_path,
+                /*include_archived*/ false,
+                /*include_history*/ false,
+            )
+            .await;
+        }
     }
     let archived_path = find_archived_thread_path_by_id_str(
         store.config.codex_home.as_path(),
@@ -198,6 +183,7 @@ mod tests {
     #[tokio::test]
     async fn unarchive_thread_updates_sqlite_metadata_when_present() {
         let home = TempDir::new().expect("temp dir");
+        let external = TempDir::new().expect("external temp dir");
         let config = test_config(home.path());
         let uuid = Uuid::from_u128(204);
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
@@ -216,7 +202,7 @@ mod tests {
             .expect("backfill should be complete");
         let mut builder = codex_state::ThreadMetadataBuilder::new(
             thread_id,
-            archived_path.clone(),
+            external.path().join("missing-rollout.jsonl"),
             Utc::now(),
             SessionSource::Cli,
         );

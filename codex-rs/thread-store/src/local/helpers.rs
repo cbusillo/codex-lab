@@ -133,13 +133,6 @@ fn lexically_normalized_path(path: &Path) -> PathBuf {
     normalized
 }
 
-pub(super) fn rollout_path_is_archived(codex_home: &Path, path: &Path) -> bool {
-    path.starts_with(codex_home.join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR))
-        || path.components().any(|component| {
-            component.as_os_str() == OsStr::new(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
-        })
-}
-
 pub(super) fn matching_rollout_file_name(
     rollout_path: &Path,
     thread_id: ThreadId,

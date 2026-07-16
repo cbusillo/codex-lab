@@ -18,7 +18,7 @@ use super::LocalThreadStore;
 use super::helpers::distinct_thread_metadata_title;
 use super::helpers::git_info_from_parts;
 use super::helpers::permission_profile_from_metadata_value;
-use super::helpers::rollout_path_is_archived;
+use super::helpers::rollout_path_is_managed_archived;
 use super::helpers::set_thread_name_from_title;
 use super::helpers::stored_thread_from_rollout_item;
 use super::live_writer;
@@ -36,10 +36,11 @@ pub(super) async fn read_thread(
     if let Some(metadata) = read_sqlite_metadata(store, thread_id).await
         && (params.include_archived
             || (metadata.archived_at.is_none()
-                && !rollout_path_is_archived(
+                && !rollout_path_is_managed_archived(
                     store.config.codex_home.as_path(),
                     metadata.rollout_path.as_path(),
-                )))
+                )
+                .await))
         && (!params.include_history
             || sqlite_rollout_path_can_load_history_for_thread(
                 store,
@@ -230,7 +231,8 @@ async fn resolve_rollout_path(
         && codex_rollout::existing_rollout_path(path.as_path())
             .await
             .is_some()
-        && (include_archived || !rollout_path_is_archived(store.config.codex_home.as_path(), &path))
+        && (include_archived
+            || !rollout_path_is_managed_archived(store.config.codex_home.as_path(), &path).await)
     {
         return Ok(Some(path));
     }
@@ -277,7 +279,8 @@ async fn read_thread_from_rollout_path(
     let Some(item) = read_thread_item_from_rollout(path.clone()).await else {
         return stored_thread_from_session_meta(store, path).await;
     };
-    let archived = rollout_path_is_archived(store.config.codex_home.as_path(), path.as_path());
+    let archived =
+        rollout_path_is_managed_archived(store.config.codex_home.as_path(), path.as_path()).await;
     let mut thread = stored_thread_from_rollout_item(
         item,
         archived,
@@ -404,7 +407,8 @@ async fn stored_thread_from_session_meta(
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to read thread {}: {err}", path.display()),
         })?;
-    let archived = rollout_path_is_archived(store.config.codex_home.as_path(), path.as_path());
+    let archived =
+        rollout_path_is_managed_archived(store.config.codex_home.as_path(), path.as_path()).await;
     Ok(stored_thread_from_meta_line(
         store, meta_line, path, archived,
     ))

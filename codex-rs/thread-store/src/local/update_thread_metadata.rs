@@ -861,12 +861,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let path = write_session_file(external_home.path(), "2025-01-03T14-45-00", uuid)
             .expect("external session file");
-        let foreign_path = write_session_file(
-            &external_home.path().join("foreign"),
-            "2025-01-04T14-45-00",
-            uuid,
-        )
-        .expect("foreign session file");
+        let foreign_path = external_home.path().join("missing-rollout.jsonl");
         let mut metadata =
             ThreadMetadataBuilder::new(thread_id, foreign_path, Utc::now(), SessionSource::Cli)
                 .build(config.default_model_provider_id.as_str());
