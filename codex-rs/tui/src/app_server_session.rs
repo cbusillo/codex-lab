@@ -2593,6 +2593,7 @@ mod tests {
         .await
         .expect("resume response should map");
         assert_eq!(started.session.forked_from_id, Some(forked_from_id));
+        assert_eq!(started.session.model_provider_id, response.model_provider);
         assert_eq!(
             started.session.runtime_workspace_roots,
             response.runtime_workspace_roots

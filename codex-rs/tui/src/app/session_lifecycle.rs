@@ -2105,11 +2105,11 @@ impl App {
             }
         };
 
-        let mut resume_config = match self
-            .rebuild_config_for_resume_or_fallback(&current_cwd, resume_cwd)
+        let (resume_config, resume_model_settings) = match self
+            .rebuild_config_and_model_settings_for_resume(&current_cwd, resume_cwd)
             .await
         {
-            Ok(cfg) => cfg,
+            Ok(result) => result,
             Err(err) => {
                 self.chat_widget.add_error_message(format!(
                     "Failed to rebuild configuration for resume: {err}"
@@ -2117,7 +2117,6 @@ impl App {
                 return Ok(AppRunControl::Continue);
             }
         };
-        self.apply_runtime_policy_overrides(&mut resume_config);
 
         let summary = session_summary(
             self.chat_widget.token_usage(),
@@ -2129,10 +2128,7 @@ impl App {
             .resume_thread(
                 resume_config.clone(),
                 target_session.thread_id,
-                config_persistence::resume_model_settings_for_overrides(
-                    &resume_config,
-                    &self.harness_overrides,
-                ),
+                resume_model_settings,
             )
             .await
         {

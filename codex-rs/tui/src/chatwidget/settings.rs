@@ -527,6 +527,9 @@ impl ChatWidget {
                     ..Default::default()
                 }
             });
+        if self.config.model_provider_id != provider_id || self.config.model_provider != provider {
+            self.runtime_model_provider_base_url = None;
+        }
         self.config.model_provider_id = provider_id.to_string();
         self.config.model_provider = provider;
     }

@@ -300,6 +300,20 @@ impl App {
         }
     }
 
+    pub(super) async fn rebuild_config_and_model_settings_for_resume(
+        &mut self,
+        current_cwd: &Path,
+        resume_cwd: PathBuf,
+    ) -> Result<(Config, crate::app_server_session::ResumeModelSettings)> {
+        let mut resume_config = self
+            .rebuild_config_for_resume_or_fallback(current_cwd, resume_cwd)
+            .await?;
+        self.apply_runtime_policy_overrides(&mut resume_config);
+        let model_settings =
+            resume_model_settings_for_overrides(&resume_config, &self.harness_overrides);
+        Ok((resume_config, model_settings))
+    }
+
     pub(super) fn apply_runtime_policy_overrides(&mut self, config: &mut Config) {
         if let Some(policy) = self.runtime_approval_policy_override.as_ref()
             && let Err(err) = config.permissions.approval_policy.set(policy.to_core())
@@ -1528,6 +1542,37 @@ terminal_resize_reflow_max_rows = 9000
             .await?;
 
         assert_eq!(resume_config.model.as_deref(), Some("fresh-resume-model"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuilt_resume_config_drives_model_settings_policy() -> Result<()> {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        let lock_path = codex_home.path().join("session.config.lock.toml");
+        std::fs::write(
+            &lock_path,
+            "version = 1\ncodex_version = \"older-version\"\n\n[config]\n",
+        )?;
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            format!(
+                "[debug.config_lockfile]\nload_path = '{}'\nallow_codex_version_mismatch = true\n",
+                lock_path.display()
+            ),
+        )?;
+        let current_cwd = app.config.cwd.clone();
+
+        let (resume_config, model_settings) = app
+            .rebuild_config_and_model_settings_for_resume(&current_cwd, current_cwd.to_path_buf())
+            .await?;
+
+        assert!(resume_config.config_lock_toml.is_some());
+        assert_eq!(
+            model_settings,
+            crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig
+        );
         Ok(())
     }
 

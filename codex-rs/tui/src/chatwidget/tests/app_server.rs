@@ -129,6 +129,7 @@ async fn thread_session_syncs_model_provider_metadata() {
     chat.config
         .model_providers
         .insert("saved-provider".to_string(), provider.clone());
+    chat.runtime_model_provider_base_url = Some("https://ambient-provider.example/v1".to_string());
     let mut session = configured_thread_session(thread_id);
     session.model_provider_id = "saved-provider".to_string();
 
@@ -137,6 +138,23 @@ async fn thread_session_syncs_model_provider_metadata() {
 
     assert_eq!(chat.config.model_provider_id, "saved-provider");
     assert_eq!(chat.config.model_provider, provider);
+    assert_eq!(chat.runtime_model_provider_base_url, None);
+}
+
+#[tokio::test]
+async fn thread_session_uses_stub_for_unknown_model_provider() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    chat.runtime_model_provider_base_url = Some("https://ambient-provider.example/v1".to_string());
+    let mut session = configured_thread_session(ThreadId::new());
+    session.model_provider_id = "missing-provider".to_string();
+
+    chat.handle_thread_session(session);
+    let _ = drain_insert_history(&mut rx);
+
+    assert_eq!(chat.config.model_provider_id, "missing-provider");
+    assert_eq!(chat.config.model_provider.name, "missing-provider");
+    assert_eq!(chat.config.model_provider.base_url, None);
+    assert_eq!(chat.runtime_model_provider_base_url, None);
 }
 
 #[tokio::test]
@@ -151,6 +169,7 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     chat.config
         .model_providers
         .insert("saved-provider".to_string(), provider.clone());
+    chat.runtime_model_provider_base_url = Some("https://ambient-provider.example/v1".to_string());
     let mut notification = thread_settings_for_test("gpt-5.4", thread_id);
     notification.thread_settings.model_provider = "saved-provider".to_string();
 
@@ -162,6 +181,7 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     assert_eq!(chat.current_model(), "gpt-5.4");
     assert_eq!(chat.config.model_provider_id, "saved-provider");
     assert_eq!(chat.config.model_provider, provider);
+    assert_eq!(chat.runtime_model_provider_base_url, None);
     assert_eq!(
         chat.current_reasoning_effort(),
         Some(ReasoningEffortConfig::High)
