@@ -42,6 +42,11 @@ struct AppServerThreadUiSnapshot {
     pending_startup_thread_start: bool,
 }
 
+enum ResumeThreadWithRebuiltConfigError {
+    Rebuild(color_eyre::Report),
+    Resume(color_eyre::Report),
+}
+
 impl AppServerThreadUiSnapshot {
     fn take_from(app: &mut App, replacement_chat_widget: ChatWidget) -> Self {
         Self {
@@ -2105,14 +2110,26 @@ impl App {
             }
         };
 
-        let (resume_config, resume_model_settings) = match self
-            .rebuild_config_and_model_settings_for_resume(&current_cwd, resume_cwd)
+        let (resume_config, resumed) = match self
+            .resume_thread_with_rebuilt_config(
+                app_server,
+                &current_cwd,
+                resume_cwd,
+                target_session.thread_id,
+            )
             .await
         {
             Ok(result) => result,
-            Err(err) => {
+            Err(ResumeThreadWithRebuiltConfigError::Rebuild(err)) => {
                 self.chat_widget.add_error_message(format!(
                     "Failed to rebuild configuration for resume: {err}"
+                ));
+                return Ok(AppRunControl::Continue);
+            }
+            Err(ResumeThreadWithRebuiltConfigError::Resume(err)) => {
+                let path_display = target_session.display_label();
+                self.chat_widget.add_error_message(format!(
+                    "Failed to resume session from {path_display}: {err}"
                 ));
                 return Ok(AppRunControl::Continue);
             }
@@ -2124,65 +2141,63 @@ impl App {
             self.chat_widget.thread_name(),
             self.chat_widget.rollout_path().as_deref(),
         );
-        match app_server
-            .resume_thread(
-                resume_config.clone(),
-                target_session.thread_id,
-                resume_model_settings,
+        let resumed_thread_id = resumed.session.thread_id;
+        self.shutdown_current_thread(app_server).await;
+        self.config = resume_config;
+        tui.set_notification_settings(
+            self.config.tui_notifications.method,
+            self.config.tui_notifications.condition,
+        );
+        self.file_search
+            .update_search_dir(self.config.cwd.to_path_buf());
+        match self
+            .replace_chat_widget_with_app_server_thread(
+                tui, app_server, resumed, /*initial_user_message*/ None,
             )
             .await
         {
-            Ok(resumed) => {
-                let resumed_thread_id = resumed.session.thread_id;
-                self.shutdown_current_thread(app_server).await;
-                self.config = resume_config;
-                tui.set_notification_settings(
-                    self.config.tui_notifications.method,
-                    self.config.tui_notifications.condition,
-                );
-                self.file_search
-                    .update_search_dir(self.config.cwd.to_path_buf());
-                match self
-                    .replace_chat_widget_with_app_server_thread(
-                        tui, app_server, resumed, /*initial_user_message*/ None,
-                    )
-                    .await
-                {
-                    Ok(()) => {
-                        if let Some(summary) = summary {
-                            let mut lines: Vec<Line<'static>> = Vec::new();
-                            if let Some(usage_line) = summary.usage_line {
-                                lines.push(usage_line.into());
-                            }
-                            if let Some(command) = summary.resume_hint {
-                                let spans =
-                                    vec!["To continue this session, run ".into(), command.cyan()];
-                                lines.push(spans.into());
-                            }
-                            self.chat_widget.add_plain_history_lines(lines);
-                        }
-                        self.maybe_prompt_resume_paused_goal_after_resume(
-                            app_server,
-                            resumed_thread_id,
-                        )
-                        .await;
+            Ok(()) => {
+                if let Some(summary) = summary {
+                    let mut lines: Vec<Line<'static>> = Vec::new();
+                    if let Some(usage_line) = summary.usage_line {
+                        lines.push(usage_line.into());
                     }
-                    Err(err) => {
-                        self.chat_widget.add_error_message(format!(
-                            "Failed to attach to resumed app-server thread: {err}"
-                        ));
+                    if let Some(command) = summary.resume_hint {
+                        let spans = vec!["To continue this session, run ".into(), command.cyan()];
+                        lines.push(spans.into());
                     }
+                    self.chat_widget.add_plain_history_lines(lines);
                 }
+                self.maybe_prompt_resume_paused_goal_after_resume(app_server, resumed_thread_id)
+                    .await;
             }
             Err(err) => {
-                let path_display = target_session.display_label();
                 self.chat_widget.add_error_message(format!(
-                    "Failed to resume session from {path_display}: {err}"
+                    "Failed to attach to resumed app-server thread: {err}"
                 ));
             }
         }
 
         Ok(AppRunControl::Continue)
+    }
+
+    async fn resume_thread_with_rebuilt_config(
+        &mut self,
+        app_server: &mut AppServerSession,
+        current_cwd: &Path,
+        resume_cwd: PathBuf,
+        thread_id: ThreadId,
+    ) -> std::result::Result<(Config, AppServerStartedThread), ResumeThreadWithRebuiltConfigError>
+    {
+        let (resume_config, resume_model_settings) = self
+            .rebuild_config_and_model_settings_for_resume(current_cwd, resume_cwd)
+            .await
+            .map_err(ResumeThreadWithRebuiltConfigError::Rebuild)?;
+        let resumed = app_server
+            .resume_thread(resume_config.clone(), thread_id, resume_model_settings)
+            .await
+            .map_err(ResumeThreadWithRebuiltConfigError::Resume)?;
+        Ok((resume_config, resumed))
     }
 }
 
@@ -2192,6 +2207,7 @@ mod tests {
     use crate::app::test_support::make_test_app;
     use crate::chatwidget::ChatWidgetInit;
     use crate::session_state::ThreadSessionState;
+    use app_test_support::create_fake_rollout;
     use codex_app_server_protocol::AskForApproval;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::WarningNotification;
@@ -2307,6 +2323,61 @@ mod tests {
         );
         assert!(app.agent_navigation.get(&original_thread_id).is_some());
         assert_eq!(app.pending_primary_events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rebuilt_resume_path_restores_saved_provider_over_ambient_default() -> Result<()> {
+        let mut app = make_test_app().await;
+        let codex_home = tempfile::tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            r#"model_provider = "ambient-provider"
+
+[model_providers.ambient-provider]
+name = "Ambient Provider"
+base_url = "https://ambient-provider.example/v1"
+
+[model_providers.saved-provider]
+name = "Saved Provider"
+base_url = "https://saved-provider.example/v1"
+"#,
+        )?;
+        let current_cwd = app.config.cwd.to_path_buf();
+        let server_config = app.rebuild_config_for_cwd(current_cwd.clone()).await?;
+        let thread_id = ThreadId::from_string(
+            &create_fake_rollout(
+                codex_home.path(),
+                "2025-01-05T12-00-00",
+                "2025-01-05T12:00:00Z",
+                "Saved user message",
+                Some("saved-provider"),
+                /*git_info*/ None,
+            )
+            .expect("create source rollout"),
+        )?;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&server_config).await?;
+
+        let result = app
+            .resume_thread_with_rebuilt_config(
+                &mut app_server,
+                &current_cwd,
+                current_cwd.clone(),
+                thread_id,
+            )
+            .await;
+        let (resume_config, resumed) = match result {
+            Ok(result) => result,
+            Err(
+                ResumeThreadWithRebuiltConfigError::Rebuild(err)
+                | ResumeThreadWithRebuiltConfigError::Resume(err),
+            ) => return Err(err),
+        };
+
+        assert_eq!(resume_config.model_provider_id, "ambient-provider");
+        assert_eq!(resumed.session.model_provider_id, "saved-provider");
+        app_server.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]
