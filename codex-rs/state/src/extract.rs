@@ -1,6 +1,8 @@
 use crate::model::ThreadMetadata;
+use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMetaLine;
@@ -27,6 +29,68 @@ pub fn apply_rollout_item(
     if metadata.model_provider.is_empty() {
         metadata.model_provider = default_provider.to_string();
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadResumeModelSettings {
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub reasoning_effort: ThreadResumeReasoningEffort,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ThreadResumeReasoningEffort {
+    #[default]
+    Unspecified,
+    Set(ReasoningEffort),
+    Cleared,
+}
+
+/// Extract durable saved model settings from canonical rollout history.
+///
+/// Turn contexts seed legacy histories until the first explicit settings event. After that,
+/// temporary per-turn settings and stale compaction baselines cannot replace the durable choice.
+pub fn extract_thread_resume_model_settings(
+    thread_id: ThreadId,
+    items: &[RolloutItem],
+) -> ThreadResumeModelSettings {
+    use ThreadResumeReasoningEffort::Cleared;
+    use ThreadResumeReasoningEffort::Set;
+    use ThreadResumeReasoningEffort::Unspecified;
+
+    let mut settings = ThreadResumeModelSettings::default();
+    let mut explicit_settings_seen = false;
+    for item in items {
+        match item {
+            RolloutItem::SessionMeta(meta_line)
+                if meta_line.meta.id == thread_id && settings.model_provider.is_none() =>
+            {
+                settings
+                    .model_provider
+                    .clone_from(&meta_line.meta.model_provider);
+            }
+            RolloutItem::TurnContext(turn_context) if !explicit_settings_seen => {
+                settings.model = Some(turn_context.model.clone());
+                settings.reasoning_effort = turn_context.effort.clone().map_or(Unspecified, Set);
+            }
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                explicit_settings_seen = true;
+                settings.model = Some(event.thread_settings.model.clone());
+                settings.model_provider = Some(event.thread_settings.model_provider_id.clone());
+                settings.reasoning_effort = event
+                    .thread_settings
+                    .reasoning_effort
+                    .clone()
+                    .map_or(Cleared, Set);
+            }
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::EventMsg(_) => {}
+        }
+    }
+    settings
 }
 
 /// Return whether this rollout item can mutate thread metadata stored in SQLite.
@@ -524,31 +588,13 @@ mod tests {
         let cwd = std::env::current_dir()
             .expect("current directory")
             .join("updated/workspace");
-        let mut item = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
-            ThreadSettingsAppliedEvent {
-                thread_settings: ThreadSettingsSnapshot {
-                    model: "gpt-5.2-codex".to_string(),
-                    model_provider_id: "updated-provider".to_string(),
-                    service_tier: None,
-                    approval_policy: AskForApproval::Never,
-                    approvals_reviewer: ApprovalsReviewer::User,
-                    permission_profile: permission_profile.clone(),
-                    active_permission_profile: None,
-                    cwd: cwd.clone().try_into().expect("absolute settings cwd"),
-                    reasoning_effort: Some(ReasoningEffort::Ultra),
-                    reasoning_summary: Some(ReasoningSummary::Auto),
-                    personality: None,
-                    collaboration_mode: CollaborationMode {
-                        mode: ModeKind::Default,
-                        settings: Settings {
-                            model: "gpt-5.2-codex".to_string(),
-                            reasoning_effort: Some(ReasoningEffort::Ultra),
-                            developer_instructions: None,
-                        },
-                    },
-                },
-            },
-        ));
+        let mut item = thread_settings_item(
+            "gpt-5.2-codex",
+            "updated-provider",
+            Some(ReasoningEffort::Ultra),
+            cwd.clone(),
+            permission_profile.clone(),
+        );
 
         assert!(super::rollout_item_affects_thread_metadata(&item));
         apply_rollout_item(&mut metadata, &item, "test-provider");
@@ -570,6 +616,83 @@ mod tests {
         event.thread_settings.reasoning_effort = None;
         apply_rollout_item(&mut metadata, &item, "test-provider");
         assert_eq!(metadata.reasoning_effort, None);
+    }
+
+    #[test]
+    fn resume_settings_prefer_explicit_events_over_later_turn_contexts() {
+        let thread_id = metadata_for_test().id;
+        let turn_context = |model: &str, effort: Option<ReasoningEffort>| {
+            RolloutItem::TurnContext(TurnContextItem {
+                turn_id: Some("turn-1".to_string()),
+                cwd: PathBuf::from("/workspace"),
+                environments: None,
+                workspace_roots: None,
+                current_date: None,
+                timezone: None,
+                approval_policy: AskForApproval::OnRequest,
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: None,
+                network: None,
+                file_system_sandbox_policy: None,
+                model: model.to_string(),
+                personality: None,
+                collaboration_mode: None,
+                multi_agent_version: None,
+                realtime_active: None,
+                effort,
+                summary: ReasoningSummary::Auto,
+            })
+        };
+        let initial_meta = RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: thread_id,
+                model_provider: Some("initial-provider".to_string()),
+                ..Default::default()
+            },
+            git: None,
+        });
+
+        let legacy = super::extract_thread_resume_model_settings(
+            thread_id,
+            &[initial_meta.clone(), turn_context("legacy-model", None)],
+        );
+        assert_eq!(legacy.model.as_deref(), Some("legacy-model"));
+        assert_eq!(legacy.model_provider.as_deref(), Some("initial-provider"));
+        assert_eq!(
+            legacy.reasoning_effort,
+            super::ThreadResumeReasoningEffort::Unspecified
+        );
+
+        let saved = super::extract_thread_resume_model_settings(
+            thread_id,
+            &[
+                initial_meta,
+                turn_context("legacy-model", Some(ReasoningEffort::Low)),
+                thread_settings_item(
+                    "saved-model",
+                    "saved-provider",
+                    None,
+                    PathBuf::from("/workspace"),
+                    PermissionProfile::workspace_write(),
+                ),
+                turn_context("stale-model-1", Some(ReasoningEffort::High)),
+                turn_context("stale-model-2", Some(ReasoningEffort::Medium)),
+                RolloutItem::SessionMeta(SessionMetaLine {
+                    meta: SessionMeta {
+                        id: thread_id,
+                        model_provider: Some("stale-provider".to_string()),
+                        ..Default::default()
+                    },
+                    git: None,
+                }),
+            ],
+        );
+        assert_eq!(saved.model.as_deref(), Some("saved-model"));
+        assert_eq!(saved.model_provider.as_deref(), Some("saved-provider"));
+        assert_eq!(
+            saved.reasoning_effort,
+            super::ThreadResumeReasoningEffort::Cleared
+        );
     }
 
     #[test]
@@ -632,6 +755,40 @@ mod tests {
         );
 
         assert_eq!(metadata.history_mode, ThreadHistoryMode::Paginated);
+    }
+
+    fn thread_settings_item(
+        model: &str,
+        model_provider_id: &str,
+        reasoning_effort: Option<ReasoningEffort>,
+        cwd: PathBuf,
+        permission_profile: PermissionProfile,
+    ) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            ThreadSettingsAppliedEvent {
+                thread_settings: ThreadSettingsSnapshot {
+                    model: model.to_string(),
+                    model_provider_id: model_provider_id.to_string(),
+                    service_tier: None,
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: ApprovalsReviewer::User,
+                    permission_profile,
+                    active_permission_profile: None,
+                    cwd: cwd.try_into().expect("absolute settings cwd"),
+                    reasoning_effort: reasoning_effort.clone(),
+                    reasoning_summary: Some(ReasoningSummary::Auto),
+                    personality: None,
+                    collaboration_mode: CollaborationMode {
+                        mode: ModeKind::Default,
+                        settings: Settings {
+                            model: model.to_string(),
+                            reasoning_effort,
+                            developer_instructions: None,
+                        },
+                    },
+                },
+            },
+        ))
     }
 
     fn metadata_for_test() -> ThreadMetadata {

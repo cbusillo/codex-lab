@@ -1,7 +1,13 @@
 use super::*;
 use crate::error_code::method_not_found;
+use codex_config::ConfigLayerSource;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+#[cfg(test)]
+use codex_state::ThreadMetadata;
+use codex_state::ThreadResumeModelSettings;
+use codex_state::ThreadResumeReasoningEffort;
+use codex_state::extract_thread_resume_model_settings;
 use std::sync::Arc;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
@@ -141,16 +147,17 @@ fn collect_resume_override_mismatches(
 fn merge_persisted_resume_metadata(
     request_overrides: &mut Option<HashMap<String, serde_json::Value>>,
     typesafe_overrides: &mut ConfigOverrides,
-    persisted_metadata: &ThreadMetadata,
+    persisted_settings: &ThreadResumeModelSettings,
 ) {
     if has_model_resume_override(request_overrides.as_ref(), typesafe_overrides) {
         return;
     }
 
-    typesafe_overrides.model = persisted_metadata.model.clone();
-    typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
+    typesafe_overrides.model = persisted_settings.model.clone();
+    typesafe_overrides.model_provider = persisted_settings.model_provider.clone();
 
-    if let Some(reasoning_effort) = persisted_metadata.reasoning_effort.as_ref() {
+    if let ThreadResumeReasoningEffort::Set(reasoning_effort) = &persisted_settings.reasoning_effort
+    {
         request_overrides.get_or_insert_with(HashMap::new).insert(
             "model_reasoning_effort".to_string(),
             serde_json::Value::String(reasoning_effort.to_string()),
@@ -189,8 +196,29 @@ fn has_model_resume_override(
     typesafe_overrides.model.is_some()
         || typesafe_overrides.model_provider.is_some()
         || request_overrides.is_some_and(|overrides| overrides.contains_key("model"))
+        || request_overrides.is_some_and(|overrides| overrides.contains_key("model_provider"))
         || request_overrides
             .is_some_and(|overrides| overrides.contains_key("model_reasoning_effort"))
+}
+
+fn config_has_explicit_model_resume_override(config: &Config) -> bool {
+    config.config_lock_toml.is_some()
+        || config
+            .config_layer_stack
+            .layers_high_to_low()
+            .into_iter()
+            .any(|layer| {
+                matches!(
+                    &layer.name,
+                    ConfigLayerSource::SessionFlags
+                        | ConfigLayerSource::User {
+                            profile: Some(_),
+                            ..
+                        }
+                ) && ["model", "model_provider", "model_reasoning_effort"]
+                    .iter()
+                    .any(|key| layer.config.get(*key).is_some())
+            })
 }
 
 fn validate_dynamic_tools(tools: &[ApiDynamicToolSpec]) -> Result<(), String> {
@@ -2548,15 +2576,28 @@ impl ThreadRequestProcessor {
             developer_instructions,
             personality,
         );
-        self.load_and_apply_persisted_resume_metadata(
-            &thread_history,
-            &mut request_overrides,
-            &mut typesafe_overrides,
-        )
-        .await;
+        let has_explicit_model_resume_override =
+            has_model_resume_override(request_overrides.as_ref(), &typesafe_overrides)
+                || config_has_explicit_model_resume_override(&self.config);
+        let persisted_settings = match &thread_history {
+            InitialHistory::Resumed(resumed_history) => extract_thread_resume_model_settings(
+                resumed_history.conversation_id,
+                resumed_history.history.as_ref(),
+            ),
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+                ThreadResumeModelSettings::default()
+            }
+        };
+        if !has_explicit_model_resume_override {
+            merge_persisted_resume_metadata(
+                &mut request_overrides,
+                &mut typesafe_overrides,
+                &persisted_settings,
+            );
+        }
 
         // Derive a Config using the same logic as new conversation, honoring overrides if provided.
-        let config = match self
+        let mut config = match self
             .config_manager
             .load_for_cwd(request_overrides, typesafe_overrides, history_cwd)
             .await
@@ -2568,6 +2609,14 @@ impl ThreadRequestProcessor {
                 return Ok(());
             }
         };
+        if !has_explicit_model_resume_override
+            && matches!(
+                persisted_settings.reasoning_effort,
+                ThreadResumeReasoningEffort::Cleared
+            )
+        {
+            config.model_reasoning_effort = None;
+        }
 
         let response_history = thread_history.clone();
 
@@ -2742,25 +2791,6 @@ impl ThreadRequestProcessor {
             }
         }
         Ok(())
-    }
-
-    async fn load_and_apply_persisted_resume_metadata(
-        &self,
-        thread_history: &InitialHistory,
-        request_overrides: &mut Option<HashMap<String, serde_json::Value>>,
-        typesafe_overrides: &mut ConfigOverrides,
-    ) -> Option<ThreadMetadata> {
-        let InitialHistory::Resumed(resumed_history) = thread_history else {
-            return None;
-        };
-        let state_db_ctx = self.state_db.clone()?;
-        let persisted_metadata = state_db_ctx
-            .get_thread(resumed_history.conversation_id)
-            .await
-            .ok()
-            .flatten()?;
-        merge_persisted_resume_metadata(request_overrides, typesafe_overrides, &persisted_metadata);
-        Some(persisted_metadata)
     }
 
     async fn resume_running_thread(
