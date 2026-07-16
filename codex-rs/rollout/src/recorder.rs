@@ -517,10 +517,7 @@ impl RolloutRecorder {
                     state_db_ctx.as_deref(),
                     item.path.as_path(),
                     default_provider,
-                    /*builder*/ None,
-                    &[],
                     Some(archived),
-                    /*new_thread_memory_mode*/ None,
                 )
                 .await;
             } else {
@@ -555,10 +552,7 @@ impl RolloutRecorder {
                         state_db_ctx.as_deref(),
                         item.rollout_path.as_path(),
                         default_provider,
-                        /*builder*/ None,
-                        &[],
                         Some(archived),
-                        /*new_thread_memory_mode*/ None,
                     )
                     .await;
                 }
@@ -593,10 +587,7 @@ impl RolloutRecorder {
                         state_db_ctx.as_deref(),
                         item.rollout_path.as_path(),
                         default_provider,
-                        /*builder*/ None,
-                        &[],
                         Some(archived),
-                        /*new_thread_memory_mode*/ None,
                     )
                     .await;
                 }

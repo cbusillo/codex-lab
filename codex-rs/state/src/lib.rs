@@ -23,12 +23,13 @@ pub use runtime::StateRuntime;
 
 pub use audit::ThreadStateAuditRow;
 pub use audit::read_thread_state_audit_rows;
+pub use extract::ThreadMetadataProjection;
 pub use extract::ThreadResumeModelSettings;
 pub use extract::ThreadResumeReasoningEffort;
 /// Low-level storage engine: useful for focused tests.
 ///
 /// Most consumers should prefer [`StateRuntime`].
-pub use extract::apply_rollout_item;
+pub use extract::apply_rollout_items_to_metadata;
 pub use extract::extract_thread_resume_model_settings;
 pub use extract::rollout_item_affects_thread_metadata;
 pub use model::AgentJob;

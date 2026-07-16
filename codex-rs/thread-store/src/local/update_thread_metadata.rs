@@ -85,10 +85,7 @@ pub(super) async fn update_thread_metadata(
         state_db_ctx.as_deref(),
         resolved_rollout_path.path.as_path(),
         store.config.default_model_provider_id.as_str(),
-        /*builder*/ None,
-        &[],
         /*archived_only*/ resolved_rollout_path.archived.then_some(true),
-        /*new_thread_memory_mode*/ None,
     )
     .await;
 
@@ -823,10 +820,7 @@ mod tests {
             Some(runtime.as_ref()),
             path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ None,
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         let memory_mode = runtime
@@ -1094,10 +1088,7 @@ mod tests {
             Some(runtime.as_ref()),
             path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ None,
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         let thread = store
@@ -1128,10 +1119,7 @@ mod tests {
             Some(runtime.as_ref()),
             path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ None,
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         let thread = store
@@ -1188,10 +1176,7 @@ mod tests {
             Some(runtime.as_ref()),
             path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ None,
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         let thread = store
@@ -1599,10 +1584,7 @@ mod tests {
             Some(runtime.as_ref()),
             archived_path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ Some(true),
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         assert!(
@@ -1662,10 +1644,7 @@ mod tests {
             Some(runtime.as_ref()),
             archived_path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ Some(true),
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         store
