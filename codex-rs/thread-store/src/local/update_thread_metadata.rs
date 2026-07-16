@@ -8,7 +8,6 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
-use codex_rollout::ARCHIVED_SESSIONS_SUBDIR;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
 use codex_rollout::find_archived_thread_path_by_id_str;
@@ -20,6 +19,8 @@ use tracing::warn;
 use super::LocalThreadStore;
 use super::helpers::git_info_from_parts;
 use super::helpers::permission_profile_to_metadata_value;
+use super::helpers::rollout_path_is_managed_archived;
+use super::helpers::rollout_paths_match;
 use super::live_writer;
 use crate::GitInfoPatch;
 use crate::ReadThreadParams;
@@ -188,9 +189,11 @@ async fn apply_metadata_update(
 ) -> ThreadStoreResult<StoredThread> {
     let live_rollout_path = live_writer::rollout_path(store, thread_id).await.ok();
     let mut rollout_path = patch.rollout_path.clone().or(live_rollout_path);
-    let mut rollout_path_archived = rollout_path
-        .as_deref()
-        .is_some_and(|path| rollout_path_is_archived(store, path));
+    let mut rollout_path_archived = if let Some(path) = rollout_path.as_deref() {
+        rollout_path_is_managed_archived(store.config.codex_home.as_path(), path).await
+    } else {
+        false
+    };
     let state_db = store.state_db().await;
     let sqlite_write_result: ThreadStoreResult<()> = if let Some(state_db) = state_db.as_ref() {
         let patch = patch.clone();
@@ -207,6 +210,13 @@ async fn apply_metadata_update(
                 rollout_path_archived = resolved.archived;
                 rollout_path = Some(resolved.path);
             }
+            let rollout_path_changed = if let (Some(existing), Some(rollout_path)) =
+                (existing.as_ref(), rollout_path.as_deref())
+            {
+                !rollout_paths_match(&existing.rollout_path, rollout_path).await
+            } else {
+                false
+            };
             let mut metadata = match existing.clone() {
                 Some(metadata) => metadata,
                 None => {
@@ -229,6 +239,13 @@ async fn apply_metadata_update(
                 }
             };
             if let Some(rollout_path) = rollout_path {
+                if rollout_path_changed {
+                    metadata.archived_at = if rollout_path_archived {
+                        Some(metadata.archived_at.unwrap_or_else(Utc::now))
+                    } else {
+                        None
+                    };
+                }
                 metadata.rollout_path = rollout_path;
             }
             if let Some(preview) = patch.preview {
@@ -625,7 +642,9 @@ async fn resolve_rollout_path(
     include_archived: bool,
 ) -> ThreadStoreResult<ResolvedRolloutPath> {
     if let Ok(path) = live_writer::rollout_path(store, thread_id).await {
-        let archived = rollout_path_is_archived(store, path.as_path());
+        let archived =
+            rollout_path_is_managed_archived(store.config.codex_home.as_path(), path.as_path())
+                .await;
         return Ok(ResolvedRolloutPath { path, archived });
     }
 
@@ -666,10 +685,6 @@ async fn resolve_rollout_path(
     .ok_or_else(|| ThreadStoreError::InvalidRequest {
         message: format!("thread not found: {thread_id}"),
     })
-}
-
-fn rollout_path_is_archived(store: &LocalThreadStore, path: &Path) -> bool {
-    path.starts_with(store.config.codex_home.join(ARCHIVED_SESSIONS_SUBDIR))
 }
 
 #[cfg(test)]
@@ -834,11 +849,32 @@ mod tests {
     async fn update_thread_metadata_uses_live_rollout_path_for_external_resume() {
         let home = TempDir::new().expect("temp dir");
         let external_home = TempDir::new().expect("external temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite_home.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
         let uuid = Uuid::from_u128(307);
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let path = write_session_file(external_home.path(), "2025-01-03T14-45-00", uuid)
             .expect("external session file");
+        let foreign_path = write_session_file(
+            &external_home.path().join("foreign"),
+            "2025-01-04T14-45-00",
+            uuid,
+        )
+        .expect("foreign session file");
+        let mut metadata =
+            ThreadMetadataBuilder::new(thread_id, foreign_path, Utc::now(), SessionSource::Cli)
+                .build(config.default_model_provider_id.as_str());
+        metadata.archived_at = Some(metadata.updated_at);
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("state db upsert should succeed");
 
         store
             .resume_thread(ResumeThreadParams {
@@ -865,6 +901,16 @@ mod tests {
 
         assert_eq!(thread.thread_id, thread_id);
         assert!(thread.rollout_path.is_some());
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("state db read should succeed")
+            .expect("thread metadata should exist");
+        assert!(codex_utils_path::paths_match_after_normalization(
+            metadata.rollout_path,
+            &path
+        ));
+        assert_eq!(metadata.archived_at, None);
         let appended = last_rollout_item(path.as_path());
         assert_eq!(appended["type"], "session_meta");
         assert_eq!(appended["payload"]["memory_mode"], "disabled");

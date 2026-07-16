@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::FileTimes;
 use std::fs::OpenOptions;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -16,7 +17,6 @@ use codex_protocol::protocol::NetworkAccess;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
-use codex_rollout::ARCHIVED_SESSIONS_SUBDIR;
 use codex_rollout::ThreadItem;
 use codex_state::ThreadMetadata;
 
@@ -55,11 +55,89 @@ pub(super) fn scoped_rollout_path(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RolloutPathCollection {
+    Active,
+    Archived,
+    External,
+}
+
+pub(super) async fn rollout_path_collection(
+    codex_home: &Path,
+    path: &Path,
+) -> RolloutPathCollection {
+    let existing_path = codex_rollout::existing_rollout_path(path).await;
+    let path = existing_path.as_deref().unwrap_or(path);
+    if path_is_under_root(
+        path,
+        codex_home
+            .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
+            .as_path(),
+    ) {
+        RolloutPathCollection::Archived
+    } else if path_is_under_root(
+        path,
+        codex_home.join(codex_rollout::SESSIONS_SUBDIR).as_path(),
+    ) {
+        RolloutPathCollection::Active
+    } else {
+        RolloutPathCollection::External
+    }
+}
+
+pub(super) async fn rollout_path_is_managed_archived(codex_home: &Path, path: &Path) -> bool {
+    rollout_path_collection(codex_home, path).await == RolloutPathCollection::Archived
+}
+
+pub(super) async fn rollout_path_is_external(codex_home: &Path, path: &Path) -> bool {
+    rollout_path_collection(codex_home, path).await == RolloutPathCollection::External
+}
+
+pub(super) async fn rollout_paths_match(left: &Path, right: &Path) -> bool {
+    let (Some(left), Some(right)) = (
+        codex_rollout::existing_rollout_path(left).await,
+        codex_rollout::existing_rollout_path(right).await,
+    ) else {
+        return false;
+    };
+    codex_utils_path::paths_match_after_normalization(left, right)
+}
+
+fn path_is_under_root(path: &Path, root: &Path) -> bool {
+    if let (Ok(path), Ok(root)) = (
+        codex_utils_path::normalize_for_path_comparison(path),
+        codex_utils_path::normalize_for_path_comparison(root),
+    ) {
+        return path.starts_with(root);
+    }
+    lexically_normalized_path(path).starts_with(lexically_normalized_path(root))
+}
+
+fn lexically_normalized_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::ParentDir) | None if !normalized.has_root() => {
+                    normalized.push(component.as_os_str());
+                }
+                _ => {}
+            },
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
 pub(super) fn rollout_path_is_archived(codex_home: &Path, path: &Path) -> bool {
-    path.starts_with(codex_home.join(ARCHIVED_SESSIONS_SUBDIR))
-        || path
-            .components()
-            .any(|component| component.as_os_str() == OsStr::new(ARCHIVED_SESSIONS_SUBDIR))
+    path.starts_with(codex_home.join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR))
+        || path.components().any(|component| {
+            component.as_os_str() == OsStr::new(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
+        })
 }
 
 pub(super) fn matching_rollout_file_name(
@@ -245,6 +323,7 @@ fn thread_id_from_rollout_path(path: &Path) -> Option<ThreadId> {
 mod tests {
     use codex_rollout::ThreadItem;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::*;
@@ -271,5 +350,49 @@ mod tests {
                 compressed_path.with_file_name(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"))
             )
         );
+    }
+
+    #[tokio::test]
+    async fn rollout_path_collection_resolves_existing_aliases() {
+        let root = TempDir::new().expect("temp dir");
+        let codex_home = root.path().join("codex-home");
+        let sessions_root = codex_home.join(codex_rollout::SESSIONS_SUBDIR);
+        let archived_root = codex_home.join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR);
+        std::fs::create_dir_all(&sessions_root).expect("sessions dir");
+        std::fs::create_dir_all(&archived_root).expect("archived sessions dir");
+        let external_root = root.path().join("external");
+        std::fs::create_dir_all(&external_root).expect("external dir");
+        std::fs::write(external_root.join("rollout.jsonl"), "").expect("external rollout");
+        let parent_alias = sessions_root.join("../../external/rollout.jsonl");
+        assert_eq!(
+            rollout_path_collection(&codex_home, &parent_alias).await,
+            RolloutPathCollection::External
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let external_compressed = external_root.join("compressed.jsonl.zst");
+            std::fs::write(&external_compressed, "").expect("external compressed rollout");
+            symlink(
+                &external_compressed,
+                sessions_root.join("compressed.jsonl.zst"),
+            )
+            .expect("compressed file symlink");
+            assert_eq!(
+                rollout_path_collection(&codex_home, &sessions_root.join("compressed.jsonl")).await,
+                RolloutPathCollection::External
+            );
+
+            std::fs::write(archived_root.join("archived.jsonl.zst"), "")
+                .expect("archived compressed rollout");
+            let archive_alias = root.path().join("archive-alias");
+            symlink(&archived_root, &archive_alias).expect("archive root symlink");
+            assert_eq!(
+                rollout_path_collection(&codex_home, &archive_alias.join("archived.jsonl")).await,
+                RolloutPathCollection::Archived
+            );
+        }
     }
 }
