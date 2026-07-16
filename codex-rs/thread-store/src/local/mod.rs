@@ -332,6 +332,7 @@ mod tests {
     use crate::local::test_support::test_config;
     use crate::local::test_support::write_archived_session_file;
     use crate::local::test_support::write_session_file;
+    use crate::local::test_support::write_session_file_with;
 
     #[test]
     fn local_store_owns_one_lazy_history_repository_across_clones() {
@@ -1228,6 +1229,101 @@ mod tests {
             matches!(
                 item,
                 RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == "Hello from user"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn read_thread_prefers_live_writer_over_mismatched_sqlite_path() {
+        let home = TempDir::new().expect("temp dir");
+        let live_home = TempDir::new().expect("live temp dir");
+        let stale_home = TempDir::new().expect("stale temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite_home.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        let uuid = uuid::Uuid::from_u128(408);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let live_path = write_session_file_with(
+            live_home.path(),
+            live_home.path().join("sessions/2025/01/04"),
+            "2025-01-04T11-30-00",
+            uuid,
+            "live history item",
+            Some("live-provider"),
+        )
+        .expect("live session file");
+        let stale_path = write_session_file_with(
+            stale_home.path(),
+            stale_home.path().join("sessions/2025/01/04"),
+            "2025-01-04T12-00-00",
+            uuid,
+            "stale sqlite history item",
+            Some("stale-provider"),
+        )
+        .expect("stale session file");
+
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(live_path.clone()),
+                history: None,
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume live thread");
+
+        let mut builder =
+            ThreadMetadataBuilder::new(thread_id, stale_path, Utc::now(), SessionSource::Cli);
+        builder.model_provider = Some("sqlite-provider".to_string());
+        builder.cwd = home.path().join("sqlite-workspace");
+        let mut metadata = builder.build(config.default_model_provider_id.as_str());
+        metadata.first_user_message = Some("SQLite preview".to_string());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("state db upsert should succeed");
+
+        let metadata_only_thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect("read live metadata");
+        assert_eq!(metadata_only_thread.rollout_path, Some(live_path.clone()));
+        assert_eq!(metadata_only_thread.preview, "live history item");
+        assert_eq!(metadata_only_thread.model_provider, "live-provider");
+        assert!(metadata_only_thread.history.is_none());
+
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect("read live history");
+        assert_eq!(thread.rollout_path, Some(live_path));
+        let history = thread.history.expect("history");
+        assert!(history.items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event))
+                    if event.message == "live history item"
+            )
+        }));
+        assert!(!history.items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event))
+                    if event.message == "stale sqlite history item"
             )
         }));
     }
