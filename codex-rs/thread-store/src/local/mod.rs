@@ -230,21 +230,10 @@ impl ThreadStore for LocalThreadStore {
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreResult<StoredThreadHistory> {
         if let Ok(rollout_path) = live_writer::rollout_path(self, params.thread_id).await {
-            if !params.include_archived
-                && helpers::rollout_path_is_managed_archived(
-                    self.config.codex_home.as_path(),
-                    rollout_path.as_path(),
-                )
-                .await
-            {
-                return Err(ThreadStoreError::InvalidRequest {
-                    message: format!("thread {} is archived", params.thread_id),
-                });
-            }
             return read_thread::read_thread_by_rollout_path(
                 self,
                 rollout_path,
-                /*include_archived*/ true,
+                params.include_archived,
                 /*include_history*/ true,
             )
             .await?
@@ -320,6 +309,7 @@ impl ThreadStore for LocalThreadStore {
 mod tests {
     use std::sync::Arc;
 
+    use chrono::Utc;
     use codex_protocol::ThreadId;
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
@@ -332,6 +322,7 @@ mod tests {
     use codex_protocol::protocol::ThreadHistoryMode;
     use codex_protocol::protocol::ThreadMemoryMode;
     use codex_protocol::protocol::UserMessageEvent;
+    use codex_state::ThreadMetadataBuilder;
     use tempfile::TempDir;
 
     use super::*;
@@ -1110,14 +1101,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_history_uses_live_writer_rollout_path() {
+    async fn load_history_uses_live_writer_external_archive_state() {
         let home = TempDir::new().expect("temp dir");
         let external_home = TempDir::new().expect("external temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite_home.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
         let uuid = uuid::Uuid::from_u128(404);
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
-        let rollout_path = write_session_file(external_home.path(), "2025-01-04T10-00-00", uuid)
+        let external_root = external_home.path().join("archived_sessions");
+        let rollout_path = write_session_file(&external_root, "2025-01-04T10-00-00", uuid)
             .expect("external session file");
+        let mut metadata = ThreadMetadataBuilder::new(
+            thread_id,
+            rollout_path.clone(),
+            Utc::now(),
+            SessionSource::Cli,
+        )
+        .build(config.default_model_provider_id.as_str());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("state db upsert should succeed");
 
         store
             .resume_thread(ResumeThreadParams {
@@ -1150,6 +1160,32 @@ mod tests {
             .expect("load external live history");
 
         assert!(history.items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == "external history item"
+            )
+        }));
+
+        metadata.archived_at = Some(Utc::now());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("archive state db upsert should succeed");
+        store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect_err("active-only history should reject archived external live thread");
+        let archived_history = store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: true,
+            })
+            .await
+            .expect("load archived external live history");
+        assert!(archived_history.items.iter().any(|item| {
             matches!(
                 item,
                 RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == "external history item"

@@ -15,10 +15,13 @@ use codex_state::ThreadMetadata;
 use std::sync::Arc;
 
 use super::LocalThreadStore;
+use super::helpers::RolloutPathCollection;
 use super::helpers::distinct_thread_metadata_title;
 use super::helpers::git_info_from_parts;
 use super::helpers::permission_profile_from_metadata_value;
+use super::helpers::rollout_path_collection;
 use super::helpers::rollout_path_is_managed_archived;
+use super::helpers::rollout_paths_match;
 use super::helpers::set_thread_name_from_title;
 use super::helpers::stored_thread_from_rollout_item;
 use super::live_writer;
@@ -66,6 +69,12 @@ pub(super) async fn read_thread(
                 &metadata_sandbox_policy,
                 rollout_thread.cwd.as_path(),
             );
+            if let Some(path) = rollout_thread.rollout_path.as_deref()
+                && rollout_path_collection(store.config.codex_home.as_path(), path).await
+                    == RolloutPathCollection::External
+            {
+                rollout_thread.archived_at = thread.archived_at;
+            }
             thread = rollout_thread;
         }
         if params.include_history
@@ -94,6 +103,9 @@ pub(super) async fn read_thread(
                 thread.thread_id
             ),
         });
+    }
+    if let Some(metadata) = read_sqlite_metadata(store, thread.thread_id).await {
+        apply_external_archive_state(store, &mut thread, &metadata).await;
     }
     if !params.include_archived && thread.archived_at.is_some() {
         return Err(ThreadStoreError::InvalidRequest {
@@ -128,12 +140,16 @@ pub(super) async fn read_thread_by_rollout_path(
 ) -> ThreadStoreResult<StoredThread> {
     let path = resolve_requested_rollout_path(store, rollout_path).await?;
     let mut thread = read_thread_from_rollout_path(store, path).await?;
+    let metadata = read_sqlite_metadata(store, thread.thread_id).await;
+    if let Some(metadata) = metadata.as_ref() {
+        apply_external_archive_state(store, &mut thread, metadata).await;
+    }
     if !include_archived && thread.archived_at.is_some() {
         return Err(ThreadStoreError::InvalidRequest {
             message: format!("thread {} is archived", thread.thread_id),
         });
     }
-    if let Some(metadata) = read_sqlite_metadata(store, thread.thread_id).await {
+    if let Some(metadata) = metadata {
         let existing_git_info = thread.git_info.take();
         let (fallback_sha, fallback_branch, fallback_origin_url) = match existing_git_info {
             Some(info) => (
@@ -151,6 +167,22 @@ pub(super) async fn read_thread_by_rollout_path(
     }
     attach_history_if_requested(&mut thread, include_history).await?;
     Ok(thread)
+}
+
+async fn apply_external_archive_state(
+    store: &LocalThreadStore,
+    thread: &mut StoredThread,
+    metadata: &ThreadMetadata,
+) {
+    let Some(rollout_path) = thread.rollout_path.as_deref() else {
+        return;
+    };
+    if rollout_path_collection(store.config.codex_home.as_path(), rollout_path).await
+        == RolloutPathCollection::External
+        && rollout_paths_match(&metadata.rollout_path, rollout_path).await
+    {
+        thread.archived_at = metadata.archived_at;
+    }
 }
 
 async fn resolve_requested_rollout_path(
@@ -504,6 +536,20 @@ mod tests {
     use crate::local::test_support::write_archived_session_file;
     use crate::local::test_support::write_session_file;
     use crate::local::test_support::write_session_file_with_fork;
+
+    fn compress_rollout(path: &std::path::Path) -> PathBuf {
+        let mut compressed_path = path.as_os_str().to_os_string();
+        compressed_path.push(".zst");
+        let compressed_path = PathBuf::from(compressed_path);
+        zstd::stream::copy_encode(
+            std::fs::File::open(path).expect("open rollout for compression"),
+            std::fs::File::create(&compressed_path).expect("create compressed rollout"),
+            0,
+        )
+        .expect("compress rollout");
+        std::fs::remove_file(path).expect("remove plain rollout");
+        compressed_path
+    }
 
     #[tokio::test]
     async fn read_thread_returns_active_rollout_summary() {
@@ -1116,6 +1162,118 @@ mod tests {
         let history = thread.history.expect("history should load");
         assert_eq!(history.thread_id, thread_id);
         assert_eq!(history.items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn read_thread_preserves_archive_state_for_existing_external_rollout() {
+        let home = TempDir::new().expect("temp dir");
+        let external = TempDir::new().expect("external temp dir");
+        let config = test_config(home.path());
+        let uuid = Uuid::from_u128(231);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let external_root = external.path().join("archived_sessions");
+        let rollout_path = write_session_file(&external_root, "2025-01-03T12-00-00", uuid)
+            .expect("external session file");
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite_home.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        let mut builder = ThreadMetadataBuilder::new(
+            thread_id,
+            rollout_path.clone(),
+            Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.model_provider = Some("sqlite-provider".to_string());
+        builder.cwd = home.path().join("sqlite-workspace");
+        let mut metadata = builder.build(config.default_model_provider_id.as_str());
+        metadata.first_user_message = Some("SQLite preview".to_string());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("state db upsert should succeed");
+
+        let active_thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect("external active thread should remain readable");
+        assert_eq!(
+            (active_thread.rollout_path, active_thread.archived_at),
+            (Some(rollout_path.clone()), None)
+        );
+
+        let compressed_path = compress_rollout(&rollout_path);
+        metadata.rollout_path = compressed_path.clone();
+        metadata.archived_at = Some(Utc::now());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("archive state db upsert should succeed");
+
+        store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect_err("external archived thread should not appear in active reads");
+
+        let preview_thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await
+            .expect("read external archived thread preview");
+        assert!(preview_thread.archived_at.is_some());
+
+        store
+            .read_thread_by_rollout_path(compressed_path.clone(), false, false)
+            .await
+            .expect_err("external archived path should not appear in active reads");
+        let path_thread = store
+            .read_thread_by_rollout_path(compressed_path.clone(), true, false)
+            .await
+            .expect("read external archived thread by path");
+        assert!(path_thread.archived_at.is_some());
+
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: true,
+            })
+            .await
+            .expect("read external archived thread");
+        assert_eq!(thread.rollout_path, Some(rollout_path));
+        assert_eq!(thread.preview, "SQLite preview");
+        assert_eq!(thread.model_provider, "sqlite-provider");
+        assert_eq!(thread.cwd, home.path().join("sqlite-workspace"));
+        assert!(thread.archived_at.is_some());
+        assert_eq!(thread.history.expect("history should load").items.len(), 2);
+
+        let foreign_root = external.path().join("foreign");
+        let foreign_path = write_session_file(&foreign_root, "2025-01-04T12-00-00", uuid)
+            .expect("foreign session file");
+        metadata.rollout_path = foreign_path;
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("foreign path state db upsert should succeed");
+        let active_path_thread = store
+            .read_thread_by_rollout_path(compressed_path, false, false)
+            .await
+            .expect("foreign SQLite path should not archive requested rollout");
+        assert!(active_path_thread.archived_at.is_none());
     }
 
     #[tokio::test]
