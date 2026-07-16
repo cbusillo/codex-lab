@@ -12,6 +12,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 pub use codex_state::LogEntry;
 use codex_state::ThreadMetadataBuilder;
+use codex_state::ThreadMetadataProjection;
 use codex_utils_path::normalize_for_path_comparison;
 use serde_json::Value;
 use std::path::Path;
@@ -476,28 +477,11 @@ pub async fn reconcile_rollout(
     context: Option<&codex_state::StateRuntime>,
     rollout_path: &Path,
     default_provider: &str,
-    builder: Option<&ThreadMetadataBuilder>,
-    items: &[RolloutItem],
     archived_only: Option<bool>,
-    new_thread_memory_mode: Option<&str>,
 ) {
     let Some(ctx) = context else {
         return;
     };
-    if builder.is_some() || !items.is_empty() {
-        apply_rollout_items(
-            Some(ctx),
-            rollout_path,
-            default_provider,
-            builder,
-            items,
-            "reconcile_rollout",
-            new_thread_memory_mode,
-            /*updated_at_override*/ None,
-        )
-        .await;
-        return;
-    }
     let outcome =
         match metadata::extract_metadata_from_rollout(rollout_path, default_provider).await {
             Ok(outcome) => outcome,
@@ -601,22 +585,20 @@ pub async fn read_repair_rollout_path(
         Some(ctx),
         rollout_path,
         default_provider.as_str(),
-        /*builder*/ None,
-        &[],
         archived_only,
-        /*new_thread_memory_mode*/ None,
     )
     .await;
 }
 
-/// Apply rollout items incrementally to SQLite.
+/// Apply the next rollout items with projection state owned by an ordered stream lifecycle.
 #[allow(clippy::too_many_arguments)]
-pub async fn apply_rollout_items(
+pub async fn apply_rollout_items_with_projection(
     context: Option<&codex_state::StateRuntime>,
     rollout_path: &Path,
     default_provider: &str,
     builder: Option<&ThreadMetadataBuilder>,
     items: &[RolloutItem],
+    projection: &mut ThreadMetadataProjection,
     stage: &str,
     new_thread_memory_mode: Option<&str>,
     updated_at_override: Option<DateTime<Utc>>,
@@ -644,7 +626,13 @@ pub async fn apply_rollout_items(
     builder.rollout_path = rollout_path.to_path_buf();
     builder.cwd = normalize_cwd_for_state_db(&builder.cwd);
     if let Err(err) = ctx
-        .apply_rollout_items(&builder, items, new_thread_memory_mode, updated_at_override)
+        .apply_rollout_items_with_projection(
+            &builder,
+            items,
+            projection,
+            new_thread_memory_mode,
+            updated_at_override,
+        )
         .await
     {
         warn!(

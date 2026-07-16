@@ -302,10 +302,7 @@ async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary(
         Some(&state_db),
         rollout_path.as_path(),
         "mock_provider",
-        /*builder*/ None,
-        &[],
         /*archived_only*/ None,
-        /*new_thread_memory_mode*/ None,
     )
     .await;
 

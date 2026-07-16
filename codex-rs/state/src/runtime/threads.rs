@@ -814,11 +814,12 @@ ON CONFLICT(id) DO UPDATE SET
         Ok(())
     }
 
-    /// Apply rollout items incrementally using the underlying database.
-    pub async fn apply_rollout_items(
+    /// Apply the next rollout items using projection state owned by the ordered stream caller.
+    pub async fn apply_rollout_items_with_projection(
         &self,
         builder: &ThreadMetadataBuilder,
         items: &[RolloutItem],
+        projection: &mut ThreadMetadataProjection,
         new_thread_memory_mode: Option<&str>,
         updated_at_override: Option<DateTime<Utc>>,
     ) -> anyhow::Result<()> {
@@ -830,9 +831,7 @@ ON CONFLICT(id) DO UPDATE SET
             .clone()
             .unwrap_or_else(|| builder.build(&self.default_provider));
         metadata.rollout_path = builder.rollout_path.clone();
-        for item in items {
-            apply_rollout_item(&mut metadata, item, &self.default_provider);
-        }
+        projection.apply_items(&mut metadata, items, &self.default_provider);
         if let Some(existing_metadata) = existing_metadata.as_ref() {
             metadata.prefer_existing_git_info(existing_metadata);
         }
@@ -1261,8 +1260,9 @@ mod tests {
             metadata.created_at,
             SessionSource::Cli,
         );
+        let mut projection = ThreadMetadataProjection::default();
         runtime
-            .apply_rollout_items(
+            .apply_rollout_items_with_projection(
                 &builder,
                 &[RolloutItem::SessionMeta(SessionMetaLine {
                     meta: SessionMeta {
@@ -1273,6 +1273,7 @@ mod tests {
                     },
                     git: None,
                 })],
+                &mut projection,
                 /*new_thread_memory_mode*/ None,
                 Some(metadata.updated_at),
             )
@@ -1635,10 +1636,14 @@ mod tests {
             },
             git: None,
         })];
+        let mut projection = ThreadMetadataProjection::default();
 
         runtime
-            .apply_rollout_items(
-                &builder, &items, /*new_thread_memory_mode*/ None,
+            .apply_rollout_items_with_projection(
+                &builder,
+                &items,
+                &mut projection,
+                /*new_thread_memory_mode*/ None,
                 /*updated_at_override*/ None,
             )
             .await
@@ -1704,10 +1709,14 @@ mod tests {
                 repository_url: Some("git@example.com:openai/codex.git".to_string()),
             }),
         })];
+        let mut projection = ThreadMetadataProjection::default();
 
         runtime
-            .apply_rollout_items(
-                &builder, &items, /*new_thread_memory_mode*/ None,
+            .apply_rollout_items_with_projection(
+                &builder,
+                &items,
+                &mut projection,
+                /*new_thread_memory_mode*/ None,
                 /*updated_at_override*/ None,
             )
             .await
@@ -2161,11 +2170,13 @@ mod tests {
         ))];
         let override_updated_at =
             DateTime::<Utc>::from_timestamp(1_700_001_234, 0).expect("timestamp");
+        let mut projection = ThreadMetadataProjection::default();
 
         runtime
-            .apply_rollout_items(
+            .apply_rollout_items_with_projection(
                 &builder,
                 &items,
+                &mut projection,
                 /*new_thread_memory_mode*/ None,
                 Some(override_updated_at),
             )

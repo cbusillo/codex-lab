@@ -85,10 +85,7 @@ pub(super) async fn update_thread_metadata(
         state_db_ctx.as_deref(),
         resolved_rollout_path.path.as_path(),
         store.config.default_model_provider_id.as_str(),
-        /*builder*/ None,
-        &[],
         /*archived_only*/ resolved_rollout_path.archived.then_some(true),
-        /*new_thread_memory_mode*/ None,
     )
     .await;
 
@@ -250,7 +247,7 @@ async fn apply_metadata_update(
                 metadata.model = Some(model);
             }
             if let Some(reasoning_effort) = patch.reasoning_effort {
-                metadata.reasoning_effort = Some(reasoning_effort);
+                metadata.reasoning_effort = reasoning_effort;
             }
             if let Some(created_at) = patch.created_at {
                 metadata.created_at = created_at;
@@ -678,6 +675,7 @@ fn rollout_path_is_archived(store: &LocalThreadStore, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use codex_protocol::models::PermissionProfile;
+    use codex_protocol::openai_models::ReasoningEffort;
     use codex_protocol::protocol::ThreadHistoryMode;
     use pretty_assertions::assert_eq;
     use serde_json::Value;
@@ -822,10 +820,7 @@ mod tests {
             Some(runtime.as_ref()),
             path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ None,
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         let memory_mode = runtime
@@ -919,7 +914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_thread_metadata_sets_permission_profile() {
+    async fn update_thread_metadata_updates_permission_profile_and_reasoning_effort() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
         let runtime = codex_state::StateRuntime::init(
@@ -938,6 +933,7 @@ mod tests {
                 thread_id,
                 patch: ThreadMetadataPatch {
                     permission_profile: Some(PermissionProfile::Disabled),
+                    reasoning_effort: Some(Some(ReasoningEffort::Ultra)),
                     ..Default::default()
                 },
                 include_archived: false,
@@ -951,10 +947,30 @@ mod tests {
             .await
             .expect("sqlite metadata read")
             .expect("sqlite metadata");
+        assert_eq!(metadata.reasoning_effort, Some(ReasoningEffort::Ultra));
+        let thread = store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch: ThreadMetadataPatch {
+                    reasoning_effort: Some(None),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await
+            .expect("clear reasoning effort");
+
+        assert_eq!(thread.reasoning_effort, None);
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
         assert_eq!(
             metadata.sandbox_policy,
             serde_json::to_string(&PermissionProfile::Disabled).expect("serialize profile")
         );
+        assert_eq!(metadata.reasoning_effort, None);
     }
 
     #[tokio::test]
@@ -1072,10 +1088,7 @@ mod tests {
             Some(runtime.as_ref()),
             path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ None,
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         let thread = store
@@ -1106,10 +1119,7 @@ mod tests {
             Some(runtime.as_ref()),
             path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ None,
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         let thread = store
@@ -1166,10 +1176,7 @@ mod tests {
             Some(runtime.as_ref()),
             path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ None,
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         let thread = store
@@ -1577,10 +1584,7 @@ mod tests {
             Some(runtime.as_ref()),
             archived_path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ Some(true),
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         assert!(
@@ -1640,10 +1644,7 @@ mod tests {
             Some(runtime.as_ref()),
             archived_path.as_path(),
             config.default_model_provider_id.as_str(),
-            /*builder*/ None,
-            &[],
             /*archived_only*/ Some(true),
-            /*new_thread_memory_mode*/ None,
         )
         .await;
         store

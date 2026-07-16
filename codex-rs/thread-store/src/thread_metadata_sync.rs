@@ -34,6 +34,7 @@ const THREAD_UPDATED_AT_TOUCH_INTERVAL: Duration = Duration::from_millis(50);
 pub(crate) struct ThreadMetadataSync {
     thread_id: ThreadId,
     cwd_seen: bool,
+    settings_snapshot_seen: bool,
     preview_seen: bool,
     first_user_message_seen: bool,
     title_seen: bool,
@@ -80,6 +81,7 @@ impl ThreadMetadataSync {
         Self {
             thread_id: params.thread_id,
             cwd_seen: !cwd.as_os_str().is_empty(),
+            settings_snapshot_seen: false,
             preview_seen: false,
             first_user_message_seen: false,
             title_seen: false,
@@ -99,6 +101,7 @@ impl ThreadMetadataSync {
                 .cwd
                 .as_ref()
                 .is_some_and(|cwd| !cwd.as_os_str().is_empty()),
+            settings_snapshot_seen: false,
             preview_seen: false,
             first_user_message_seen: false,
             title_seen: false,
@@ -206,7 +209,8 @@ impl ThreadMetadataSync {
                     update.agent_nickname = Some(meta_line.meta.agent_nickname.clone());
                     update.agent_role = Some(meta_line.meta.agent_role.clone());
                     update.agent_path = Some(meta_line.meta.agent_path.clone());
-                    if let Some(model_provider) = meta_line.meta.model_provider.clone()
+                    if !self.settings_snapshot_seen
+                        && let Some(model_provider) = meta_line.meta.model_provider.clone()
                         && !model_provider.is_empty()
                     {
                         update.model_provider = Some(model_provider);
@@ -214,7 +218,7 @@ impl ThreadMetadataSync {
                     if !meta_line.meta.cli_version.is_empty() {
                         update.cli_version = Some(meta_line.meta.cli_version.clone());
                     }
-                    if !meta_line.meta.cwd.as_os_str().is_empty() {
+                    if !self.settings_snapshot_seen && !meta_line.meta.cwd.as_os_str().is_empty() {
                         self.cwd_seen = true;
                         update.cwd = Some(meta_line.meta.cwd.clone());
                     }
@@ -227,13 +231,13 @@ impl ThreadMetadataSync {
                         update.memory_mode = Some(memory_mode);
                     }
                 }
-                RolloutItem::TurnContext(turn_ctx) => {
+                RolloutItem::TurnContext(turn_ctx) if !self.settings_snapshot_seen => {
                     if !self.cwd_seen && !turn_ctx.cwd.as_os_str().is_empty() {
                         self.cwd_seen = true;
                         update.cwd = Some(turn_ctx.cwd.clone());
                     }
                     update.model = Some(turn_ctx.model.clone());
-                    update.reasoning_effort = turn_ctx.effort.clone();
+                    update.reasoning_effort = Some(turn_ctx.effort.clone());
                     update.approval_mode = Some(turn_ctx.approval_policy);
                     update.permission_profile = Some(turn_ctx.permission_profile());
                 }
@@ -262,7 +266,19 @@ impl ThreadMetadataSync {
                         }
                     }
                 }
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                    let settings = &event.thread_settings;
+                    self.cwd_seen = true;
+                    self.settings_snapshot_seen = true;
+                    update.model = Some(settings.model.clone());
+                    update.model_provider = Some(settings.model_provider_id.clone());
+                    update.reasoning_effort = Some(settings.reasoning_effort.clone());
+                    update.cwd = Some(settings.cwd.clone().into_path_buf());
+                    update.approval_mode = Some(settings.approval_policy);
+                    update.permission_profile = Some(settings.permission_profile.clone());
+                }
                 RolloutItem::SessionMeta(_)
+                | RolloutItem::TurnContext(_)
                 | RolloutItem::EventMsg(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::Compacted(_) => {}
@@ -361,7 +377,15 @@ fn git_info_patch_from_observation(git_info: GitInfo) -> GitInfoPatch {
 
 #[cfg(test)]
 mod tests {
+    use codex_protocol::config_types::ApprovalsReviewer;
+    use codex_protocol::config_types::CollaborationMode;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::config_types::ReasoningSummary;
+    use codex_protocol::config_types::Settings;
     use codex_protocol::items::UserMessageItem;
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::CompactedItem;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::SessionMeta;
@@ -371,6 +395,8 @@ mod tests {
     use codex_protocol::protocol::ThreadGoalStatus;
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
     use codex_protocol::protocol::ThreadHistoryMode;
+    use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+    use codex_protocol::protocol::ThreadSettingsSnapshot;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_protocol::user_input::UserInput;
     use pretty_assertions::assert_eq;
@@ -488,6 +514,111 @@ mod tests {
     }
 
     #[test]
+    fn thread_settings_applied_updates_live_metadata() {
+        let thread_id = ThreadId::new();
+        let mut sync = ThreadMetadataSync::for_resume(&resume_params(thread_id, Vec::new()));
+        let permission_profile = PermissionProfile::workspace_write();
+        let cwd = std::env::current_dir()
+            .expect("current directory")
+            .join("updated/workspace");
+
+        let mut item = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            ThreadSettingsAppliedEvent {
+                thread_settings: ThreadSettingsSnapshot {
+                    model: "gpt-5.2-codex".to_string(),
+                    model_provider_id: "updated-provider".to_string(),
+                    service_tier: None,
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: ApprovalsReviewer::User,
+                    permission_profile: permission_profile.clone(),
+                    active_permission_profile: None,
+                    cwd: cwd.clone().try_into().expect("absolute settings cwd"),
+                    reasoning_effort: Some(ReasoningEffort::Ultra),
+                    reasoning_summary: Some(ReasoningSummary::Auto),
+                    personality: None,
+                    collaboration_mode: CollaborationMode {
+                        mode: ModeKind::Default,
+                        settings: Settings {
+                            model: "gpt-5.2-codex".to_string(),
+                            reasoning_effort: Some(ReasoningEffort::Ultra),
+                            developer_instructions: None,
+                        },
+                    },
+                },
+            },
+        ));
+
+        let update = sync
+            .observe_appended_items(&[item.clone()])
+            .expect("thread settings metadata update");
+
+        assert_eq!(update.patch.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(
+            update.patch.model_provider.as_deref(),
+            Some("updated-provider")
+        );
+        assert_eq!(
+            update.patch.reasoning_effort,
+            Some(Some(ReasoningEffort::Ultra))
+        );
+        assert_eq!(update.patch.cwd, Some(cwd.clone()));
+        assert_eq!(update.patch.approval_mode, Some(AskForApproval::Never));
+        assert_eq!(update.patch.permission_profile, Some(permission_profile));
+        sync.mark_pending_update_applied(&update);
+
+        let stale_update = sync
+            .observe_appended_items(&[stale_turn_context()])
+            .expect("stale turn context metadata touch");
+        assert!(stale_update.patch.model.is_none());
+        assert!(stale_update.patch.model_provider.is_none());
+        assert!(stale_update.patch.reasoning_effort.is_none());
+        assert!(stale_update.patch.cwd.is_none());
+        assert!(stale_update.patch.approval_mode.is_none());
+        assert!(stale_update.patch.permission_profile.is_none());
+        sync.mark_pending_update_applied(&stale_update);
+
+        let mut compatibility_meta = session_meta(thread_id);
+        compatibility_meta.meta.model_provider = Some("initial-provider".to_string());
+        compatibility_meta.meta.cwd = std::path::PathBuf::from("/initial/workspace");
+        let replay = ThreadMetadataSync::for_resume(&resume_params(
+            thread_id,
+            vec![
+                item.clone(),
+                RolloutItem::SessionMeta(compatibility_meta),
+                stale_turn_context(),
+            ],
+        ));
+        let replay_update = replay
+            .take_pending_update()
+            .expect("replayed settings metadata update");
+        assert_eq!(
+            replay_update.patch.model_provider.as_deref(),
+            Some("updated-provider")
+        );
+        assert_eq!(replay_update.patch.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(
+            replay_update.patch.reasoning_effort,
+            Some(Some(ReasoningEffort::Ultra))
+        );
+        assert_eq!(replay_update.patch.cwd, Some(cwd));
+
+        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+            panic!("thread settings applied item");
+        };
+        event.thread_settings.reasoning_effort = None;
+        event
+            .thread_settings
+            .collaboration_mode
+            .settings
+            .reasoning_effort = None;
+
+        let update = sync
+            .observe_appended_items(&[item])
+            .expect("thread settings clear metadata update");
+        assert_eq!(update.patch.reasoning_effort, Some(None));
+    }
+
+    #[test]
     fn metadata_irrelevant_items_coalesce_updated_at_touches() {
         let thread_id = ThreadId::new();
         let mut sync = ThreadMetadataSync::for_resume(&resume_params(thread_id, Vec::new()));
@@ -574,6 +705,29 @@ mod tests {
             },
             git: None,
         }
+    }
+
+    fn stale_turn_context() -> RolloutItem {
+        RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
+            turn_id: Some("stale-turn".to_string()),
+            cwd: std::path::PathBuf::from("/stale/workspace"),
+            environments: None,
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::OnRequest,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "stale-model".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            realtime_active: None,
+            effort: Some(ReasoningEffort::Low),
+            summary: ReasoningSummary::Auto,
+        })
     }
 
     fn goal_update(thread_id: ThreadId, objective: &str) -> ThreadGoalUpdatedEvent {

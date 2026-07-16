@@ -113,10 +113,7 @@ async fn reconcile_rollout_preserves_existing_explicit_title() -> anyhow::Result
         Some(runtime.as_ref()),
         rollout_path.as_path(),
         "test-provider",
-        /*builder*/ None,
-        &[],
         /*archived_only*/ Some(false),
-        /*new_thread_memory_mode*/ None,
     )
     .await;
 

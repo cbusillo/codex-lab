@@ -15,6 +15,7 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_state::BackfillStatus;
 use codex_state::ThreadMetadataBuilder;
+use codex_state::apply_rollout_items_to_metadata;
 use pretty_assertions::assert_eq;
 use std::fs::File;
 use std::io::Write;
@@ -74,7 +75,11 @@ async fn extract_metadata_from_rollout_uses_session_meta() {
 
     let builder = builder_from_session_meta(&session_meta_line, path.as_path()).expect("builder");
     let mut expected = builder.build("openai");
-    apply_rollout_item(&mut expected, &rollout_line.item, "openai");
+    apply_rollout_items_to_metadata(
+        &mut expected,
+        std::slice::from_ref(&rollout_line.item),
+        "openai",
+    );
     expected.updated_at = file_modified_time_utc(&path).await.expect("mtime");
 
     assert_eq!(outcome.metadata, expected);

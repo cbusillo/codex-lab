@@ -23,10 +23,11 @@ pub use runtime::StateRuntime;
 
 pub use audit::ThreadStateAuditRow;
 pub use audit::read_thread_state_audit_rows;
+pub use extract::ThreadMetadataProjection;
 /// Low-level storage engine: useful for focused tests.
 ///
 /// Most consumers should prefer [`StateRuntime`].
-pub use extract::apply_rollout_item;
+pub use extract::apply_rollout_items_to_metadata;
 pub use extract::rollout_item_affects_thread_metadata;
 pub use model::AgentJob;
 pub use model::AgentJobCreateParams;
