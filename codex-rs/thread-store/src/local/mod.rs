@@ -231,10 +231,11 @@ impl ThreadStore for LocalThreadStore {
     ) -> ThreadStoreResult<StoredThreadHistory> {
         if let Ok(rollout_path) = live_writer::rollout_path(self, params.thread_id).await {
             if !params.include_archived
-                && helpers::rollout_path_is_archived(
+                && helpers::rollout_path_is_managed_archived(
                     self.config.codex_home.as_path(),
                     rollout_path.as_path(),
                 )
+                .await
             {
                 return Err(ThreadStoreError::InvalidRequest {
                     message: format!("thread {} is archived", params.thread_id),
