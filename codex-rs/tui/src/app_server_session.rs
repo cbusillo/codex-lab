@@ -1857,6 +1857,7 @@ mod tests {
     use super::*;
     use crate::legacy_core::config::ConfigBuilder;
     use crate::legacy_core::config::ConfigOverrides;
+    use app_test_support::create_fake_rollout;
     use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStatus;
@@ -2333,6 +2334,61 @@ mod tests {
             overrides.get("model_reasoning_summary"),
             Some(&serde_json::Value::String("detailed".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_resume_does_not_forward_implicit_service_tier() -> Result<()> {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let mut config = build_config(&codex_home).await;
+        config.model = Some("gpt-5.4".to_string());
+        config.service_tier = None;
+        config
+            .features
+            .enable(Feature::FastMode)
+            .expect("enable fast mode");
+        let thread_id = ThreadId::from_string(
+            &create_fake_rollout(
+                codex_home.path(),
+                "2025-01-05T12-00-00",
+                "2025-01-05T12:00:00Z",
+                "Saved user message",
+                Some(config.model_provider_id.as_str()),
+                /*git_info*/ None,
+            )
+            .expect("create source rollout"),
+        )?;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
+        let preset = ModelPreset {
+            id: "gpt-5.4".to_string(),
+            model: "gpt-5.4".to_string(),
+            display_name: "GPT-5.4".to_string(),
+            description: String::new(),
+            default_reasoning_effort: ReasoningEffort::Medium,
+            supported_reasoning_efforts: Vec::new(),
+            supports_personality: false,
+            additional_speed_tiers: Vec::new(),
+            service_tiers: vec![ModelServiceTier {
+                id: ServiceTier::Fast.request_value().to_string(),
+                name: "fast".to_string(),
+                description: "Fast tier".to_string(),
+            }],
+            default_service_tier: Some(ServiceTier::Fast.request_value().to_string()),
+            is_default: true,
+            upgrade: None,
+            show_in_picker: true,
+            availability_nux: None,
+            supported_in_api: true,
+            input_modalities: vec![codex_protocol::openai_models::InputModality::Text],
+        };
+        app_server.available_models = vec![preset];
+
+        let resumed = app_server
+            .resume_thread(config, thread_id, ResumeModelSettings::RestoreFromThread)
+            .await?;
+
+        assert_eq!(resumed.session.service_tier, None);
+        app_server.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]

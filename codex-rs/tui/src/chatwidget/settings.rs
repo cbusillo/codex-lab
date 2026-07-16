@@ -507,10 +507,34 @@ impl ChatWidget {
         self.refresh_status_line();
     }
 
+    pub(super) fn sync_model_provider(&mut self, provider_id: &str) {
+        let provider = self
+            .config
+            .model_providers
+            .get(provider_id)
+            .cloned()
+            .or_else(|| {
+                (self.config.model_provider_id == provider_id)
+                    .then(|| self.config.model_provider.clone())
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    provider_id,
+                    "restored thread provider is not available in local config"
+                );
+                codex_model_provider_info::ModelProviderInfo {
+                    name: provider_id.to_string(),
+                    ..Default::default()
+                }
+            });
+        self.config.model_provider_id = provider_id.to_string();
+        self.config.model_provider = provider;
+    }
+
     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
         let cwd_changed = self.config.cwd != settings.cwd;
         self.apply_thread_settings_cwd(settings.cwd.clone());
-        self.config.model_provider_id = settings.model_provider.clone();
+        self.sync_model_provider(&settings.model_provider);
         self.set_service_tier(settings.service_tier.clone());
         self.set_approval_policy(settings.approval_policy);
         self.set_approvals_reviewer(settings.approvals_reviewer.to_core());

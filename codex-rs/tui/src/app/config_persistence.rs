@@ -1513,6 +1513,25 @@ terminal_resize_reflow_max_rows = 9000
     }
 
     #[tokio::test]
+    async fn rebuild_config_for_resume_or_fallback_returns_fresh_config() -> Result<()> {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            "model = \"fresh-resume-model\"\n",
+        )?;
+        let current_cwd = app.config.cwd.clone();
+
+        let resume_config = app
+            .rebuild_config_for_resume_or_fallback(&current_cwd, current_cwd.to_path_buf())
+            .await?;
+
+        assert_eq!(resume_config.model.as_deref(), Some("fresh-resume-model"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn rebuild_config_for_resume_or_fallback_errors_when_cwd_changes() -> Result<()> {
         let mut app = make_test_app().await;
         let codex_home = tempdir()?;
