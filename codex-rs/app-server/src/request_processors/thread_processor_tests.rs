@@ -718,6 +718,30 @@ mod thread_processor_behavior_tests {
         );
     }
 
+    #[test]
+    fn model_resume_override_layers_require_explicit_model_source() {
+        let layer_config = |key: &str| {
+            TomlValue::Table(toml::map::Map::from_iter([(
+                key.to_string(),
+                TomlValue::String("value".to_string()),
+            )]))
+        };
+        let user_source = |profile| ConfigLayerSource::User {
+            file: test_path_buf("/tmp/config.toml").abs(),
+            profile,
+        };
+        let flags = ConfigLayerSource::SessionFlags;
+        let model = layer_config("model");
+        let sandbox = layer_config("sandbox_mode");
+        assert!(model_resume_override_in_layer(&flags, &model));
+        assert!(model_resume_override_in_layer(
+            &user_source(Some("work".to_string())),
+            &model
+        ));
+        assert!(!model_resume_override_in_layer(&user_source(None), &model));
+        assert!(!model_resume_override_in_layer(&flags, &sandbox));
+    }
+
     fn test_thread_metadata(
         model: Option<&str>,
         reasoning_effort: Option<ReasoningEffort>,
@@ -734,6 +758,20 @@ mod thread_processor_behavior_tests {
         metadata.model = model.map(ToString::to_string);
         metadata.reasoning_effort = reasoning_effort;
         Ok(metadata)
+    }
+
+    fn test_resume_model_settings(
+        model: Option<&str>,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> ThreadResumeModelSettings {
+        ThreadResumeModelSettings {
+            model: model.map(ToString::to_string),
+            model_provider: Some("mock_provider".to_string()),
+            reasoning_effort: reasoning_effort.map_or(
+                ThreadResumeReasoningEffort::Unspecified,
+                ThreadResumeReasoningEffort::Set,
+            ),
+        }
     }
 
     #[test]
@@ -758,7 +796,7 @@ mod thread_processor_behavior_tests {
         let mut request_overrides = None;
         let mut typesafe_overrides = ConfigOverrides::default();
         let persisted_metadata =
-            test_thread_metadata(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High))?;
+            test_resume_model_settings(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High));
 
         merge_persisted_resume_metadata(
             &mut request_overrides,
@@ -795,7 +833,7 @@ mod thread_processor_behavior_tests {
             ..Default::default()
         };
         let persisted_metadata =
-            test_thread_metadata(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High))?;
+            test_resume_model_settings(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High));
 
         merge_persisted_resume_metadata(
             &mut request_overrides,
@@ -824,7 +862,7 @@ mod thread_processor_behavior_tests {
         )]));
         let mut typesafe_overrides = ConfigOverrides::default();
         let persisted_metadata =
-            test_thread_metadata(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High))?;
+            test_resume_model_settings(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High));
 
         merge_persisted_resume_metadata(
             &mut request_overrides,
@@ -845,15 +883,15 @@ mod thread_processor_behavior_tests {
     }
 
     #[test]
-    fn merge_persisted_resume_metadata_skips_persisted_values_when_provider_overridden()
+    fn merge_persisted_resume_metadata_skips_persisted_values_when_config_provider_overridden()
     -> Result<()> {
-        let mut request_overrides = None;
-        let mut typesafe_overrides = ConfigOverrides {
-            model_provider: Some("oss".to_string()),
-            ..Default::default()
-        };
+        let mut request_overrides = Some(HashMap::from([(
+            "model_provider".to_string(),
+            serde_json::Value::String("oss".to_string()),
+        )]));
+        let mut typesafe_overrides = ConfigOverrides::default();
         let persisted_metadata =
-            test_thread_metadata(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High))?;
+            test_resume_model_settings(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High));
 
         merge_persisted_resume_metadata(
             &mut request_overrides,
@@ -862,8 +900,14 @@ mod thread_processor_behavior_tests {
         );
 
         assert_eq!(typesafe_overrides.model, None);
-        assert_eq!(typesafe_overrides.model_provider, Some("oss".to_string()));
-        assert_eq!(request_overrides, None);
+        assert_eq!(typesafe_overrides.model_provider, None);
+        assert_eq!(
+            request_overrides,
+            Some(HashMap::from([(
+                "model_provider".to_string(),
+                serde_json::Value::String("oss".to_string()),
+            )]))
+        );
         Ok(())
     }
 
@@ -876,7 +920,7 @@ mod thread_processor_behavior_tests {
         )]));
         let mut typesafe_overrides = ConfigOverrides::default();
         let persisted_metadata =
-            test_thread_metadata(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High))?;
+            test_resume_model_settings(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High));
 
         merge_persisted_resume_metadata(
             &mut request_overrides,
@@ -901,7 +945,7 @@ mod thread_processor_behavior_tests {
         let mut request_overrides = None;
         let mut typesafe_overrides = ConfigOverrides::default();
         let persisted_metadata =
-            test_thread_metadata(/*model*/ None, /*reasoning_effort*/ None)?;
+            test_resume_model_settings(/*model*/ None, /*reasoning_effort*/ None);
 
         merge_persisted_resume_metadata(
             &mut request_overrides,
