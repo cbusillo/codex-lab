@@ -18,17 +18,29 @@ pub fn apply_rollout_items_to_metadata(
     default_provider: &str,
 ) {
     let mut projection = ThreadMetadataProjection::default();
-    for item in items {
-        projection.apply_item(metadata, item, default_provider);
-    }
+    projection.apply_items(metadata, items, default_provider);
 }
 
-#[derive(Default)]
-struct ThreadMetadataProjection {
+/// Ordered metadata projection state for one complete or incrementally owned rollout stream.
+/// Resume callers must seed it from complete history before applying new batches.
+#[derive(Debug, Default)]
+pub struct ThreadMetadataProjection {
     settings_snapshot_seen: bool,
 }
 
 impl ThreadMetadataProjection {
+    /// Apply the next ordered rollout items while preserving snapshot authority across batches.
+    pub fn apply_items(
+        &mut self,
+        metadata: &mut ThreadMetadata,
+        items: &[RolloutItem],
+        default_provider: &str,
+    ) {
+        for item in items {
+            self.apply_item(metadata, item, default_provider);
+        }
+    }
+
     fn apply_item(
         &mut self,
         metadata: &mut ThreadMetadata,
@@ -188,6 +200,7 @@ pub(crate) fn enum_to_string<T: Serialize>(value: &T) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::ThreadMetadataProjection;
     use super::apply_rollout_items_to_metadata;
     use crate::model::ThreadMetadata;
     use chrono::DateTime;
@@ -624,6 +637,20 @@ mod tests {
             Some(ReasoningEffort::Ultra)
         );
         assert_eq!(replayed_metadata.cwd, cwd);
+
+        let mut incremental_metadata = metadata_for_test();
+        let mut projection = ThreadMetadataProjection::default();
+        projection.apply_items(
+            &mut incremental_metadata,
+            std::slice::from_ref(&item),
+            "test-provider",
+        );
+        projection.apply_items(
+            &mut incremental_metadata,
+            &[stale_turn_context()],
+            "test-provider",
+        );
+        assert_eq!(incremental_metadata, metadata);
 
         let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
             panic!("thread settings applied item");

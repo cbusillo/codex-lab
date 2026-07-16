@@ -564,6 +564,18 @@ mod tests {
         assert_eq!(update.patch.cwd, Some(cwd.clone()));
         assert_eq!(update.patch.approval_mode, Some(AskForApproval::Never));
         assert_eq!(update.patch.permission_profile, Some(permission_profile));
+        sync.mark_pending_update_applied(&update);
+
+        let stale_update = sync
+            .observe_appended_items(&[stale_turn_context()])
+            .expect("stale turn context metadata touch");
+        assert!(stale_update.patch.model.is_none());
+        assert!(stale_update.patch.model_provider.is_none());
+        assert!(stale_update.patch.reasoning_effort.is_none());
+        assert!(stale_update.patch.cwd.is_none());
+        assert!(stale_update.patch.approval_mode.is_none());
+        assert!(stale_update.patch.permission_profile.is_none());
+        sync.mark_pending_update_applied(&stale_update);
 
         let mut compatibility_meta = session_meta(thread_id);
         compatibility_meta.meta.model_provider = Some("initial-provider".to_string());

@@ -23,6 +23,7 @@ pub use runtime::StateRuntime;
 
 pub use audit::ThreadStateAuditRow;
 pub use audit::read_thread_state_audit_rows;
+pub use extract::ThreadMetadataProjection;
 /// Low-level storage engine: useful for focused tests.
 ///
 /// Most consumers should prefer [`StateRuntime`].

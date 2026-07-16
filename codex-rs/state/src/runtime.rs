@@ -16,6 +16,7 @@ use crate::SortKey;
 use crate::THREAD_HISTORY_DB_FILENAME;
 use crate::ThreadMetadata;
 use crate::ThreadMetadataBuilder;
+use crate::ThreadMetadataProjection;
 use crate::ThreadsPage;
 use crate::migrations::runtime_goals_migrator;
 use crate::migrations::runtime_logs_migrator;
