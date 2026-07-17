@@ -166,8 +166,9 @@ The Codex Lab provider runtime extends the existing project-command lifecycle
 instead of restoring the monolithic patch harness:
 
 1. Providers run only for root sessions after the worktree admission check
-   detects relevant work. Selection uses the current changed paths relative to
-   `HEAD`, including untracked files, and fixed provider predicates.
+   detects relevant work. Selection uses the current paths changed from the
+   turn-start `HEAD`, including committed and untracked files, and fixed
+   provider predicates.
 2. An explicit `validation.project_command` remains the catch-all contract and
    takes precedence over automatic provider selection. The MVP runs at most one
    executable validation path per turn, preserving existing project-command
@@ -204,13 +205,12 @@ same executable resolution, timeout, output, cancellation, correction, and
 deduplication contracts needed by later providers.
 
 `scenarios/auto-validation-shellcheck-provider.json` records #309's
-deterministic contract for #310 before production implementation. A trusted
-user-level provider
+deterministic contract and now provides runtime-covered proof for #310. A
+trusted user-level provider
 override points to a fake direct-argv executable, a model patch adds one shell
 file, the first provider run emits one bounded actionable failure, the existing
 correction fragment appears exactly once, and the single owned rerun passes.
-The scenario is `contract-only` and excluded from `run_all.py` until #310 turns
-the contract into runtime-covered proof.
+The scenario runs in the default `run_all.py` gate.
 
 ## First Contract
 

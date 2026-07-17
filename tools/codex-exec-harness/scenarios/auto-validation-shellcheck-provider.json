@@ -5,9 +5,8 @@
     "implementation_issue": 310,
     "selected_provider": "shellcheck",
     "source_revision": "4339c3743917725b3b685864b3384af259a35964",
-    "status": "contract-only"
+    "status": "runtime-covered"
   },
-  "skip_run_all": true,
   "model": "gpt-5.5",
   "prompt": "Apply the requested shell fixture. AUTO_VALIDATION_SHELLCHECK_PROVIDER_MARKER",
   "files": {

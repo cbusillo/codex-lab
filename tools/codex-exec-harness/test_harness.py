@@ -1202,15 +1202,15 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
 
         self.assertEqual([], failures)
 
-    def test_shellcheck_provider_fixture_records_pending_runtime_contract(self) -> None:
-        self.assertTrue(self.provider_scenario["skip_run_all"])
+    def test_shellcheck_provider_fixture_records_runtime_contract(self) -> None:
+        self.assertNotIn("skip_run_all", self.provider_scenario)
         self.assertEqual(
             {
                 "implementation_issue": 310,
                 "issue": 309,
                 "selected_provider": "shellcheck",
                 "source_revision": "4339c3743917725b3b685864b3384af259a35964",
-                "status": "contract-only",
+                "status": "runtime-covered",
             },
             self.provider_scenario["characterization"],
         )
