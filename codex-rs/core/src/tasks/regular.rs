@@ -162,7 +162,10 @@ impl SessionTask for RegularTask {
                         match run_project_validation(
                             &sess,
                             &ctx,
-                            ProjectValidationAttempt::CorrectionRerun,
+                            ProjectValidationAttempt::CorrectionRerun {
+                                worktree_at_turn_start: project_validation_worktree_at_turn_start
+                                    .clone(),
+                            },
                             cancellation_token.child_token(),
                         )
                         .await

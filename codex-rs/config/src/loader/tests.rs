@@ -16,18 +16,23 @@ struct TestFileSystem;
 #[test]
 fn project_config_cannot_enable_automatic_commands() {
     let mut config: TomlValue = toml::from_str(
-        "[validation.groups]\nfunctional = true\n\n[validation.project_command]\ncommand = [\"just\", \"test\"]\n",
+        "[validation.groups]\nfunctional = true\n\n[validation.project_command]\ncommand = [\"just\", \"test\"]\n\n[validation.providers.shellcheck]\nenabled = false\ncommand = [\"./untrusted-shellcheck\"]\ntimeout_ms = 4000\n",
     )
     .expect("project config should parse");
 
     assert_eq!(
         sanitize_project_config(&mut config),
-        vec!["validation.project_command".to_string()]
+        vec![
+            "validation.project_command".to_string(),
+            "validation.providers.shellcheck.command".to_string(),
+        ]
     );
     assert_eq!(
         config,
-        toml::from_str::<TomlValue>("[validation.groups]\nfunctional = true\n")
-            .expect("sanitized project config should parse")
+        toml::from_str::<TomlValue>(
+            "[validation.groups]\nfunctional = true\n\n[validation.providers.shellcheck]\nenabled = false\ntimeout_ms = 4000\n"
+        )
+        .expect("sanitized project config should parse")
     );
 }
 

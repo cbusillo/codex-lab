@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::ffi::OsStr;
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -301,6 +305,90 @@ pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     hasher.update(diff.as_bytes());
     Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
+pub async fn get_worktree_changed_files(cwd: &Path) -> Option<Vec<PathBuf>> {
+    get_worktree_changed_files_from(cwd, None).await
+}
+
+pub async fn get_worktree_changed_files_since(
+    cwd: &Path,
+    base_sha: &GitSha,
+) -> Option<Vec<PathBuf>> {
+    get_worktree_changed_files_from(cwd, Some(base_sha)).await
+}
+
+async fn get_worktree_changed_files_from(
+    cwd: &Path,
+    base_sha: Option<&GitSha>,
+) -> Option<Vec<PathBuf>> {
+    let repo_root = get_git_repo_root(cwd)?;
+    let tracked_output = if let Some(base_sha) = base_sha {
+        // One base ref intentionally compares its tree with the current index
+        // and worktree, covering committed and uncommitted turn changes.
+        run_git_command_with_timeout(
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=ACMR",
+                "-z",
+                &base_sha.0,
+                "--",
+            ],
+            &repo_root,
+        )
+        .await?
+    } else if get_head_commit_hash(&repo_root).await.is_some() {
+        run_git_command_with_timeout(
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=ACMR",
+                "-z",
+                "HEAD",
+                "--",
+            ],
+            &repo_root,
+        )
+        .await?
+    } else {
+        run_git_command_with_timeout(&["ls-files", "--cached", "-z"], &repo_root).await?
+    };
+    if !tracked_output.status.success() {
+        return None;
+    }
+    let mut files = parse_nul_separated_paths(&tracked_output.stdout)?;
+
+    let untracked_output = run_git_command_with_timeout(
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        &repo_root,
+    )
+    .await?;
+    if !untracked_output.status.success() {
+        return None;
+    }
+    files.extend(parse_nul_separated_paths(&untracked_output.stdout)?);
+    files.sort();
+    files.dedup();
+    Some(files)
+}
+
+fn parse_nul_separated_paths(output: &[u8]) -> Option<Vec<PathBuf>> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(path_from_git_bytes)
+        .collect()
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(path: &[u8]) -> Option<PathBuf> {
+    Some(PathBuf::from(OsString::from_vec(path.to_vec())))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(path: &[u8]) -> Option<PathBuf> {
+    String::from_utf8(path.to_vec()).ok().map(PathBuf::from)
 }
 
 pub fn diff_fingerprint(diff: &str) -> Option<String> {
@@ -918,5 +1006,27 @@ mod tests {
         for remote in ["", "file:///tmp/repo", "github.com/openai", "/tmp/repo"] {
             assert_eq!(canonicalize_git_remote_url(remote), None);
         }
+    }
+
+    #[test]
+    fn parse_nul_separated_paths_preserves_spaces_and_newlines() {
+        assert_eq!(
+            parse_nul_separated_paths(b"scripts/check me.sh\0notes/line\nname.md\0"),
+            Some(vec![
+                PathBuf::from("scripts/check me.sh"),
+                PathBuf::from("notes/line\nname.md"),
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_nul_separated_paths_preserves_non_utf8_paths() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let paths =
+            parse_nul_separated_paths(b"scripts/check-\xff.sh\0").expect("parse non-utf8 path");
+
+        assert_eq!(paths[0].as_os_str().as_bytes(), b"scripts/check-\xff.sh");
     }
 }
