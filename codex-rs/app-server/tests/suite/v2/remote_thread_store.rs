@@ -27,6 +27,8 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -172,7 +174,7 @@ async fn thread_start_with_non_local_thread_store_does_not_create_local_persiste
 }
 
 #[tokio::test]
-async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
+async fn cold_thread_resume_and_fork_reuse_non_local_store() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
@@ -278,7 +280,39 @@ async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
     assert_eq!(resumed.id, thread.id);
     assert_eq!(resumed.path, Some(rollout_path));
 
+    let calls_before_fork = thread_store.calls().await;
+    let fork_result = client
+        .request(ClientRequest::ThreadFork {
+            request_id: RequestId::Integer(4),
+            params: ThreadForkParams {
+                thread_id: thread.id.clone(),
+                ..Default::default()
+            },
+        })
+        .await?;
+    let response = fork_result.expect("thread/fork should succeed");
+    let ThreadForkResponse { thread: forked, .. } = serde_json::from_value(response)?;
+    let calls_after_fork = thread_store.calls().await;
+
+    assert_eq!(forked.forked_from_id.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(forked.path, None);
+    assert_eq!(
+        calls_after_fork.read_thread,
+        calls_before_fork.read_thread + 3
+    );
+    assert_eq!(
+        calls_after_fork.read_thread_with_history,
+        calls_before_fork.read_thread_with_history + 1
+    );
+    assert_eq!(
+        calls_after_fork.read_thread_by_rollout_path,
+        calls_before_fork.read_thread_by_rollout_path
+    );
+
     client.shutdown().await?;
+    assert!(!codex_home.path().join("sessions").exists());
+    assert!(!codex_home.path().join("archived_sessions").exists());
+    assert!(!codex_state::state_db_path(codex_home.path()).exists());
     Ok(())
 }
 

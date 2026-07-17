@@ -3,6 +3,7 @@ use crate::error_code::method_not_found;
 use codex_config::ConfigLayerSource;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+use codex_protocol::protocol::ThreadHistoryMode;
 #[cfg(test)]
 use codex_state::ThreadMetadata;
 use codex_state::ThreadResumeModelSettings;
@@ -3252,6 +3253,31 @@ impl ThreadRequestProcessor {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandbox`",
             ));
+        }
+        let source_thread = self
+            .read_stored_thread_for_resume(
+                &thread_id,
+                path.as_ref(),
+                /*include_history*/ false,
+            )
+            .await?;
+        let paginated_source_is_materialized =
+            matches!(source_thread.history_mode, ThreadHistoryMode::Paginated)
+                && match (path.as_ref(), source_thread.rollout_path.as_ref()) {
+                    (Some(_), _) | (_, None) => true,
+                    (None, Some(rollout_path)) => matches!(
+                        self.thread_store
+                            .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
+                                rollout_path: rollout_path.clone(),
+                                include_archived: true,
+                                include_history: false,
+                            })
+                            .await,
+                        Ok(_) | Err(ThreadStoreError::Unsupported { .. })
+                    ),
+                };
+        if paginated_source_is_materialized {
+            return Err(method_not_found("paginated_threads is not supported yet"));
         }
         let source_thread = self
             .read_stored_thread_for_resume(&thread_id, path.as_ref(), /*include_history*/ true)

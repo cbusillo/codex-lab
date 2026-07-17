@@ -547,6 +547,111 @@ async fn thread_fork_rejects_unmaterialized_thread() -> Result<()> {
 }
 
 #[tokio::test]
+async fn thread_fork_rejects_paginated_thread_without_side_effects() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let conversation_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let rollout_path = codex_home
+        .path()
+        .join("sessions")
+        .join("2025")
+        .join("01")
+        .join("05")
+        .join(format!(
+            "rollout-2025-01-05T12-00-00-{conversation_id}.jsonl"
+        ));
+    let mut lines = std::fs::read_to_string(&rollout_path)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    lines[0]["payload"]["history_mode"] = json!("paginated");
+    let paginated_contents = lines
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let paginated_contents = format!("{paginated_contents}\n");
+    std::fs::write(&rollout_path, &paginated_contents)?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_ids_before = list_threads(&mut mcp)
+        .await?
+        .data
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect::<Vec<_>>();
+
+    for (thread_id, path) in [
+        (conversation_id.clone(), None),
+        (
+            "not-a-valid-thread-id".to_string(),
+            Some(rollout_path.clone()),
+        ),
+    ] {
+        let fork_id = mcp
+            .send_thread_fork_request(ThreadForkParams {
+                thread_id,
+                path,
+                ..Default::default()
+            })
+            .await?;
+        let fork_err: JSONRPCError = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_error_message(RequestId::Integer(fork_id)),
+        )
+        .await??;
+
+        assert_eq!(fork_err.error.code, -32601);
+        assert_eq!(
+            fork_err.error.message,
+            "paginated_threads is not supported yet"
+        );
+    }
+
+    let thread_ids_after = list_threads(&mut mcp)
+        .await?
+        .data
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect::<Vec<_>>();
+    assert_eq!(thread_ids_after, thread_ids_before);
+    assert_eq!(std::fs::read_to_string(&rollout_path)?, paginated_contents);
+
+    std::fs::remove_file(rollout_path)?;
+    let fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: conversation_id,
+            ..Default::default()
+        })
+        .await?;
+    let fork_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(fork_id)),
+    )
+    .await??;
+    assert_eq!(fork_err.error.code, -32600);
+    assert!(
+        fork_err
+            .error
+            .message
+            .contains("no rollout found for thread id"),
+        "unexpected fork error: {}",
+        fork_err.error.message
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_fork_with_empty_path_uses_thread_id() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
