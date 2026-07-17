@@ -1,0 +1,132 @@
+{
+  "name": "third-party-agent-live-copilot",
+  "characterization": {
+    "issue": 312,
+    "status": "opt-in-live"
+  },
+  "skip_run_all": true,
+  "model": "gpt-5.6-sol",
+  "sandbox": "read-only",
+  "prompt": "Spawn the github-copilot agent as task live_copilot, wait for it, list its terminal status, close it, and finish.",
+  "files": {
+    "README.md": "# Third-party agent live smoke fixture\n"
+  },
+  "config_toml": "model_provider = \"harness\"\n\n[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = false\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-live-copilot-spawn",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "arguments": "{\"message\":\"Reply with exactly LIVE_EXTERNAL_AGENT_OK. Do not inspect or change files.\",\"task_name\":\"live_copilot\",\"agent_type\":\"github-copilot\",\"fork_turns\":\"none\"}",
+              "call_id": "call-live-copilot-spawn"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-copilot-wait",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "wait_agent",
+              "arguments": "{\"timeout_ms\":120000}",
+              "call_id": "call-live-copilot-wait"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-copilot-list",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "list_agents",
+              "arguments": "{}",
+              "call_id": "call-live-copilot-list"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-copilot-close",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "close_agent",
+              "arguments": "{\"target\":\"live_copilot\"}",
+              "call_id": "call-live-copilot-close"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-copilot-complete",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-live-copilot-complete",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Live third-party agent smoke completed."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 5,
+    "turn_count": 1,
+    "thread_id": "required",
+    "responses": [
+      {
+        "request": 0,
+        "scope": "tools",
+        "contains_all": [
+          "github-copilot",
+          "spawn_agent"
+        ]
+      }
+    ],
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-live-copilot-spawn",
+        "contains": "live_copilot"
+      },
+      {
+        "request": 2,
+        "call_id": "call-live-copilot-wait",
+        "contains": "\"timed_out\":false"
+      },
+      {
+        "request": 3,
+        "call_id": "call-live-copilot-list",
+        "contains_all": [
+          "live_copilot",
+          "\"agent_status\":{\"completed\":\"LIVE_EXTERNAL_AGENT_OK"
+        ]
+      },
+      {
+        "request": 4,
+        "call_id": "call-live-copilot-close",
+        "contains": "\"previous_status\":{\"completed\":\"LIVE_EXTERNAL_AGENT_OK"
+      }
+    ]
+  },
+  "timeout_seconds": 180
+}

@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 const MAX_EXTERNAL_AGENT_STDOUT_BYTES: usize = 64 * 1024;
 const MAX_EXTERNAL_AGENT_STDERR_BYTES: usize = 8 * 1024;
 const EXTERNAL_AGENT_TRUNCATED_MARKER: &[u8] = b"[external agent output truncated]\n";
+const GITHUB_COPILOT_VERSION_MARKER: &[u8] = b"GitHub Copilot CLI";
+const THIRD_PARTY_CLI_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
 const CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_DIR";
 const CODEX_LAB_CARGO_TARGET_SCOPE_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_SCOPE";
@@ -159,7 +161,7 @@ async fn run_external_agent_inner(
     }
 
     let invocation = build_external_agent_invocation(launch, &message)?;
-    validate_external_agent_invocation_ready(launch, &invocation)?;
+    validate_external_agent_invocation_ready(launch, &invocation).await?;
     let mut command = Command::new(&invocation.command);
     command
         .args(&invocation.args)
@@ -381,7 +383,7 @@ fn raw_cli_uses_prompt_flag(launch_family: Option<&str>) -> bool {
     )
 }
 
-fn validate_external_agent_invocation_ready(
+async fn validate_external_agent_invocation_ready(
     launch: &ExternalAgentLaunch,
     invocation: &ExternalAgentInvocation,
 ) -> anyhow::Result<()> {
@@ -391,17 +393,56 @@ fn validate_external_agent_invocation_ready(
         return Ok(());
     }
 
-    if which::which(&invocation.command).is_ok() {
+    let command = invocation.command.to_string_lossy();
+    let resolved_command = match which::which(&invocation.command) {
+        Ok(resolved_command) => resolved_command,
+        Err(_) => {
+            let agent_name =
+                third_party_agent_display_name(launch.backend.launch_family.as_deref());
+            let hint = install_hint_for_third_party_agent(
+                launch.backend.launch_family.as_deref(),
+                &command,
+            );
+            return Err(anyhow::anyhow!(
+                "{agent_name} command `{command}` was not found or is not executable. {hint}"
+            ));
+        }
+    };
+
+    if launch.backend.launch_family.as_deref() != Some("copilot") {
         return Ok(());
     }
 
-    let command = invocation.command.to_string_lossy();
+    let version_output = tokio::time::timeout(
+        THIRD_PARTY_CLI_PREFLIGHT_TIMEOUT,
+        Command::new(&resolved_command).arg("--version").output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "timed out while verifying GitHub Copilot CLI command `{}`",
+            resolved_command.display()
+        )
+    })??;
+    if version_output.status.success()
+        && github_copilot_version_output(&version_output.stdout, &version_output.stderr)
+    {
+        return Ok(());
+    }
+
     let agent_name = third_party_agent_display_name(launch.backend.launch_family.as_deref());
-    let hint =
-        install_hint_for_third_party_agent(launch.backend.launch_family.as_deref(), &command);
     Err(anyhow::anyhow!(
-        "{agent_name} command `{command}` was not found or is not executable. {hint}"
+        "{agent_name} command `{}` resolved to a different `copilot` executable. Install GitHub Copilot CLI and ensure its `copilot` command appears first on PATH.",
+        resolved_command.display()
     ))
+}
+
+fn github_copilot_version_output(stdout: &[u8], stderr: &[u8]) -> bool {
+    [stdout, stderr].into_iter().any(|output| {
+        output
+            .windows(GITHUB_COPILOT_VERSION_MARKER.len())
+            .any(|window| window == GITHUB_COPILOT_VERSION_MARKER)
+    })
 }
 
 fn is_builtin_third_party_agent_family(launch_family: Option<&str>) -> bool {
@@ -793,8 +834,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn missing_builtin_third_party_cli_reports_install_hint() {
+    #[tokio::test]
+    async fn missing_builtin_third_party_cli_reports_install_hint() {
         let temp_dir = TempDir::new().expect("tempdir");
         let launch = test_launch(
             &temp_dir,
@@ -805,12 +846,13 @@ mod tests {
                 timeout_ms: 5_000,
                 ..Default::default()
             },
-            false,
+            /*is_read_only*/ false,
         );
         let invocation = build_external_agent_invocation(&launch, "inspect this repo")
             .expect("third-party invocation should build");
 
         let err = validate_external_agent_invocation_ready(&launch, &invocation)
+            .await
             .expect_err("missing built-in third-party CLI should fail preflight");
 
         let message = err.to_string();
@@ -825,8 +867,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn first_party_and_custom_raw_cli_commands_skip_readiness_preflight() {
+    #[tokio::test]
+    async fn first_party_and_custom_raw_cli_commands_skip_readiness_preflight() {
         for launch_family in [Some("code"), Some("codex"), Some("cloud"), None] {
             let temp_dir = TempDir::new().expect("tempdir");
             let launch = test_launch(
@@ -844,8 +886,52 @@ mod tests {
                 .expect("raw CLI invocation should build");
 
             validate_external_agent_invocation_ready(&launch, &invocation)
+                .await
                 .expect("non-third-party launch should keep subprocess spawn behavior");
         }
+    }
+
+    #[tokio::test]
+    async fn non_github_copilot_command_is_rejected() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let command = std::env::current_exe().expect("current test executable");
+        let launch = test_launch(
+            &temp_dir,
+            ExternalCommandAgentBackendConfig {
+                command: command.display().to_string(),
+                protocol: ExternalCommandProtocol::RawCli,
+                launch_family: Some("copilot".to_string()),
+                timeout_ms: 5_000,
+                ..Default::default()
+            },
+            /*is_read_only*/ false,
+        );
+        let invocation = build_external_agent_invocation(&launch, "inspect this repo")
+            .expect("copilot invocation should build");
+
+        let err = validate_external_agent_invocation_ready(&launch, &invocation)
+            .await
+            .expect_err("non-GitHub copilot executable should fail preflight");
+
+        let message = err.to_string();
+        assert!(message.contains("resolved to a different `copilot` executable"));
+        assert!(message.contains("Install GitHub Copilot CLI"));
+    }
+
+    #[test]
+    fn github_copilot_version_output_accepts_official_banner() {
+        assert!(github_copilot_version_output(
+            b"GitHub Copilot CLI 1.0.71.\n",
+            b""
+        ));
+        assert!(github_copilot_version_output(
+            b"",
+            b"notice: GitHub Copilot CLI 1.0.71 is ready\n"
+        ));
+        assert!(!github_copilot_version_output(
+            b"copilot version: 1.34.1\n",
+            b""
+        ));
     }
 
     #[test]
