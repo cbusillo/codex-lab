@@ -2,4 +2,4 @@
 source: tui/src/chatwidget/tests/app_server.rs
 expression: rendered
 ---
-✗ Auto Review failed for base branch main · run-background-failed · review model unavailable
+✗ Background Review failed for base branch main · run-background-failed · review model unavailable

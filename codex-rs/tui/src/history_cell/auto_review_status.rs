@@ -1,4 +1,4 @@
-//! Native Auto Review status transcript cells.
+//! Native Background Review status transcript cells.
 
 use super::*;
 use codex_app_server_protocol::AutoReviewDiagnosticsSummary;
@@ -24,7 +24,7 @@ pub(crate) fn new_auto_review_status_cell(
     };
     let mut spans = vec![
         symbol,
-        "Auto Review ".into(),
+        "Background Review ".into(),
         state,
         " for ".into(),
         Span::from(review_target_label(&notification.review_target)).dim(),
@@ -59,7 +59,7 @@ pub(crate) fn new_auto_review_summary_cell(
 pub(crate) fn new_auto_review_summary_error_cell(error: String) -> PlainHistoryCell {
     PlainHistoryCell::new(vec![Line::from(vec![
         "✗ ".red(),
-        "Auto Review summary unavailable".bold(),
+        "Background Review summary unavailable".bold(),
         " · ".dim(),
         error.dim(),
     ])])
@@ -83,7 +83,7 @@ fn push_current_summary_lines(lines: &mut Vec<Line<'static>>, summary: &AutoRevi
     };
     lines.push(Line::from(vec![
         symbol,
-        "Auto Review ".into(),
+        "Background Review ".into(),
         headline.bold(),
         " · ".dim(),
         Span::from(summary.run_id.clone()).dim(),
@@ -99,7 +99,7 @@ fn push_no_current_summary_lines(
     if let Some(latest) = response.latest.as_ref() {
         lines.push(Line::from(vec![
             "○ ".yellow(),
-            "Auto Review has no current findings".bold(),
+            "Background Review has no current findings".bold(),
             " · latest ".dim(),
             Span::from(freshness_label(latest.freshness)).yellow(),
             " · ".dim(),
@@ -123,7 +123,7 @@ fn push_no_current_summary_lines(
     } else {
         lines.push(Line::from(vec![
             "✔ ".green(),
-            "Auto Review has no stored result for this thread".bold(),
+            "Background Review has no stored result for this thread".bold(),
         ]));
     }
     push_status_counts(lines, &response.status_counts);
