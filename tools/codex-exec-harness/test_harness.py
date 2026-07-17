@@ -1113,6 +1113,11 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
             / "auto-validation-bounded-apply-patch-feedback.json"
         )
         self.scenario = HARNESS.load_json(scenario_path)
+        provider_scenario_path = (
+            Path(__file__).with_name("scenarios")
+            / "auto-validation-shellcheck-provider.json"
+        )
+        self.provider_scenario = HARNESS.load_json(provider_scenario_path)
 
     def _run(self) -> dict:
         return {
@@ -1196,6 +1201,32 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
         )
 
         self.assertEqual([], failures)
+
+    def test_shellcheck_provider_fixture_records_pending_runtime_contract(self) -> None:
+        self.assertTrue(self.provider_scenario["skip_run_all"])
+        self.assertEqual(
+            {
+                "implementation_issue": 310,
+                "issue": 309,
+                "selected_provider": "shellcheck",
+                "source_revision": "4339c3743917725b3b685864b3384af259a35964",
+                "status": "contract-only",
+            },
+            self.provider_scenario["characterization"],
+        )
+        self.assertIn(
+            "[validation.providers.shellcheck]",
+            self.provider_scenario["config_toml"],
+        )
+        self.assertEqual(
+            3, self.provider_scenario["expect"]["responses_request_count"]
+        )
+        self.assertEqual(
+            2,
+            self.provider_scenario["expect"]["event_types"][
+                "validation.completed"
+            ],
+        )
 
     def test_runtime_scenario_rejects_unbounded_feedback(self) -> None:
         failures = HARNESS.evaluate_expectations(
