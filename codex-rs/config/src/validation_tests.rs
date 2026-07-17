@@ -19,6 +19,15 @@ fn project_command(input: &str) -> ProjectValidationCommand {
         .expect("project command should be present")
 }
 
+fn shellcheck_provider(input: &str) -> ShellcheckValidationProviderConfig {
+    toml::from_str::<ConfigToml>(input)
+        .expect("validation config should deserialize")
+        .validation
+        .expect("validation config should be present")
+        .providers
+        .shellcheck
+}
+
 #[test]
 fn validation_groups_deserialize_explicit_values() {
     assert_eq!(
@@ -93,5 +102,27 @@ fn empty_project_command_table_is_preserved_for_runtime_error_reporting() {
     assert_eq!(
         project_command("[validation.project_command]\n"),
         ProjectValidationCommand::default()
+    );
+}
+
+#[test]
+fn shellcheck_provider_defaults_to_trusted_builtin_command() {
+    assert_eq!(
+        shellcheck_provider("[validation.groups]\nfunctional = true\n"),
+        ShellcheckValidationProviderConfig::default()
+    );
+}
+
+#[test]
+fn shellcheck_provider_deserializes_trusted_override() {
+    assert_eq!(
+        shellcheck_provider(
+            "[validation.providers.shellcheck]\nenabled = false\ncommand = [\"/bin/sh\", \"fixture\"]\ntimeout_ms = 5000\n"
+        ),
+        ShellcheckValidationProviderConfig {
+            enabled: false,
+            command: vec!["/bin/sh".to_string(), "fixture".to_string()],
+            timeout_ms: 5_000,
+        }
     );
 }

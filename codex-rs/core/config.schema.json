@@ -2746,6 +2746,35 @@
       },
       "type": "object"
     },
+    "ShellcheckValidationProviderConfig": {
+      "additionalProperties": false,
+      "description": "Trusted configuration for the built-in ShellCheck provider.",
+      "properties": {
+        "command": {
+          "default": [
+            "shellcheck"
+          ],
+          "description": "Executable and optional trusted prefix arguments. Only user, system, managed, or runtime config may set this field; repository-local values are ignored with a warning. The runtime appends `-f gcc` and the selected changed-file paths without shell parsing.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Whether changed shell files select this provider.",
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "default": 6000,
+          "description": "Maximum execution time in milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "SkillConfig": {
       "additionalProperties": false,
       "properties": {
@@ -4398,6 +4427,23 @@
           ],
           "default": null,
           "description": "Optional project command to run after a root turn changes a Git worktree. Model tool activity, non-Git workspaces, and unreadable worktree state preserve the existing fail-open behavior and run the command. An actionable failure sends a bounded command/output fragment to the model, permits one correction cycle, and reruns the command once. The command should therefore tolerate up to two executions per root turn. Commands targeting the same Git repository are serialized across root sessions in one runtime; non-Git workspaces remain uncoordinated. A waiting turn can be cancelled and correction reruns reacquire the repository lease. Repository-local config cannot set this executable field."
+        },
+        "providers": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ValidationProviders"
+            }
+          ],
+          "default": {
+            "shellcheck": {
+              "command": [
+                "shellcheck"
+              ],
+              "enabled": true,
+              "timeout_ms": 6000
+            }
+          },
+          "description": "Automatically selected executable providers. Provider argv is trusted executable configuration and cannot be supplied by repository-local config."
         }
       },
       "type": "object"
@@ -4415,6 +4461,28 @@
           "default": false,
           "description": "Formatting and style checks. Reserved for a later runtime slice.",
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ValidationProviders": {
+      "additionalProperties": false,
+      "description": "Automatically selected executable validation providers.",
+      "properties": {
+        "shellcheck": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ShellcheckValidationProviderConfig"
+            }
+          ],
+          "default": {
+            "command": [
+              "shellcheck"
+            ],
+            "enabled": true,
+            "timeout_ms": 6000
+          },
+          "description": "Shell script validation selected from changed `.sh` and shebang files."
         }
       },
       "type": "object"

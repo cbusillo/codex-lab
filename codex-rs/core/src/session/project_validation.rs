@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codex_config::MAX_PROJECT_VALIDATION_TIMEOUT_MS;
+use codex_config::ProjectValidationCommand;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_head_commit_hash;
 use codex_git_utils::get_worktree_diff_fingerprint;
@@ -20,6 +21,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::Session;
 use super::turn_context::TurnContext;
+use super::validation_provider::AutomaticValidationCommand;
+use super::validation_provider::AutomaticValidationProviderError;
+use super::validation_provider::AutomaticValidationProviderErrorKind;
+use super::validation_provider::automatic_validation_provider_enabled;
+use super::validation_provider::resolve_automatic_validation_provider;
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
@@ -41,7 +47,9 @@ pub(crate) enum ProjectValidationAttempt {
         worktree_at_turn_start: Option<ProjectValidationWorktreeFingerprint>,
         model_used_tools: bool,
     },
-    CorrectionRerun,
+    CorrectionRerun {
+        worktree_at_turn_start: Option<ProjectValidationWorktreeFingerprint>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,10 +58,26 @@ pub(crate) struct ProjectValidationWorktreeFingerprint {
     worktree_diff: Option<String>,
 }
 
+enum ValidationCommandKind {
+    ProjectCommand,
+    Shellcheck,
+}
+
+struct ValidationCommandPlan {
+    kind: ValidationCommandKind,
+    command: Vec<String>,
+    cwd: AbsolutePathBuf,
+    timeout_ms: u64,
+}
+
 pub(crate) async fn project_validation_worktree_fingerprint(
     turn_context: &TurnContext,
 ) -> Option<ProjectValidationWorktreeFingerprint> {
-    turn_context.config.validation.project_command.as_ref()?;
+    if turn_context.config.validation.project_command.is_none()
+        && !automatic_validation_provider_enabled(&turn_context.config.validation)
+    {
+        return None;
+    }
     if turn_context.session_source.is_non_root_agent() {
         return None;
     }
@@ -67,54 +91,38 @@ pub(crate) async fn run_project_validation(
     attempt: ProjectValidationAttempt,
     cancellation_token: CancellationToken,
 ) -> ProjectValidationRun {
-    let Some(configured) = turn_context.config.validation.project_command.as_ref() else {
+    let configured_project_command = turn_context.config.validation.project_command.as_ref();
+    if configured_project_command.is_none()
+        && !automatic_validation_provider_enabled(&turn_context.config.validation)
+    {
         return ProjectValidationRun::Skipped;
-    };
+    }
     if turn_context.session_source.is_non_root_agent() {
         return ProjectValidationRun::Skipped;
     }
 
-    let command = configured.command.clone();
-    if command
-        .first()
-        .is_none_or(|program| program.trim().is_empty())
-    {
-        return ProjectValidationRun::Completed(configuration_error(
-            turn_context,
-            command,
-            None,
-            "validation.project_command.command must include a non-empty executable",
-        ));
-    }
-    let command_bytes = command.iter().fold(0usize, |total, argument| {
-        total.saturating_add(argument.len() + 1)
-    });
-    if command_bytes > PROJECT_VALIDATION_COMMAND_MAX_BYTES {
-        return ProjectValidationRun::Completed(configuration_error(
-            turn_context,
-            command,
-            None,
-            format!(
-                "validation.project_command.command must not exceed {PROJECT_VALIDATION_COMMAND_MAX_BYTES} bytes"
-            ),
-        ));
-    }
-    if configured.timeout_ms == 0 || configured.timeout_ms > MAX_PROJECT_VALIDATION_TIMEOUT_MS {
-        return ProjectValidationRun::Completed(configuration_error(
-            turn_context,
-            command,
-            None,
-            format!(
-                "validation.project_command.timeout_ms must be between 1 and {MAX_PROJECT_VALIDATION_TIMEOUT_MS}"
-            ),
-        ));
-    }
+    let project_command = match configured_project_command {
+        Some(configured) => match validate_project_command(turn_context, configured) {
+            Ok(command) => Some(command),
+            Err(event) => return ProjectValidationRun::Completed(event),
+        },
+        None => None,
+    };
 
     let Some(cwd) = turn_context
         .environments
         .single_local_environment_cwd()
         .cloned()
     else {
+        let command = project_command.unwrap_or_else(|| {
+            turn_context
+                .config
+                .validation
+                .providers
+                .shellcheck
+                .command
+                .clone()
+        });
         return ProjectValidationRun::Completed(completed_event(
             turn_context,
             command,
@@ -135,10 +143,12 @@ pub(crate) async fn run_project_validation(
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
         .map(|(_, value)| OsString::from(value));
-    if which::which_in(&command[0], search_path.as_ref(), cwd.as_ref()).is_err() {
+    if let Some(command) = project_command.as_ref()
+        && which::which_in(&command[0], search_path.as_ref(), cwd.as_ref()).is_err()
+    {
         return ProjectValidationRun::Completed(configuration_error(
             turn_context,
-            command,
+            command.clone(),
             None,
             "project validation executable was not found or is not executable",
         ));
@@ -174,11 +184,60 @@ pub(crate) async fn run_project_validation(
         return ProjectValidationRun::Cancelled;
     }
 
+    let plan = if let Some(configured) = configured_project_command {
+        let Some(command) = project_command else {
+            return ProjectValidationRun::Completed(completed_event(
+                turn_context,
+                Vec::new(),
+                Some(cwd),
+                ProjectValidationStatus::InfrastructureFailure,
+                None,
+                "validated project command was unavailable".to_string(),
+                Duration::ZERO,
+            ));
+        };
+        ValidationCommandPlan {
+            kind: ValidationCommandKind::ProjectCommand,
+            command,
+            cwd: cwd.clone(),
+            timeout_ms: configured.timeout_ms,
+        }
+    } else {
+        let automatic = match resolve_automatic_validation_provider(
+            &turn_context.config.validation,
+            &cwd,
+            attempt_worktree_start(&attempt).map(|worktree| worktree.head_commit.as_str()),
+        )
+        .await
+        {
+            Ok(Some(command)) => command,
+            Ok(None) => return ProjectValidationRun::Skipped,
+            Err(error) => {
+                return ProjectValidationRun::Completed(provider_error_event(turn_context, error));
+            }
+        };
+        if which::which_in(
+            &automatic.command[0],
+            search_path.as_ref(),
+            automatic.cwd.as_ref(),
+        )
+        .is_err()
+        {
+            return ProjectValidationRun::Completed(configuration_error(
+                turn_context,
+                automatic.command,
+                Some(automatic.cwd),
+                "shellcheck validation executable was not found or is not executable",
+            ));
+        }
+        automatic_validation_plan(automatic)
+    };
+
     let params = ExecParams {
-        command: command.clone(),
-        cwd: cwd.clone(),
+        command: plan.command.clone(),
+        cwd: plan.cwd.clone(),
         expiration: ExecExpiration::TimeoutOrCancellation {
-            timeout: Duration::from_millis(configured.timeout_ms),
+            timeout: Duration::from_millis(plan.timeout_ms),
             cancellation: cancellation_token.clone(),
         },
         capture_policy: ExecCapturePolicy::ShellTool,
@@ -196,7 +255,7 @@ pub(crate) async fn run_project_validation(
     let result = process_exec_tool_call(
         params,
         &turn_context.permission_profile,
-        &cwd,
+        &plan.cwd,
         &turn_context.config.effective_workspace_roots(),
         &turn_context.codex_linux_sandbox_exe,
         turn_context.features.use_legacy_landlock(),
@@ -211,8 +270,8 @@ pub(crate) async fn run_project_validation(
     ProjectValidationRun::Completed(match result {
         Ok(output) if output.timed_out => completed_from_output(
             turn_context,
-            command,
-            cwd,
+            plan.command,
+            plan.cwd,
             ProjectValidationStatus::TimedOut,
             output,
         ),
@@ -222,39 +281,143 @@ pub(crate) async fn run_project_validation(
             } else {
                 ProjectValidationStatus::ActionableFailure
             };
-            completed_from_output(turn_context, command, cwd, status, output)
+            completed_from_output(turn_context, plan.command, plan.cwd, status, output)
         }
         Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => completed_from_output(
             turn_context,
-            command,
-            cwd,
+            plan.command,
+            plan.cwd,
             ProjectValidationStatus::TimedOut,
             *output,
         ),
         Err(CodexErr::Sandbox(SandboxErr::Denied { output, .. })) => completed_from_output(
             turn_context,
-            command,
-            cwd,
+            plan.command,
+            plan.cwd,
             ProjectValidationStatus::InfrastructureFailure,
             *output,
         ),
         Err(CodexErr::TurnAborted) => return ProjectValidationRun::Cancelled,
         Err(CodexErr::Io(error)) if is_configuration_io_error(&error) => configuration_error(
             turn_context,
-            command,
-            Some(cwd),
-            format!("failed to start project validation command: {error}"),
+            plan.command,
+            Some(plan.cwd),
+            format!(
+                "failed to start {}: {error}",
+                plan.kind.start_failure_label()
+            ),
         ),
         Err(error) => completed_event(
             turn_context,
-            command,
-            Some(cwd),
+            plan.command,
+            Some(plan.cwd),
             ProjectValidationStatus::InfrastructureFailure,
             None,
-            format!("project validation infrastructure failure: {error}"),
+            format!("{} infrastructure failure: {error}", plan.kind.label()),
             Duration::ZERO,
         ),
     })
+}
+
+fn validate_project_command(
+    turn_context: &TurnContext,
+    configured: &ProjectValidationCommand,
+) -> Result<Vec<String>, ProjectValidationCompletedEvent> {
+    let command = configured.command.clone();
+    if command
+        .first()
+        .is_none_or(|program| program.trim().is_empty())
+    {
+        return Err(configuration_error(
+            turn_context,
+            command,
+            None,
+            "validation.project_command.command must include a non-empty executable",
+        ));
+    }
+    let command_bytes = command.iter().fold(0usize, |total, argument| {
+        total.saturating_add(argument.len() + 1)
+    });
+    if command_bytes > PROJECT_VALIDATION_COMMAND_MAX_BYTES {
+        return Err(configuration_error(
+            turn_context,
+            command,
+            None,
+            format!(
+                "validation.project_command.command must not exceed {PROJECT_VALIDATION_COMMAND_MAX_BYTES} bytes"
+            ),
+        ));
+    }
+    if configured.timeout_ms == 0 || configured.timeout_ms > MAX_PROJECT_VALIDATION_TIMEOUT_MS {
+        return Err(configuration_error(
+            turn_context,
+            command,
+            None,
+            format!(
+                "validation.project_command.timeout_ms must be between 1 and {MAX_PROJECT_VALIDATION_TIMEOUT_MS}"
+            ),
+        ));
+    }
+    Ok(command)
+}
+
+fn automatic_validation_plan(command: AutomaticValidationCommand) -> ValidationCommandPlan {
+    ValidationCommandPlan {
+        kind: ValidationCommandKind::Shellcheck,
+        command: command.command,
+        cwd: command.cwd,
+        timeout_ms: command.timeout_ms,
+    }
+}
+
+fn provider_error_event(
+    turn_context: &TurnContext,
+    error: AutomaticValidationProviderError,
+) -> ProjectValidationCompletedEvent {
+    match error.kind {
+        AutomaticValidationProviderErrorKind::Configuration => {
+            configuration_error(turn_context, error.command, error.cwd, error.message)
+        }
+        AutomaticValidationProviderErrorKind::Infrastructure => completed_event(
+            turn_context,
+            error.command,
+            error.cwd,
+            ProjectValidationStatus::InfrastructureFailure,
+            None,
+            error.message,
+            Duration::ZERO,
+        ),
+    }
+}
+
+impl ValidationCommandKind {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::ProjectCommand => "project validation",
+            Self::Shellcheck => "shellcheck validation",
+        }
+    }
+
+    fn start_failure_label(&self) -> &'static str {
+        match self {
+            Self::ProjectCommand => "project validation command",
+            Self::Shellcheck => "shellcheck validation command",
+        }
+    }
+}
+
+fn attempt_worktree_start(
+    attempt: &ProjectValidationAttempt,
+) -> Option<&ProjectValidationWorktreeFingerprint> {
+    match attempt {
+        ProjectValidationAttempt::Initial {
+            worktree_at_turn_start,
+            ..
+        }
+        | ProjectValidationAttempt::CorrectionRerun {
+            worktree_at_turn_start,
+        } => worktree_at_turn_start.as_ref(),
+    }
 }
 
 async fn initial_attempt_worktree_unchanged(

@@ -10,6 +10,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_config::MAX_PROJECT_VALIDATION_TIMEOUT_MS;
 use codex_config::ProjectValidationCommand;
+use codex_config::ShellcheckValidationProviderConfig;
 use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
 use codex_exec_server::CreateDirectoryOptions;
@@ -179,6 +180,26 @@ async fn build_validation_codex(
 ) -> Result<TestCodex> {
     let mut builder = test_codex().with_config(move |config| {
         config.validation.project_command = Some(command);
+    });
+    builder.build(server).await
+}
+
+async fn build_shellcheck_provider_codex(
+    server: &MockServer,
+    cwd: &Path,
+    provider_command: Vec<String>,
+    project_command: Option<ProjectValidationCommand>,
+) -> Result<TestCodex> {
+    let cwd = AbsolutePathBuf::try_from(cwd.to_path_buf())?;
+    let mut builder = test_codex().with_config(move |config| {
+        config.cwd = cwd.clone();
+        config.validation.groups.functional = true;
+        config.validation.providers.shellcheck = ShellcheckValidationProviderConfig {
+            command: provider_command.clone(),
+            timeout_ms: 5_000,
+            ..ShellcheckValidationProviderConfig::default()
+        };
+        config.validation.project_command = project_command;
     });
     builder.build(server).await
 }
@@ -1498,6 +1519,138 @@ async fn project_validation_correction_preserves_the_aggregated_turn_diff() -> R
     assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
     assert_eq!(validation_events[1].output, "validation-pass");
     assert_eq!(response_mock.requests().len(), 4);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_shellcheck_provider_runs_one_correction_cycle() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .context("initialize shellcheck provider repository")?;
+    std::fs::write(
+        repo.path().join("fake-shellcheck"),
+        concat!(
+            "set -eu\n",
+            "if [ \"$#\" -ne 3 ] || [ \"$1\" != \"-f\" ] || [ \"$2\" != \"gcc\" ] || [ \"$3\" != \"scripts/check.sh\" ]; then exit 64; fi\n",
+            "if [ -f .shellcheck-ran ]; then printf shellcheck-pass; exit 0; fi\n",
+            "touch .shellcheck-ran\n",
+            "printf shellcheck-fail >&2\n",
+            "exit 7\n",
+        ),
+    )?;
+    let patch =
+        "*** Begin Patch\n*** Add File: scripts/check.sh\n+#!/bin/sh\n+printf ok\n*** End Patch\n";
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-shellcheck-1"),
+                ev_apply_patch_custom_tool_call("shellcheck-patch", patch),
+                ev_completed("resp-shellcheck-1"),
+            ]),
+            sse_completed("resp-shellcheck-2"),
+            sse_completed("resp-shellcheck-3"),
+        ],
+    )
+    .await;
+    let test = build_shellcheck_provider_codex(
+        &server,
+        repo.path(),
+        vec!["/bin/sh".to_string(), "fake-shellcheck".to_string()],
+        None,
+    )
+    .await?;
+
+    submit_user_input(&test.codex, &test, "finish the shell change").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 2);
+    assert_eq!(
+        validation_events[0].command,
+        vec![
+            "/bin/sh",
+            "fake-shellcheck",
+            "-f",
+            "gcc",
+            "scripts/check.sh",
+        ]
+    );
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[0].output, "shellcheck-fail");
+    assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[1].output, "shellcheck-pass");
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[2]
+            .message_input_texts("user")
+            .into_iter()
+            .filter(|text| text.starts_with("<project_validation_failure>"))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_project_command_takes_precedence_over_shellcheck_provider() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .context("initialize validation precedence repository")?;
+    std::fs::write(
+        repo.path().join("fake-shellcheck"),
+        "touch provider-ran\nprintf provider-pass\n",
+    )?;
+    let patch =
+        "*** Begin Patch\n*** Add File: scripts/check.sh\n+#!/bin/sh\n+printf ok\n*** End Patch\n";
+    let server = start_mock_server().await;
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-precedence-1"),
+                ev_apply_patch_custom_tool_call("precedence-patch", patch),
+                ev_completed("resp-precedence-1"),
+            ]),
+            sse_completed("resp-precedence-2"),
+        ],
+    )
+    .await;
+    let project_command = shell_command(
+        "touch project-command-ran; printf project-command-pass",
+        /*timeout_ms*/ 5_000,
+    );
+    let test = build_shellcheck_provider_codex(
+        &server,
+        repo.path(),
+        vec!["/bin/sh".to_string(), "fake-shellcheck".to_string()],
+        Some(project_command),
+    )
+    .await?;
+
+    submit_user_input(&test.codex, &test, "finish the shell change").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].output, "project-command-pass");
+    assert!(repo.path().join("project-command-ran").is_file());
+    assert!(!repo.path().join("provider-ran").exists());
     Ok(())
 }
 

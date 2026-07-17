@@ -944,9 +944,19 @@ fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
     if let Some(validation) = table
         .get_mut("validation")
         .and_then(TomlValue::as_table_mut)
-        && validation.remove("project_command").is_some()
     {
-        ignored_keys.push("validation.project_command".to_string());
+        if validation.remove("project_command").is_some() {
+            ignored_keys.push("validation.project_command".to_string());
+        }
+        if let Some(shellcheck) = validation
+            .get_mut("providers")
+            .and_then(TomlValue::as_table_mut)
+            .and_then(|providers| providers.get_mut("shellcheck"))
+            .and_then(TomlValue::as_table_mut)
+            && shellcheck.remove("command").is_some()
+        {
+            ignored_keys.push("validation.providers.shellcheck.command".to_string());
+        }
     }
 
     ignored_keys

@@ -35,6 +35,8 @@ pub use info::get_git_repo_root;
 pub use info::get_git_repo_root_with_fs;
 pub use info::get_has_changes;
 pub use info::get_head_commit_hash;
+pub use info::get_worktree_changed_files;
+pub use info::get_worktree_changed_files_since;
 pub use info::get_worktree_diff_byte_count;
 pub use info::get_worktree_diff_fingerprint;
 pub use info::git_diff_to_remote;
