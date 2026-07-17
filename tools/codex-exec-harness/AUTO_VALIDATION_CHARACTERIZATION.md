@@ -168,26 +168,30 @@ instead of restoring the monolithic patch harness:
 1. Providers run only for root sessions after the worktree admission check
    detects relevant work. Selection uses the current changed paths relative to
    `HEAD`, including untracked files, and fixed provider predicates.
-2. Repository configuration may enable or disable safe provider definitions,
+2. An explicit `validation.project_command` remains the catch-all contract and
+   takes precedence over automatic provider selection. The MVP runs at most one
+   executable validation path per turn, preserving existing project-command
+   behavior while adding automatic selection when no command is configured.
+3. Repository configuration may enable or disable safe provider definitions,
    but it cannot supply executable argv. Executable overrides are accepted only
    from user, system, managed, or runtime configuration and never use shell
    interpretation.
-3. The MVP selects at most one executable provider (`shellcheck`) and at most 64
+4. The MVP selects at most one executable provider (`shellcheck`) and at most 64
    matching paths whose rendered argv remains within 8 KiB.
-4. One provider execution is allowed initially and one final rerun is allowed
+5. One provider execution is allowed initially and one final rerun is allowed
    after the existing model correction cycle. There is no hidden retry loop.
-5. A provider has a 6-second default timeout. Retained event output is capped at
+6. A provider has a 6-second default timeout. Retained event output is capped at
    8 KiB, and actionable model feedback reuses the existing fully rendered
    960-byte correction-fragment cap.
-6. Exit zero is `passed`; a nonzero exit is `actionable_failure`; timeout,
+7. Exit zero is `passed`; a nonzero exit is `actionable_failure`; timeout,
    invalid or missing executable configuration, and execution infrastructure
    failures retain their existing typed terminal states. Turn cancellation
    emits no potentially misleading terminal result.
-7. Equivalent unchanged work is suppressed, same-repository execution uses the
+8. Equivalent unchanged work is suppressed, same-repository execution uses the
    existing cancellation-aware coordinator, and the correction rerun reacquires
    the lease. Resumed or multi-patch turns therefore cannot create duplicate
    provider work beyond the one initial attempt and one owned rerun.
-8. Provider results continue to use `validation.completed`; the fixed command
+9. Provider results continue to use `validation.completed`; the fixed command
    field identifies the provider without adding a parallel validation ledger or
    protocol surface for the MVP.
 
