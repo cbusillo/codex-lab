@@ -99,6 +99,19 @@ harness answers. With agent metadata explicitly enabled, it proves GPT-5.6 Sol
 receives the configured third-party roles, model overrides, concurrency limit,
 and self-report guidance without adding that catalog to every default session.
 
+`third-party-agent-current-binary-lifecycle.json` provides the deterministic
+current-binary gate for issue #312. It configures a fixture external-command
+agent, then proves native spawn, parent-visible completion output, terminal
+status listing, and close cleanup without using a paid provider or inherited
+credentials.
+
+`third-party-agent-live-copilot.json` is the opt-in real-provider companion. It
+keeps the parent model deterministic through the fake Responses API, runs
+GitHub Copilot read-only, and is excluded from `run_all.py` so CI never consumes
+a provider account or depends on local CLI authentication. When Copilot relies
+on GitHub CLI authentication, export `GH_TOKEN="$(gh auth token)"` for the
+harness process so the spawned provider receives the credential.
+
 ## Auto Review Proof Loop
 
 Issue #35 uses this harness as the first Codex-native Auto Review proof loop.

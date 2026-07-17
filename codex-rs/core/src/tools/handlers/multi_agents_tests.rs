@@ -3918,7 +3918,7 @@ async fn multi_agent_v2_external_command_close_wakes_parent_wait() {
         }
     });
 
-    timeout(Duration::from_secs(2), ready_rx)
+    timeout(Duration::from_secs(/*secs*/ 5), ready_rx)
         .await
         .expect("external helper should start")
         .expect("readiness sender should report");

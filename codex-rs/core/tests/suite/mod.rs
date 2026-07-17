@@ -50,6 +50,7 @@ mod compact_resume_fork;
 mod deprecation_notice;
 mod exec;
 mod exec_policy;
+mod external_agent_preflight;
 mod fork_thread;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
