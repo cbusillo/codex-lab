@@ -128,6 +128,86 @@ The project command skips unchanged supported Git worktrees only on tool-free
 turns and retains a single bounded correction-and-rerun cycle for actionable
 failures. It does not persist a validation ledger or provide TUI controls.
 
+## Provider Decision Matrix
+
+The provider decision uses four outcomes:
+
+- **ADOPT** preserves the provider and its current command contract.
+- **ADAPT** preserves the capability but reworks discovery, trust, or lifecycle
+  around Codex Lab's terminal root-turn validation boundary.
+- **DEFER** records the contract but does not include it in the MVP runtime.
+- **RETIRE** removes a duplicate provider adapter while retaining the behavior
+  in its authoritative subsystem.
+
+| Provider | Class and trigger | Discovery and trust source | Command and bounds | Decision |
+| --- | --- | --- | --- | --- |
+| JSON parser | Built-in functional parser for added or updated `*.json` content | In-process `serde_json`; no executable or repository trust | Patch-local; 12 surfaced findings with total count and truncation metadata | **ADOPT**; already implemented |
+| TOML parser | Built-in functional parser for added or updated `*.toml` content | In-process `toml`; no executable or repository trust | Same patch-local finding bound | **ADOPT**; already implemented |
+| YAML parser | Built-in functional parser for added or updated `*.yml` and `*.yaml` content | In-process `serde_yaml`; no executable or repository trust | Same patch-local finding bound | **ADOPT**; already implemented |
+| `actionlint` | Hook-backed functional check for GitHub workflow changes | `maybe_run_actionlint` plus GitHub integration configuration, not the generic executable registry | Up to 24 lines in the authoritative adapter | **RETIRE** the duplicate validation-provider adapter; retain workflow validation in its hook/plugin owner |
+| `shellcheck` | Functional executable for changed `*.sh` files and files beginning with `#!/` | Built-in provider definition; default `shellcheck` from the active user/system `PATH`; only user, system, managed, or runtime config may override argv | `shellcheck -f gcc <files>`; 6-second provider timeout; existing 8 KiB event and 960-byte correction-context caps | **ADOPT** as the first MVP executable provider |
+| `markdownlint` | Stylistic executable for changed `*.md` files | `markdownlint` with `markdownlint-cli2` fallback plus repository configuration through a workspace overlay | 6-second authoritative timeout and bounded output | **ADAPT** after MVP; preserve repository-aware execution without dual implicit fallbacks |
+| `hadolint` | Stylistic executable for `Dockerfile` and `Dockerfile.*` | Fixed executable from trusted `PATH`; no project command | 6-second authoritative timeout and bounded output | **DEFER**; simple follow-on after the functional MVP slice |
+| `yamllint` | Stylistic executable for changed YAML files | Fixed executable plus repository configuration through a workspace overlay | `yamllint -f parsable <files>` with a 6-second authoritative timeout | **ADAPT** after MVP |
+| `cargo-check` | Functional workspace check when Rust files change | Trusted Cargo toolchain plus discovered `Cargo.toml` manifests and target hints | `cargo check --quiet`, `RUSTFLAGS=-Dwarnings`, at least 30 seconds per manifest in the authoritative source | **ADAPT** after MVP; too broad and expensive for the first provider |
+| `shfmt` | Stylistic executable for the same shell-file trigger as `shellcheck` | Fixed executable from trusted `PATH` | `shfmt -d <files>` with a 6-second authoritative timeout | **DEFER**; functional `shellcheck` proves the shared shell-file resolver first |
+| `prettier` | Stylistic executable for supported web/data/markup files and Prettier config files | Nearest project root, local `node_modules/.bin` preferred, global fallback, repository config through an overlay | `prettier --check <files>` with bounded output | **ADAPT** after MVP; requires Node project grouping and trusted local-tool rules |
+| `tsc` | Functional executable for changed `*.ts` and `*.tsx` files | Nearest TypeScript project, local Node tool preferred, optional discovered `tsconfig` | `tsc --noEmit --pretty false`, at least 20 seconds in the authoritative source | **ADAPT** after MVP |
+| `eslint` | Functional executable for changed JS/TS-family files when an ESLint config exists | Nearest configured project root, local Node tool preferred | `eslint --max-warnings 0 <files>`, at least 15 seconds in the authoritative source | **ADAPT** after MVP |
+| `phpstan` | Functional executable for changed PHP files when PHPStan configuration exists | Trusted `PATH` plus nearest `phpstan.neon*` repository configuration | `phpstan analyse --error-format=raw --no-progress`, at least 20 seconds | **DEFER** pending a PHP dogfood repository |
+| `psalm` | Functional executable for changed PHP files when Psalm configuration exists | Trusted `PATH` plus nearest `psalm.xml*` repository configuration | Compact no-progress output, two threads, at least 20 seconds | **DEFER** pending a PHP dogfood repository |
+| `mypy` | Functional executable for changed Python files | Nearest virtual environment preferred, trusted `PATH` fallback, repository typing configuration | `mypy --no-color-output --hide-error-context <files>`, at least 20 seconds | **ADAPT** after MVP; requires explicit virtual-environment trust rules |
+| `pyright` | Functional executable for changed Python files | Nearest virtual environment preferred, trusted `PATH` fallback, repository typing configuration | `pyright --warnings <files>`, at least 20 seconds | **ADAPT** after MVP; share the Python resolver with `mypy` |
+| `golangci-lint` | Functional executable for changed Go files in a repository with `go.mod` | Trusted `PATH` plus module-root discovery | `golangci-lint run ./...`, at least 20 seconds | **ADAPT** after MVP; module-wide scope needs stronger elapsed-time and deduplication policy |
+
+### Shared Executable-Provider Contract
+
+The Codex Lab provider runtime extends the existing project-command lifecycle
+instead of restoring the monolithic patch harness:
+
+1. Providers run only for root sessions after the worktree admission check
+   detects relevant work. Selection uses the current changed paths relative to
+   `HEAD`, including untracked files, and fixed provider predicates.
+2. Repository configuration may enable or disable safe provider definitions,
+   but it cannot supply executable argv. Executable overrides are accepted only
+   from user, system, managed, or runtime configuration and never use shell
+   interpretation.
+3. The MVP selects at most one executable provider (`shellcheck`) and at most 64
+   matching paths whose rendered argv remains within 8 KiB.
+4. One provider execution is allowed initially and one final rerun is allowed
+   after the existing model correction cycle. There is no hidden retry loop.
+5. A provider has a 6-second default timeout. Retained event output is capped at
+   8 KiB, and actionable model feedback reuses the existing fully rendered
+   960-byte correction-fragment cap.
+6. Exit zero is `passed`; a nonzero exit is `actionable_failure`; timeout,
+   invalid or missing executable configuration, and execution infrastructure
+   failures retain their existing typed terminal states. Turn cancellation
+   emits no potentially misleading terminal result.
+7. Equivalent unchanged work is suppressed, same-repository execution uses the
+   existing cancellation-aware coordinator, and the correction rerun reacquires
+   the lease. Resumed or multi-patch turns therefore cannot create duplicate
+   provider work beyond the one initial attempt and one owned rerun.
+8. Provider results continue to use `validation.completed`; the fixed command
+   field identifies the provider without adding a parallel validation ledger or
+   protocol surface for the MVP.
+
+### Selected MVP Provider
+
+`shellcheck` is the first provider for issue #310. It is functional rather than
+stylistic, has a narrow changed-file predicate, uses a fixed read-only argv,
+needs no repository project graph or configuration discovery, and exercises the
+same executable resolution, timeout, output, cancellation, correction, and
+deduplication contracts needed by later providers.
+
+`scenarios/auto-validation-shellcheck-provider.json` records #309's
+deterministic contract for #310 before production implementation. A trusted
+user-level provider
+override points to a fake direct-argv executable, a model patch adds one shell
+file, the first provider run emits one bounded actionable failure, the existing
+correction fragment appears exactly once, and the single owned rerun passes.
+The scenario is `contract-only` and excluded from `run_all.py` until #310 turns
+the contract into runtime-covered proof.
+
 ## First Contract
 
 `scenarios/auto-validation-bounded-apply-patch-feedback.json` drives one fake

@@ -90,6 +90,11 @@ contract: one user-owned direct-argv validation command runs at root-turn
 completion and emits a typed, bounded `validation.completed` event before
 `turn.completed`.
 
+`auto-validation-shellcheck-provider.json` is the contract-only fixture for
+issue #310's first automatically selected executable provider. It is excluded
+from the default suite until the trusted `shellcheck` provider runtime lands;
+at that point the scenario must become `runtime-covered` and join `run_all.py`.
+
 `gpt-5-6-luna-low-request-shape.json` is the deterministic catalog smoke test
 for the lowest-cost GPT-5.6 variant. It proves the local binary sends
 `gpt-5.6-luna` with low reasoning effort without making a paid model call.
