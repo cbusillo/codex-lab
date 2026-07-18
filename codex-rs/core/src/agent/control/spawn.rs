@@ -1,6 +1,8 @@
 use super::*;
+use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::external_diagnostics::permission_profile_is_read_only;
+#[cfg(test)]
 use codex_protocol::models::PermissionProfile;
-use codex_protocol::permissions::FileSystemSandboxKind;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
@@ -15,17 +17,6 @@ fn default_agent_nickname_list() -> Vec<&'static str> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .collect()
-}
-
-fn permission_profile_is_read_only(profile: &PermissionProfile) -> bool {
-    let file_system = profile.file_system_sandbox_policy();
-    match file_system.kind {
-        FileSystemSandboxKind::Restricted => file_system
-            .entries
-            .iter()
-            .all(|entry| !entry.access.can_write()),
-        FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => false,
-    }
 }
 
 pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>) -> Vec<String> {
@@ -345,16 +336,32 @@ impl AgentControl {
             let thread_id = ThreadId::new();
             agent_metadata.agent_id = Some(thread_id);
             agent_metadata.last_task_message = Some(last_task_message);
+            let is_read_only =
+                permission_profile_is_read_only(&config.permissions.effective_permission_profile());
+            let external_agent_provider = options.external_agent_provider.clone();
+            let resolved_command = external_agent_provider
+                .as_ref()
+                .and_then(ExternalAgentProviderProvenance::resolved_command)
+                .map(std::path::Path::to_path_buf);
+            let preflight_completed = resolved_command.is_some();
+            let provider = external_agent_provider.unwrap_or_else(|| {
+                ExternalAgentProviderProvenance::new(
+                    agent_role.as_deref(),
+                    &backend,
+                    config.cwd.as_path(),
+                    is_read_only,
+                    /*cli_version*/ None,
+                )
+            });
             let cancellation_token = self.state.register_external_agent(
                 thread_id,
                 parent_thread_id,
                 AgentStatus::PendingInit,
+                provider,
             );
             reservation.commit(agent_metadata.clone());
             self.persist_thread_spawn_edge(parent_thread_id, thread_id)
                 .await;
-            let is_read_only =
-                permission_profile_is_read_only(&config.permissions.effective_permission_profile());
 
             let launch = ExternalAgentLaunch {
                 thread_id,
@@ -371,6 +378,9 @@ impl AgentControl {
                 cwd: config.cwd.to_path_buf(),
                 cancellation_token,
                 is_read_only,
+                preflight_completed,
+                resolved_command,
+                hide_provider_metadata: config.multi_agent_v2.hide_spawn_agent_metadata,
             };
             self.spawn_external_agent_task(launch);
             return Ok(LiveAgent {

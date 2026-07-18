@@ -483,6 +483,55 @@ fn list_agents_output_schema() -> Value {
                         "last_task_message": {
                             "type": ["string", "null"],
                             "description": "Most recent user or inter-agent instruction received by the agent, when available."
+                        },
+                        "provider": {
+                            "type": "object",
+                            "description": "External-provider provenance when spawn metadata is visible.",
+                            "properties": {
+                                "agent_type": { "type": "string" },
+                                "provider_family": { "type": "string" },
+                                "command": { "type": "string" },
+                                "cli_version": { "type": "string" },
+                                "protocol": {
+                                    "type": "string",
+                                    "enum": ["json", "raw_cli"]
+                                },
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["read_only", "write"]
+                                },
+                                "workspace": { "type": "string" }
+                            },
+                            "required": ["command", "protocol", "mode", "workspace"],
+                            "additionalProperties": false
+                        },
+                        "failure": {
+                            "type": "object",
+                            "description": "Structured external-provider failure details when the agent failed.",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "command_missing",
+                                        "authentication_required",
+                                        "quota_or_rate_limited",
+                                        "unsupported_mode",
+                                        "timed_out",
+                                        "malformed_output",
+                                        "empty_output",
+                                        "launch_failed",
+                                        "provider_failed"
+                                    ]
+                                },
+                                "message": { "type": "string" }
+                            },
+                            "required": ["kind"],
+                            "additionalProperties": false
+                        },
+                        "duration_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Elapsed external-agent runtime in milliseconds."
                         }
                     },
                     "required": ["agent_name", "agent_status", "last_task_message"],

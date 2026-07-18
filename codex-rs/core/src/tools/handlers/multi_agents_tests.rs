@@ -189,6 +189,20 @@ fn install_external_role(config: &mut crate::config::Config, role_name: &str, la
     );
 }
 
+#[cfg(not(windows))]
+async fn write_executable_script(path: &std::path::Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::write(path, contents)
+        .await
+        .expect("helper should be written");
+    let mut permissions = std::fs::metadata(path)
+        .expect("helper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("helper should be executable");
+}
+
 fn expect_text_output<T>(output: T) -> (String, Option<bool>)
 where
     T: ToolOutput,
@@ -225,6 +239,9 @@ struct ListedAgentResult {
     agent_name: String,
     agent_status: serde_json::Value,
     last_task_message: Option<String>,
+    provider: Option<serde_json::Value>,
+    failure: Option<serde_json::Value>,
+    duration_ms: Option<u64>,
 }
 
 #[tokio::test]
@@ -598,6 +615,170 @@ async fn multi_agent_v2_routes_normal_security_task_to_external_agent_without_fo
     assert_eq!(result.agent_type, "antigravity");
     assert_eq!(result.routing.kind, "automatic_external");
     assert!(result.routing.reason.contains("normal `security` task"));
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn multi_agent_v2_preflight_skips_signed_out_provider() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnResult {
+        task_name: String,
+        agent_type: String,
+        routing: RoutingResult,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RoutingResult {
+        kind: String,
+        reason: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
+    tokio::fs::create_dir_all(&config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let antigravity_path = config.codex_home.as_path().join("fake-antigravity.sh");
+    tokio::fs::write(
+        &antigravity_path,
+        r#"if [ "$1" = "--version" ]; then
+  echo "Antigravity CLI 1.2.3"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo "Authentication required. Please sign in." >&2
+  exit 1
+fi
+exit 2
+"#,
+    )
+    .await
+    .expect("fake Antigravity CLI should be written");
+    let claude_path = config.codex_home.as_path().join("fake-claude.sh");
+    tokio::fs::write(
+        &claude_path,
+        r#"if [ "$1" = "--version" ]; then
+  echo "Claude Code 2.1.212"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"loggedIn":true,"authMethod":"test"}'
+  exit 0
+fi
+if [ "$1" = "-p" ]; then
+  echo "CLAUDE_FALLBACK_OK"
+  exit 0
+fi
+exit 2
+"#,
+    )
+    .await
+    .expect("fake Claude CLI should be written");
+    for (role_name, launch_family, script_path) in [
+        ("antigravity", "antigravity", antigravity_path),
+        ("claude-sonnet-4.6", "claude", claude_path),
+    ] {
+        config.agent_roles.insert(
+            role_name.to_string(),
+            AgentRoleConfig {
+                description: Some(format!("Test {launch_family} provider")),
+                backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                    ExternalCommandAgentBackendConfig {
+                        command: format!("/bin/sh {}", script_path.display()),
+                        protocol: ExternalCommandProtocol::RawCli,
+                        launch_family: Some(launch_family.to_string()),
+                        timeout_ms: 5_000,
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+    }
+    let root = manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "audit the release workflow",
+                "task_name": "authenticated_provider_review",
+                "task_kind": "security",
+                "task_size": "normal"
+            })),
+        ))
+        .await
+        .expect("routing should skip the signed-out preferred provider");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+
+    assert_eq!(result.task_name, "/root/authenticated_provider_review");
+    assert_eq!(result.agent_type, "claude-sonnet-4.6");
+    assert_eq!(result.routing.kind, "automatic_external");
+    assert!(result.routing.reason.contains("claude-sonnet-4.6"));
+
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.thread_id,
+            &turn.session_source,
+            "authenticated_provider_review",
+        )
+        .await
+        .expect("Claude agent path should resolve");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match session.services.agent_control.get_status(agent_id).await {
+                AgentStatus::Completed(Some(message)) => {
+                    assert_eq!(message, "CLAUDE_FALLBACK_OK");
+                    return;
+                }
+                AgentStatus::Errored(message) => panic!("Claude fallback failed: {message}"),
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("Claude fallback should complete");
+
+    let list_output = ListAgentsHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed");
+    let (content, _) = expect_text_output(list_output);
+    let list: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let provider = list
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/authenticated_provider_review")
+        .and_then(|agent| agent.provider.as_ref())
+        .expect("preflight provider provenance should be retained");
+    assert_eq!(provider["provider_family"], "claude");
+    assert_eq!(provider["cli_version"], "Claude Code 2.1.212");
 }
 
 #[tokio::test]
@@ -3851,6 +4032,19 @@ printf '%s\n' '{"status":"completed","final_message":"external done"}'
         external.last_task_message.as_deref(),
         Some("inspect this repo")
     );
+    let provider = external
+        .provider
+        .as_ref()
+        .expect("external provider provenance should be listed");
+    assert_eq!(provider["agent_type"], "external");
+    assert_eq!(provider["command"], "external-agent-helper.sh");
+    assert_eq!(provider["protocol"], "json");
+    assert_eq!(
+        provider["workspace"],
+        turn.config.cwd.as_path().display().to_string()
+    );
+    assert!(external.failure.is_none());
+    assert!(external.duration_ms.is_some());
 
     let result = FollowupTaskHandlerV2
         .handle(invocation(
@@ -3872,6 +4066,253 @@ printf '%s\n' '{"status":"completed","final_message":"external done"}'
             "external_command agents do not accept follow-up messages in this dogfood backend"
                 .to_string(),
         )
+    );
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn multi_agent_v2_external_failure_lists_provider_and_classification() {
+    let (_, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
+    tokio::fs::create_dir_all(&config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let helper_path = config.codex_home.as_path().join("external-auth-failure.sh");
+    write_executable_script(
+        &helper_path,
+        "#!/bin/sh\necho 'Authentication required. Please sign in.' >&2\nexit 1\n",
+    )
+    .await;
+    config.agent_roles.insert(
+        "external_failure".to_string(),
+        AgentRoleConfig {
+            description: Some("External failure role".to_string()),
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: helper_path.display().to_string(),
+                    protocol: ExternalCommandProtocol::RawCli,
+                    launch_family: Some("fixture".to_string()),
+                    timeout_ms: 5_000,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        },
+    );
+    set_turn_config(&mut turn, config);
+
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let session = Arc::clone(&root.thread.codex.session);
+    let turn = root.thread.codex.session.new_default_turn().await;
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "external_failure",
+                "agent_type": "external_failure",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed after preflight");
+
+    timeout(
+        Duration::from_secs(10),
+        WaitAgentHandlerV2::default().handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("external failure should wake wait_agent")
+    .expect("wait_agent should succeed");
+
+    let list_output = ListAgentsHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed");
+    let (content, _) = expect_text_output(list_output);
+    let list: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let external = list
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/external_failure")
+        .expect("failed external agent should be listed");
+    let provider = external
+        .provider
+        .as_ref()
+        .expect("provider provenance should be present");
+    assert_eq!(provider["agent_type"], "external_failure");
+    assert_eq!(provider["provider_family"], "fixture");
+    assert_eq!(provider["command"], "external-auth-failure.sh");
+    assert_eq!(provider["protocol"], "raw_cli");
+    let failure = external
+        .failure
+        .as_ref()
+        .expect("failure classification should be present");
+    assert_eq!(failure["kind"], "authentication_required");
+    assert!(
+        failure["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Authentication required"))
+    );
+    assert!(external.duration_ms.is_some());
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn multi_agent_v2_hidden_metadata_redacts_external_failure_provenance() {
+    let (_, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = true;
+    tokio::fs::create_dir_all(&config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let helper_path = config.codex_home.as_path().join("hidden-auth-failure.sh");
+    write_executable_script(
+        &helper_path,
+        "#!/bin/sh\necho 'Authentication required. Please sign in.' >&2\nexit 1\n",
+    )
+    .await;
+    config.agent_roles.insert(
+        "antigravity".to_string(),
+        AgentRoleConfig {
+            description: Some("Automatic external failure role".to_string()),
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: helper_path.display().to_string(),
+                    protocol: ExternalCommandProtocol::RawCli,
+                    launch_family: Some("fixture".to_string()),
+                    timeout_ms: 5_000,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        },
+    );
+    set_turn_config(&mut turn, config);
+
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let session = Arc::clone(&root.thread.codex.session);
+    let turn = root.thread.codex.session.new_default_turn().await;
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "hidden_external_failure",
+                "task_kind": "security",
+                "task_size": "normal"
+            })),
+        ))
+        .await
+        .expect("automatic external spawn should succeed after preflight");
+
+    timeout(
+        Duration::from_secs(10),
+        WaitAgentHandlerV2::default().handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("external failure should wake wait_agent")
+    .expect("wait_agent should succeed");
+
+    assert!(manager.captured_ops().iter().any(|(thread_id, op)| {
+        *thread_id == session.thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.content
+                        == "external agent failed: authentication_required"
+            )
+    }));
+    assert!(!manager.captured_ops().iter().any(|(_, op)| {
+        matches!(
+            op,
+            Op::InterAgentCommunication { communication }
+                if communication.content.contains("Please sign in")
+        )
+    }));
+
+    let list_output = ListAgentsHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed");
+    let (content, _) = expect_text_output(list_output);
+    let list: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let external = list
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/hidden_external_failure")
+        .expect("failed external agent should be listed");
+    assert!(external.provider.is_none());
+    assert_eq!(
+        external.failure,
+        Some(json!({"kind": "authentication_required"}))
+    );
+    assert_eq!(
+        external.agent_status,
+        json!({"errored": "external agent failed: authentication_required"})
+    );
+    assert!(external.duration_ms.is_some());
+
+    let close_output = CloseAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "close_agent",
+            function_payload(json!({"target": "hidden_external_failure"})),
+        ))
+        .await
+        .expect("close_agent should succeed");
+    let (content, _) = expect_text_output(close_output);
+    let result: close_agent::CloseAgentResult =
+        serde_json::from_str(&content).expect("close_agent result should be json");
+    assert_eq!(
+        result.previous_status,
+        AgentStatus::Errored("external agent failed: authentication_required".to_string())
     );
 }
 

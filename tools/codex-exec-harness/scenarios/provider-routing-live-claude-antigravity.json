@@ -180,7 +180,10 @@
           "live_antigravity",
           "LIVE_ANTIGRAVITY_AUTO_OK",
           "live_claude",
-          "LIVE_CLAUDE_AUTO_OK"
+          "LIVE_CLAUDE_AUTO_OK",
+          "provider_family",
+          "cli_version",
+          "read_only"
         ]
       },
       {

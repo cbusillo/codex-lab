@@ -137,7 +137,7 @@ class RunAllReportTest(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertFalse(report["partial"])
         self.assertEqual("/tmp/codex", report["codex_bin"])
-        self.assertEqual(14, report["scenario_total"])
+        self.assertEqual(15, report["scenario_total"])
         self.assertEqual("abc123", report["git_revision"])
         self.assertEqual("current", report["provenance"]["status"])
         self.assertEqual("f" * 64, report["provenance"]["binary_sha256"])

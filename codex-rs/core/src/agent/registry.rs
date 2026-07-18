@@ -1,3 +1,5 @@
+use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
+use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -13,6 +15,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -34,6 +37,18 @@ struct ExternalAgentRuntime {
     status_tx: watch::Sender<AgentStatus>,
     _status_rx: watch::Receiver<AgentStatus>,
     cancellation_token: CancellationToken,
+    provider: ExternalAgentProviderProvenance,
+    failure: Option<ExternalAgentFailureDetail>,
+    started_at: Instant,
+    completed_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExternalAgentRuntimeSnapshot {
+    pub(crate) status: AgentStatus,
+    pub(crate) provider: ExternalAgentProviderProvenance,
+    pub(crate) failure: Option<ExternalAgentFailureDetail>,
+    pub(crate) duration_ms: u64,
 }
 
 #[derive(Default)]
@@ -214,6 +229,7 @@ impl AgentRegistry {
         thread_id: ThreadId,
         parent_thread_id: ThreadId,
         initial_status: AgentStatus,
+        provider: ExternalAgentProviderProvenance,
     ) -> CancellationToken {
         let (status_tx, status_rx) = watch::channel(initial_status);
         let cancellation_token = CancellationToken::new();
@@ -227,9 +243,37 @@ impl AgentRegistry {
                     status_tx,
                     _status_rx: status_rx,
                     cancellation_token: cancellation_token.clone(),
+                    provider,
+                    failure: None,
+                    started_at: Instant::now(),
+                    completed_at: None,
                 },
             );
         cancellation_token
+    }
+
+    pub(crate) fn external_agent_snapshot(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<ExternalAgentRuntimeSnapshot> {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread_id)
+            .map(|runtime| {
+                let completed_at = runtime.completed_at.unwrap_or_else(Instant::now);
+                let duration_ms = completed_at
+                    .saturating_duration_since(runtime.started_at)
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                ExternalAgentRuntimeSnapshot {
+                    status: runtime.status_tx.borrow().clone(),
+                    provider: runtime.provider.clone(),
+                    failure: runtime.failure.clone(),
+                    duration_ms,
+                }
+            })
     }
 
     pub(crate) fn external_agent_status(&self, thread_id: ThreadId) -> Option<AgentStatus> {
@@ -289,8 +333,30 @@ impl AgentRegistry {
         self.external_agents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&thread_id)
-            .is_some_and(|runtime| runtime.status_tx.send(status).is_ok())
+            .get_mut(&thread_id)
+            .is_some_and(|runtime| {
+                if crate::agent::status::is_final(&status) {
+                    runtime.completed_at.get_or_insert_with(Instant::now);
+                }
+                runtime.status_tx.send(status).is_ok()
+            })
+    }
+
+    pub(crate) fn update_external_agent_failure(
+        &self,
+        thread_id: ThreadId,
+        status: AgentStatus,
+        failure: ExternalAgentFailureDetail,
+    ) -> bool {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&thread_id)
+            .is_some_and(|runtime| {
+                runtime.failure = Some(failure);
+                runtime.completed_at.get_or_insert_with(Instant::now);
+                runtime.status_tx.send(status).is_ok()
+            })
     }
 
     pub(crate) fn cancel_external_agent(&self, thread_id: ThreadId) -> bool {

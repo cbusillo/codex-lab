@@ -429,10 +429,31 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
             .and_then(|schema| schema.description.as_deref()),
         Some("Task-path prefix filter without a trailing slash. Omit to list all live agents.")
     );
+    let output_schema = output_schema.expect("list_agents output schema");
     assert_eq!(
-        output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
+        output_schema["properties"]["agents"]["items"]["required"],
         json!(["agent_name", "agent_status", "last_task_message"])
     );
+    let agent_properties = &output_schema["properties"]["agents"]["items"]["properties"];
+    assert_eq!(
+        agent_properties["provider"]["properties"]["protocol"]["enum"],
+        json!(["json", "raw_cli"])
+    );
+    assert_eq!(
+        agent_properties["failure"]["properties"]["kind"]["enum"],
+        json!([
+            "command_missing",
+            "authentication_required",
+            "quota_or_rate_limited",
+            "unsupported_mode",
+            "timed_out",
+            "malformed_output",
+            "empty_output",
+            "launch_failed",
+            "provider_failed"
+        ])
+    );
+    assert_eq!(agent_properties["duration_ms"]["minimum"], json!(0));
 }
 
 #[test]

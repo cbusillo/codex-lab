@@ -1,3 +1,8 @@
+use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
+use crate::agent::external_diagnostics::ExternalAgentFailureKind;
+use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::external_diagnostics::permission_profile_is_read_only;
+use crate::agent::external_preflight::preflight_external_agent_backend;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config_owned;
 use crate::config::AgentRoleBackendConfig;
@@ -100,7 +105,25 @@ pub(crate) struct ProviderRoutingDecision {
     agent_type: String,
     role_name: Option<String>,
     is_external: bool,
+    provider: Option<ExternalAgentProviderProvenance>,
     summary: ProviderRoutingSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderRoutingFailure {
+    agent_type: String,
+    detail: ExternalAgentFailureDetail,
+}
+
+impl ProviderRoutingFailure {
+    pub(crate) fn message(&self) -> String {
+        let detail = self.detail.message.as_deref().unwrap_or("preflight failed");
+        format!(
+            "Explicit external agent `{}` failed `{}` preflight: {detail}",
+            self.agent_type,
+            self.detail.kind.as_str()
+        )
+    }
 }
 
 impl ProviderRoutingDecision {
@@ -114,6 +137,10 @@ impl ProviderRoutingDecision {
 
     pub(crate) fn is_external(&self) -> bool {
         self.is_external
+    }
+
+    pub(crate) fn provider(&self) -> Option<&ExternalAgentProviderProvenance> {
+        self.provider.as_ref()
     }
 
     pub(crate) fn kind(&self) -> ProviderRoutingKind {
@@ -147,23 +174,60 @@ impl ProviderRoutingDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProviderEligibility {
-    Available,
+    Available(Option<ExternalAgentProviderProvenance>),
     Unavailable(String),
 }
 
-pub(crate) fn select_provider_route(
+pub(crate) async fn select_provider_route(
     config: &Config,
     explicit_agent_type: Option<&str>,
     task_kind: AgentTaskKind,
     task_size: AgentTaskSize,
-) -> ProviderRoutingDecision {
-    select_provider_route_with(
+) -> Result<ProviderRoutingDecision, ProviderRoutingFailure> {
+    let explicit_provider = if let Some(agent_type) = explicit_agent_type
+        && role_uses_external_backend(config, agent_type)
+    {
+        Some(
+            external_role_preflight(config, agent_type)
+                .await
+                .map_err(|detail| ProviderRoutingFailure {
+                    agent_type: agent_type.to_string(),
+                    detail,
+                })?,
+        )
+    } else {
+        None
+    };
+
+    let mut eligibility = std::collections::HashMap::new();
+    if explicit_agent_type.is_none() && task_size != AgentTaskSize::Tiny {
+        for candidate in task_kind.provider_candidates() {
+            let result = external_role_preflight(config, candidate)
+                .await
+                .map(|provider| ProviderEligibility::Available(Some(provider)))
+                .unwrap_or_else(|detail| {
+                    let message = detail.message.as_deref().unwrap_or("preflight failed");
+                    ProviderEligibility::Unavailable(format!("{}: {message}", detail.kind.as_str()))
+                });
+            eligibility.insert(*candidate, result);
+        }
+    }
+
+    let mut decision = select_provider_route_with(
         explicit_agent_type,
         task_kind,
         task_size,
         |agent_type| role_uses_external_backend(config, agent_type),
-        |agent_type| external_role_eligibility(config, agent_type),
-    )
+        |agent_type| {
+            eligibility.remove(agent_type).unwrap_or_else(|| {
+                ProviderEligibility::Unavailable("preflight was not run".to_string())
+            })
+        },
+    );
+    if explicit_provider.is_some() {
+        decision.provider = explicit_provider;
+    }
+    Ok(decision)
 }
 
 fn select_provider_route_with<IsExternal, Eligibility>(
@@ -182,6 +246,7 @@ where
             agent_type: agent_type.to_string(),
             role_name: (agent_type != DEFAULT_ROLE_NAME).then(|| agent_type.to_string()),
             is_external: is_external(agent_type),
+            provider: None,
             summary: ProviderRoutingSummary {
                 kind: ProviderRoutingKind::Explicit,
                 reason: format!("`agent_type` explicitly selected `{agent_type}`."),
@@ -213,11 +278,12 @@ where
     let mut unavailable = Vec::new();
     for candidate in candidates {
         match eligibility(candidate) {
-            ProviderEligibility::Available => {
+            ProviderEligibility::Available(provider) => {
                 return ProviderRoutingDecision {
                     agent_type: (*candidate).to_string(),
                     role_name: Some((*candidate).to_string()),
                     is_external: true,
+                    provider,
                     summary: ProviderRoutingSummary {
                         kind: ProviderRoutingKind::AutomaticExternal,
                         reason: format!(
@@ -250,6 +316,7 @@ fn native_decision(kind: ProviderRoutingKind, reason: String) -> ProviderRouting
         agent_type: DEFAULT_ROLE_NAME.to_string(),
         role_name: None,
         is_external: false,
+        provider: None,
         summary: ProviderRoutingSummary { kind, reason },
     }
 }
@@ -263,25 +330,31 @@ fn role_uses_external_backend(config: &Config, agent_type: &str) -> bool {
     })
 }
 
-fn external_role_eligibility(config: &Config, agent_type: &str) -> ProviderEligibility {
+async fn external_role_preflight(
+    config: &Config,
+    agent_type: &str,
+) -> Result<ExternalAgentProviderProvenance, ExternalAgentFailureDetail> {
     let Some(role) = resolve_role_config_owned(config, agent_type) else {
-        return ProviderEligibility::Unavailable("role is not configured".to_string());
+        return Err(ExternalAgentFailureDetail::new(
+            ExternalAgentFailureKind::LaunchFailed,
+            "role is not configured",
+        ));
     };
     let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
-        return ProviderEligibility::Unavailable(
-            "role does not use an external command backend".to_string(),
-        );
+        return Err(ExternalAgentFailureDetail::new(
+            ExternalAgentFailureKind::LaunchFailed,
+            "role does not use an external command backend",
+        ));
     };
-    let Some(command) =
-        shlex::split(backend.command.trim()).and_then(|parts| parts.into_iter().next())
-    else {
-        return ProviderEligibility::Unavailable("command is empty or invalid".to_string());
-    };
-    if which::which(&command).is_ok() {
-        ProviderEligibility::Available
-    } else {
-        ProviderEligibility::Unavailable(format!("command `{command}` was not found"))
-    }
+    let is_read_only =
+        permission_profile_is_read_only(&config.permissions.effective_permission_profile());
+    preflight_external_agent_backend(
+        Some(agent_type),
+        &backend,
+        config.cwd.as_path(),
+        is_read_only,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -303,7 +376,7 @@ mod tests {
             |agent_type| agent_type != DEFAULT_ROLE_NAME,
             |agent_type| {
                 if available.contains(agent_type) {
-                    ProviderEligibility::Available
+                    ProviderEligibility::Available(None)
                 } else {
                     ProviderEligibility::Unavailable("not installed".to_string())
                 }

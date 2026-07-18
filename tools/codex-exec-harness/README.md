@@ -119,6 +119,15 @@ agent, then proves native spawn, parent-visible completion output, terminal
 status listing, and close cleanup without using a paid provider or inherited
 credentials.
 
+`provider-routing-high-risk-external.json` proves issue #370's significance-aware
+automatic routing with a deterministic external-command fixture.
+`provider-preflight-diagnostics.json` proves generic external-command preflight
+plus parent-visible provider provenance, classified runtime authentication
+failure, elapsed runtime, and cleanup. Provider-specific authentication probes
+are deterministic Rust tests; `provider-routing-live-claude-antigravity.json`
+is the opt-in current-binary companion that exercises authenticated Claude and
+Antigravity CLIs.
+
 `third-party-agent-live-copilot.json` is the opt-in real-provider companion. It
 keeps the parent model deterministic through the fake Responses API, runs
 GitHub Copilot read-only, and is excluded from `run_all.py` so CI never consumes
