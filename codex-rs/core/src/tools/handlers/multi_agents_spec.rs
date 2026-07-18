@@ -16,6 +16,10 @@ const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
     "Service tier override for the new agent. Omit unless explicitly requested.";
+const VISIBLE_PROVIDER_ROUTING_GUIDANCE: &str = "Classify every delegated task with `task_kind` and `task_size`. For normal or large independent review, security, infrastructure, release, and product-risk work, omit `agent_type` so Codex Lab can select an eligible installed third-party agent. Tiny tasks stay native by default. Set `agent_type` only to make an explicit override; `agent_type = \"default\"` explicitly accepts a native agent.";
+const HIDDEN_PROVIDER_ROUTING_GUIDANCE: &str = "Classify every delegated task with `task_kind` and `task_size`. For normal or large independent review, security, infrastructure, release, and product-risk work, Codex Lab selects an eligible installed third-party agent when available. Tiny tasks stay native by default. Agent-type overrides are not exposed in this configuration.";
+const AGENT_TASK_KIND_DESCRIPTION: &str = "Task category used by Codex Lab's provider-routing policy. Use `independent_review` for a dissenting review and the matching risk category for security, infrastructure, release, or product-risk work.";
+const AGENT_TASK_SIZE_DESCRIPTION: &str = "Task significance used by provider routing. Use `tiny` only for bounded low-risk work; normal and large high-risk work may route to an eligible third-party agent.";
 const VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE: &str = "When the user asks which agents, models, or delegation capabilities are available, answer from this tool's current schema and descriptions rather than from generic harness assumptions. Enumerate exposed `agent_type` choices and model overrides. Do not claim that every agent uses the same model, that arbitrary models or tools are available, or that a concurrency limit exists unless it is explicitly stated here.";
 const HIDDEN_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE: &str = "When the user asks which agents, models, or delegation capabilities are available, answer only from this tool's current schema and descriptions rather than from generic harness assumptions. Agent type and model override metadata are intentionally not exposed here; do not infer or enumerate hidden choices.";
 const MAX_MODEL_OVERRIDES_IN_SPAWN_AGENT_DESCRIPTION: usize = 5;
@@ -110,7 +114,12 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            Some(vec!["task_name".to_string(), "message".to_string()]),
+            Some(vec![
+                "task_name".to_string(),
+                "message".to_string(),
+                "task_kind".to_string(),
+                "task_size".to_string(),
+            ]),
             Some(false.into()),
         ),
         output_schema: Some(spawn_agent_output_schema_v2(
@@ -384,9 +393,23 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                 "task_name": {
                     "type": "string",
                     "description": "Canonical task name for the spawned agent."
+                },
+                "routing": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["explicit", "automatic_external", "native_default", "native_fallback"]
+                        },
+                        "reason": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["kind", "reason"],
+                    "additionalProperties": false
                 }
             },
-            "required": ["task_name"],
+            "required": ["task_name", "routing"],
             "additionalProperties": false
         });
     }
@@ -401,9 +424,27 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
+            },
+            "agent_type": {
+                "type": "string",
+                "description": "Effective agent role selected for the spawned agent."
+            },
+            "routing": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["explicit", "automatic_external", "native_default", "native_fallback"]
+                    },
+                    "reason": {
+                        "type": "string"
+                    }
+                },
+                "required": ["kind", "reason"],
+                "additionalProperties": false
             }
         },
-        "required": ["task_name", "nickname"],
+        "required": ["task_name", "nickname", "agent_type", "routing"],
         "additionalProperties": false
     })
 }
@@ -604,6 +645,8 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             ))
             .with_encrypted(),
         ),
+        ("task_kind".to_string(), create_agent_task_kind_schema()),
+        ("task_size".to_string(), create_agent_task_size_schema()),
         (
             "agent_type".to_string(),
             JsonSchema::string(Some(agent_type_description.to_string())),
@@ -611,7 +654,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "fork_turns".to_string(),
             JsonSchema::string(Some(
-                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+                "Optional number of turns to fork. Defaults to `none` when an external agent is selected and `all` otherwise. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
                     .to_string(),
             )),
         ),
@@ -635,6 +678,29 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             )),
         ),
     ])
+}
+
+fn create_agent_task_kind_schema() -> JsonSchema {
+    JsonSchema::string_enum(
+        vec![
+            json!("implementation"),
+            json!("research"),
+            json!("independent_review"),
+            json!("security"),
+            json!("infrastructure"),
+            json!("release"),
+            json!("product_risk"),
+            json!("other"),
+        ],
+        Some(AGENT_TASK_KIND_DESCRIPTION.to_string()),
+    )
+}
+
+fn create_agent_task_size_schema() -> JsonSchema {
+    JsonSchema::string_enum(
+        vec![json!("tiny"), json!("normal"), json!("large")],
+        Some(AGENT_TASK_SIZE_DESCRIPTION.to_string()),
+    )
 }
 
 fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
@@ -735,6 +801,11 @@ fn spawn_agent_tool_description_v2(
     } else {
         HIDDEN_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE
     };
+    let provider_routing_guidance = if available_models_description.is_some() {
+        VISIBLE_PROVIDER_ROUTING_GUIDANCE
+    } else {
+        HIDDEN_PROVIDER_ROUTING_GUIDANCE
+    };
     let concurrency_guidance = max_concurrent_threads_per_session
         .map(|limit| {
             format!(
@@ -750,6 +821,7 @@ fn spawn_agent_tool_description_v2(
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
 Native child agents receive the same tools as you and can spawn subagents. Configured agent types may instead route to external CLIs with their own capabilities.
 {inherited_model_guidance}
+{provider_routing_guidance}
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
 {concurrency_guidance}

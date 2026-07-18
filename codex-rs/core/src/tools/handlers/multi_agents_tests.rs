@@ -5,6 +5,7 @@ use crate::config::AgentRoleBackendConfig;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::ExternalCommandAgentBackendConfig;
+use crate::config::ExternalCommandProtocol;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::tests::make_session_and_context;
@@ -72,6 +73,29 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 fn invocation(
+    session: Arc<crate::session::session::Session>,
+    turn: Arc<TurnContext>,
+    tool_name: &str,
+    mut payload: ToolPayload,
+) -> ToolInvocation {
+    if tool_name == "spawn_agent"
+        && let ToolPayload::Function { arguments } = &mut payload
+        && let Ok(serde_json::Value::Object(mut object)) =
+            serde_json::from_str::<serde_json::Value>(arguments)
+        && object.contains_key("task_name")
+    {
+        object
+            .entry("task_kind".to_string())
+            .or_insert(json!("other"));
+        object
+            .entry("task_size".to_string())
+            .or_insert(json!("normal"));
+        *arguments = serde_json::Value::Object(object).to_string();
+    }
+    raw_invocation(session, turn, tool_name, payload)
+}
+
+fn raw_invocation(
     session: Arc<crate::session::session::Session>,
     turn: Arc<TurnContext>,
     tool_name: &str,
@@ -144,6 +168,25 @@ model_reasoning_effort = "minimal"
 fn set_turn_config(turn: &mut TurnContext, config: crate::config::Config) {
     turn.multi_agent_version = config.multi_agent_version_from_features();
     turn.config = Arc::new(config);
+}
+
+fn install_external_role(config: &mut crate::config::Config, role_name: &str, launch_family: &str) {
+    config.agent_roles.insert(
+        role_name.to_string(),
+        AgentRoleConfig {
+            description: Some(format!("Test {launch_family} agent")),
+            config_file: None,
+            nickname_candidates: None,
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: "true".to_string(),
+                    protocol: ExternalCommandProtocol::RawCli,
+                    launch_family: Some(launch_family.to_string()),
+                    ..Default::default()
+                },
+            )),
+        },
+    );
 }
 
 fn expect_text_output<T>(output: T) -> (String, Option<bool>)
@@ -392,6 +435,7 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
     let turn = TurnContext {
         config: Arc::new(config),
         multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
@@ -430,6 +474,7 @@ async fn multi_agent_v2_spawn_defaults_to_full_fork_and_rejects_child_model_over
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
     set_turn_config(&mut turn, config);
 
     let err = SpawnAgentHandlerV2::default()
@@ -452,6 +497,240 @@ async fn multi_agent_v2_spawn_defaults_to_full_fork_and_rejects_child_model_over
         err,
             FunctionCallError::RespondToModel(
             "Full-history forked agents inherit the parent agent type, model, and reasoning effort; omit agent_type, model, and reasoning_effort, or spawn without a full-history fork.".to_string(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_requires_task_routing_metadata() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    for missing_field in ["task_kind", "task_size"] {
+        let mut arguments = json!({
+            "message": "inspect this repo",
+            "task_name": "missing_routing_metadata",
+            "task_kind": "other",
+            "task_size": "normal"
+        });
+        arguments
+            .as_object_mut()
+            .expect("arguments should be an object")
+            .remove(missing_field);
+        let err = SpawnAgentHandlerV2::default()
+            .handle(raw_invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "spawn_agent",
+                function_payload(arguments),
+            ))
+            .await
+            .err()
+            .expect("missing routing metadata should be rejected");
+        let FunctionCallError::RespondToModel(message) = err else {
+            panic!("missing routing metadata should return a model-facing error");
+        };
+        assert!(
+            message.contains(&format!("missing field `{missing_field}`")),
+            "unexpected error for {missing_field}: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_routes_normal_security_task_to_external_agent_without_fork() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnResult {
+        task_name: String,
+        agent_type: String,
+        routing: RoutingResult,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RoutingResult {
+        kind: String,
+        reason: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
+    install_external_role(&mut config, "antigravity", "antigravity");
+    let root = manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    set_turn_config(&mut turn, config);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "audit the release workflow",
+                "task_name": "release_security_review",
+                "task_kind": "security",
+                "task_size": "normal"
+            })),
+        ))
+        .await
+        .expect("provider routing should select the external agent without a fork");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+
+    assert_eq!(result.task_name, "/root/release_security_review");
+    assert_eq!(result.agent_type, "antigravity");
+    assert_eq!(result.routing.kind, "automatic_external");
+    assert!(result.routing.reason.contains("normal `security` task"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_hidden_metadata_reports_redacted_external_routing() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    install_external_role(&mut config, "antigravity", "antigravity");
+    let root = manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    set_turn_config(&mut turn, config);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "audit the release workflow",
+                "task_name": "hidden_release_security_review",
+                "task_kind": "security",
+                "task_size": "normal"
+            })),
+        ))
+        .await
+        .expect("hidden metadata should not disable provider routing");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+
+    assert_eq!(
+        result["task_name"],
+        json!("/root/hidden_release_security_review")
+    );
+    assert_eq!(result["routing"]["kind"], json!("automatic_external"));
+    assert!(result.get("agent_type").is_none());
+    assert!(
+        !result["routing"]["reason"]
+            .as_str()
+            .expect("routing reason should be text")
+            .contains("antigravity")
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_hidden_metadata_rejects_hidden_override_fields() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    for (field, value) in [
+        ("agent_type", json!("antigravity")),
+        ("model", json!("gpt-5.4")),
+        ("reasoning_effort", json!("low")),
+        ("service_tier", json!("fast")),
+    ] {
+        let mut arguments = json!({
+            "message": "audit the release workflow",
+            "task_name": "hidden_explicit_override",
+            "task_kind": "security",
+            "task_size": "normal"
+        });
+        arguments[field] = value;
+        let err = SpawnAgentHandlerV2::default()
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "spawn_agent",
+                function_payload(arguments),
+            ))
+            .await
+            .err()
+            .expect("hidden metadata should reject hidden override fields");
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "agent_type, model, reasoning_effort, and service_tier overrides are not available when spawn-agent metadata is hidden; omit those fields and use task_kind plus task_size for automatic routing."
+                    .to_string()
+            ),
+            "hidden field {field} should be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_rejects_explicit_fork_for_external_agent() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
+    install_external_role(&mut config, "antigravity", "antigravity");
+    set_turn_config(&mut turn, config);
+
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "audit the release workflow",
+                "task_name": "release_security_review",
+                "task_kind": "security",
+                "task_size": "normal",
+                "fork_turns": "all"
+            })),
+        ))
+        .await
+        .err()
+        .expect("external agent fork should be rejected before spawn");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "External agents do not support fork_turns; use `fork_turns = \"none\"` or omit it when an external agent is selected."
+                .to_string()
         )
     );
 }
@@ -900,6 +1179,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
     set_turn_config(&mut turn, config);
     let manager = thread_manager();
     let root = manager
@@ -966,6 +1246,7 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
     let turn = TurnContext {
         config: Arc::new(config),
         multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
@@ -3440,6 +3721,7 @@ async fn multi_agent_v2_external_command_role_completes_through_parent_mailbox()
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
     tokio::fs::create_dir_all(&config.codex_home)
         .await
         .expect("codex home should be created");
@@ -3604,6 +3886,7 @@ async fn multi_agent_v2_external_command_persists_spawn_graph_edge() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
     config
         .features
         .enable(Feature::Sqlite)
@@ -3735,6 +4018,7 @@ async fn multi_agent_v2_external_command_shutdown_keeps_spawn_edge_open() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
     config
         .features
         .enable(Feature::Sqlite)
@@ -3849,6 +4133,7 @@ async fn multi_agent_v2_external_command_close_wakes_parent_wait() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
     tokio::fs::create_dir_all(&config.codex_home)
         .await
         .expect("codex home should be created");

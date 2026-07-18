@@ -32,6 +32,8 @@ async fn wrong_copilot_executable_surfaces_actionable_agent_status() -> Result<(
     let spawn_args = serde_json::to_string(&json!({
         "message": AGENT_MESSAGE,
         "task_name": "copilot_probe",
+        "task_kind": "other",
+        "task_size": "normal",
         "agent_type": "copilot_probe",
         "fork_turns": "none",
     }))?;
@@ -94,6 +96,7 @@ async fn wrong_copilot_executable_surfaces_actionable_agent_status() -> Result<(
             .features
             .enable(Feature::MultiAgentV2)
             .expect("test config should enable MultiAgentV2");
+        config.multi_agent_v2.hide_spawn_agent_metadata = false;
         config.multi_agent_v2.min_wait_timeout_ms = 10;
         config.multi_agent_v2.max_wait_timeout_ms = 1_000;
         config.multi_agent_v2.default_wait_timeout_ms = 100;

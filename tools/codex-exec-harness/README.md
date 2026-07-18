@@ -66,6 +66,9 @@ Scenarios are JSON files. Supported fields:
 - `responses_api`: start a local fake Responses API and point Codex at it
 - `inherit_auth`: copy the caller's `CODEX_LAB_HOME` or `~/.codex-lab` into the
   isolated harness home for opt-in live model scenarios
+- `inherit_host_home`: preserve the caller's `HOME` for opt-in live external
+  provider scenarios while keeping Codex Lab, shell, XDG config, and cache
+  paths isolated; this lets provider CLIs reuse their existing authentication
 - `skip_run_all`: omit a scenario from `run_all.py` and CI's all-scenario sweep
 - `expect`: assertions over return code, turn count, captured thread id, and
   fake Responses request bodies, captured agent messages and commands, and
@@ -76,6 +79,11 @@ The fake Responses API is for request-shape proof only. Use direct scenario runs
 with `inherit_auth` for opt-in live model checks when the question depends on
 model behavior rather than prompt assembly. Mark those scenarios
 `skip_run_all: true` unless they are safe for unauthenticated CI.
+
+Use `inherit_host_home` only for direct, opt-in live scenarios that launch a
+locally authenticated external provider. It intentionally gives spawned
+commands access to the caller's home directory, so it must remain excluded from
+`run_all.py` and CI.
 
 ## Auto-Validation Characterization
 

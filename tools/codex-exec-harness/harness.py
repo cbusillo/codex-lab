@@ -610,11 +610,12 @@ def run_codex(
 ) -> dict[str, Any]:
     inherit_auth_home(scenario, paths)
     env = os.environ.copy()
+    home = Path.home() if scenario.get("inherit_host_home") is True else paths.home
     env.update(
         {
             "CODEX_LAB_HOME": str(paths.codex_home),
             "CODEX_SQLITE_HOME": str(paths.codex_home),
-            "HOME": str(paths.home),
+            "HOME": str(home),
             "ZDOTDIR": str(paths.home),
             "XDG_CONFIG_HOME": str(paths.home / ".config"),
             "XDG_CACHE_HOME": str(paths.home / ".cache"),

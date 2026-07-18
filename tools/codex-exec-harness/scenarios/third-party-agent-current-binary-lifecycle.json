@@ -19,7 +19,7 @@
             "item": {
               "type": "function_call",
               "name": "spawn_agent",
-              "arguments": "{\"message\":\"Return the fixture completion marker and workspace provenance.\",\"task_name\":\"fixture_agent\",\"agent_type\":\"fixture_external\",\"fork_turns\":\"none\"}",
+              "arguments": "{\"message\":\"Return the fixture completion marker and workspace provenance.\",\"task_name\":\"fixture_agent\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external\",\"fork_turns\":\"none\"}",
               "call_id": "call-third-party-agent-spawn"
             }
           }
@@ -94,18 +94,12 @@
       {
         "request": 0,
         "scope": "tools",
-        "contains_all": [
-          "fixture_external",
-          "spawn_agent"
-        ]
+        "contains_all": ["fixture_external", "spawn_agent"]
       },
       {
         "request": 2,
         "scope": "input",
-        "contains_all": [
-          "FIXTURE_EXTERNAL_AGENT_COMPLETED",
-          "fixture_agent"
-        ]
+        "contains_all": ["FIXTURE_EXTERNAL_AGENT_COMPLETED", "fixture_agent"]
       }
     ],
     "tool_outputs": [
@@ -122,10 +116,7 @@
       {
         "request": 3,
         "call_id": "call-third-party-agent-list",
-        "contains_all": [
-          "fixture_agent",
-          "FIXTURE_EXTERNAL_AGENT_COMPLETED"
-        ]
+        "contains_all": ["fixture_agent", "FIXTURE_EXTERNAL_AGENT_COMPLETED"]
       },
       {
         "request": 4,
