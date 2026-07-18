@@ -915,6 +915,35 @@ class HarnessSafetyTest(unittest.TestCase):
             self.assertTrue((paths.codex_home / "auth-profiles" / "default.json").is_file())
             self.assertFalse((paths.codex_home / "config.toml").exists())
 
+    def test_run_codex_can_inherit_host_home_for_external_provider_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            host_home = Path(tmp) / "host-home"
+            host_home.mkdir()
+            paths = HARNESS.make_paths(Path(tmp) / "runs", "inherit-host-home")
+            paths.workspace.mkdir(parents=True)
+            artifact_dir = paths.artifacts
+            artifact_dir.mkdir(parents=True)
+            script = (
+                "import json, os; "
+                "print(json.dumps({key: os.environ.get(key) for key in "
+                "['HOME', 'ZDOTDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME']}))"
+            )
+
+            with unittest.mock.patch.dict(os.environ, {"HOME": str(host_home)}):
+                result = HARNESS.run_codex(
+                    [sys.executable, "-c", script],
+                    {"inherit_host_home": True},
+                    paths,
+                    artifact_dir,
+                )
+
+            self.assertEqual(0, result["returncode"])
+            payload = json.loads((artifact_dir / "stdout.jsonl").read_text())
+            self.assertEqual(str(host_home), payload["HOME"])
+            self.assertEqual(str(paths.home), payload["ZDOTDIR"])
+            self.assertEqual(str(paths.home / ".config"), payload["XDG_CONFIG_HOME"])
+            self.assertEqual(str(paths.home / ".cache"), payload["XDG_CACHE_HOME"])
+
     def test_event_helpers_extract_agent_messages_and_commands(self) -> None:
         events = [
             {"msg": {"type": "agent_message", "message": "UNKNOWN result"}},

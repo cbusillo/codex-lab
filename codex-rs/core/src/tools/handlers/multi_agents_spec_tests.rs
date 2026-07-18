@@ -69,6 +69,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .expect("spawn_agent should use object params");
     assert!(description.contains("Spawns an agent to work on the specified task."));
     assert!(description.contains("Native child agents receive the same tools as you"));
+    assert!(description.contains(VISIBLE_PROVIDER_ROUTING_GUIDANCE));
     assert!(description.contains(VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE));
     assert!(description.contains("`max_concurrent_threads_per_session = 4`"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
@@ -82,6 +83,16 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(!description.contains("hidden-model"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
+    assert!(properties.contains_key("task_kind"));
+    assert!(properties.contains_key("task_size"));
+    assert_eq!(
+        properties
+            .get("fork_turns")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Optional number of turns to fork. Defaults to `none` when an external agent is selected and `all` otherwise. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+        )
+    );
     assert_eq!(
         properties
             .get("message")
@@ -109,11 +120,16 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         parameters.required.as_ref(),
-        Some(&vec!["task_name".to_string(), "message".to_string()])
+        Some(&vec![
+            "task_name".to_string(),
+            "message".to_string(),
+            "task_kind".to_string(),
+            "task_size".to_string(),
+        ])
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema")["required"],
-        json!(["task_name", "nickname"])
+        json!(["task_name", "nickname", "agent_type", "routing"])
     );
 }
 
@@ -238,6 +254,7 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
     let ToolSpec::Function(ResponsesApiTool {
         description,
         parameters,
+        output_schema,
         ..
     }) = tool
     else {
@@ -252,10 +269,16 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
     assert!(!properties.contains_key("model"));
     assert!(!properties.contains_key("reasoning_effort"));
     assert!(!properties.contains_key("service_tier"));
+    assert!(properties.contains_key("task_kind"));
+    assert!(properties.contains_key("task_size"));
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(!description.contains("Available model overrides"));
     assert!(!description.contains(VISIBLE_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE));
+    assert!(description.contains(HIDDEN_PROVIDER_ROUTING_GUIDANCE));
     assert!(description.contains(HIDDEN_AGENT_CAPABILITY_SELF_REPORT_GUIDANCE));
+    let output_schema = output_schema.expect("spawn_agent output schema");
+    assert_eq!(output_schema["required"], json!(["task_name", "routing"]));
+    assert!(output_schema["properties"].get("agent_type").is_none());
 }
 
 #[test]

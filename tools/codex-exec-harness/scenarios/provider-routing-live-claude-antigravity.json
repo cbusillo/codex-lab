@@ -1,0 +1,199 @@
+{
+  "name": "provider-routing-live-claude-antigravity",
+  "characterization": {
+    "issue": 370,
+    "status": "opt-in-live"
+  },
+  "inherit_host_home": true,
+  "skip_run_all": true,
+  "model": "gpt-5.6-sol",
+  "sandbox": "read-only",
+  "prompt": "Delegate one normal security review and one normal independent review through automatic provider routing, wait for both, list their terminal status, close them, and finish.",
+  "files": {
+    "README.md": "# Provider-diverse live routing fixture\n"
+  },
+  "config_toml": "model_provider = \"harness\"\n\n[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = false\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-live-antigravity-spawn",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "arguments": "{\"message\":\"Reply with exactly LIVE_ANTIGRAVITY_AUTO_OK. Do not inspect or change files.\",\"task_name\":\"live_antigravity\",\"task_kind\":\"security\",\"task_size\":\"normal\"}",
+              "call_id": "call-live-antigravity-spawn"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-antigravity-wait",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "wait_agent",
+              "arguments": "{\"timeout_ms\":180000}",
+              "call_id": "call-live-antigravity-wait"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-claude-spawn",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "arguments": "{\"message\":\"Reply with exactly LIVE_CLAUDE_AUTO_OK. Do not inspect or change files.\",\"task_name\":\"live_claude\",\"task_kind\":\"independent_review\",\"task_size\":\"normal\"}",
+              "call_id": "call-live-claude-spawn"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-claude-wait",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "wait_agent",
+              "arguments": "{\"timeout_ms\":180000}",
+              "call_id": "call-live-claude-wait"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-provider-routing-list",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "list_agents",
+              "arguments": "{}",
+              "call_id": "call-live-provider-routing-list"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-antigravity-close",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "close_agent",
+              "arguments": "{\"target\":\"live_antigravity\"}",
+              "call_id": "call-live-antigravity-close"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-claude-close",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "close_agent",
+              "arguments": "{\"target\":\"live_claude\"}",
+              "call_id": "call-live-claude-close"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-live-provider-routing-complete",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-live-provider-routing-complete",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Live Claude and Antigravity routing completed."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 8,
+    "turn_count": 1,
+    "thread_id": "required",
+    "responses": [
+      {
+        "request": 0,
+        "scope": "tools",
+        "contains_all": [
+          "task_kind",
+          "task_size",
+          "antigravity",
+          "claude-sonnet-4.6"
+        ]
+      }
+    ],
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-live-antigravity-spawn",
+        "contains_all": [
+          "live_antigravity",
+          "antigravity",
+          "automatic_external"
+        ]
+      },
+      {
+        "request": 2,
+        "call_id": "call-live-antigravity-wait",
+        "contains": "\"timed_out\":false"
+      },
+      {
+        "request": 3,
+        "call_id": "call-live-claude-spawn",
+        "contains_all": [
+          "live_claude",
+          "claude-sonnet-4.6",
+          "automatic_external"
+        ]
+      },
+      {
+        "request": 4,
+        "call_id": "call-live-claude-wait",
+        "contains": "\"timed_out\":false"
+      },
+      {
+        "request": 5,
+        "call_id": "call-live-provider-routing-list",
+        "contains_all": [
+          "live_antigravity",
+          "LIVE_ANTIGRAVITY_AUTO_OK",
+          "live_claude",
+          "LIVE_CLAUDE_AUTO_OK"
+        ]
+      },
+      {
+        "request": 6,
+        "call_id": "call-live-antigravity-close",
+        "contains": "LIVE_ANTIGRAVITY_AUTO_OK"
+      },
+      {
+        "request": 7,
+        "call_id": "call-live-claude-close",
+        "contains": "LIVE_CLAUDE_AUTO_OK"
+      }
+    ]
+  },
+  "timeout_seconds": 420
+}

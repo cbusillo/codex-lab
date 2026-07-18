@@ -1035,6 +1035,8 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
     let spawn_args = serde_json::to_string(&json!({
         "message": encrypted_message,
         "task_name": "worker",
+        "task_kind": "implementation",
+        "task_size": "normal",
     }))?;
     mount_sse_once_match(
         &server,

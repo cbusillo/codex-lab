@@ -1,6 +1,7 @@
 pub(crate) mod agent_resolver;
 pub(crate) mod control;
 pub(crate) mod external_command;
+pub(crate) mod provider_routing;
 mod registry;
 pub(crate) mod role;
 pub(crate) mod status;

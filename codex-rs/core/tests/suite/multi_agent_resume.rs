@@ -74,6 +74,8 @@ async fn cold_root_resume_restores_agent_identity_and_reloads_target_on_followup
     let spawn_args = serde_json::to_string(&json!({
         "message": INITIAL_TASK,
         "task_name": "worker",
+        "task_kind": "implementation",
+        "task_size": "normal",
     }))?;
     mount_sse_once_match(
         &server,
