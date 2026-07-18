@@ -1,6 +1,13 @@
 use super::*;
 use codex_app_server_protocol::BackgroundAutoReviewControlReason as ApiBackgroundAutoReviewControlReason;
+use codex_auto_review::AutoReviewBudget as CoreAutoReviewBudget;
 use codex_auto_review::AutoReviewDiagnostics;
+use codex_auto_review::AutoReviewDispositionActor as CoreAutoReviewDispositionActor;
+use codex_auto_review::AutoReviewFindingDisposition as CoreAutoReviewFindingDisposition;
+use codex_auto_review::AutoReviewFindingDispositionRecord as CoreAutoReviewFindingDispositionRecord;
+use codex_auto_review::AutoReviewRunState;
+use codex_auto_review::AutoReviewTerminalReason as CoreAutoReviewTerminalReason;
+use codex_auto_review::AutoReviewUsage as CoreAutoReviewUsage;
 use codex_auto_review::ReviewCoordination;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
@@ -239,6 +246,15 @@ impl TurnRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn auto_review_disposition_write(
+        &self,
+        params: AutoReviewDispositionWriteParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.auto_review_disposition_write_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     fn track_error_response(
         &self,
         request_id: &ConnectionRequestId,
@@ -443,8 +459,23 @@ impl TurnRequestProcessor {
         }
     }
 
-    fn auto_review_run_summary(run: &AutoReviewRunProjection) -> AutoReviewRunSummary {
+    fn auto_review_run_summary(
+        store: &AutoReviewStore,
+        run: &AutoReviewRunProjection,
+    ) -> AutoReviewRunSummary {
         let summary = &run.summary;
+        let state = match store.load_run_state(&run.run_id) {
+            Ok(state) => state,
+            Err(err) => {
+                warn!(
+                    run_id = %run.run_id,
+                    error = %err,
+                    "failed to load auto review run state for summary"
+                );
+                None
+            }
+        };
+        let usage = Self::api_auto_review_usage(run, state.as_ref());
         AutoReviewRunSummary {
             run_id: run.run_id.clone(),
             status: Self::api_auto_review_status(run.status.clone()),
@@ -458,6 +489,106 @@ impl TurnRequestProcessor {
             omitted_findings: summary.omitted_findings,
             truncated: summary.truncated,
             content: summary.content.clone(),
+            budget: state
+                .as_ref()
+                .and_then(|state| state.budget.as_ref())
+                .map(Self::api_auto_review_budget),
+            usage,
+            terminal_reason: state
+                .as_ref()
+                .and_then(|state| state.terminal_reason)
+                .map(Self::api_auto_review_terminal_reason),
+            finding_disposition: state
+                .as_ref()
+                .and_then(|state| state.finding_disposition.as_ref())
+                .map(Self::api_auto_review_finding_disposition_record),
+        }
+    }
+
+    fn api_auto_review_budget(budget: &CoreAutoReviewBudget) -> ApiAutoReviewBudget {
+        ApiAutoReviewBudget {
+            max_scope_bytes: budget.max_scope_bytes,
+            max_elapsed_ms: budget.max_elapsed_ms,
+            max_total_tokens: budget.max_total_tokens,
+            max_output_bytes: budget.max_output_bytes,
+            max_findings: budget.max_findings,
+        }
+    }
+
+    fn api_auto_review_usage(
+        run: &AutoReviewRunProjection,
+        state: Option<&AutoReviewRunState>,
+    ) -> ApiAutoReviewUsage {
+        let CoreAutoReviewUsage {
+            scope_bytes,
+            mut elapsed_ms,
+            total_tokens,
+            output_bytes,
+            finding_count,
+        } = state.map(|state| state.usage.clone()).unwrap_or_default();
+        if run.status.is_in_flight() {
+            let started_at_ms = run.started_at_unix_secs.saturating_mul(1_000);
+            let current_elapsed_ms = chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(started_at_ms);
+            if let Ok(current_elapsed_ms) = u64::try_from(current_elapsed_ms) {
+                elapsed_ms = Some(elapsed_ms.unwrap_or_default().max(current_elapsed_ms));
+            }
+        }
+        ApiAutoReviewUsage {
+            scope_bytes,
+            elapsed_ms,
+            total_tokens,
+            output_bytes,
+            finding_count,
+        }
+    }
+
+    fn api_auto_review_terminal_reason(
+        reason: CoreAutoReviewTerminalReason,
+    ) -> ApiAutoReviewTerminalReason {
+        match reason {
+            CoreAutoReviewTerminalReason::BudgetScope => ApiAutoReviewTerminalReason::BudgetScope,
+            CoreAutoReviewTerminalReason::BudgetElapsed => {
+                ApiAutoReviewTerminalReason::BudgetElapsed
+            }
+            CoreAutoReviewTerminalReason::BudgetTotalTokens => {
+                ApiAutoReviewTerminalReason::BudgetTotalTokens
+            }
+            CoreAutoReviewTerminalReason::BudgetOutput => ApiAutoReviewTerminalReason::BudgetOutput,
+            CoreAutoReviewTerminalReason::BudgetFindingCount => {
+                ApiAutoReviewTerminalReason::BudgetFindingCount
+            }
+            CoreAutoReviewTerminalReason::EmptyOutput => ApiAutoReviewTerminalReason::EmptyOutput,
+            CoreAutoReviewTerminalReason::StaleTarget => ApiAutoReviewTerminalReason::StaleTarget,
+        }
+    }
+
+    fn api_auto_review_finding_disposition_record(
+        record: &CoreAutoReviewFindingDispositionRecord,
+    ) -> ApiAutoReviewFindingDispositionRecord {
+        ApiAutoReviewFindingDispositionRecord {
+            disposition: match record.disposition {
+                CoreAutoReviewFindingDisposition::NeedsAttention => {
+                    ApiAutoReviewFindingDisposition::NeedsAttention
+                }
+                CoreAutoReviewFindingDisposition::Repairing => {
+                    ApiAutoReviewFindingDisposition::Repairing
+                }
+                CoreAutoReviewFindingDisposition::Deferred => {
+                    ApiAutoReviewFindingDisposition::Deferred
+                }
+                CoreAutoReviewFindingDisposition::Obsolete => {
+                    ApiAutoReviewFindingDisposition::Obsolete
+                }
+            },
+            actor: match record.actor {
+                CoreAutoReviewDispositionActor::User => ApiAutoReviewDispositionActor::User,
+                CoreAutoReviewDispositionActor::Agent => ApiAutoReviewDispositionActor::Agent,
+                CoreAutoReviewDispositionActor::System => ApiAutoReviewDispositionActor::System,
+            },
+            reason: record.reason.clone(),
+            updated_at: record.updated_at_unix_secs,
         }
     }
 
@@ -1403,7 +1534,8 @@ impl TurnRequestProcessor {
             .worktree_path
             .as_deref()
             .unwrap_or(self.config.cwd.as_path());
-        let runs = AutoReviewStore::for_scope(&self.config.codex_home, store_scope)
+        let store = AutoReviewStore::for_scope(&self.config.codex_home, store_scope);
+        let runs = store
             .list_runs()
             .map_err(|err| internal_error(format!("failed to list auto review runs: {err}")))?;
 
@@ -1414,11 +1546,11 @@ impl TurnRequestProcessor {
             latest: projection
                 .latest
                 .as_ref()
-                .map(Self::auto_review_run_summary),
+                .map(|run| Self::auto_review_run_summary(&store, run)),
             current: projection
                 .current
                 .as_ref()
-                .map(Self::auto_review_run_summary),
+                .map(|run| Self::auto_review_run_summary(&store, run)),
             status_counts: projection
                 .status_counts
                 .iter()
@@ -1427,6 +1559,68 @@ impl TurnRequestProcessor {
             diagnostics: projection
                 .diagnostics
                 .map(Self::auto_review_diagnostics_summary),
+        })
+    }
+
+    async fn auto_review_disposition_write_inner(
+        &self,
+        params: AutoReviewDispositionWriteParams,
+    ) -> Result<AutoReviewDispositionWriteResponse, JSONRPCErrorError> {
+        let AutoReviewDispositionWriteParams {
+            thread_id,
+            run_id,
+            action,
+            reason,
+        } = params;
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        let active_review_target = CoreReviewTarget::UncommittedChanges;
+        let active_target = self.auto_review_target_for_thread(thread.as_ref()).await;
+        let store_scope = active_target
+            .worktree_path
+            .as_deref()
+            .unwrap_or(self.config.cwd.as_path());
+        let store = AutoReviewStore::for_scope(&self.config.codex_home, store_scope);
+        let run = store
+            .load_run(&run_id)
+            .map_err(|err| invalid_params(format!("invalid auto review run: {err}")))?;
+        if !matches!(action, AutoReviewDispositionAction::Obsolete)
+            && !run.can_read_detail(&active_target, &active_review_target)
+        {
+            return Err(invalid_params(
+                "auto review repair/defer disposition requires current findings".to_string(),
+            ));
+        }
+        let disposition = match action {
+            AutoReviewDispositionAction::Repair => CoreAutoReviewFindingDisposition::Repairing,
+            AutoReviewDispositionAction::Defer => CoreAutoReviewFindingDisposition::Deferred,
+            AutoReviewDispositionAction::Obsolete => CoreAutoReviewFindingDisposition::Obsolete,
+        };
+        if matches!(action, AutoReviewDispositionAction::Repair) {
+            store
+                .detail(&run_id, /*finding_id*/ None, /*max_bytes*/ 1)
+                .map_err(|err| {
+                    invalid_params(format!("auto review repair detail is unavailable: {err}"))
+                })?;
+        }
+        let record = CoreAutoReviewFindingDispositionRecord {
+            disposition,
+            actor: CoreAutoReviewDispositionActor::User,
+            reason: reason
+                .map(|reason| reason.trim().to_string())
+                .filter(|reason| !reason.is_empty()),
+            updated_at_unix_secs: chrono::Utc::now().timestamp(),
+        };
+        let state = store
+            .set_finding_disposition(&run_id, record)
+            .map_err(|err| invalid_params(format!("invalid auto review disposition: {err}")))?;
+        let finding_disposition = state.finding_disposition.as_ref().ok_or_else(|| {
+            internal_error("auto review disposition was not persisted".to_string())
+        })?;
+        Ok(AutoReviewDispositionWriteResponse {
+            run_id,
+            finding_disposition: Self::api_auto_review_finding_disposition_record(
+                finding_disposition,
+            ),
         })
     }
 

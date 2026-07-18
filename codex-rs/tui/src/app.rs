@@ -202,6 +202,18 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::task::JoinHandle;
 use toml::Value as TomlValue;
 use uuid::Uuid;
+
+fn background_auto_review_status_has_summary(status: BackgroundAutoReviewStatus) -> bool {
+    matches!(
+        status,
+        BackgroundAutoReviewStatus::Completed
+            | BackgroundAutoReviewStatus::Failed
+            | BackgroundAutoReviewStatus::Cancelled
+            | BackgroundAutoReviewStatus::Superseded
+            | BackgroundAutoReviewStatus::Skipped
+    )
+}
+
 mod agent_message_consolidation;
 mod agent_navigation;
 mod app_server_event_targets;

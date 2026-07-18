@@ -5,6 +5,8 @@ use std::time::Duration;
 use codex_auto_review::AutoReviewDuplicateDisposition;
 use codex_auto_review::AutoReviewDuplicateMatch;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::AutoReviewTerminalReason;
+use codex_auto_review::AutoReviewUsage;
 use codex_auto_review::ReviewCoordination;
 use codex_auto_review::ReviewLockGuard;
 use codex_git_utils::diff_fingerprint;
@@ -36,6 +38,7 @@ use crate::turn_timing::now_unix_timestamp_ms;
 const BACKGROUND_AUTO_REVIEW_DEBOUNCE: Duration = Duration::from_secs(2);
 const BACKGROUND_AUTO_REVIEW_LOCK_RETRY: Duration = Duration::from_millis(500);
 const BACKGROUND_AUTO_REVIEW_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+const BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON: &str = "background_auto_review_control";
 
 impl Session {
     pub(crate) async fn record_background_auto_review_turn_start(
@@ -136,7 +139,11 @@ impl Session {
                 .map(|effort| effort.to_string()),
             /*prompt_token_estimate*/ None,
         )
-        .await;
+        .await
+        .with_background_budget(
+            turn_context.config.background_auto_review_budget.clone(),
+            turn_diff.len(),
+        );
         if let Some(duplicate) = self
             .resolve_durable_background_auto_review_duplicate(&persistence)
             .await
@@ -260,16 +267,20 @@ impl Session {
             },
             user_facing_hint: Some("current turn changes".to_string()),
         };
-        if let Some(max_bytes) = turn_context.config.background_auto_review_max_diff_bytes
-            && let Some(error_summary) =
-                background_auto_review_size_limit_summary(&turn_diff, None, max_bytes)
+        let max_scope_bytes = turn_context
+            .config
+            .background_auto_review_budget
+            .max_scope_bytes;
+        if let Some(error_summary) =
+            background_auto_review_size_limit_summary(&turn_diff, None, max_scope_bytes)
         {
             debug!(%error_summary, "background auto review skipped: oversized diff");
-            self.record_skipped_background_auto_review(
+            self.record_scope_budget_skipped_background_auto_review(
                 &persistence,
                 generation,
                 &fingerprint,
                 error_summary,
+                turn_diff.len(),
             )
             .await;
             return;
@@ -281,19 +292,20 @@ impl Session {
                 return;
             }
         };
-        if let Some(max_bytes) = turn_context.config.background_auto_review_max_diff_bytes
-            && let Some(error_summary) = background_auto_review_size_limit_summary(
-                &turn_diff,
-                Some(resolved.prompt.as_str()),
-                max_bytes,
-            )
-        {
+        let scope_bytes = resolved.prompt.len();
+        let persistence = persistence.with_scope_bytes(scope_bytes);
+        if let Some(error_summary) = background_auto_review_size_limit_summary(
+            &turn_diff,
+            Some(resolved.prompt.as_str()),
+            max_scope_bytes,
+        ) {
             debug!(%error_summary, "background auto review skipped: oversized review scope");
-            self.record_skipped_background_auto_review(
+            self.record_scope_budget_skipped_background_auto_review(
                 &persistence,
                 generation,
                 &fingerprint,
                 error_summary,
+                scope_bytes,
             )
             .await;
             return;
@@ -538,6 +550,40 @@ impl Session {
         }
     }
 
+    async fn record_scope_budget_skipped_background_auto_review(
+        self: &Arc<Self>,
+        persistence: &ReviewPersistenceContext,
+        generation: u64,
+        fingerprint: &str,
+        error_summary: String,
+        scope_bytes: usize,
+    ) {
+        let codex_home = self.codex_home().await;
+        {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .clear_pending_review(generation, fingerprint);
+        }
+        if persistence.save_budget_skipped(
+            codex_home,
+            AutoReviewTerminalReason::BudgetScope,
+            error_summary.clone(),
+            AutoReviewUsage {
+                scope_bytes: Some(scope_bytes),
+                ..Default::default()
+            },
+        ) {
+            record_background_review_status(
+                Arc::clone(self),
+                persistence,
+                BackgroundAutoReviewStatus::Skipped,
+                Some(error_summary),
+            )
+            .await;
+        }
+    }
+
     async fn record_skipped_duplicate_background_auto_review(
         self: &Arc<Self>,
         persistence: &ReviewPersistenceContext,
@@ -770,9 +816,32 @@ impl Session {
         running_review: BackgroundAutoReviewRunningHandle,
         error_summary: String,
     ) {
+        let completion = running_review.completion;
+        if completion.is_done() {
+            return;
+        }
+        running_review.persistence.set_cancelled_interruption(
+            error_summary.clone(),
+            BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON.to_string(),
+        );
+        let notified = completion.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        running_review.cancellation_token.cancel();
+        if !completion.is_done()
+            && tokio::time::timeout(Duration::from_millis(100), notified.as_mut())
+                .await
+                .is_err()
+        {
+            warn!("background auto review did not finish promptly after cancellation");
+        }
         if running_review
             .persistence
-            .save_cancelled_with_summary(self.codex_home().await, error_summary.clone())
+            .save_cancelled_with_summary_and_reason(
+                self.codex_home().await,
+                error_summary.clone(),
+                BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON.to_string(),
+            )
         {
             record_background_review_status(
                 Arc::clone(self),
@@ -782,23 +851,6 @@ impl Session {
             )
             .await;
         }
-        let completion = running_review.completion;
-        if completion.is_done() {
-            return;
-        }
-        let notified = completion.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        running_review.cancellation_token.cancel();
-        if completion.is_done() {
-            return;
-        }
-        if tokio::time::timeout(Duration::from_millis(100), notified.as_mut())
-            .await
-            .is_err()
-        {
-            warn!("background auto review did not finish promptly after cancellation");
-        }
     }
 
     async fn supersede_running_background_auto_review(
@@ -807,6 +859,24 @@ impl Session {
         error_summary: String,
         superseded_by: Option<String>,
     ) {
+        let completion = running_review.completion;
+        if completion.is_done() {
+            return;
+        }
+        running_review
+            .persistence
+            .set_superseded_interruption(error_summary.clone(), superseded_by.clone());
+        let notified = completion.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        running_review.cancellation_token.cancel();
+        if !completion.is_done()
+            && tokio::time::timeout(Duration::from_millis(100), notified.as_mut())
+                .await
+                .is_err()
+        {
+            warn!("background auto review did not finish promptly after supersede");
+        }
         if running_review.persistence.save_superseded_with_summary(
             self.codex_home().await,
             error_summary.clone(),
@@ -819,23 +889,6 @@ impl Session {
                 Some(error_summary),
             )
             .await;
-        }
-        let completion = running_review.completion;
-        if completion.is_done() {
-            return;
-        }
-        let notified = completion.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        running_review.cancellation_token.cancel();
-        if completion.is_done() {
-            return;
-        }
-        if tokio::time::timeout(Duration::from_millis(100), notified.as_mut())
-            .await
-            .is_err()
-        {
-            warn!("background auto review did not finish promptly after supersede");
         }
     }
 

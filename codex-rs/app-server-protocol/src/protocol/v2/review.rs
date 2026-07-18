@@ -189,6 +189,79 @@ pub struct AutoReviewRunSummary {
     pub omitted_findings: usize,
     pub truncated: bool,
     pub content: String,
+    pub budget: Option<AutoReviewBudget>,
+    pub usage: AutoReviewUsage,
+    pub terminal_reason: Option<AutoReviewTerminalReason>,
+    pub finding_disposition: Option<AutoReviewFindingDispositionRecord>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewBudget {
+    pub max_scope_bytes: usize,
+    #[ts(type = "number")]
+    pub max_elapsed_ms: u64,
+    #[ts(type = "number")]
+    pub max_total_tokens: u64,
+    pub max_output_bytes: usize,
+    pub max_findings: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewUsage {
+    pub scope_bytes: Option<usize>,
+    #[ts(type = "number | null")]
+    pub elapsed_ms: Option<u64>,
+    #[ts(type = "number | null")]
+    pub total_tokens: Option<u64>,
+    pub output_bytes: Option<usize>,
+    pub finding_count: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AutoReviewTerminalReason {
+    BudgetScope,
+    BudgetElapsed,
+    BudgetTotalTokens,
+    BudgetOutput,
+    BudgetFindingCount,
+    EmptyOutput,
+    StaleTarget,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AutoReviewFindingDisposition {
+    NeedsAttention,
+    Repairing,
+    Deferred,
+    Obsolete,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AutoReviewDispositionActor {
+    User,
+    Agent,
+    System,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewFindingDispositionRecord {
+    pub disposition: AutoReviewFindingDisposition,
+    pub actor: AutoReviewDispositionActor,
+    pub reason: Option<String>,
+    #[ts(type = "number")]
+    pub updated_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -255,6 +328,35 @@ pub struct AutoReviewFindingDetailReadResponse {
     pub max_bytes: usize,
     pub truncated: bool,
     pub content: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AutoReviewDispositionAction {
+    Repair,
+    Defer,
+    Obsolete,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewDispositionWriteParams {
+    pub thread_id: String,
+    pub run_id: String,
+    pub action: AutoReviewDispositionAction,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutoReviewDispositionWriteResponse {
+    pub run_id: String,
+    pub finding_disposition: AutoReviewFindingDispositionRecord,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

@@ -19,6 +19,7 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadMetadataPatch;
 use crate::ThreadStore;
+use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 use crate::UpdateThreadMetadataParams;
 use crate::thread_metadata_sync::ThreadMetadataSync;
@@ -152,17 +153,27 @@ impl LiveThread {
             .await
             .observe_appended_items(persisted_items.as_slice());
         if let Some(update) = update {
-            self.thread_store
-                .update_thread_metadata(UpdateThreadMetadataParams {
-                    thread_id: self.thread_id,
-                    patch: update.patch.clone(),
-                    include_archived: true,
-                })
-                .await?;
-            self.metadata_sync
-                .lock()
-                .await
-                .mark_pending_update_applied(&update);
+            let thread_store = Arc::clone(&self.thread_store);
+            let metadata_sync = Arc::clone(&self.metadata_sync);
+            let thread_id = self.thread_id;
+            tokio::spawn(async move {
+                thread_store
+                    .update_thread_metadata(UpdateThreadMetadataParams {
+                        thread_id,
+                        patch: update.patch.clone(),
+                        include_archived: true,
+                    })
+                    .await?;
+                metadata_sync
+                    .lock()
+                    .await
+                    .mark_pending_update_applied(&update);
+                ThreadStoreResult::Ok(())
+            })
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("thread metadata update task failed: {err}"),
+            })??;
         }
         Ok(())
     }

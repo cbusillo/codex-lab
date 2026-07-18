@@ -457,7 +457,12 @@ fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<RtL
         let lang_path = r.move_path.as_deref().unwrap_or(&r.path);
         let lang = detect_lang_for_path(lang_path);
         let mut lines = vec![];
-        render_change(&r.change, &mut lines, wrap_cols - 4, lang.as_deref());
+        render_change(
+            &r.change,
+            &mut lines,
+            wrap_cols.saturating_sub(4).max(1),
+            lang.as_deref(),
+        );
         out.extend(prefix_lines(lines, "    ".into(), "    ".into()));
     }
 
@@ -1358,6 +1363,20 @@ mod tests {
     }
     fn diff_summary_for_tests(changes: &HashMap<PathBuf, FileChange>) -> Vec<RtLine<'static>> {
         create_diff_summary(changes, &PathBuf::from("/"), /*wrap_cols*/ 80)
+    }
+
+    #[test]
+    fn diff_summary_handles_width_smaller_than_prefix() {
+        let changes = HashMap::from([(
+            PathBuf::from("src/lib.rs"),
+            FileChange::Add {
+                content: "pub fn added() {}\n".to_string(),
+            },
+        )]);
+
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 0);
+
+        assert!(!lines.is_empty());
     }
 
     fn snapshot_lines(name: &str, lines: Vec<RtLine<'static>>, width: u16, height: u16) {

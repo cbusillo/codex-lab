@@ -835,6 +835,11 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::AutoReviewFindingDetailReadResponse,
     },
+    AutoReviewDispositionWrite => "review/disposition/write" {
+        params: v2::AutoReviewDispositionWriteParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutoReviewDispositionWriteResponse,
+    },
 
     ModelList => "model/list" {
         params: v2::ModelListParams,

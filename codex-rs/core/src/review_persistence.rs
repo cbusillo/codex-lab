@@ -1,14 +1,21 @@
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 
+use codex_auto_review::AutoReviewBudget;
+use codex_auto_review::AutoReviewDispositionActor;
 use codex_auto_review::AutoReviewDuplicateMatch;
+use codex_auto_review::AutoReviewFindingDisposition;
+use codex_auto_review::AutoReviewFindingDispositionRecord;
 use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunFreshness;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::AutoReviewTerminalReason;
+use codex_auto_review::AutoReviewUsage;
 use codex_auto_review::ReviewCoordination;
 use codex_auto_review::SCHEMA_VERSION;
 use codex_auto_review::finding_digests;
@@ -39,6 +46,29 @@ pub(crate) struct ReviewPersistenceContext {
     model: Option<String>,
     reasoning_effort: Option<String>,
     prompt_token_estimate: Option<u64>,
+    background_budget: Option<AutoReviewBudget>,
+    scope_bytes: Option<usize>,
+    interruption: Arc<Mutex<Option<ReviewInterruption>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReviewInterruptionStatus {
+    Cancelled,
+    Superseded,
+}
+
+#[derive(Clone, Debug)]
+struct ReviewInterruption {
+    status: ReviewInterruptionStatus,
+    error_summary: String,
+    superseded_by: Option<String>,
+    cancel_reason: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SavedReviewInterruption {
+    pub(crate) status: ReviewInterruptionStatus,
+    pub(crate) error_summary: String,
 }
 
 impl ReviewPersistenceContext {
@@ -70,6 +100,9 @@ impl ReviewPersistenceContext {
             model,
             reasoning_effort,
             prompt_token_estimate,
+            background_budget: None,
+            scope_bytes: None,
+            interruption: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -94,6 +127,25 @@ impl ReviewPersistenceContext {
             self.prompt_token_estimate = prompt_token_estimate;
         }
         self
+    }
+
+    pub(crate) fn with_background_budget(
+        mut self,
+        budget: AutoReviewBudget,
+        scope_bytes: usize,
+    ) -> Self {
+        self.background_budget = Some(budget);
+        self.scope_bytes = Some(scope_bytes);
+        self
+    }
+
+    pub(crate) fn with_scope_bytes(mut self, scope_bytes: usize) -> Self {
+        self.scope_bytes = Some(scope_bytes);
+        self
+    }
+
+    pub(crate) fn background_budget(&self) -> Option<&AutoReviewBudget> {
+        self.background_budget.as_ref()
     }
 
     pub(crate) fn target(&self) -> &AutoReviewRunTarget {
@@ -121,6 +173,16 @@ impl ReviewPersistenceContext {
         &self.review_target
     }
 
+    pub(crate) async fn completion_freshness(&self, codex_home: &Path) -> AutoReviewRunFreshness {
+        let active =
+            collect_auto_review_target(codex_home, &self.store_scope, &self.review_target).await;
+        match self.target.freshness(&active) {
+            codex_auto_review::AutoReviewFreshness::Current => AutoReviewRunFreshness::Current,
+            codex_auto_review::AutoReviewFreshness::Stale
+            | codex_auto_review::AutoReviewFreshness::Detached => AutoReviewRunFreshness::Obsolete,
+        }
+    }
+
     pub(crate) fn save_running(&self, codex_home: impl AsRef<Path>) -> bool {
         self.save_run(
             codex_home,
@@ -141,25 +203,51 @@ impl ReviewPersistenceContext {
         )
     }
 
-    pub(crate) fn save_completed(
+    pub(crate) fn save_completed_with_freshness(
         &self,
         codex_home: impl AsRef<Path>,
         output: &ReviewOutputEvent,
         token_usage: Option<&TokenUsage>,
+        freshness: AutoReviewRunFreshness,
+        usage: AutoReviewUsage,
     ) -> bool {
-        self.save_run(
+        let codex_home = codex_home.as_ref();
+        let disposition = if output.findings.is_empty() {
+            None
+        } else if freshness == AutoReviewRunFreshness::Current {
+            Some(AutoReviewFindingDispositionRecord {
+                disposition: AutoReviewFindingDisposition::NeedsAttention,
+                actor: AutoReviewDispositionActor::System,
+                reason: None,
+                updated_at_unix_secs: now_unix_secs(),
+            })
+        } else {
+            Some(AutoReviewFindingDispositionRecord {
+                disposition: AutoReviewFindingDisposition::Obsolete,
+                actor: AutoReviewDispositionActor::System,
+                reason: Some("review target changed before completion".to_string()),
+                updated_at_unix_secs: now_unix_secs(),
+            })
+        };
+        let has_stale_findings =
+            freshness != AutoReviewRunFreshness::Current && !output.findings.is_empty();
+        self.save_run_with_metadata_and_state(
             codex_home,
             AutoReviewRunStatus::Completed,
             Some(output),
             token_usage,
             /*error_summary*/ None,
-        )
-    }
-
-    pub(crate) fn save_cancelled(&self, codex_home: impl AsRef<Path>) -> bool {
-        self.save_cancelled_with_summary(
-            codex_home,
-            AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+            freshness,
+            None,
+            None,
+            /*saved_token_estimate*/ None,
+            move |state| {
+                merge_usage(&mut state.usage, usage);
+                state.finding_disposition = disposition;
+                if has_stale_findings {
+                    state.terminal_reason = Some(AutoReviewTerminalReason::StaleTarget);
+                }
+            },
         )
     }
 
@@ -175,6 +263,88 @@ impl ReviewPersistenceContext {
             /*token_usage*/ None,
             Some(error_summary),
         )
+    }
+
+    pub(crate) fn save_cancelled_with_summary_and_reason(
+        &self,
+        codex_home: impl AsRef<Path>,
+        error_summary: String,
+        cancel_reason: String,
+    ) -> bool {
+        self.save_run_with_metadata(
+            codex_home,
+            AutoReviewRunStatus::Cancelled,
+            /*output*/ None,
+            /*token_usage*/ None,
+            Some(error_summary),
+            AutoReviewRunFreshness::Current,
+            None,
+            Some(cancel_reason),
+            /*saved_token_estimate*/ None,
+        )
+    }
+
+    pub(crate) fn set_cancelled_interruption(&self, error_summary: String, cancel_reason: String) {
+        self.set_interruption(ReviewInterruption {
+            status: ReviewInterruptionStatus::Cancelled,
+            error_summary,
+            superseded_by: None,
+            cancel_reason: Some(cancel_reason),
+        });
+    }
+
+    pub(crate) fn set_superseded_interruption(
+        &self,
+        error_summary: String,
+        superseded_by: Option<String>,
+    ) {
+        self.set_interruption(ReviewInterruption {
+            status: ReviewInterruptionStatus::Superseded,
+            error_summary,
+            superseded_by,
+            cancel_reason: None,
+        });
+    }
+
+    pub(crate) fn save_interrupted(
+        &self,
+        codex_home: impl AsRef<Path>,
+    ) -> Option<SavedReviewInterruption> {
+        let interruption = {
+            let pending = self.interruption.lock().unwrap_or_else(|err| {
+                tracing::warn!("review interruption lock was poisoned; continuing");
+                err.into_inner()
+            });
+            pending.clone()
+        }
+        .unwrap_or_else(|| ReviewInterruption {
+            status: ReviewInterruptionStatus::Cancelled,
+            error_summary: AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+            superseded_by: None,
+            cancel_reason: None,
+        });
+        let saved = match interruption.status {
+            ReviewInterruptionStatus::Cancelled => {
+                if let Some(cancel_reason) = interruption.cancel_reason.clone() {
+                    self.save_cancelled_with_summary_and_reason(
+                        codex_home,
+                        interruption.error_summary.clone(),
+                        cancel_reason,
+                    )
+                } else {
+                    self.save_cancelled_with_summary(codex_home, interruption.error_summary.clone())
+                }
+            }
+            ReviewInterruptionStatus::Superseded => self.save_superseded_with_summary(
+                codex_home,
+                interruption.error_summary.clone(),
+                interruption.superseded_by,
+            ),
+        };
+        saved.then_some(SavedReviewInterruption {
+            status: interruption.status,
+            error_summary: interruption.error_summary,
+        })
     }
 
     pub(crate) fn save_superseded_with_summary(
@@ -209,6 +379,96 @@ impl ReviewPersistenceContext {
             token_usage,
             Some(error_summary),
         )
+    }
+
+    pub(crate) fn save_empty_output(
+        &self,
+        codex_home: impl AsRef<Path>,
+        error_summary: String,
+        token_usage: Option<&TokenUsage>,
+        usage: AutoReviewUsage,
+    ) -> bool {
+        let codex_home = codex_home.as_ref();
+        self.save_run_with_metadata_and_state(
+            codex_home,
+            AutoReviewRunStatus::Failed,
+            /*output*/ None,
+            token_usage,
+            Some(error_summary),
+            AutoReviewRunFreshness::Current,
+            None,
+            Some(
+                AutoReviewTerminalReason::EmptyOutput
+                    .cancel_reason()
+                    .to_string(),
+            ),
+            /*saved_token_estimate*/ None,
+            move |state| {
+                merge_usage(&mut state.usage, usage);
+                state.terminal_reason = Some(AutoReviewTerminalReason::EmptyOutput);
+            },
+        )
+    }
+
+    pub(crate) fn save_budget_cancelled(
+        &self,
+        codex_home: impl AsRef<Path>,
+        reason: AutoReviewTerminalReason,
+        error_summary: String,
+        token_usage: Option<&TokenUsage>,
+        usage: AutoReviewUsage,
+    ) -> bool {
+        let codex_home = codex_home.as_ref();
+        self.save_run_with_metadata_and_state(
+            codex_home,
+            AutoReviewRunStatus::Cancelled,
+            /*output*/ None,
+            token_usage,
+            Some(error_summary),
+            AutoReviewRunFreshness::Current,
+            None,
+            Some(reason.cancel_reason().to_string()),
+            /*saved_token_estimate*/ None,
+            move |state| {
+                merge_usage(&mut state.usage, usage);
+                state.terminal_reason = Some(reason);
+            },
+        )
+    }
+
+    pub(crate) fn save_budget_skipped(
+        &self,
+        codex_home: impl AsRef<Path>,
+        reason: AutoReviewTerminalReason,
+        error_summary: String,
+        usage: AutoReviewUsage,
+    ) -> bool {
+        let codex_home = codex_home.as_ref();
+        self.save_run_with_metadata_and_state(
+            codex_home,
+            AutoReviewRunStatus::Skipped,
+            /*output*/ None,
+            /*token_usage*/ None,
+            Some(error_summary),
+            AutoReviewRunFreshness::Current,
+            None,
+            Some(reason.cancel_reason().to_string()),
+            /*saved_token_estimate*/ None,
+            move |state| {
+                merge_usage(&mut state.usage, usage);
+                state.terminal_reason = Some(reason);
+            },
+        )
+    }
+
+    pub(crate) fn record_progress(
+        &self,
+        codex_home: impl AsRef<Path>,
+        usage: AutoReviewUsage,
+    ) -> bool {
+        self.update_run_state(codex_home.as_ref(), |state| {
+            merge_usage(&mut state.usage, usage);
+        })
     }
 
     pub(crate) fn save_skipped(&self, codex_home: impl AsRef<Path>, error_summary: String) -> bool {
@@ -276,6 +536,34 @@ impl ReviewPersistenceContext {
         cancel_reason: Option<String>,
         saved_token_estimate: Option<u64>,
     ) -> bool {
+        self.save_run_with_metadata_and_state(
+            codex_home,
+            status,
+            output,
+            token_usage,
+            error_summary,
+            freshness,
+            superseded_by,
+            cancel_reason,
+            saved_token_estimate,
+            |_| {},
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_run_with_metadata_and_state(
+        &self,
+        codex_home: impl AsRef<Path>,
+        status: AutoReviewRunStatus,
+        output: Option<&ReviewOutputEvent>,
+        token_usage: Option<&TokenUsage>,
+        error_summary: Option<String>,
+        freshness: AutoReviewRunFreshness,
+        superseded_by: Option<String>,
+        cancel_reason: Option<String>,
+        saved_token_estimate: Option<u64>,
+        update_state: impl FnOnce(&mut codex_auto_review::AutoReviewRunState),
+    ) -> bool {
         let codex_home = codex_home.as_ref();
         let completed_at_unix_secs = if is_terminal_status(&status) {
             Some(now_unix_secs())
@@ -290,14 +578,24 @@ impl ReviewPersistenceContext {
         if let Ok(existing) = store.load_run(&self.run_id)
             && is_terminal_status(&existing.status)
         {
-            if !is_terminal_status(&status) {
-                tracing::debug!(
-                    run_id = %self.run_id,
-                    existing_status = ?existing.status,
-                    "skipping non-terminal auto review run write after terminal status"
+            let corrects_interrupted_lifecycle = existing.status == AutoReviewRunStatus::Cancelled
+                && existing.cancel_reason.is_none()
+                && existing.superseded_by.is_none()
+                && is_explicit_lifecycle_update(
+                    &status,
+                    superseded_by.as_deref(),
+                    cancel_reason.as_deref(),
                 );
+            if !corrects_interrupted_lifecycle {
+                if !is_terminal_status(&status) {
+                    tracing::debug!(
+                        run_id = %self.run_id,
+                        existing_status = ?existing.status,
+                        "skipping non-terminal auto review run write after terminal status"
+                    );
+                }
+                return false;
             }
-            return false;
         }
         if let Err(err) = store.list_runs() {
             tracing::warn!(
@@ -305,6 +603,9 @@ impl ReviewPersistenceContext {
                 error = %err,
                 "failed to read auto review runs before persisting output"
             );
+            return false;
+        }
+        if !self.update_run_state(codex_home, update_state) {
             return false;
         }
         if let Some(output) = output
@@ -355,16 +656,87 @@ impl ReviewPersistenceContext {
         }
         true
     }
+
+    fn update_run_state(
+        &self,
+        codex_home: &Path,
+        update: impl FnOnce(&mut codex_auto_review::AutoReviewRunState),
+    ) -> bool {
+        let store = AutoReviewStore::for_scope(codex_home, &self.store_scope);
+        match store.update_run_state(&self.run_id, |state| {
+            if let Some(budget) = &self.background_budget {
+                state.budget = Some(budget.clone());
+            }
+            if let Some(scope_bytes) = self.scope_bytes {
+                state.usage.scope_bytes = Some(scope_bytes);
+            }
+            update(state);
+            Ok(())
+        }) {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(
+                    run_id = %self.run_id,
+                    error = %err,
+                    "failed to persist auto review run state"
+                );
+                false
+            }
+        }
+    }
+
+    fn set_interruption(&self, interruption: ReviewInterruption) {
+        let mut pending = self.interruption.lock().unwrap_or_else(|err| {
+            tracing::warn!("review interruption lock was poisoned; continuing");
+            err.into_inner()
+        });
+        *pending = Some(interruption);
+    }
 }
 
 fn is_terminal_status(status: &AutoReviewRunStatus) -> bool {
     status.is_terminal()
 }
 
+fn is_explicit_lifecycle_update(
+    status: &AutoReviewRunStatus,
+    superseded_by: Option<&str>,
+    cancel_reason: Option<&str>,
+) -> bool {
+    matches!(
+        status,
+        AutoReviewRunStatus::Cancelled | AutoReviewRunStatus::Superseded
+    ) && (status == &AutoReviewRunStatus::Superseded
+        || superseded_by.is_some()
+        || cancel_reason.is_some())
+}
+
 fn token_count_u64(token_usage: &TokenUsage) -> Option<u64> {
-    u64::try_from(token_usage.total_tokens)
+    let reconstructed_total = token_usage
+        .non_cached_input()
+        .saturating_add(token_usage.cached_input())
+        .saturating_add(token_usage.output_tokens.max(0));
+    u64::try_from(token_usage.total_tokens.max(reconstructed_total))
         .ok()
         .filter(|token_count| *token_count > 0)
+}
+
+fn merge_usage(current: &mut AutoReviewUsage, update: AutoReviewUsage) {
+    if update.scope_bytes.is_some() {
+        current.scope_bytes = update.scope_bytes;
+    }
+    if update.elapsed_ms.is_some() {
+        current.elapsed_ms = update.elapsed_ms;
+    }
+    if update.total_tokens.is_some() {
+        current.total_tokens = update.total_tokens;
+    }
+    if update.output_bytes.is_some() {
+        current.output_bytes = update.output_bytes;
+    }
+    if update.finding_count.is_some() {
+        current.finding_count = update.finding_count;
+    }
 }
 
 fn duplicate_saved_token_estimate(duplicate: &AutoReviewDuplicateMatch) -> Option<u64> {
@@ -437,6 +809,9 @@ fn now_unix_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::protocol::ReviewCodeLocation;
+    use codex_protocol::protocol::ReviewFinding;
+    use codex_protocol::protocol::ReviewLineRange;
     use codex_protocol::protocol::ReviewPersistence;
     use codex_protocol::protocol::TokenUsage;
     use tempfile::TempDir;
@@ -457,7 +832,10 @@ mod tests {
         )
         .await;
 
-        persistence.save_cancelled(codex_home.path());
+        persistence.save_cancelled_with_summary(
+            codex_home.path(),
+            AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+        );
         persistence.save_running(codex_home.path());
 
         let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
@@ -497,6 +875,82 @@ mod tests {
             run.error_summary.as_deref(),
             Some("background auto review was cancelled by request")
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_reason_corrects_generic_interruption() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "corrected-cancelled".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
+        )
+        .await;
+
+        persistence.save_cancelled_with_summary(
+            codex_home.path(),
+            AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+        );
+        persistence.save_cancelled_with_summary_and_reason(
+            codex_home.path(),
+            "background auto review was cancelled by request".to_string(),
+            "background_auto_review_control".to_string(),
+        );
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let run = store
+            .load_run("corrected-cancelled")
+            .expect("load persisted review run");
+        assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+        assert_eq!(
+            run.error_summary.as_deref(),
+            Some("background auto review was cancelled by request")
+        );
+        assert_eq!(
+            run.cancel_reason.as_deref(),
+            Some("background_auto_review_control")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_supersede_corrects_generic_interruption() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "corrected-superseded".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
+        )
+        .await;
+
+        persistence.save_cancelled_with_summary(
+            codex_home.path(),
+            AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+        );
+        persistence.save_superseded_with_summary(
+            codex_home.path(),
+            "background auto review was superseded by run replacement-run".to_string(),
+            Some("replacement-run".to_string()),
+        );
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let run = store
+            .load_run("corrected-superseded")
+            .expect("load persisted review run");
+        assert_eq!(run.status, AutoReviewRunStatus::Superseded);
+        assert_eq!(run.freshness, AutoReviewRunFreshness::Superseded);
+        assert_eq!(run.superseded_by.as_deref(), Some("replacement-run"));
     }
 
     #[tokio::test]
@@ -652,11 +1106,24 @@ mod tests {
         .await;
         let output = ReviewOutputEvent::default();
         let token_usage = TokenUsage {
-            total_tokens: 25_915,
-            ..TokenUsage::default()
+            input_tokens: 100,
+            cached_input_tokens: 90,
+            output_tokens: 10,
+            reasoning_output_tokens: 0,
+            total_tokens: 20,
         };
 
-        persistence.save_completed(codex_home.path(), &output, Some(&token_usage));
+        persistence.save_completed_with_freshness(
+            codex_home.path(),
+            &output,
+            Some(&token_usage),
+            AutoReviewRunFreshness::Current,
+            AutoReviewUsage {
+                total_tokens: Some(110),
+                finding_count: Some(0),
+                ..Default::default()
+            },
+        );
 
         let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
         let run = store
@@ -665,8 +1132,183 @@ mod tests {
         assert_eq!(run.model.as_deref(), Some("test-model"));
         assert_eq!(run.reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(run.prompt_token_estimate, Some(42_000));
-        assert_eq!(run.token_count, Some(25_915));
+        assert_eq!(run.token_count, Some(110));
         assert_eq!(run.saved_token_estimate, None);
+    }
+
+    #[tokio::test]
+    async fn save_budget_cancelled_records_limits_usage_and_reason() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "budget-cancelled".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
+        )
+        .await
+        .with_background_budget(test_budget(), 12_000);
+        let usage = AutoReviewUsage {
+            scope_bytes: Some(12_000),
+            elapsed_ms: Some(30_000),
+            total_tokens: Some(250_001),
+            ..Default::default()
+        };
+        let token_usage = TokenUsage {
+            total_tokens: 250_001,
+            ..Default::default()
+        };
+
+        assert!(persistence.save_budget_cancelled(
+            codex_home.path(),
+            AutoReviewTerminalReason::BudgetTotalTokens,
+            "background review exceeded token budget".to_string(),
+            Some(&token_usage),
+            usage.clone(),
+        ));
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let run = store
+            .load_run("budget-cancelled")
+            .expect("load persisted review run");
+        let state = store
+            .load_run_state("budget-cancelled")
+            .expect("load persisted review state")
+            .expect("review state should exist");
+        assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+        assert_eq!(run.cancel_reason.as_deref(), Some("budget_total_tokens"));
+        assert_eq!(run.token_count, Some(250_001));
+        assert_eq!(state.budget, Some(test_budget()));
+        assert_eq!(state.usage, usage);
+        assert_eq!(
+            state.terminal_reason,
+            Some(AutoReviewTerminalReason::BudgetTotalTokens)
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_current_findings_require_attention() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "actionable-findings".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
+        )
+        .await
+        .with_background_budget(test_budget(), 12_000);
+        let output = output_with_finding(cwd.path());
+
+        assert!(persistence.save_completed_with_freshness(
+            codex_home.path(),
+            &output,
+            /*token_usage*/ None,
+            AutoReviewRunFreshness::Current,
+            AutoReviewUsage {
+                finding_count: Some(1),
+                ..Default::default()
+            },
+        ));
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let state = store
+            .load_run_state("actionable-findings")
+            .expect("load persisted review state")
+            .expect("review state should exist");
+        let disposition = state
+            .finding_disposition
+            .expect("current findings should require disposition");
+        assert_eq!(
+            disposition.disposition,
+            AutoReviewFindingDisposition::NeedsAttention
+        );
+        assert_eq!(disposition.actor, AutoReviewDispositionActor::System);
+    }
+
+    #[tokio::test]
+    async fn completed_stale_findings_are_marked_obsolete() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "stale-findings".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
+        )
+        .await
+        .with_background_budget(test_budget(), 12_000);
+        let output = output_with_finding(cwd.path());
+
+        assert!(persistence.save_completed_with_freshness(
+            codex_home.path(),
+            &output,
+            /*token_usage*/ None,
+            AutoReviewRunFreshness::Obsolete,
+            AutoReviewUsage {
+                finding_count: Some(1),
+                ..Default::default()
+            },
+        ));
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let run = store
+            .load_run("stale-findings")
+            .expect("load persisted review run");
+        let state = store
+            .load_run_state("stale-findings")
+            .expect("load persisted review state")
+            .expect("review state should exist");
+        assert_eq!(run.freshness, AutoReviewRunFreshness::Obsolete);
+        assert_eq!(
+            state.terminal_reason,
+            Some(AutoReviewTerminalReason::StaleTarget)
+        );
+        assert_eq!(
+            state
+                .finding_disposition
+                .expect("stale finding disposition")
+                .disposition,
+            AutoReviewFindingDisposition::Obsolete
+        );
+    }
+
+    fn test_budget() -> AutoReviewBudget {
+        AutoReviewBudget {
+            max_scope_bytes: 120_000,
+            max_elapsed_ms: 300_000,
+            max_total_tokens: 250_000,
+            max_output_bytes: 65_536,
+            max_findings: 20,
+        }
+    }
+
+    fn output_with_finding(cwd: &Path) -> ReviewOutputEvent {
+        ReviewOutputEvent {
+            findings: vec![ReviewFinding {
+                title: "[P1] Finding".to_string(),
+                body: "Finding body".to_string(),
+                confidence_score: 0.9,
+                priority: 1,
+                code_location: ReviewCodeLocation {
+                    absolute_file_path: cwd.join("src/lib.rs"),
+                    line_range: ReviewLineRange { start: 1, end: 2 },
+                },
+            }],
+            ..Default::default()
+        }
     }
 
     #[tokio::test]

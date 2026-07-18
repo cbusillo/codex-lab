@@ -401,7 +401,7 @@ pub(super) async fn record_background_review_status(
     status: BackgroundAutoReviewStatus,
     error_summary: Option<String>,
 ) {
-    sess.send_event_raw(Event {
+    let event = Event {
         id: persistence.run_id().to_string(),
         msg: EventMsg::BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent {
             run_id: persistence.run_id().to_string(),
@@ -409,6 +409,12 @@ pub(super) async fn record_background_review_status(
             review_target: persistence.review_target().clone(),
             error_summary,
         }),
+    };
+    if let Err(err) = tokio::spawn(async move {
+        sess.send_event_raw(event).await;
     })
-    .await;
+    .await
+    {
+        tracing::warn!(error = %err, "background auto review status task failed");
+    }
 }

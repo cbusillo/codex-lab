@@ -12,6 +12,7 @@ use tokio::process::ChildStdout;
 
 use anyhow::Context;
 use codex_app_server_protocol::AppsListParams;
+use codex_app_server_protocol::AutoReviewDispositionWriteParams;
 use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
 use codex_app_server_protocol::AutoReviewSummaryReadParams;
 use codex_app_server_protocol::BackgroundAutoReviewControlParams;
@@ -1163,6 +1164,15 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("review/findingDetail/read", params).await
+    }
+
+    /// Send a `review/disposition/write` JSON-RPC request (v2).
+    pub async fn send_auto_review_disposition_write_request(
+        &mut self,
+        params: AutoReviewDispositionWriteParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("review/disposition/write", params).await
     }
 
     pub async fn send_windows_sandbox_setup_start_request(

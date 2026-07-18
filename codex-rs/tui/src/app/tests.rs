@@ -629,6 +629,44 @@ async fn replay_thread_snapshot_fetches_missing_completed_auto_review_summary() 
 }
 
 #[tokio::test]
+async fn replay_thread_snapshot_fetches_missing_cancelled_auto_review_summary() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let thread_id = ThreadId::new();
+
+    app.replay_thread_snapshot(
+        ThreadEventSnapshot {
+            session: Some(test_thread_session(
+                thread_id,
+                test_path_buf("/tmp/project"),
+            )),
+            turns: Vec::new(),
+            events: vec![ThreadBufferedEvent::Notification(
+                auto_review_status_notification(
+                    thread_id,
+                    "run-background-cancelled",
+                    BackgroundAutoReviewStatus::Cancelled,
+                ),
+            )],
+            input_state: None,
+        },
+        /*resume_restored_queue*/ true,
+    );
+
+    let emitted_events = drain_app_events(&mut app_event_rx);
+    assert!(
+        emitted_events.iter().any(|event| matches!(
+            event,
+            AppEvent::FetchAutoReviewSummary {
+                thread_id: fetched_thread_id,
+                run_id,
+            } if *fetched_thread_id == thread_id && run_id == "run-background-cancelled"
+        )),
+        "expected replay to fetch the cancelled auto-review summary, got {emitted_events:?}"
+    );
+}
+
+#[tokio::test]
 async fn replay_thread_snapshot_replay_only_does_not_fetch_auto_review_summary() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     while app_event_rx.try_recv().is_ok() {}

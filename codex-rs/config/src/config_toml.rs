@@ -559,6 +559,14 @@ pub struct AutoReviewToml {
     /// to 120000. Reviews whose diff exceeds this limit are recorded as
     /// skipped rather than launched.
     pub background_max_diff_bytes: Option<usize>,
+    /// Maximum wall-clock runtime in seconds for automatic background reviews.
+    pub background_max_elapsed_seconds: Option<u64>,
+    /// Maximum cumulative token usage for automatic background reviews.
+    pub background_max_total_tokens: Option<u64>,
+    /// Maximum serialized reviewer output size in bytes.
+    pub background_max_output_bytes: Option<usize>,
+    /// Maximum number of findings accepted from one background review.
+    pub background_max_findings: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]

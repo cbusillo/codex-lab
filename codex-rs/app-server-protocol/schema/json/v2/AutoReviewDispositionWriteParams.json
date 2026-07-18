@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AutoReviewDispositionAction": {
+      "enum": [
+        "repair",
+        "defer",
+        "obsolete"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/AutoReviewDispositionAction"
+    },
+    "reason": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "runId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "action",
+    "runId",
+    "threadId"
+  ],
+  "title": "AutoReviewDispositionWriteParams",
+  "type": "object"
+}

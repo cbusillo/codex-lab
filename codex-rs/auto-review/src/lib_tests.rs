@@ -7,18 +7,25 @@ use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewTarget;
 use pretty_assertions::assert_eq;
 
+use super::AutoReviewBudget;
 use super::AutoReviewDetailKind;
 use super::AutoReviewDiagnostics;
+use super::AutoReviewDispositionActor;
 use super::AutoReviewDuplicateDisposition;
+use super::AutoReviewFindingDisposition;
+use super::AutoReviewFindingDispositionRecord;
 use super::AutoReviewFreshness;
 use super::AutoReviewLedgerProjection;
 use super::AutoReviewRun;
 use super::AutoReviewRunFreshness;
 use super::AutoReviewRunSource;
+use super::AutoReviewRunState;
 use super::AutoReviewRunStatus;
 use super::AutoReviewRunTarget;
 use super::AutoReviewRunsIndex;
 use super::AutoReviewStore;
+use super::AutoReviewTerminalReason;
+use super::AutoReviewUsage;
 use super::DEFAULT_MAX_RUNS;
 use super::DETAIL_MAX_BYTES;
 use super::SCHEMA_VERSION;
@@ -49,6 +56,85 @@ fn save_and_load_run_round_trips_compact_index() -> anyhow::Result<()> {
     assert!(sidecar_text.contains("Body Title"));
     assert!(metadata_text.contains("finding_count"));
     assert!(!metadata_text.contains("Body Title"));
+    Ok(())
+}
+
+#[test]
+fn save_and_load_run_state_preserves_run_schema_compatibility() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let output = sample_output(vec![sample_finding("Title")]);
+    store.save_run(&sample_run("run_1", &output))?;
+    let mut state = AutoReviewRunState::new("run_1");
+    state.budget = Some(AutoReviewBudget {
+        max_scope_bytes: 120_000,
+        max_elapsed_ms: 300_000,
+        max_total_tokens: 250_000,
+        max_output_bytes: 65_536,
+        max_findings: 20,
+    });
+    state.usage = AutoReviewUsage {
+        scope_bytes: Some(12_000),
+        elapsed_ms: Some(4_000),
+        total_tokens: Some(25_000),
+        output_bytes: Some(2_000),
+        finding_count: Some(1),
+    };
+    state.terminal_reason = Some(AutoReviewTerminalReason::BudgetTotalTokens);
+
+    store.save_run_state(&state)?;
+
+    assert_eq!(store.load_run_state("run_1")?, Some(state));
+    let index_text = std::fs::read_to_string(store.runs_path())?;
+    assert!(!index_text.contains("max_total_tokens"));
+    assert!(!index_text.contains("terminal_reason"));
+    assert_eq!(store.load_run("run_1")?.schema_version, SCHEMA_VERSION);
+    Ok(())
+}
+
+#[test]
+fn set_finding_disposition_is_durable_and_audited() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let output = sample_output(vec![sample_finding("Title")]);
+    store.save_run(&sample_run("run_1", &output))?;
+    let disposition = AutoReviewFindingDispositionRecord {
+        disposition: AutoReviewFindingDisposition::Deferred,
+        actor: AutoReviewDispositionActor::User,
+        reason: Some("acknowledged for follow-up".to_string()),
+        updated_at_unix_secs: 42,
+    };
+
+    let state = store.set_finding_disposition("run_1", disposition.clone())?;
+
+    assert_eq!(state.finding_disposition, Some(disposition));
+    assert_eq!(store.load_run_state("run_1")?, Some(state));
+    Ok(())
+}
+
+#[test]
+fn obsolete_finding_disposition_requires_reason() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let output = sample_output(vec![sample_finding("Title")]);
+    store.save_run(&sample_run("run_1", &output))?;
+
+    let err = store
+        .set_finding_disposition(
+            "run_1",
+            AutoReviewFindingDispositionRecord {
+                disposition: AutoReviewFindingDisposition::Obsolete,
+                actor: AutoReviewDispositionActor::Agent,
+                reason: None,
+                updated_at_unix_secs: 42,
+            },
+        )
+        .expect_err("obsolete disposition without a reason should fail");
+
+    assert!(err.to_string().contains("requires a reason"));
     Ok(())
 }
 
@@ -1573,6 +1659,10 @@ fn lifecycle_freshness_overrides_matching_target_freshness() {
         (
             AutoReviewRunFreshness::Superseded,
             AutoReviewRunStatus::Superseded,
+        ),
+        (
+            AutoReviewRunFreshness::Obsolete,
+            AutoReviewRunStatus::Completed,
         ),
     ] {
         let run = AutoReviewRun {

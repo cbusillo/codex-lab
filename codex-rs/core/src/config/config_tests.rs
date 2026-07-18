@@ -6695,6 +6695,10 @@ fn config_toml_deserializes_auto_review_policy() {
 [auto_review]
 policy = "Use the user-configured guardian policy."
 background_max_diff_bytes = 64000
+background_max_elapsed_seconds = 90
+background_max_total_tokens = 75000
+background_max_output_bytes = 32000
+background_max_findings = 12
 "#,
     )
     .expect("TOML deserialization should succeed");
@@ -6711,10 +6715,15 @@ background_max_diff_bytes = 64000
             .and_then(|auto_review| auto_review.background_max_diff_bytes),
         Some(64000)
     );
+    let auto_review = cfg.auto_review.as_ref().expect("auto_review config");
+    assert_eq!(auto_review.background_max_elapsed_seconds, Some(90));
+    assert_eq!(auto_review.background_max_total_tokens, Some(75_000));
+    assert_eq!(auto_review.background_max_output_bytes, Some(32_000));
+    assert_eq!(auto_review.background_max_findings, Some(12));
 }
 
 #[tokio::test]
-async fn load_config_sets_background_auto_review_diff_limit() -> std::io::Result<()> {
+async fn load_config_sets_background_auto_review_budget() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let default_config = Config::load_from_base_config_with_overrides(
         ConfigToml::default(),
@@ -6726,14 +6735,28 @@ async fn load_config_sets_background_auto_review_diff_limit() -> std::io::Result
     )
     .await?;
     assert_eq!(
-        default_config.background_auto_review_max_diff_bytes,
-        Some(crate::config::DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES)
+        default_config.background_auto_review_budget.max_scope_bytes,
+        crate::config::DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES
+    );
+    assert_eq!(
+        default_config.background_auto_review_budget.max_elapsed_ms,
+        crate::config::DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS
+    );
+    assert_eq!(
+        default_config
+            .background_auto_review_budget
+            .max_total_tokens,
+        crate::config::DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS
     );
 
     let configured = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: None,
             background_max_diff_bytes: Some(64_000),
+            background_max_elapsed_seconds: Some(90),
+            background_max_total_tokens: Some(75_000),
+            background_max_output_bytes: Some(32_000),
+            background_max_findings: Some(12),
         }),
         ..Default::default()
     };
@@ -6747,8 +6770,14 @@ async fn load_config_sets_background_auto_review_diff_limit() -> std::io::Result
     )
     .await?;
     assert_eq!(
-        configured_config.background_auto_review_max_diff_bytes,
-        Some(64_000)
+        configured_config.background_auto_review_budget,
+        codex_auto_review::AutoReviewBudget {
+            max_scope_bytes: 64_000,
+            max_elapsed_ms: 90_000,
+            max_total_tokens: 75_000,
+            max_output_bytes: 32_000,
+            max_findings: 12,
+        }
     );
 
     Ok(())
@@ -6761,6 +6790,7 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
         auto_review: Some(AutoReviewToml {
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
             background_max_diff_bytes: None,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -6799,6 +6829,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
         auto_review: Some(AutoReviewToml {
             policy: Some("Use the user-configured guardian policy.".to_string()),
             background_max_diff_bytes: None,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -6830,6 +6861,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
         auto_review: Some(AutoReviewToml {
             policy: Some("   ".to_string()),
             background_max_diff_bytes: None,
+            ..Default::default()
         }),
         ..Default::default()
     };

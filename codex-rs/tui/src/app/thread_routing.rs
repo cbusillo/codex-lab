@@ -1545,7 +1545,7 @@ impl App {
         else {
             return;
         };
-        if notification.status != BackgroundAutoReviewStatus::Completed
+        if !background_auto_review_status_has_summary(notification.status)
             || replayed_auto_review_summaries.contains(&notification.run_id)
         {
             return;

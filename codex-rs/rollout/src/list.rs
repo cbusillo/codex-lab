@@ -24,6 +24,7 @@ use crate::state_db;
 use codex_file_search as file_search;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMetaLine;
@@ -1185,22 +1186,33 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) {
-            match rollout_line.item {
-                RolloutItem::SessionMeta(session_meta_line) => {
-                    if let Ok(value) = serde_json::to_value(session_meta_line) {
-                        head.push(value);
-                    }
-                }
-                RolloutItem::ResponseItem(item) => {
-                    if let Ok(value) = serde_json::to_value(item) {
-                        head.push(value);
-                    }
-                }
-                RolloutItem::Compacted(_)
-                | RolloutItem::TurnContext(_)
-                | RolloutItem::EventMsg(_) => {}
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let Some(fields) = value.as_object_mut() else {
+            continue;
+        };
+        let Some(item_type) = fields
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(payload) = fields.remove("payload") else {
+            continue;
+        };
+        let normalized = match item_type.as_str() {
+            "session_meta" => {
+                serde_json::from_value::<SessionMetaLine>(payload).and_then(serde_json::to_value)
             }
+            "response_item" => {
+                serde_json::from_value::<ResponseItem>(payload).and_then(serde_json::to_value)
+            }
+            _ => continue,
+        };
+        if let Ok(value) = normalized {
+            head.push(value);
         }
     }
 
