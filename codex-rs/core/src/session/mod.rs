@@ -29,6 +29,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::NetworkRuleSaved;
 use crate::context::PermissionsInstructions;
 use crate::context::PersonalitySpecInstructions;
+use crate::context::RuntimeIdentity;
 use crate::default_skill_metadata_budget;
 use crate::environment_selection::ResolvedTurnEnvironments;
 use crate::exec_policy::ExecPolicyManager;
@@ -3038,6 +3039,7 @@ impl Session {
                     .render(),
             );
         }
+        developer_sections.push(RuntimeIdentity.render());
 
         let multi_agent_v2_usage_hint_text =
             multi_agents::usage_hint_text(turn_context, &session_source);
@@ -3118,18 +3120,45 @@ impl Session {
         &self,
         turn_context: &TurnContext,
     ) {
-        let reference_context_item = {
+        let (reference_context_item, has_runtime_identity) = {
             let state = self.state.lock().await;
-            state.reference_context_item()
+            (
+                state.reference_context_item(),
+                state
+                    .history
+                    .raw_items()
+                    .iter()
+                    .any(RuntimeIdentity::matches_response_item),
+            )
         };
         let should_inject_full_context = reference_context_item.is_none();
-        let context_items = if should_inject_full_context {
+        let mut context_items = if should_inject_full_context {
             self.build_initial_context(turn_context).await
         } else {
             // Steady-state path: append only context diffs to minimize token overhead.
             self.build_settings_update_items(reference_context_item.as_ref(), turn_context)
                 .await
         };
+        if has_runtime_identity {
+            for item in &mut context_items {
+                if let ResponseItem::Message { role, content, .. } = item
+                    && role == "developer"
+                {
+                    content.retain(|content_item| {
+                        !RuntimeIdentity::matches_content_item(content_item)
+                    });
+                }
+            }
+            context_items.retain(|item| {
+                !matches!(
+                    item,
+                    ResponseItem::Message { role, content, .. }
+                        if role == "developer" && content.is_empty()
+                )
+            });
+        } else if !should_inject_full_context {
+            context_items.insert(0, ContextualUserFragment::into(RuntimeIdentity));
+        }
         let turn_context_item = turn_context.to_turn_context_item();
         if !context_items.is_empty() {
             self.record_conversation_items(turn_context, &context_items)

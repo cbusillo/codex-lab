@@ -353,10 +353,15 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
         .iter()
         .filter(|text| text.contains("<model_switch>"))
         .count();
+    let first_runtime_identity_count = first_developer_texts
+        .iter()
+        .filter(|text| text.contains("<runtime_identity>"))
+        .count();
     assert!(
         first_model_switch_count >= 1,
         "expected model switch message on first post-resume turn"
     );
+    assert_eq!(first_runtime_identity_count, 1);
 
     let second_resumed = &requests[1];
     assert_eq!(second_resumed.instructions_text(), initial_instructions);
@@ -365,10 +370,15 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
         .iter()
         .filter(|text| text.contains("<model_switch>"))
         .count();
+    let second_runtime_identity_count = second_developer_texts
+        .iter()
+        .filter(|text| text.contains("<runtime_identity>"))
+        .count();
     assert_eq!(
         second_model_switch_count, 1,
         "did not expect duplicate model switch message after first post-resume turn"
     );
+    assert_eq!(second_runtime_identity_count, 1);
 
     Ok(())
 }

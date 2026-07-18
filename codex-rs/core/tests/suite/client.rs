@@ -94,6 +94,13 @@ use wiremock::matchers::path;
 use wiremock::matchers::query_param;
 
 const INSTALLATION_ID_FILENAME: &str = "installation_id";
+const CODEX_LAB_RUNTIME_IDENTITY: &str = concat!(
+    "<runtime_identity>\n",
+    "Agent identity: Codex\n",
+    "Runtime harness: Codex Lab\n",
+    "When asked which harness is active, answer `Codex Lab`.\n",
+    "</runtime_identity>"
+);
 
 #[expect(clippy::unwrap_used)]
 fn assert_message_role(request_body: &serde_json::Value, role: &str) {
@@ -115,6 +122,15 @@ fn message_input_text_contains(request: &ResponsesRequest, role: &str, needle: &
         .message_input_texts(role)
         .iter()
         .any(|text| text.contains(needle))
+}
+
+fn assert_includes_one_codex_lab_runtime_identity(request: &ResponsesRequest) {
+    let count = request
+        .message_input_texts("developer")
+        .iter()
+        .filter(|text| text.as_str() == CODEX_LAB_RUNTIME_IDENTITY)
+        .count();
+    assert_eq!(count, 1);
 }
 
 fn response_message_item_id(request: &ResponsesRequest, role: &str, text: &str) -> String {
@@ -1250,6 +1266,43 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn includes_codex_lab_runtime_identity_in_request() {
+    skip_if_no_network!();
+    let server = MockServer::start().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let mut builder = test_codex();
+    let codex = builder
+        .build(&server)
+        .await
+        .expect("create new conversation")
+        .codex;
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit user input");
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let request = response_mock.single_request();
+    assert_includes_one_codex_lab_runtime_identity(&request);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn includes_base_instructions_override_in_request() {
     skip_if_no_network!();
     // Mock server
@@ -1289,14 +1342,8 @@ async fn includes_base_instructions_override_in_request() {
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let request = resp_mock.single_request();
-    let request_body = request.body_json();
-
-    assert!(
-        request_body["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("test instructions")
-    );
+    assert_eq!(request.instructions_text(), "test instructions");
+    assert_includes_one_codex_lab_runtime_identity(&request);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

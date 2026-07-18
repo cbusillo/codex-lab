@@ -6,6 +6,7 @@ use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
 use crate::config::test_config;
 use crate::context::ContextualUserFragment;
+use crate::context::RuntimeIdentity;
 use crate::context::TurnAborted;
 use crate::function_tool::FunctionCallError;
 use crate::shell::default_user_shell;
@@ -9070,8 +9071,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
 }
 
 #[tokio::test]
-async fn record_context_updates_and_set_reference_context_item_persists_baseline_without_emitting_diffs()
- {
+async fn context_update_injects_missing_runtime_identity_once() {
     let (mut session, previous_context) = make_session_and_context().await;
     let next_model = if previous_context.model_info.slug == "gpt-5.4" {
         "gpt-5.2"
@@ -9097,9 +9097,17 @@ async fn record_context_updates_and_set_reference_context_item_persists_baseline
         .record_context_updates_and_set_reference_context_item(&turn_context)
         .await;
 
+    let expected_history = vec![ContextualUserFragment::into(RuntimeIdentity)];
     assert_eq!(
-        session.clone_history().await.raw_items().to_vec(),
-        Vec::new()
+        without_generated_response_item_ids(session.clone_history().await.raw_items()),
+        expected_history
+    );
+    session
+        .record_context_updates_and_set_reference_context_item(&turn_context)
+        .await;
+    assert_eq!(
+        without_generated_response_item_ids(session.clone_history().await.raw_items()),
+        expected_history
     );
     assert_eq!(
         serde_json::to_value(session.reference_context_item().await)
