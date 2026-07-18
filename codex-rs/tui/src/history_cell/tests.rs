@@ -16,7 +16,9 @@ use codex_app_server_protocol::AutoReviewRunSummary;
 use codex_app_server_protocol::AutoReviewStatusCount;
 use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
+use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::McpAuthStatus;
+use codex_app_server_protocol::ReviewTarget;
 use codex_config::types::McpServerConfig;
 use codex_otel::RuntimeMetricTotals;
 use codex_otel::RuntimeMetricsSummary;
@@ -248,6 +250,23 @@ fn auto_review_summary(
 }
 
 #[test]
+fn auto_review_status_snapshot() {
+    let notification = BackgroundAutoReviewStatusChangedNotification {
+        thread_id: "thread-1".to_string(),
+        run_id: "run-queued".to_string(),
+        status: BackgroundAutoReviewStatus::Pending,
+        review_target: ReviewTarget::CurrentTurnDiff {
+            fingerprint: "turn-1".to_string(),
+        },
+        error_summary: None,
+    };
+
+    let cell = new_auto_review_status_cell(&notification);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"○ Background Review queued for current turn changes · run-queued");
+}
+
+#[test]
 fn auto_review_summary_clean_snapshot() {
     let summary = auto_review_summary(
         "run-clean",
@@ -265,7 +284,7 @@ fn auto_review_summary_clean_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-✔ Auto Review found no findings · run-clean
+✔ Background Review found no findings · run-clean
   completed · current · code-gpt-5.5
   No findings.
 ");
@@ -291,7 +310,7 @@ fn auto_review_summary_findings_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-! Auto Review found 2 findings · run-findings
+! Background Review found 2 findings · run-findings
   completed · current · code-gpt-5.5 · 1 omitted · truncated
   [P1] Fix request ordering
   The resumed turn can miss sandbox propagation.
@@ -322,7 +341,7 @@ fn auto_review_summary_stale_latest_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-○ Auto Review has no current findings · latest stale · run-stale
+○ Background Review has no current findings · latest stale · run-stale
   completed · stale · code-gpt-5.5
   Latest review output is stale and hidden because it no longer matches this worktree.
   1 stale completed off-target
@@ -353,7 +372,7 @@ fn auto_review_summary_stale_latest_with_content_stays_hidden_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-○ Auto Review has no current findings · latest stale · run-stale-content
+○ Background Review has no current findings · latest stale · run-stale-content
   completed · stale · code-gpt-5.5
   Latest review output is stale and hidden because it no longer matches this worktree.
   1 stale completed off-target
@@ -384,7 +403,7 @@ fn auto_review_summary_detached_latest_with_content_stays_hidden_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-○ Auto Review has no current findings · latest detached · run-detached-content
+○ Background Review has no current findings · latest detached · run-detached-content
   completed · detached · code-gpt-5.5
   Latest review output is detached and hidden because it no longer matches this worktree.
   1 detached completed off-target
@@ -415,7 +434,7 @@ fn auto_review_summary_current_latest_without_current_stays_hidden_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-○ Auto Review has no current findings · latest current · run-current-off-target
+○ Background Review has no current findings · latest current · run-current-off-target
   completed · current · code-gpt-5.5
   Latest review output is hidden because it does not apply to this review target.
   1 current completed off-target
@@ -426,7 +445,7 @@ fn auto_review_summary_current_latest_without_current_stays_hidden_snapshot() {
 fn auto_review_summary_error_snapshot() {
     let cell = new_auto_review_summary_error_cell("review/summary/read failed".to_string());
 
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"✗ Auto Review summary unavailable · review/summary/read failed");
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"✗ Background Review summary unavailable · review/summary/read failed");
 }
 
 #[test]
@@ -449,7 +468,7 @@ fn auto_review_summary_failed_current_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-✗ Auto Review failed · run-failed
+✗ Background Review failed · run-failed
   failed · current · code-gpt-5.5 · review model unavailable
 ");
 }
@@ -475,7 +494,7 @@ fn auto_review_summary_superseded_current_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 100)).join("\n"), @"
-○ Auto Review superseded · run-superseded
+○ Background Review superseded · run-superseded
   superseded · current · code-gpt-5.5 · background auto review was superseded by run next-run
 ");
 }
@@ -506,7 +525,7 @@ fn auto_review_summary_diagnostics_snapshot() {
     let cell = new_auto_review_summary_cell(&response);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 120)).join("\n"), @"
-✔ Auto Review has no stored result for this thread
+✔ Background Review has no stored result for this thread
   diagnostics recent_runs=4 in_flight=0 terminal=4 suppressed_stale=1 skipped=2 duplicate_skipped=1 failed=1
 ");
 }
