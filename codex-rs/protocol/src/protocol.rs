@@ -3077,13 +3077,6 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct SessionMetaLineFields {
-            #[serde(flatten)]
-            meta: SessionMeta,
-            git: Option<GitInfo>,
-        }
-
         let mut value = Value::deserialize(deserializer)?;
         let fields = value
             .as_object_mut()
@@ -3095,13 +3088,17 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
                 .ok_or_else(|| D::Error::missing_field("id"))?;
             fields.insert("session_id".to_string(), thread_id);
         }
-        let SessionMetaLineFields { meta, git } =
-            serde_json::from_value(value).map_err(D::Error::custom)?;
+        let git = fields
+            .remove("git")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(D::Error::custom)?;
+        let meta = serde_json::from_value(value).map_err(D::Error::custom)?;
         Ok(Self { meta, git })
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+#[derive(Serialize, Debug, Clone, JsonSchema, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
@@ -3109,6 +3106,52 @@ pub enum RolloutItem {
     Compacted(CompactedItem),
     TurnContext(TurnContextItem),
     EventMsg(EventMsg),
+}
+
+impl<'de> Deserialize<'de> for RolloutItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| D::Error::custom("rollout item must be an object"))?;
+        let item_type = fields
+            .remove("type")
+            .ok_or_else(|| D::Error::missing_field("type"))
+            .and_then(|value| serde_json::from_value::<String>(value).map_err(D::Error::custom))?;
+        let payload = fields
+            .remove("payload")
+            .ok_or_else(|| D::Error::missing_field("payload"))?;
+        match item_type.as_str() {
+            "session_meta" => serde_json::from_value(payload)
+                .map(Self::SessionMeta)
+                .map_err(D::Error::custom),
+            "response_item" => serde_json::from_value(payload)
+                .map(Self::ResponseItem)
+                .map_err(D::Error::custom),
+            "compacted" => serde_json::from_value(payload)
+                .map(Self::Compacted)
+                .map_err(D::Error::custom),
+            "turn_context" => serde_json::from_value(payload)
+                .map(Self::TurnContext)
+                .map_err(D::Error::custom),
+            "event_msg" => serde_json::from_value(payload)
+                .map(Self::EventMsg)
+                .map_err(D::Error::custom),
+            _ => Err(D::Error::unknown_variant(
+                &item_type,
+                &[
+                    "session_meta",
+                    "response_item",
+                    "compacted",
+                    "turn_context",
+                    "event_msg",
+                ],
+            )),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
@@ -3256,13 +3299,40 @@ impl Mul<f64> for TruncationPolicy {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[derive(Serialize, Clone, JsonSchema)]
 pub struct RolloutLine {
     pub timestamp: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinal: Option<u64>,
     #[serde(flatten)]
     pub item: RolloutItem,
+}
+
+impl<'de> Deserialize<'de> for RolloutLine {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| D::Error::custom("rollout line must be an object"))?;
+        let timestamp = fields
+            .remove("timestamp")
+            .ok_or_else(|| D::Error::missing_field("timestamp"))
+            .and_then(|value| serde_json::from_value(value).map_err(D::Error::custom))?;
+        let ordinal = fields
+            .remove("ordinal")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(D::Error::custom)?;
+        let item = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self {
+            timestamp,
+            ordinal,
+            item,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
@@ -5552,6 +5622,41 @@ mod tests {
 
         assert_eq!(meta_line.meta.id, thread_id);
         assert_eq!(meta_line.meta.session_id, thread_id.into());
+        Ok(())
+    }
+
+    #[test]
+    fn rollout_line_deserializes_flattened_session_meta() -> Result<()> {
+        let thread_id = ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8")?;
+        let line: RolloutLine = serde_json::from_value(json!({
+            "timestamp": "2026-07-04T00:00:00Z",
+            "ordinal": 7,
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "timestamp": "2026-07-04T00:00:00Z",
+                "instructions": null,
+                "cwd": test_path_buf("/home/user/project"),
+                "originator": "codex_cli_rs",
+                "cli_version": "0.0.0",
+                "source": "exec",
+                "git": {
+                    "branch": "main"
+                }
+            }
+        }))?;
+
+        assert_eq!(line.timestamp, "2026-07-04T00:00:00Z");
+        assert_eq!(line.ordinal, Some(7));
+        let RolloutItem::SessionMeta(meta_line) = line.item else {
+            anyhow::bail!("expected session_meta rollout item");
+        };
+        assert_eq!(meta_line.meta.id, thread_id);
+        assert_eq!(meta_line.meta.session_id, thread_id.into());
+        assert_eq!(
+            meta_line.git.and_then(|git| git.branch).as_deref(),
+            Some("main")
+        );
         Ok(())
     }
 
