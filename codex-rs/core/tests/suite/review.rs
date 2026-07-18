@@ -874,7 +874,7 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
         .submit_turn("create a file to review")
         .await?;
 
-    let pending_status = wait_for_background_auto_review_status(
+    let pending_status = wait_for_detached_background_auto_review_status(
         harness.test().codex.as_ref(),
         BackgroundAutoReviewStatus::Pending,
         None,
@@ -882,13 +882,13 @@ async fn automatic_background_review_runs_after_file_changing_turn() -> anyhow::
     .await;
     assert_diff_review_target(&pending_status.review_target);
     assert_eq!(pending_status.error_summary, None);
-    let running_status = wait_for_background_auto_review_status(
+    let running_status = wait_for_detached_background_auto_review_status(
         harness.test().codex.as_ref(),
         BackgroundAutoReviewStatus::Running,
         Some(pending_status.run_id.as_str()),
     )
     .await;
-    let completed_status = wait_for_background_auto_review_status(
+    let completed_status = wait_for_detached_background_auto_review_status(
         harness.test().codex.as_ref(),
         BackgroundAutoReviewStatus::Completed,
         Some(running_status.run_id.as_str()),
@@ -3895,6 +3895,41 @@ async fn wait_for_background_auto_review_status(
     expected_status: BackgroundAutoReviewStatus,
     expected_run_id: Option<&str>,
 ) -> BackgroundAutoReviewStatusEvent {
+    wait_for_background_auto_review_status_with_lifecycle(
+        codex,
+        expected_status,
+        expected_run_id,
+        ParentTurnLifecycle::Allowed,
+    )
+    .await
+}
+
+async fn wait_for_detached_background_auto_review_status(
+    codex: &CodexThread,
+    expected_status: BackgroundAutoReviewStatus,
+    expected_run_id: Option<&str>,
+) -> BackgroundAutoReviewStatusEvent {
+    wait_for_background_auto_review_status_with_lifecycle(
+        codex,
+        expected_status,
+        expected_run_id,
+        ParentTurnLifecycle::Forbidden,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ParentTurnLifecycle {
+    Allowed,
+    Forbidden,
+}
+
+async fn wait_for_background_auto_review_status_with_lifecycle(
+    codex: &CodexThread,
+    expected_status: BackgroundAutoReviewStatus,
+    expected_run_id: Option<&str>,
+    parent_turn_lifecycle: ParentTurnLifecycle,
+) -> BackgroundAutoReviewStatusEvent {
     loop {
         let event = match tokio::time::timeout(Duration::from_secs(10), codex.next_event()).await {
             Ok(Ok(event)) => event,
@@ -3919,10 +3954,19 @@ async fn wait_for_background_auto_review_status(
                     "unexpected background auto-review status while waiting for {expected_status:?}: {status_event:?}"
                 );
             }
-            EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => {
+            lifecycle_event @ (EventMsg::TurnStarted(_)
+            | EventMsg::TurnComplete(_)
+            | EventMsg::TurnAborted(_))
+                if matches!(parent_turn_lifecycle, ParentTurnLifecycle::Forbidden) =>
+            {
                 panic!(
-                    "background review emitted review mode event while waiting for status {expected_status:?}: {:?}",
-                    event.msg
+                    "detached background review emitted parent turn lifecycle event while waiting for status {expected_status:?}: {lifecycle_event:?}"
+                )
+            }
+            review_mode_event
+            @ (EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_)) => {
+                panic!(
+                    "background review emitted review mode event while waiting for status {expected_status:?}: {review_mode_event:?}"
                 )
             }
             _ => {}
