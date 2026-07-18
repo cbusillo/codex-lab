@@ -8,6 +8,7 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
+use codex_auto_review::AutoReviewBudget;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -26,6 +27,7 @@ use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
 use codex_config::ValidationConfig;
 use codex_config::config_toml::AgentRoleBackendToml;
+use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
@@ -167,6 +169,45 @@ pub(crate) use resolved_permission_profile::PermissionProfileState;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
 pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES: usize = 120_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS: u64 = 5 * 60 * 1_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS: u64 = 250_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS: usize = 20;
+
+fn resolve_background_auto_review_budget(
+    auto_review: Option<&AutoReviewToml>,
+) -> std::io::Result<AutoReviewBudget> {
+    let max_elapsed_seconds = auto_review
+        .and_then(|config| config.background_max_elapsed_seconds)
+        .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS / 1_000);
+    let budget = AutoReviewBudget {
+        max_scope_bytes: auto_review
+            .and_then(|config| config.background_max_diff_bytes)
+            .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES),
+        max_elapsed_ms: max_elapsed_seconds.checked_mul(1_000).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "[auto_review] background_max_elapsed_seconds is too large",
+            )
+        })?,
+        max_total_tokens: auto_review
+            .and_then(|config| config.background_max_total_tokens)
+            .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS),
+        max_output_bytes: auto_review
+            .and_then(|config| config.background_max_output_bytes)
+            .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES),
+        max_findings: auto_review
+            .and_then(|config| config.background_max_findings)
+            .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS),
+    };
+    budget.validate().map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid [auto_review] background budget: {err}"),
+        )
+    })?;
+    Ok(budget)
+}
 
 /// Compatibility-only config retained so legacy `ghost_snapshot` settings
 /// continue to load even though snapshots are no longer produced.
@@ -604,11 +645,8 @@ pub struct Config {
     /// Model used specifically for review sessions.
     pub review_model: Option<String>,
 
-    /// Maximum diff size (in bytes) for automatic background reviews. Reviews
-    /// whose diff exceeds this limit are recorded as skipped rather than
-    /// launched. Corresponds to `[auto_review] background_max_diff_bytes` in
-    /// config.toml.
-    pub background_auto_review_max_diff_bytes: Option<usize>,
+    /// Effective hard limits for automatic background reviews.
+    pub background_auto_review_budget: AutoReviewBudget,
 
     /// Patch-local validation policy.
     pub validation: ValidationConfig,
@@ -3541,11 +3579,9 @@ impl Config {
             model,
             service_tier,
             review_model,
-            background_auto_review_max_diff_bytes: cfg
-                .auto_review
-                .as_ref()
-                .and_then(|ar| ar.background_max_diff_bytes)
-                .or(Some(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES)),
+            background_auto_review_budget: resolve_background_auto_review_budget(
+                cfg.auto_review.as_ref(),
+            )?,
             validation: cfg.validation.unwrap_or_default(),
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,

@@ -6,8 +6,13 @@ use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_shell_command_sse_response;
 use app_test_support::to_response;
 use codex_app_server_protocol::AutoReviewDetailKind;
+use codex_app_server_protocol::AutoReviewDispositionAction;
+use codex_app_server_protocol::AutoReviewDispositionActor as ApiAutoReviewDispositionActor;
+use codex_app_server_protocol::AutoReviewDispositionWriteParams;
+use codex_app_server_protocol::AutoReviewDispositionWriteResponse;
 use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
 use codex_app_server_protocol::AutoReviewFindingDetailReadResponse;
+use codex_app_server_protocol::AutoReviewFindingDisposition as ApiAutoReviewFindingDisposition;
 use codex_app_server_protocol::AutoReviewFreshness as ApiAutoReviewFreshness;
 use codex_app_server_protocol::AutoReviewRunSource as ApiAutoReviewRunSource;
 use codex_app_server_protocol::AutoReviewSummaryReadParams;
@@ -39,11 +44,17 @@ use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_auto_review::AutoReviewBudget;
+use codex_auto_review::AutoReviewDispositionActor;
+use codex_auto_review::AutoReviewFindingDisposition;
+use codex_auto_review::AutoReviewFindingDispositionRecord;
 use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunSource;
+use codex_auto_review::AutoReviewRunState;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::AutoReviewUsage;
 use codex_auto_review::ReviewCoordination;
 use codex_auto_review::SCHEMA_VERSION;
 use codex_git_utils::collect_git_info;
@@ -812,6 +823,153 @@ async fn auto_review_summary_read_returns_current_summary_and_counts() -> Result
             diagnostics.suppressed_stale_runs
         )),
         Some((1, 1, 0))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_disposition_write_updates_durable_attention_state() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    let (run, output) = sample_auto_review_run("run_disposition", &thread_cwd, "Stored body");
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), &thread_cwd);
+    let mut state = AutoReviewRunState::new(&run.run_id);
+    state.budget = Some(AutoReviewBudget {
+        max_scope_bytes: 120_000,
+        max_elapsed_ms: 300_000,
+        max_total_tokens: 250_000,
+        max_output_bytes: 65_536,
+        max_findings: 20,
+    });
+    state.usage = AutoReviewUsage {
+        scope_bytes: Some(12_000),
+        elapsed_ms: Some(5_000),
+        total_tokens: Some(25_000),
+        output_bytes: Some(2_000),
+        finding_count: Some(1),
+    };
+    state.finding_disposition = Some(AutoReviewFindingDispositionRecord {
+        disposition: AutoReviewFindingDisposition::NeedsAttention,
+        actor: AutoReviewDispositionActor::System,
+        reason: None,
+        updated_at_unix_secs: 2,
+    });
+    store.save_run_state(&state)?;
+
+    let request_id = mcp
+        .send_auto_review_disposition_write_request(AutoReviewDispositionWriteParams {
+            thread_id: thread_id.clone(),
+            run_id: run.run_id.clone(),
+            action: AutoReviewDispositionAction::Defer,
+            reason: Some("acknowledged for the next dogfood pass".to_string()),
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let response = to_response::<AutoReviewDispositionWriteResponse>(response)?;
+    assert_eq!(response.run_id, run.run_id);
+    assert_eq!(
+        response.finding_disposition.disposition,
+        ApiAutoReviewFindingDisposition::Deferred
+    );
+    assert_eq!(
+        response.finding_disposition.actor,
+        ApiAutoReviewDispositionActor::User
+    );
+
+    let summary_request_id = mcp
+        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
+        .await?;
+    let summary_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(summary_request_id)),
+    )
+    .await??;
+    let summary = to_response::<AutoReviewSummaryReadResponse>(summary_response)?;
+    let current = summary.current.expect("current run summary");
+    assert_eq!(
+        current
+            .budget
+            .as_ref()
+            .map(|budget| budget.max_total_tokens),
+        Some(250_000)
+    );
+    assert_eq!(current.usage.total_tokens, Some(25_000));
+    assert_eq!(
+        current
+            .finding_disposition
+            .as_ref()
+            .map(|record| record.disposition),
+        Some(ApiAutoReviewFindingDisposition::Deferred)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_repair_disposition_requires_durable_detail() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
+    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
+    let (run, output) = sample_auto_review_run("run_missing_detail", &thread_cwd, "Stored body");
+    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), &thread_cwd);
+    let mut state = AutoReviewRunState::new(&run.run_id);
+    state.finding_disposition = Some(AutoReviewFindingDispositionRecord {
+        disposition: AutoReviewFindingDisposition::NeedsAttention,
+        actor: AutoReviewDispositionActor::System,
+        reason: None,
+        updated_at_unix_secs: 2,
+    });
+    store.save_run_state(&state)?;
+    std::fs::remove_file(store.output_path(&run.run_id)?)?;
+
+    let request_id = mcp
+        .send_auto_review_disposition_write_request(AutoReviewDispositionWriteParams {
+            thread_id,
+            run_id: run.run_id.clone(),
+            action: AutoReviewDispositionAction::Repair,
+            reason: None,
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert!(
+        error
+            .error
+            .message
+            .contains("auto review repair detail is unavailable"),
+        "unexpected message: {}",
+        error.error.message
+    );
+    let persisted_state = store
+        .load_run_state(&run.run_id)?
+        .expect("durable run state");
+    assert_eq!(
+        persisted_state
+            .finding_disposition
+            .as_ref()
+            .map(|record| record.disposition),
+        Some(AutoReviewFindingDisposition::NeedsAttention)
     );
 
     Ok(())

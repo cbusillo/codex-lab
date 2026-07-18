@@ -4,6 +4,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::AutoReviewDispositionHandler;
 use crate::tools::handlers::CodeBridgeHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
@@ -646,6 +647,9 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     let environment_mode = turn_context.tool_environment_mode();
 
     planned_tools.add(PlanHandler);
+    if !turn_context.session_source.is_non_root_agent() {
+        planned_tools.add(AutoReviewDispositionHandler);
+    }
     let code_bridge_tool_name = ToolName::plain(CODE_BRIDGE_TOOL_NAME);
     let code_bridge_owned_by_extension_tool = context
         .extension_tool_executors

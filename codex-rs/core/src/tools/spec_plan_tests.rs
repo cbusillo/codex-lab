@@ -192,6 +192,23 @@ async fn probe(configure_turn: impl FnOnce(&mut TurnContext)) -> ToolPlanProbe {
     probe_with(configure_turn, ToolPlanInputs::default()).await
 }
 
+#[tokio::test]
+async fn root_session_exposes_auto_review_disposition() {
+    let plan = probe(|_| {}).await;
+    plan.assert_visible_contains(&["auto_review_disposition"]);
+    plan.assert_registered_contains(&["auto_review_disposition"]);
+}
+
+#[tokio::test]
+async fn review_subagent_cannot_disposition_findings() {
+    let plan = probe(|turn| {
+        turn.session_source = SessionSource::SubAgent(SubAgentSource::Review);
+    })
+    .await;
+    plan.assert_visible_lacks(&["auto_review_disposition"]);
+    plan.assert_registered_lacks(&["auto_review_disposition"]);
+}
+
 fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
     if enabled {
         turn.features

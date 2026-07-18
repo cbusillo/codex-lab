@@ -3,6 +3,7 @@ use codex_auto_review::AutoReviewRunFreshness;
 use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::AutoReviewTerminalReason;
 use codex_auto_review::ReviewCoordination;
 use codex_auto_review::SCHEMA_VERSION as AUTO_REVIEW_SCHEMA_VERSION;
 use codex_core::CodexThread;
@@ -374,6 +375,27 @@ async fn review_op_with_persistence_writes_auto_review_run() {
     assert_eq!(run.finding_digests.len(), 1);
     assert_eq!(run.finding_digests[0].finding_id, "f1");
     assert_eq!(run.finding_digests[0].title, "Persist this finding");
+    let state = AutoReviewStore::for_scope(
+        codex_home.path(),
+        run.target
+            .worktree_path
+            .as_deref()
+            .expect("manual review worktree path"),
+    )
+    .load_run_state(&run.run_id)
+    .expect("load manual auto review state")
+    .expect("manual auto review state");
+    let disposition = state
+        .finding_disposition
+        .expect("manual findings should require disposition");
+    assert_eq!(
+        disposition.disposition,
+        codex_auto_review::AutoReviewFindingDisposition::NeedsAttention
+    );
+    assert_eq!(
+        disposition.actor,
+        codex_auto_review::AutoReviewDispositionActor::System
+    );
     let detail = load_auto_review_finding_detail(codex_home.path(), &run.run_id, "f1")
         .expect("load auto review finding detail");
     assert!(detail.content.contains("Persist this finding"));
@@ -2201,7 +2223,7 @@ async fn automatic_background_review_skips_oversized_diff() -> anyhow::Result<()
     let test = test_codex()
         .with_home(codex_home.clone())
         .with_config(|config| {
-            config.background_auto_review_max_diff_bytes = Some(1);
+            config.background_auto_review_budget.max_scope_bytes = 1;
         })
         .build_with_streaming_server(&server)
         .await?;
@@ -2273,7 +2295,7 @@ async fn automatic_background_review_skips_oversized_wrapped_scope() -> anyhow::
     let test = test_codex()
         .with_home(codex_home.clone())
         .with_config(|config| {
-            config.background_auto_review_max_diff_bytes = Some(360);
+            config.background_auto_review_budget.max_scope_bytes = 360;
         })
         .build_with_streaming_server(&server)
         .await?;
@@ -2314,6 +2336,185 @@ async fn automatic_background_review_skips_oversized_wrapped_scope() -> anyhow::
         .await;
 
     let _codex_home_guard = codex_home;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_cancels_at_token_budget() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_token_budget.txt\n+review me\n*** End Patch";
+    let review_json = serde_json::json!({
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "Review completed above the configured token ceiling.",
+        "overall_confidence_score": 0.9
+    })
+    .to_string();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                ev_response_created("resp-1"),
+                ev_apply_patch_custom_tool_call("auto-bg-token-budget", patch),
+                ev_completed("resp-1"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                ev_assistant_message("msg-1", "patch applied"),
+                ev_completed("resp-2"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                ev_assistant_message("msg-2", &review_json),
+                ev_completed_with_tokens("resp-3", 101),
+            ]),
+        }],
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .with_config(|config| {
+            config.background_auto_review_budget.max_total_tokens = 100;
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file for a bounded background review")
+        .await?;
+    let pending = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+    let running = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Running,
+        Some(pending.run_id.as_str()),
+    )
+    .await;
+    let cancelled = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Cancelled,
+        Some(running.run_id.as_str()),
+    )
+    .await;
+
+    assert!(
+        cancelled
+            .error_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("101 tokens >= 100 tokens"))
+    );
+    let run = load_single_auto_review_run(codex_home.path())?;
+    let state = load_auto_review_run_state(codex_home.path(), &run.run_id)?;
+    assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(run.cancel_reason.as_deref(), Some("budget_total_tokens"));
+    assert_eq!(run.token_count, Some(101));
+    assert_eq!(state.usage.total_tokens, Some(101));
+    assert_eq!(
+        state.budget.map(|budget| budget.max_total_tokens),
+        Some(100)
+    );
+    assert_eq!(
+        state.terminal_reason,
+        Some(AutoReviewTerminalReason::BudgetTotalTokens)
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_background_review_cancels_at_elapsed_budget() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let patch = "*** Begin Patch\n*** Add File: auto_background_review_elapsed_budget.txt\n+review me\n*** End Patch";
+    let (release_review_tx, release_review_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                ev_response_created("resp-1"),
+                ev_apply_patch_custom_tool_call("auto-bg-elapsed-budget", patch),
+                ev_completed("resp-1"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                ev_assistant_message("msg-1", "patch applied"),
+                ev_completed("resp-2"),
+            ]),
+        }],
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: streaming_sse_event(ev_response_created("resp-3")),
+            },
+            StreamingSseChunk {
+                gate: Some(release_review_rx),
+                body: streaming_sse_event(ev_completed("resp-3")),
+            },
+        ],
+    ])
+    .await;
+    let codex_home = Arc::new(TempDir::new()?);
+    let test = test_codex()
+        .with_home(codex_home.clone())
+        .with_config(|config| {
+            config.background_auto_review_budget.max_elapsed_ms = 100;
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+    init_git_repo(test.cwd_path());
+
+    test.submit_turn("create a file for an elapsed-budget review")
+        .await?;
+    let pending = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Pending,
+        None,
+    )
+    .await;
+    let running = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Running,
+        Some(pending.run_id.as_str()),
+    )
+    .await;
+    let cancelled = wait_for_background_auto_review_status(
+        test.codex.as_ref(),
+        BackgroundAutoReviewStatus::Cancelled,
+        Some(running.run_id.as_str()),
+    )
+    .await;
+
+    assert!(
+        cancelled
+            .error_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("elapsed budget"))
+    );
+    let run = load_single_auto_review_run(codex_home.path())?;
+    let state = load_auto_review_run_state(codex_home.path(), &run.run_id)?;
+    assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(run.cancel_reason.as_deref(), Some("budget_elapsed"));
+    assert_eq!(
+        state.terminal_reason,
+        Some(AutoReviewTerminalReason::BudgetElapsed)
+    );
+    assert!(state.usage.elapsed_ms.is_some_and(|elapsed| elapsed >= 100));
+
+    drop(release_review_tx);
     server.shutdown().await;
     Ok(())
 }
@@ -3587,6 +3788,26 @@ fn load_auto_review_finding_detail(
         }
     }
     anyhow::bail!("auto review run {run_id} not found")
+}
+
+fn load_auto_review_run_state(
+    codex_home: &std::path::Path,
+    run_id: &str,
+) -> anyhow::Result<codex_auto_review::AutoReviewRunState> {
+    let review_dir = codex_home.join("state/review");
+    for entry in std::fs::read_dir(&review_dir)
+        .map_err(|err| anyhow::anyhow!("auto review state dir: {err}"))?
+    {
+        let entry = entry?;
+        let store_root = entry.path().join("auto-review");
+        let store = AutoReviewStore::from_store_root(store_root);
+        if store.load_run(run_id).is_ok()
+            && let Some(state) = store.load_run_state(run_id)?
+        {
+            return Ok(state);
+        }
+    }
+    anyhow::bail!("auto review run state {run_id} not found")
 }
 
 async fn submit_user_input_without_waiting(

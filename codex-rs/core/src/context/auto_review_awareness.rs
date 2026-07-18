@@ -1,8 +1,12 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
+use codex_auto_review::AutoReviewFindingDisposition;
 use codex_auto_review::AutoReviewLedgerProjection;
 use codex_auto_review::AutoReviewRun;
+use codex_auto_review::AutoReviewRunState;
+use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
 use codex_auto_review::AutoReviewSummary;
@@ -83,7 +87,8 @@ async fn build_auto_review_awareness_inner(
     let active_review_target = ReviewTarget::UncommittedChanges;
     let active_target = collect_auto_review_target(codex_home, cwd, &active_review_target).await;
     let store_scope = active_target.worktree_path.as_deref().unwrap_or(cwd);
-    let runs = AutoReviewStore::for_scope(codex_home, store_scope).list_runs()?;
+    let store = AutoReviewStore::for_scope(codex_home, store_scope);
+    let runs = store.list_runs()?;
     if runs.is_empty()
         && active_snapshot.pending_run_id.is_none()
         && active_snapshot.running_run_id.is_none()
@@ -91,16 +96,47 @@ async fn build_auto_review_awareness_inner(
         return Ok(None);
     }
 
-    Ok(render_awareness(
+    let run_states = runs
+        .iter()
+        .filter(|run| {
+            run.finding_count > 0 && run.can_read_detail(&active_target, &active_review_target)
+        })
+        .filter_map(|run| {
+            store
+                .load_run_state(&run.run_id)
+                .ok()
+                .flatten()
+                .map(|state| (run.run_id.clone(), state))
+        })
+        .collect();
+    Ok(render_awareness_with_states(
         &runs,
+        &run_states,
         &active_target,
         &active_review_target,
         &active_snapshot,
     ))
 }
 
+#[cfg(test)]
 fn render_awareness(
     runs: &[AutoReviewRun],
+    active_target: &AutoReviewRunTarget,
+    active_review_target: &ReviewTarget,
+    active_snapshot: &BackgroundAutoReviewActiveSnapshot,
+) -> Option<AutoReviewAwareness> {
+    render_awareness_with_states(
+        runs,
+        &BTreeMap::new(),
+        active_target,
+        active_review_target,
+        active_snapshot,
+    )
+}
+
+fn render_awareness_with_states(
+    runs: &[AutoReviewRun],
+    run_states: &BTreeMap<String, AutoReviewRunState>,
     active_target: &AutoReviewRunTarget,
     active_review_target: &ReviewTarget,
     active_snapshot: &BackgroundAutoReviewActiveSnapshot,
@@ -124,6 +160,9 @@ fn render_awareness(
     }
 
     for run in &visible_runs {
+        if !run_has_actionable_disposition(run, run_states.get(&run.run_id)) {
+            continue;
+        }
         let summary = run.project(active_target, active_review_target).summary;
         if !summary.content.is_empty() {
             match &current_summary {
@@ -134,9 +173,19 @@ fn render_awareness(
     }
 
     let current_finding_lines = current_summary.map(|(run, summary)| {
+        let disposition = run_states
+            .get(&run.run_id)
+            .and_then(|state| state.finding_disposition.as_ref())
+            .map(|record| match record.disposition {
+                AutoReviewFindingDisposition::NeedsAttention => "needs_attention",
+                AutoReviewFindingDisposition::Repairing => "repairing",
+                AutoReviewFindingDisposition::Deferred => "deferred",
+                AutoReviewFindingDisposition::Obsolete => "obsolete",
+            })
+            .unwrap_or("needs_attention");
         let mut lines = vec![format!(
-            "- current findings from run {}: {} rendered, {} omitted",
-            run.run_id, summary.rendered_findings, summary.omitted_findings
+            "- current findings from run {}: disposition={disposition}, {} rendered, {} omitted",
+            run.run_id, summary.rendered_findings, summary.omitted_findings,
         )];
         lines.extend(summary.content.lines().map(|line| format!("  {line}")));
         if summary.truncated {
@@ -145,10 +194,12 @@ fn render_awareness(
         lines
     });
 
-    if status_lines.is_empty()
-        && current_finding_lines.is_none()
-        && projection.status_counts.is_empty()
-    {
+    let has_diagnostic_state = visible_runs.iter().any(|run| {
+        !matches!(run.status, AutoReviewRunStatus::Completed)
+            || (run.finding_count > 0
+                && run_has_actionable_disposition(run, run_states.get(&run.run_id)))
+    });
+    if status_lines.is_empty() && current_finding_lines.is_none() && !has_diagnostic_state {
         return None;
     }
 
@@ -164,14 +215,18 @@ fn render_awareness(
         lines.push(format!(
             "- finding detail is available by stable run_id/finding_id; normal turns include summaries only (max {SUMMARY_MAX_BYTES} bytes)."
         ));
+        lines.push(
+            "- disposition required: use auto_review_disposition with repair, defer, or obsolete (obsolete requires a reason)."
+                .to_string(),
+        );
     }
-    if !projection.status_counts.is_empty() {
+    if has_diagnostic_state && !projection.status_counts.is_empty() {
         lines.push("- recent run status counts:".to_string());
         for count in projection.status_counts.iter().take(MAX_STATUS_LINES) {
             lines.push(format!("  - {}: {}", count.label(), count.count));
         }
     }
-    if let Some(diagnostics) = projection.diagnostics {
+    if has_diagnostic_state && let Some(diagnostics) = projection.diagnostics {
         lines.push(format!(
             "- recent run diagnostics: {}",
             diagnostics.compact_line()
@@ -179,6 +234,19 @@ fn render_awareness(
     }
 
     AutoReviewAwareness::new(lines.join("\n"))
+}
+
+fn run_has_actionable_disposition(run: &AutoReviewRun, state: Option<&AutoReviewRunState>) -> bool {
+    run.finding_count > 0
+        && state
+            .and_then(|state| state.finding_disposition.as_ref())
+            .is_none_or(|record| {
+                matches!(
+                    record.disposition,
+                    AutoReviewFindingDisposition::NeedsAttention
+                        | AutoReviewFindingDisposition::Repairing
+                )
+            })
 }
 
 fn run_is_visible_for_awareness(run: &AutoReviewRun, active_review_target: &ReviewTarget) -> bool {

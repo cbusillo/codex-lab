@@ -502,6 +502,10 @@ async fn stale_auto_review_summary_result_is_ignored() {
         omitted_findings: 0,
         truncated: false,
         content: String::new(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
     };
 
     chat.handle_auto_review_summary_loaded(

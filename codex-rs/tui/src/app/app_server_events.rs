@@ -4,6 +4,7 @@ use super::App;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
+use super::background_auto_review_status_has_summary;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
@@ -18,7 +19,6 @@ use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
 use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
-use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_protocol::ThreadId;
@@ -151,7 +151,7 @@ impl App {
 
         let auto_review_summary_target = match &notification {
             ServerNotification::BackgroundAutoReviewStatusChanged(notification)
-                if notification.status == BackgroundAutoReviewStatus::Completed =>
+                if background_auto_review_status_has_summary(notification.status) =>
             {
                 ThreadId::from_string(&notification.thread_id)
                     .ok()

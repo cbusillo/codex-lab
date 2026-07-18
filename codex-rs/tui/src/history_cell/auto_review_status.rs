@@ -2,10 +2,12 @@
 
 use super::*;
 use codex_app_server_protocol::AutoReviewDiagnosticsSummary;
+use codex_app_server_protocol::AutoReviewFindingDisposition;
 use codex_app_server_protocol::AutoReviewFreshness;
 use codex_app_server_protocol::AutoReviewRunSummary;
 use codex_app_server_protocol::AutoReviewStatusCount;
 use codex_app_server_protocol::AutoReviewSummaryReadResponse;
+use codex_app_server_protocol::AutoReviewTerminalReason;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::ReviewTarget;
@@ -151,6 +153,37 @@ fn push_summary_metadata(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRun
     if summary.truncated {
         spans.push(" · truncated".dim());
     }
+    if let Some(record) = summary.finding_disposition.as_ref() {
+        spans.push(" · ".dim());
+        spans.push(Span::from(disposition_label(record.disposition)).yellow());
+    }
+    if let Some(reason) = summary.terminal_reason {
+        spans.push(" · ".dim());
+        spans.push(Span::from(format!("stopped: {}", terminal_reason_label(reason))).red());
+    }
+    if let Some(budget) = summary.budget.as_ref() {
+        spans.push(" · ".dim());
+        spans.push(
+            Span::from(format!(
+                "elapsed {}/{} · tokens {}/{} · scope {}/{} · output {}/{} · findings {}/{}",
+                display_optional_duration(summary.usage.elapsed_ms),
+                display_duration(budget.max_elapsed_ms),
+                display_optional_count(summary.usage.total_tokens),
+                display_count(budget.max_total_tokens),
+                display_optional_bytes(summary.usage.scope_bytes),
+                display_bytes(budget.max_scope_bytes),
+                display_optional_bytes(summary.usage.output_bytes),
+                display_bytes(budget.max_output_bytes),
+                summary
+                    .usage
+                    .finding_count
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                budget.max_findings,
+            ))
+            .dim(),
+        );
+    }
     if let Some(error_summary) = summary
         .error_summary
         .as_deref()
@@ -226,6 +259,71 @@ fn finding_count_label(count: usize) -> String {
         0 => "found no findings".to_string(),
         1 => "found 1 finding".to_string(),
         count => format!("found {count} findings"),
+    }
+}
+
+fn disposition_label(disposition: AutoReviewFindingDisposition) -> &'static str {
+    match disposition {
+        AutoReviewFindingDisposition::NeedsAttention => "needs attention",
+        AutoReviewFindingDisposition::Repairing => "repairing",
+        AutoReviewFindingDisposition::Deferred => "deferred",
+        AutoReviewFindingDisposition::Obsolete => "obsolete",
+    }
+}
+
+fn terminal_reason_label(reason: AutoReviewTerminalReason) -> &'static str {
+    match reason {
+        AutoReviewTerminalReason::BudgetScope => "scope budget",
+        AutoReviewTerminalReason::BudgetElapsed => "elapsed budget",
+        AutoReviewTerminalReason::BudgetTotalTokens => "token budget",
+        AutoReviewTerminalReason::BudgetOutput => "output budget",
+        AutoReviewTerminalReason::BudgetFindingCount => "finding budget",
+        AutoReviewTerminalReason::EmptyOutput => "empty output",
+        AutoReviewTerminalReason::StaleTarget => "stale target",
+    }
+}
+
+fn display_optional_duration(milliseconds: Option<u64>) -> String {
+    milliseconds
+        .map(display_duration)
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn display_duration(milliseconds: u64) -> String {
+    if milliseconds >= 60_000 {
+        format!("{}m", milliseconds / 60_000)
+    } else if milliseconds >= 1_000 {
+        format!("{}s", milliseconds / 1_000)
+    } else {
+        format!("{milliseconds}ms")
+    }
+}
+
+fn display_optional_count(count: Option<u64>) -> String {
+    count.map(display_count).unwrap_or_else(|| "?".to_string())
+}
+
+fn display_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{}m", count / 1_000_000)
+    } else if count >= 1_000 {
+        format!("{}k", count / 1_000)
+    } else {
+        count.to_string()
+    }
+}
+
+fn display_optional_bytes(bytes: Option<usize>) -> String {
+    bytes.map(display_bytes).unwrap_or_else(|| "?".to_string())
+}
+
+fn display_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{}MiB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{}KiB", bytes / 1024)
+    } else {
+        format!("{bytes}B")
     }
 }
 

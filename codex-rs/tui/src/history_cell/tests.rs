@@ -9,12 +9,18 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::session_state::ThreadSessionState;
 use crate::wrapping::word_wrap_lines;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AutoReviewBudget;
 use codex_app_server_protocol::AutoReviewDiagnosticsSummary;
+use codex_app_server_protocol::AutoReviewDispositionActor;
+use codex_app_server_protocol::AutoReviewFindingDisposition;
+use codex_app_server_protocol::AutoReviewFindingDispositionRecord;
 use codex_app_server_protocol::AutoReviewFreshness;
 use codex_app_server_protocol::AutoReviewRunSource;
 use codex_app_server_protocol::AutoReviewRunSummary;
 use codex_app_server_protocol::AutoReviewStatusCount;
 use codex_app_server_protocol::AutoReviewSummaryReadResponse;
+use codex_app_server_protocol::AutoReviewTerminalReason;
+use codex_app_server_protocol::AutoReviewUsage;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::McpAuthStatus;
@@ -246,6 +252,10 @@ fn auto_review_summary(
         omitted_findings: 0,
         truncated: false,
         content: content.to_string(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
     }
 }
 
@@ -288,6 +298,74 @@ fn auto_review_summary_clean_snapshot() {
   completed · current · code-gpt-5.5
   No findings.
 ");
+}
+
+#[test]
+fn auto_review_summary_surfaces_budget_usage_and_terminal_reason() {
+    let mut summary = auto_review_summary(
+        "run-budget",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 0,
+        "",
+    );
+    summary.status = BackgroundAutoReviewStatus::Cancelled;
+    summary.error_summary = Some("background review exceeded token budget".to_string());
+    summary.budget = Some(AutoReviewBudget {
+        max_scope_bytes: 120 * 1024,
+        max_elapsed_ms: 5 * 60 * 1_000,
+        max_total_tokens: 250_000,
+        max_output_bytes: 64 * 1024,
+        max_findings: 20,
+    });
+    summary.usage = AutoReviewUsage {
+        scope_bytes: Some(32 * 1024),
+        elapsed_ms: Some(4 * 60 * 1_000),
+        total_tokens: Some(250_000),
+        output_bytes: None,
+        finding_count: None,
+    };
+    summary.terminal_reason = Some(AutoReviewTerminalReason::BudgetTotalTokens);
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(summary),
+        current: None,
+        status_counts: Vec::new(),
+        diagnostics: None,
+    };
+
+    let rendered =
+        render_lines(&new_auto_review_summary_cell(&response).display_lines(160)).join("\n");
+
+    assert!(rendered.contains("stopped: token budget"));
+    assert!(rendered.contains("elapsed 4m/5m"));
+    assert!(rendered.contains("tokens 250k/250k"));
+    assert!(rendered.contains("scope 32KiB/120KiB"));
+}
+
+#[test]
+fn auto_review_summary_surfaces_finding_disposition() {
+    let mut summary = auto_review_summary(
+        "run-attention",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 1,
+        "[P1] f1: Fix the regression",
+    );
+    summary.finding_disposition = Some(AutoReviewFindingDispositionRecord {
+        disposition: AutoReviewFindingDisposition::NeedsAttention,
+        actor: AutoReviewDispositionActor::System,
+        reason: None,
+        updated_at: 1_700_000_001_000,
+    });
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(summary.clone()),
+        current: Some(summary),
+        status_counts: Vec::new(),
+        diagnostics: None,
+    };
+
+    let rendered =
+        render_lines(&new_auto_review_summary_cell(&response).display_lines(120)).join("\n");
+
+    assert!(rendered.contains("needs attention"));
 }
 
 #[test]

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -33,10 +34,13 @@ const STATE_DIR: &str = "state";
 const REVIEW_DIR: &str = "review";
 const RUNS_FILENAME: &str = "runs.json";
 const RUN_METADATA_DIR: &str = "run-metadata";
+const RUN_STATES_DIR: &str = "run-states";
 const OUTPUTS_DIR: &str = "outputs";
 const OMITTED_TEMPLATE_PREFIX: &str = "... ";
 const OMITTED_TEMPLATE_SUFFIX: &str = " more finding(s) omitted";
 const DUPLICATE_AUTO_REVIEW_SCOPE_CANCEL_REASON: &str = "duplicate_auto_review_scope";
+
+static AUTO_REVIEW_RUN_STATE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct AutoReviewStore {
@@ -377,6 +381,12 @@ impl AutoReviewStore {
                 "failed to prune stale auto review run metadata"
             );
         }
+        if let Err(err) = self.prune_run_states_except(&index) {
+            tracing::warn!(
+                error = %err,
+                "failed to prune stale auto review run states"
+            );
+        }
         Ok(path)
     }
 
@@ -563,6 +573,54 @@ impl AutoReviewStore {
         Ok(run)
     }
 
+    pub fn load_run_state(&self, run_id: &str) -> Result<Option<AutoReviewRunState>> {
+        validate_safe_id(run_id).context("auto review run_id")?;
+        self.load_run_state_unlocked(run_id)
+    }
+
+    pub fn save_run_state(&self, state: &AutoReviewRunState) -> Result<PathBuf> {
+        let _guard = AUTO_REVIEW_RUN_STATE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        self.save_run_state_unlocked(state)
+    }
+
+    pub fn update_run_state<F>(&self, run_id: &str, update: F) -> Result<AutoReviewRunState>
+    where
+        F: FnOnce(&mut AutoReviewRunState) -> Result<()>,
+    {
+        validate_safe_id(run_id).context("auto review run_id")?;
+        let _guard = AUTO_REVIEW_RUN_STATE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut state = self
+            .load_run_state_unlocked(run_id)?
+            .unwrap_or_else(|| AutoReviewRunState::new(run_id));
+        update(&mut state)?;
+        state.validate()?;
+        self.save_run_state_unlocked(&state)?;
+        Ok(state)
+    }
+
+    pub fn set_finding_disposition(
+        &self,
+        run_id: &str,
+        disposition: AutoReviewFindingDispositionRecord,
+    ) -> Result<AutoReviewRunState> {
+        let run = self.load_run(run_id)?;
+        if run.status != AutoReviewRunStatus::Completed {
+            anyhow::bail!("auto review run is not completed: {run_id}");
+        }
+        if run.finding_count == 0 {
+            anyhow::bail!("auto review run has no findings to disposition: {run_id}");
+        }
+        disposition.validate()?;
+        self.update_run_state(run_id, |state| {
+            state.finding_disposition = Some(disposition);
+            Ok(())
+        })
+    }
+
     pub fn list_runs(&self) -> Result<Vec<AutoReviewRun>> {
         let mut runs = self.load_index_for_read()?.runs;
         runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
@@ -656,6 +714,36 @@ impl AutoReviewStore {
             .join(format!("{run_id}.json")))
     }
 
+    fn run_state_path(&self, run_id: &str) -> Result<PathBuf> {
+        validate_safe_id(run_id).context("auto review run_id")?;
+        Ok(self
+            .root
+            .join(RUN_STATES_DIR)
+            .join(format!("{run_id}.json")))
+    }
+
+    fn load_run_state_unlocked(&self, run_id: &str) -> Result<Option<AutoReviewRunState>> {
+        let path = self.run_state_path(run_id)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let json = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read auto review run state {run_id}"))?;
+        let state: AutoReviewRunState = serde_json::from_str(&json)
+            .with_context(|| format!("failed to parse auto review run state {run_id}"))?;
+        state.validate()?;
+        Ok(Some(state))
+    }
+
+    fn save_run_state_unlocked(&self, state: &AutoReviewRunState) -> Result<PathBuf> {
+        state.validate()?;
+        let path = self.run_state_path(&state.run_id)?;
+        let json = serde_json::to_string_pretty(state)?;
+        write_atomically(&path, &format!("{json}\n"))
+            .with_context(|| format!("failed to write auto review run state {}", path.display()))?;
+        Ok(path)
+    }
+
     fn save_run_metadata(&self, run: &AutoReviewRun) -> Result<()> {
         let path = self.run_metadata_path(&run.run_id)?;
         let json = serde_json::to_string_pretty(run)?;
@@ -711,6 +799,45 @@ impl AutoReviewStore {
                         "failed to remove auto review run metadata {}",
                         path.display()
                     )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prune_run_states_except(&self, index: &AutoReviewRunsIndex) -> Result<()> {
+        let states_dir = self.root.join(RUN_STATES_DIR);
+        if !states_dir.exists() {
+            return Ok(());
+        }
+        let retained_run_ids = index
+            .runs
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let entries = std::fs::read_dir(&states_dir).with_context(|| {
+            format!(
+                "failed to read auto review run states directory {}",
+                states_dir.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to read auto review run states directory {}",
+                    states_dir.display()
+                )
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if validate_safe_id(run_id).is_ok() && !retained_run_ids.contains(run_id) {
+                std::fs::remove_file(&path).with_context(|| {
+                    format!("failed to remove auto review run state {}", path.display())
                 })?;
             }
         }
@@ -966,6 +1093,170 @@ pub struct AutoReviewRun {
     pub omitted_finding_digest_count: usize,
 }
 
+pub const RUN_STATE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct AutoReviewRunState {
+    pub schema_version: u32,
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<AutoReviewBudget>,
+    #[serde(default)]
+    pub usage: AutoReviewUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<AutoReviewTerminalReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding_disposition: Option<AutoReviewFindingDispositionRecord>,
+}
+
+impl AutoReviewRunState {
+    pub fn new(run_id: impl Into<String>) -> Self {
+        Self {
+            schema_version: RUN_STATE_SCHEMA_VERSION,
+            run_id: run_id.into(),
+            budget: None,
+            usage: AutoReviewUsage::default(),
+            terminal_reason: None,
+            finding_disposition: None,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema_version != RUN_STATE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported auto review run state schema version: {}",
+                self.schema_version
+            );
+        }
+        validate_safe_id(&self.run_id).context("auto review run state run_id")?;
+        if let Some(budget) = &self.budget {
+            budget.validate()?;
+        }
+        if let Some(disposition) = &self.finding_disposition {
+            disposition.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct AutoReviewBudget {
+    pub max_scope_bytes: usize,
+    pub max_elapsed_ms: u64,
+    pub max_total_tokens: u64,
+    pub max_output_bytes: usize,
+    pub max_findings: usize,
+}
+
+impl AutoReviewBudget {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_scope_bytes == 0
+            || self.max_elapsed_ms == 0
+            || self.max_total_tokens == 0
+            || self.max_output_bytes == 0
+            || self.max_findings == 0
+        {
+            anyhow::bail!("auto review budget limits must all be positive");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct AutoReviewUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReviewTerminalReason {
+    BudgetScope,
+    BudgetElapsed,
+    BudgetTotalTokens,
+    BudgetOutput,
+    BudgetFindingCount,
+    EmptyOutput,
+    StaleTarget,
+}
+
+impl AutoReviewTerminalReason {
+    pub const fn cancel_reason(self) -> &'static str {
+        match self {
+            Self::BudgetScope => "budget_scope",
+            Self::BudgetElapsed => "budget_elapsed",
+            Self::BudgetTotalTokens => "budget_total_tokens",
+            Self::BudgetOutput => "budget_output",
+            Self::BudgetFindingCount => "budget_finding_count",
+            Self::EmptyOutput => "empty_output",
+            Self::StaleTarget => "stale_target",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReviewFindingDisposition {
+    NeedsAttention,
+    Repairing,
+    Deferred,
+    Obsolete,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReviewDispositionActor {
+    User,
+    Agent,
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct AutoReviewFindingDispositionRecord {
+    pub disposition: AutoReviewFindingDisposition,
+    pub actor: AutoReviewDispositionActor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub updated_at_unix_secs: i64,
+}
+
+impl AutoReviewFindingDispositionRecord {
+    fn validate(&self) -> Result<()> {
+        if matches!(self.disposition, AutoReviewFindingDisposition::Obsolete)
+            && self
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+        {
+            anyhow::bail!("obsolete auto review disposition requires a reason");
+        }
+        if self
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.len() > SUMMARY_MAX_FIELD_BYTES)
+        {
+            anyhow::bail!("auto review disposition reason exceeds {SUMMARY_MAX_FIELD_BYTES} bytes");
+        }
+        Ok(())
+    }
+}
+
 impl AutoReviewRun {
     pub fn sort_key(&self) -> (i64, &str) {
         (
@@ -1053,10 +1344,12 @@ impl AutoReviewRun {
     }
 
     pub fn freshness(&self, active_target: &AutoReviewRunTarget) -> AutoReviewFreshness {
-        if self.freshness == AutoReviewRunFreshness::Lost {
-            return AutoReviewFreshness::Stale;
-        }
-        if self.freshness == AutoReviewRunFreshness::Superseded {
+        if matches!(
+            self.freshness,
+            AutoReviewRunFreshness::Lost
+                | AutoReviewRunFreshness::Superseded
+                | AutoReviewRunFreshness::Obsolete
+        ) {
             return AutoReviewFreshness::Stale;
         }
         self.target.freshness(active_target)
