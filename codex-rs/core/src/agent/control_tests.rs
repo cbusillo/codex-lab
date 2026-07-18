@@ -3,6 +3,7 @@ use crate::CodexThread;
 use crate::StateDbHandle;
 use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
+use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
 use crate::config::AgentRoleBackendConfig;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
@@ -3371,10 +3372,22 @@ async fn harness_with_external_descendant() -> (
         .await;
 
     let external_thread_id = ThreadId::new();
+    let external_backend = ExternalCommandAgentBackendConfig {
+        command: "/bin/true".to_string(),
+        protocol: ExternalCommandProtocol::RawCli,
+        ..Default::default()
+    };
     harness.control.state.register_external_agent(
         external_thread_id,
         child_thread_id,
         AgentStatus::PendingInit,
+        ExternalAgentProviderProvenance::new(
+            Some("external"),
+            &external_backend,
+            harness.config.cwd.as_path(),
+            true,
+            /*cli_version*/ None,
+        ),
     );
     harness
         .control

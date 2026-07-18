@@ -67,6 +67,7 @@ async fn handle_close_agent(
             .into(),
         )
         .await;
+    let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     let status = match session
         .services
         .agent_control
@@ -79,6 +80,14 @@ async fn handle_close_agent(
         }
         Err(err) => {
             let status = session.services.agent_control.get_status(agent_id).await;
+            let status = if hide_agent_metadata {
+                session
+                    .services
+                    .agent_control
+                    .redact_external_status(agent_id, status)
+            } else {
+                status
+            };
             session
                 .send_event(
                     &turn,
@@ -96,6 +105,14 @@ async fn handle_close_agent(
                 .await;
             return Err(collab_agent_error(agent_id, err));
         }
+    };
+    let status = if hide_agent_metadata {
+        session
+            .services
+            .agent_control
+            .redact_external_status(agent_id, status)
+    } else {
+        status
     };
     let result = session
         .services

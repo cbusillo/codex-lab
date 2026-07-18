@@ -13,21 +13,18 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
-use serde_json::Value;
 use serde_json::json;
 
 const PROMPT: &str = "probe the configured Copilot agent";
 const AGENT_MESSAGE: &str = "reply without changing files";
 const SPAWN_CALL_ID: &str = "spawn-copilot-probe";
-const WAIT_CALL_ID: &str = "wait-copilot-probe";
-const LIST_CALL_ID: &str = "list-copilot-probe";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     String::from_utf8_lossy(&request.body).contains(text)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wrong_copilot_executable_surfaces_actionable_agent_status() -> Result<()> {
+async fn wrong_copilot_executable_fails_explicit_preflight() -> Result<()> {
     let server = start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": AGENT_MESSAGE,
@@ -49,33 +46,9 @@ async fn wrong_copilot_executable_surfaces_actionable_agent_status() -> Result<(
         ]),
     )
     .await;
-    responses::mount_sse_once_match(
-        &server,
-        |request: &wiremock::Request| {
-            body_contains(request, SPAWN_CALL_ID) && !body_contains(request, WAIT_CALL_ID)
-        },
-        sse(vec![
-            ev_response_created("resp-copilot-wait"),
-            ev_function_call(WAIT_CALL_ID, "wait_agent", r#"{"timeout_ms":100}"#),
-            ev_completed("resp-copilot-wait"),
-        ]),
-    )
-    .await;
-    responses::mount_sse_once_match(
-        &server,
-        |request: &wiremock::Request| {
-            body_contains(request, WAIT_CALL_ID) && !body_contains(request, LIST_CALL_ID)
-        },
-        sse(vec![
-            ev_response_created("resp-copilot-list"),
-            ev_function_call(LIST_CALL_ID, "list_agents", "{}"),
-            ev_completed("resp-copilot-list"),
-        ]),
-    )
-    .await;
     let final_response = responses::mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| body_contains(request, LIST_CALL_ID),
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
         sse(vec![
             ev_response_created("resp-copilot-complete"),
             ev_assistant_message("msg-copilot-complete", "probe complete"),
@@ -122,27 +95,16 @@ async fn wrong_copilot_executable_surfaces_actionable_agent_status() -> Result<(
 
     let output_item = final_response
         .single_request()
-        .function_call_output(LIST_CALL_ID);
+        .function_call_output(SPAWN_CALL_ID);
     let output = output_item
         .get("output")
-        .and_then(Value::as_str)
-        .expect("list_agents output string");
-    let output: Value = serde_json::from_str(output)?;
-    let agent = output["agents"]
-        .as_array()
-        .and_then(|agents| {
-            agents
-                .iter()
-                .find(|agent| agent["agent_name"] == "/root/copilot_probe")
-        })
-        .expect("Copilot probe agent");
+        .and_then(serde_json::Value::as_str)
+        .expect("spawn_agent output string");
     assert_eq!(
-        agent,
-        &json!({
-            "agent_name": "/root/copilot_probe",
-            "agent_status": {"errored": expected_error},
-            "last_task_message": AGENT_MESSAGE,
-        })
+        output,
+        format!(
+            "Explicit external agent `copilot_probe` failed `launch_failed` preflight: {expected_error}"
+        )
     );
 
     Ok(())

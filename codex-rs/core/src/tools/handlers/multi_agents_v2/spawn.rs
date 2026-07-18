@@ -71,12 +71,13 @@ async fn handle_spawn_agent(
                 .to_string(),
         ));
     }
-    let routing = select_provider_route(
-        turn.config.as_ref(),
-        explicit_role_name,
-        args.task_kind,
-        args.task_size,
-    );
+    let mut config =
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    let routing =
+        select_provider_route(&config, explicit_role_name, args.task_kind, args.task_size)
+            .await
+            .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
     let role_name = routing.role_name();
     let fork_mode = args.fork_mode(routing.is_external())?;
     if routing.is_external() && fork_mode.is_some() {
@@ -106,8 +107,6 @@ async fn handle_spawn_agent(
             .into(),
         )
         .await;
-    let mut config =
-        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }
@@ -170,6 +169,7 @@ async fn handle_spawn_agent(
                 fork_mode,
                 parent_thread_id: Some(session.thread_id),
                 environments: Some(turn.environments.to_selections()),
+                external_agent_provider: routing.provider().cloned(),
             },
         ),
     )

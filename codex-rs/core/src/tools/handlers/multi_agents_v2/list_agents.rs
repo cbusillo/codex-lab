@@ -37,6 +37,14 @@ impl ToolExecutor<ToolInvocation> for Handler {
             .list_agents(&turn.session_source, args.path_prefix.as_deref())
             .await
             .map_err(collab_spawn_error)?;
+        let agents = if turn.config.multi_agent_v2.hide_spawn_agent_metadata {
+            agents
+                .into_iter()
+                .map(ListedAgent::redact_external_metadata)
+                .collect()
+        } else {
+            agents
+        };
 
         Ok(boxed_tool_output(ListAgentsResult { agents }))
     }

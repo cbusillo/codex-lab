@@ -1,5 +1,8 @@
 use crate::agent::AgentStatus;
 use crate::agent::external_command::ExternalAgentLaunch;
+use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
+use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::external_diagnostics::redact_external_agent_status;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -62,6 +65,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
+    pub(crate) external_agent_provider: Option<ExternalAgentProviderProvenance>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +80,27 @@ pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
     pub(crate) last_task_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider: Option<ExternalAgentProviderProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure: Option<ExternalAgentFailureDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) duration_ms: Option<u64>,
+}
+
+impl ListedAgent {
+    pub(crate) fn redact_external_metadata(mut self) -> Self {
+        if self.provider.is_none() {
+            return self;
+        }
+        self.agent_status = redact_external_agent_status(self.agent_status, self.failure.as_ref());
+        self.provider = None;
+        self.failure = self
+            .failure
+            .as_ref()
+            .map(ExternalAgentFailureDetail::redacted);
+        self
+    }
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -384,6 +409,9 @@ impl AgentControl {
                 agent_name: root_path.to_string(),
                 agent_status: root_thread.agent_status().await,
                 last_task_message: Some(ROOT_LAST_TASK_MESSAGE.to_string()),
+                provider: None,
+                failure: None,
+                duration_ms: None,
             });
         }
 
@@ -404,17 +432,26 @@ impl AgentControl {
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
             let last_task_message = metadata.last_task_message.clone();
-            let agent_status = if let Some(status) = self.state.external_agent_status(thread_id) {
-                status
-            } else if let Ok(thread) = state.get_thread(thread_id).await {
-                thread.agent_status().await
-            } else {
-                continue;
-            };
+            let (agent_status, provider, failure, duration_ms) =
+                if let Some(snapshot) = self.state.external_agent_snapshot(thread_id) {
+                    (
+                        snapshot.status,
+                        Some(snapshot.provider),
+                        snapshot.failure,
+                        Some(snapshot.duration_ms),
+                    )
+                } else if let Ok(thread) = state.get_thread(thread_id).await {
+                    (thread.agent_status().await, None, None, None)
+                } else {
+                    continue;
+                };
             agents.push(ListedAgent {
                 agent_name,
                 agent_status,
                 last_task_message,
+                provider,
+                failure,
+                duration_ms,
             });
         }
 
@@ -423,6 +460,17 @@ impl AgentControl {
 
     pub(crate) fn is_external_agent(&self, agent_id: ThreadId) -> bool {
         self.state.external_agent_status(agent_id).is_some()
+    }
+
+    pub(crate) fn redact_external_status(
+        &self,
+        agent_id: ThreadId,
+        status: AgentStatus,
+    ) -> AgentStatus {
+        let Some(snapshot) = self.state.external_agent_snapshot(agent_id) else {
+            return status;
+        };
+        redact_external_agent_status(status, snapshot.failure.as_ref())
     }
 
     fn spawn_external_agent_task(&self, launch: ExternalAgentLaunch) {
@@ -434,6 +482,17 @@ impl AgentControl {
 
     pub(crate) fn update_external_agent_status(&self, agent_id: ThreadId, status: AgentStatus) {
         let _ = self.state.update_external_agent_status(agent_id, status);
+    }
+
+    pub(crate) fn update_external_agent_failure(
+        &self,
+        agent_id: ThreadId,
+        status: AgentStatus,
+        failure: ExternalAgentFailureDetail,
+    ) {
+        let _ = self
+            .state
+            .update_external_agent_failure(agent_id, status, failure);
     }
 
     pub(crate) fn release_external_agent(&self, agent_id: ThreadId) {
