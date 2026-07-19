@@ -120,12 +120,14 @@ jobs:
             --shim-dir "$shim_dir" \
             --short-version "$lab_version" \
             --bundle-version "$GITHUB_RUN_NUMBER" \
+            --source-commit "$(git rev-parse HEAD)" \
             --force
           bundle_seconds=$((SECONDS - start))
           start=$SECONDS
           python3 scripts/codex_lab_package/smoke.py \
             "$app_dir" \
-            --shim-path "${shim_dir}/codex-lab"
+            --shim-path "${shim_dir}/codex-lab" \
+            --expected-source-commit "$(git rev-parse HEAD)"
           smoke_seconds=$((SECONDS - start))
           {
             echo "- Bundle build seconds: \`$bundle_seconds\`"

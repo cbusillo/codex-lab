@@ -4,6 +4,12 @@ import argparse
 import plistlib
 import subprocess
 from pathlib import Path
+import sys
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from codex_lab_package.live_smoke import read_cli_provenance
 
 
 def parse_args() -> argparse.Namespace:
@@ -17,18 +23,28 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional codex-lab terminal wrapper path to check.",
     )
+    parser.add_argument(
+        "--expected-source-commit",
+        help="Expected source commit reported by the embedded CLI.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     smoke_check(
-        args.app_dir.resolve(), args.shim_path.resolve() if args.shim_path else None
+        args.app_dir.resolve(),
+        args.shim_path.resolve() if args.shim_path else None,
+        args.expected_source_commit,
     )
     return 0
 
 
-def smoke_check(app_dir: Path, shim_path: Path | None) -> None:
+def smoke_check(
+    app_dir: Path,
+    shim_path: Path | None,
+    expected_source_commit: str | None = None,
+) -> None:
     contents_dir = app_dir / "Contents"
     launcher_path = contents_dir / "MacOS" / "Codex Lab Launcher"
     embedded_cli_path = contents_dir / "Resources" / "codex-lab"
@@ -41,10 +57,28 @@ def smoke_check(app_dir: Path, shim_path: Path | None) -> None:
     _check_plist(info_plist_path)
     _check_shell_syntax(launcher_path)
 
+    if expected_source_commit is not None:
+        provenance = read_cli_provenance(embedded_cli_path)
+        if provenance["source_commit"] != expected_source_commit:
+            raise ValueError(
+                "embedded CLI source commit does not match the expected package commit"
+            )
+
     launcher = launcher_path.read_text(encoding="utf-8")
     _require_contains(launcher, "CODEX_CLI_PATH", launcher_path)
     _require_contains(launcher, "Resources/codex-lab", launcher_path)
-    _require_contains(launcher, "open -n", launcher_path)
+    _require_contains(launcher, "EXPECTED_CLI_SHA256=", launcher_path)
+    _require_contains(launcher, "EXPECTED_SOURCE_COMMIT=", launcher_path)
+    _require_contains(launcher, "/Applications/ChatGPT.app", launcher_path)
+    _require_contains(launcher, "$HOME/Applications/ChatGPT.app", launcher_path)
+    _require_contains(launcher, "/Applications/Codex.app", launcher_path)
+    _require_contains(launcher, "$HOME/Applications/Codex.app", launcher_path)
+    _require_contains(launcher, "com.openai.codex", launcher_path)
+    _require_contains(launcher, "codesign", launcher_path)
+    _require_contains(launcher, "lsappinfo", launcher_path)
+    _require_contains(launcher, "debug provenance --json", launcher_path)
+    _require_contains(launcher, "4096-byte limit", launcher_path)
+    _require_contains(launcher, "Quit it before launching Codex Lab", launcher_path)
     _require_contains(launcher, "--env", launcher_path)
 
     if shim_path is not None:
