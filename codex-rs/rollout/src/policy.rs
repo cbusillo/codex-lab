@@ -90,7 +90,8 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::ThreadRolledBack(_)
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
-        | EventMsg::TurnComplete(_) => true,
+        | EventMsg::TurnComplete(_)
+        | EventMsg::ProjectValidationCompleted(_) => true,
         // This fork keeps manual review lifecycle events distinct from background review state and
         // has no canonical review TurnItem variants, so both history modes retain these events.
         EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => true,
@@ -143,7 +144,6 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::TurnDiff(_)
         | EventMsg::RealtimeConversationListVoicesResponse(_)
         | EventMsg::BackgroundAutoReviewStatus(_)
-        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::McpStartupUpdate(_)
         | EventMsg::McpStartupComplete(_)
         | EventMsg::WebSearchBegin(_)

@@ -5,6 +5,8 @@ use super::McpToolCallResult;
 use super::NetworkApprovalContext;
 use super::NetworkApprovalProtocol;
 use super::NetworkPolicyAmendment;
+use super::ProjectValidationSkipReason;
+use super::ProjectValidationStatus;
 use super::RequestPermissionProfile;
 use super::UserInput;
 use super::shared::v2_enum_from_core;
@@ -382,6 +384,21 @@ pub enum ThreadItem {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     ContextCompaction { id: String },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    ProjectValidation {
+        id: String,
+        command: Vec<String>,
+        command_truncated: bool,
+        cwd: Option<AbsolutePathBuf>,
+        status: ProjectValidationStatus,
+        skip_reason: Option<ProjectValidationSkipReason>,
+        changed_file_count: Option<u32>,
+        exit_code: Option<i32>,
+        output: String,
+        output_truncated: bool,
+        duration_ms: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -412,7 +429,8 @@ impl ThreadItem {
             | ThreadItem::ImageGeneration { id, .. }
             | ThreadItem::EnteredReviewMode { id, .. }
             | ThreadItem::ExitedReviewMode { id, .. }
-            | ThreadItem::ContextCompaction { id, .. } => id,
+            | ThreadItem::ContextCompaction { id, .. }
+            | ThreadItem::ProjectValidation { id, .. } => id,
         }
     }
 }

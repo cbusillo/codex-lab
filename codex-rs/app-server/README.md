@@ -1350,6 +1350,7 @@ The app-server streams JSON-RPC notifications while a turn is running. Each turn
 - `model/rerouted` — `{ threadId, turnId, fromModel, toModel, reason }` when the backend reroutes a request to a different model (for example, due to high-risk cyber safety checks).
 - `model/verification` — `{ threadId, turnId, verifications }` when the backend flags additional account verification, such as `trustedAccessForCyber`.
 - `turn/moderationMetadata` — experimental; `{ threadId, turnId, metadata }` when a first-party backend supplies turn-scoped moderation metadata for client-side presentation.
+- `validation/completed` — `{ threadId, turnId, command, commandTruncated, cwd, status, skipReason, changedFileCount, exitCode, output, outputTruncated, durationMs }` for the terminal Automatic Validation disposition. `status` is `passed`, `actionableFailure`, `configurationError`, `timedOut`, `infrastructureFailure`, `cancelled`, or `skipped`. A skipped disposition carries `skipReason` as `validationDisabled`, `noChangedFiles`, `noApplicableProvider`, `nonRootAgent`, `unchangedFingerprint`, or `unsupportedEnvironment`.
 
 Today both notifications carry an empty `items` array even when item events were streamed; rely on `item/*` notifications for the canonical item list until this is fixed.
 
@@ -1370,6 +1371,7 @@ Today both notifications carry an empty `items` array even when item events were
 - `enteredReviewMode` — `{id, review}` sent when the reviewer starts; `review` is a short user-facing label such as `"current changes"` or the requested target description.
 - `exitedReviewMode` — `{id, review}` emitted when the reviewer finishes; `review` is the full plain-text review (usually, overall notes plus bullet point findings).
 - `contextCompaction` — `{id}` emitted when codex compacts the conversation history. This can happen automatically.
+- `projectValidation` — `{id, command, commandTruncated, cwd, status, skipReason, changedFileCount, exitCode, output, outputTruncated, durationMs}` containing a persisted terminal Automatic Validation disposition reconstructed from `validation/completed` during thread history reads and replay.
 - `compacted` - `{threadId, turnId}` when codex compacts the conversation history. This can happen automatically. **Deprecated:** Use `contextCompaction` instead.
 
 All items emit shared lifecycle events:

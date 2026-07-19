@@ -5,24 +5,48 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "ProjectValidationSkipReason": {
+      "enum": [
+        "validationDisabled",
+        "noChangedFiles",
+        "noApplicableProvider",
+        "nonRootAgent",
+        "unchangedFingerprint",
+        "unsupportedEnvironment"
+      ],
+      "type": "string"
+    },
     "ProjectValidationStatus": {
       "enum": [
         "passed",
         "actionableFailure",
         "configurationError",
         "timedOut",
-        "infrastructureFailure"
+        "infrastructureFailure",
+        "cancelled",
+        "skipped"
       ],
       "type": "string"
     }
   },
   "description": "One completed project-validation command execution. An actionable first execution may be followed by one bounded correction cycle and a second completion notification.",
   "properties": {
+    "changedFileCount": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "command": {
       "items": {
         "type": "string"
       },
       "type": "array"
+    },
+    "commandTruncated": {
+      "type": "boolean"
     },
     "cwd": {
       "anyOf": [
@@ -52,6 +76,16 @@
     "outputTruncated": {
       "type": "boolean"
     },
+    "skipReason": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ProjectValidationSkipReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "status": {
       "$ref": "#/definitions/ProjectValidationStatus"
     },
@@ -64,6 +98,7 @@
   },
   "required": [
     "command",
+    "commandTruncated",
     "durationMs",
     "output",
     "outputTruncated",

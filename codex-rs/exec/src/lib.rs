@@ -125,6 +125,7 @@ pub use exec_events::McpToolCallStatus;
 pub use exec_events::PatchApplyStatus;
 pub use exec_events::PatchChangeKind;
 pub use exec_events::ProjectValidationCompletedEvent;
+pub use exec_events::ProjectValidationSkipReason;
 pub use exec_events::ProjectValidationStatus;
 pub use exec_events::ReasoningItem;
 pub use exec_events::ThreadErrorEvent;

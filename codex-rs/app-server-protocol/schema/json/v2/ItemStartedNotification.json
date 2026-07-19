@@ -461,6 +461,29 @@
         }
       ]
     },
+    "ProjectValidationSkipReason": {
+      "enum": [
+        "validationDisabled",
+        "noChangedFiles",
+        "noApplicableProvider",
+        "nonRootAgent",
+        "unchangedFingerprint",
+        "unsupportedEnvironment"
+      ],
+      "type": "string"
+    },
+    "ProjectValidationStatus": {
+      "enum": [
+        "passed",
+        "actionableFailure",
+        "configurationError",
+        "timedOut",
+        "infrastructureFailure",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    },
     "ReasoningEffort": {
       "description": "A non-empty reasoning effort value advertised by the model.",
       "minLength": 1,
@@ -1229,6 +1252,90 @@
             "type"
           ],
           "title": "ContextCompactionThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "changedFileCount": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "commandTruncated": {
+              "type": "boolean"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "durationMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            },
+            "outputTruncated": {
+              "type": "boolean"
+            },
+            "skipReason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProjectValidationSkipReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/definitions/ProjectValidationStatus"
+            },
+            "type": {
+              "enum": [
+                "projectValidation"
+              ],
+              "title": "ProjectValidationThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "commandTruncated",
+            "durationMs",
+            "id",
+            "output",
+            "outputTruncated",
+            "status",
+            "type"
+          ],
+          "title": "ProjectValidationThreadItem",
           "type": "object"
         }
       ]

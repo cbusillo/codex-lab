@@ -1,0 +1,54 @@
+{
+  "name": "auto-validation-no-applicable-provider",
+  "characterization": {
+    "issue": 371,
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.5",
+  "prompt": "Apply the requested Rust fixture. AUTO_VALIDATION_NO_APPLICABLE_PROVIDER_MARKER",
+  "config_toml": "model_provider = \"harness\"\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n\n[validation.groups]\nfunctional = true\nstylistic = false\n\n[validation.providers.shellcheck]\nenabled = true\ncommand = [\"/usr/bin/true\"]\ntimeout_ms = 5000\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-no-applicable-provider-patch",
+        "events": [
+          {
+            "item": {
+              "type": "custom_tool_call",
+              "name": "apply_patch",
+              "input": "*** Begin Patch\n*** Add File: src/lib.rs\n+pub fn answer() -> u64 { 42 }\n*** End Patch",
+              "call_id": "call-no-applicable-provider-patch"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-no-applicable-provider-complete"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 2,
+    "turn_count": 1,
+    "thread_id": "required",
+    "event_types": {
+      "validation.completed": 1,
+      "turn.completed": 1
+    },
+    "events": [
+      {
+        "type": "validation.completed",
+        "contains_all": [
+          "\"status\":\"skipped\"",
+          "\"skip_reason\":\"no_applicable_provider\"",
+          "\"changed_file_count\":1",
+          "\"command\":[\"/usr/bin/true\"]",
+          "\"command_truncated\":false",
+          "\"output_truncated\":false"
+        ]
+      }
+    ]
+  },
+  "timeout_seconds": 60
+}

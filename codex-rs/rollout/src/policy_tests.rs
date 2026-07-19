@@ -17,6 +17,8 @@ use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::ProjectValidationCompletedEvent;
+use codex_protocol::protocol::ProjectValidationStatus;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::RolloutItem;
@@ -120,6 +122,29 @@ fn legacy_special_and_always_persisted_events_keep_their_policy() {
     for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
         assert!(should_persist_event_msg(&plan, history_mode));
         assert!(should_persist_event_msg(&rollback, history_mode));
+    }
+}
+
+#[test]
+fn project_validation_dispositions_are_persisted_in_all_history_modes() {
+    let event = EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
+        turn_id: "turn-1".to_string(),
+        command: Vec::new(),
+        command_truncated: false,
+        cwd: None,
+        status: ProjectValidationStatus::Skipped,
+        skip_reason: Some(
+            codex_protocol::protocol::ProjectValidationSkipReason::NoApplicableProvider,
+        ),
+        changed_file_count: Some(1),
+        exit_code: None,
+        output: "automatic validation skipped".to_string(),
+        output_truncated: false,
+        duration_ms: 0,
+    });
+
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        assert!(should_persist_event_msg(&event, history_mode));
     }
 }
 

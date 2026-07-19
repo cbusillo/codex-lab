@@ -343,6 +343,7 @@ export type { ProcessOutputDeltaNotification } from "./ProcessOutputDeltaNotific
 export type { ProcessOutputStream } from "./ProcessOutputStream";
 export type { ProcessTerminalSize } from "./ProcessTerminalSize";
 export type { ProjectValidationCompletedNotification } from "./ProjectValidationCompletedNotification";
+export type { ProjectValidationSkipReason } from "./ProjectValidationSkipReason";
 export type { ProjectValidationStatus } from "./ProjectValidationStatus";
 export type { RateLimitReachedType } from "./RateLimitReachedType";
 export type { RateLimitSnapshot } from "./RateLimitSnapshot";

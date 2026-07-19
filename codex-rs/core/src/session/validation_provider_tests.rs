@@ -36,6 +36,7 @@ fn shellcheck_command_appends_fixed_arguments_and_paths() {
         },
         cwd.clone(),
         vec![PathBuf::from("scripts/check.sh")],
+        /*changed_file_count*/ 1,
     )
     .expect("build shellcheck command");
 
@@ -45,6 +46,7 @@ fn shellcheck_command_appends_fixed_arguments_and_paths() {
     );
     assert_eq!(command.cwd, cwd);
     assert_eq!(command.timeout_ms, 5_000);
+    assert_eq!(command.changed_file_count, 1);
 }
 
 #[test]
@@ -52,11 +54,16 @@ fn shellcheck_command_rejects_more_than_bounded_file_count() {
     let cwd = AbsolutePathBuf::from_absolute_path("/tmp/repo").expect("absolute cwd");
     let files = (0..=SHELLCHECK_MAX_FILES)
         .map(|index| PathBuf::from(format!("scripts/check-{index}.sh")))
-        .collect();
+        .collect::<Vec<_>>();
+    let changed_file_count = u32::try_from(files.len()).expect("file count should fit in u32");
 
-    let error =
-        build_shellcheck_command(&ShellcheckValidationProviderConfig::default(), cwd, files)
-            .expect_err("file cap should reject oversized provider run");
+    let error = build_shellcheck_command(
+        &ShellcheckValidationProviderConfig::default(),
+        cwd,
+        files,
+        changed_file_count,
+    )
+    .expect_err("file cap should reject oversized provider run");
 
     assert!(matches!(
         error.kind,
@@ -136,13 +143,16 @@ async fn shellcheck_provider_includes_files_committed_during_turn() {
     config.groups.functional = true;
     config.providers.shellcheck.command = vec!["/bin/sh".to_string(), "fixture".to_string()];
     let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf()).expect("absolute repo path");
-    let command = resolve_automatic_validation_provider(&config, &cwd, Some(&base_commit))
+    let resolution = resolve_automatic_validation_provider(&config, &cwd, Some(&base_commit))
         .await
-        .expect("resolve provider")
-        .expect("shellcheck should be selected");
+        .expect("resolve provider");
+    let AutomaticValidationProviderResolution::Command(command) = resolution else {
+        panic!("shellcheck should be selected");
+    };
 
     assert_eq!(
         command.command,
         vec!["/bin/sh", "fixture", "-f", "gcc", "scripts/committed.sh",]
     );
+    assert_eq!(command.changed_file_count, 1);
 }

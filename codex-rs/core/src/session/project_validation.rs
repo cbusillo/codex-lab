@@ -15,6 +15,7 @@ use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::models::SandboxPermissions;
 use codex_protocol::protocol::ProjectValidationCompletedEvent;
+use codex_protocol::protocol::ProjectValidationSkipReason;
 use codex_protocol::protocol::ProjectValidationStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use tokio_util::sync::CancellationToken;
@@ -24,6 +25,8 @@ use super::turn_context::TurnContext;
 use super::validation_provider::AutomaticValidationCommand;
 use super::validation_provider::AutomaticValidationProviderError;
 use super::validation_provider::AutomaticValidationProviderErrorKind;
+use super::validation_provider::AutomaticValidationProviderResolution;
+use super::validation_provider::AutomaticValidationProviderSkipReason;
 use super::validation_provider::automatic_validation_provider_enabled;
 use super::validation_provider::resolve_automatic_validation_provider;
 use crate::exec::ExecCapturePolicy;
@@ -34,12 +37,13 @@ use crate::exec_env::create_env;
 
 const PROJECT_VALIDATION_OUTPUT_MAX_BYTES: usize = 8 * 1024;
 const PROJECT_VALIDATION_COMMAND_MAX_BYTES: usize = 8 * 1024;
+const COMMAND_TRUNCATED_MARKER: &str = "… project validation command truncated …";
 const OUTPUT_TRUNCATED_MARKER: &str = "\n… project validation output truncated …\n";
 
 pub(crate) enum ProjectValidationRun {
-    Skipped,
+    Skipped(ProjectValidationCompletedEvent),
     Completed(ProjectValidationCompletedEvent),
-    Cancelled,
+    Cancelled(ProjectValidationCompletedEvent),
 }
 
 pub(crate) enum ProjectValidationAttempt {
@@ -68,6 +72,14 @@ struct ValidationCommandPlan {
     command: Vec<String>,
     cwd: AbsolutePathBuf,
     timeout_ms: u64,
+    changed_file_count: Option<u32>,
+}
+
+#[derive(Default)]
+struct ProjectValidationEventMetadata {
+    skip_reason: Option<ProjectValidationSkipReason>,
+    changed_file_count: Option<u32>,
+    exit_code: Option<i32>,
 }
 
 pub(crate) async fn project_validation_worktree_fingerprint(
@@ -92,13 +104,14 @@ pub(crate) async fn run_project_validation(
     cancellation_token: CancellationToken,
 ) -> ProjectValidationRun {
     let configured_project_command = turn_context.config.validation.project_command.as_ref();
-    if configured_project_command.is_none()
-        && !automatic_validation_provider_enabled(&turn_context.config.validation)
-    {
-        return ProjectValidationRun::Skipped;
-    }
     if turn_context.session_source.is_non_root_agent() {
-        return ProjectValidationRun::Skipped;
+        return ProjectValidationRun::Skipped(skipped_event(
+            turn_context,
+            Vec::new(),
+            None,
+            ProjectValidationSkipReason::NonRootAgent,
+            None,
+        ));
     }
 
     let project_command = match configured_project_command {
@@ -109,33 +122,68 @@ pub(crate) async fn run_project_validation(
         None => None,
     };
 
+    if project_command.is_none()
+        && !automatic_validation_provider_enabled(&turn_context.config.validation)
+    {
+        let cwd = turn_context
+            .environments
+            .single_local_environment_cwd()
+            .cloned();
+        if cancellation_token.is_cancelled() {
+            return ProjectValidationRun::Cancelled(cancelled_event(
+                turn_context,
+                Vec::new(),
+                cwd,
+                None,
+            ));
+        }
+        return ProjectValidationRun::Skipped(skipped_event(
+            turn_context,
+            Vec::new(),
+            cwd,
+            ProjectValidationSkipReason::ValidationDisabled,
+            None,
+        ));
+    }
+
     let Some(cwd) = turn_context
         .environments
         .single_local_environment_cwd()
         .cloned()
     else {
-        let command = project_command.unwrap_or_else(|| {
+        if let Some(command) = project_command {
+            return ProjectValidationRun::Completed(completed_event(
+                turn_context,
+                command,
+                None,
+                ProjectValidationStatus::InfrastructureFailure,
+                None,
+                "project validation requires exactly one local turn environment".to_string(),
+                Duration::ZERO,
+            ));
+        }
+        return ProjectValidationRun::Skipped(skipped_event(
+            turn_context,
             turn_context
                 .config
                 .validation
                 .providers
                 .shellcheck
                 .command
-                .clone()
-        });
-        return ProjectValidationRun::Completed(completed_event(
-            turn_context,
-            command,
+                .clone(),
             None,
-            ProjectValidationStatus::InfrastructureFailure,
+            ProjectValidationSkipReason::UnsupportedEnvironment,
             None,
-            "project validation requires exactly one local turn environment".to_string(),
-            Duration::ZERO,
         ));
     };
 
     if cancellation_token.is_cancelled() {
-        return ProjectValidationRun::Cancelled;
+        return ProjectValidationRun::Cancelled(cancelled_event(
+            turn_context,
+            project_command.clone().unwrap_or_default(),
+            Some(cwd),
+            None,
+        ));
     }
 
     let env = create_env(&turn_context.shell_environment_policy, Some(sess.thread_id));
@@ -155,9 +203,24 @@ pub(crate) async fn run_project_validation(
     }
 
     match initial_attempt_worktree_unchanged(&cwd, &attempt, &cancellation_token).await {
-        Some(true) => return ProjectValidationRun::Skipped,
+        Some(true) => {
+            return ProjectValidationRun::Skipped(skipped_event(
+                turn_context,
+                project_command.clone().unwrap_or_default(),
+                Some(cwd),
+                ProjectValidationSkipReason::UnchangedFingerprint,
+                None,
+            ));
+        }
         Some(false) => {}
-        None => return ProjectValidationRun::Cancelled,
+        None => {
+            return ProjectValidationRun::Cancelled(cancelled_event(
+                turn_context,
+                project_command.clone().unwrap_or_default(),
+                Some(cwd),
+                None,
+            ));
+        }
     }
 
     let _lease = if let Some(repo_root) = project_validation_lease_root(turn_context, &cwd).await {
@@ -167,7 +230,12 @@ pub(crate) async fn run_project_validation(
             .acquire(repo_root, &cancellation_token)
             .await
         else {
-            return ProjectValidationRun::Cancelled;
+            return ProjectValidationRun::Cancelled(cancelled_event(
+                turn_context,
+                project_command.clone().unwrap_or_default(),
+                Some(cwd),
+                None,
+            ));
         };
         Some(lease)
     } else {
@@ -175,13 +243,33 @@ pub(crate) async fn run_project_validation(
     };
 
     match initial_attempt_worktree_unchanged(&cwd, &attempt, &cancellation_token).await {
-        Some(true) => return ProjectValidationRun::Skipped,
+        Some(true) => {
+            return ProjectValidationRun::Skipped(skipped_event(
+                turn_context,
+                project_command.clone().unwrap_or_default(),
+                Some(cwd),
+                ProjectValidationSkipReason::UnchangedFingerprint,
+                None,
+            ));
+        }
         Some(false) => {}
-        None => return ProjectValidationRun::Cancelled,
+        None => {
+            return ProjectValidationRun::Cancelled(cancelled_event(
+                turn_context,
+                project_command.clone().unwrap_or_default(),
+                Some(cwd),
+                None,
+            ));
+        }
     }
 
     if cancellation_token.is_cancelled() {
-        return ProjectValidationRun::Cancelled;
+        return ProjectValidationRun::Cancelled(cancelled_event(
+            turn_context,
+            project_command.clone().unwrap_or_default(),
+            Some(cwd),
+            None,
+        ));
     }
 
     let plan = if let Some(configured) = configured_project_command {
@@ -201,6 +289,7 @@ pub(crate) async fn run_project_validation(
             command,
             cwd: cwd.clone(),
             timeout_ms: configured.timeout_ms,
+            changed_file_count: None,
         }
     } else {
         let automatic = match resolve_automatic_validation_provider(
@@ -210,8 +299,22 @@ pub(crate) async fn run_project_validation(
         )
         .await
         {
-            Ok(Some(command)) => command,
-            Ok(None) => return ProjectValidationRun::Skipped,
+            Ok(AutomaticValidationProviderResolution::Command(command)) => command,
+            Ok(AutomaticValidationProviderResolution::Skipped(skip)) => {
+                return ProjectValidationRun::Skipped(skipped_event(
+                    turn_context,
+                    turn_context
+                        .config
+                        .validation
+                        .providers
+                        .shellcheck
+                        .command
+                        .clone(),
+                    Some(cwd),
+                    automatic_provider_skip_reason(skip.reason),
+                    skip.changed_file_count,
+                ));
+            }
             Err(error) => {
                 return ProjectValidationRun::Completed(provider_error_event(turn_context, error));
             }
@@ -264,7 +367,12 @@ pub(crate) async fn run_project_validation(
     .await;
 
     if cancellation_token.is_cancelled() {
-        return ProjectValidationRun::Cancelled;
+        return ProjectValidationRun::Cancelled(cancelled_event(
+            turn_context,
+            plan.command,
+            Some(plan.cwd),
+            plan.changed_file_count,
+        ));
     }
 
     ProjectValidationRun::Completed(match result {
@@ -274,6 +382,7 @@ pub(crate) async fn run_project_validation(
             plan.cwd,
             ProjectValidationStatus::TimedOut,
             output,
+            plan.changed_file_count,
         ),
         Ok(output) => {
             let status = if output.exit_code == 0 {
@@ -281,7 +390,14 @@ pub(crate) async fn run_project_validation(
             } else {
                 ProjectValidationStatus::ActionableFailure
             };
-            completed_from_output(turn_context, plan.command, plan.cwd, status, output)
+            completed_from_output(
+                turn_context,
+                plan.command,
+                plan.cwd,
+                status,
+                output,
+                plan.changed_file_count,
+            )
         }
         Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => completed_from_output(
             turn_context,
@@ -289,6 +405,7 @@ pub(crate) async fn run_project_validation(
             plan.cwd,
             ProjectValidationStatus::TimedOut,
             *output,
+            plan.changed_file_count,
         ),
         Err(CodexErr::Sandbox(SandboxErr::Denied { output, .. })) => completed_from_output(
             turn_context,
@@ -296,8 +413,16 @@ pub(crate) async fn run_project_validation(
             plan.cwd,
             ProjectValidationStatus::InfrastructureFailure,
             *output,
+            plan.changed_file_count,
         ),
-        Err(CodexErr::TurnAborted) => return ProjectValidationRun::Cancelled,
+        Err(CodexErr::TurnAborted) => {
+            return ProjectValidationRun::Cancelled(cancelled_event(
+                turn_context,
+                plan.command,
+                Some(plan.cwd),
+                plan.changed_file_count,
+            ));
+        }
         Err(CodexErr::Io(error)) if is_configuration_io_error(&error) => configuration_error(
             turn_context,
             plan.command,
@@ -367,6 +492,26 @@ fn automatic_validation_plan(command: AutomaticValidationCommand) -> ValidationC
         command: command.command,
         cwd: command.cwd,
         timeout_ms: command.timeout_ms,
+        changed_file_count: Some(command.changed_file_count),
+    }
+}
+
+fn automatic_provider_skip_reason(
+    reason: AutomaticValidationProviderSkipReason,
+) -> ProjectValidationSkipReason {
+    match reason {
+        AutomaticValidationProviderSkipReason::ValidationDisabled => {
+            ProjectValidationSkipReason::ValidationDisabled
+        }
+        AutomaticValidationProviderSkipReason::NoChangedFiles => {
+            ProjectValidationSkipReason::NoChangedFiles
+        }
+        AutomaticValidationProviderSkipReason::NoApplicableProvider => {
+            ProjectValidationSkipReason::NoApplicableProvider
+        }
+        AutomaticValidationProviderSkipReason::UnsupportedEnvironment => {
+            ProjectValidationSkipReason::UnsupportedEnvironment
+        }
     }
 }
 
@@ -503,6 +648,7 @@ fn completed_from_output(
     cwd: AbsolutePathBuf,
     status: ProjectValidationStatus,
     output: ExecToolCallOutput,
+    changed_file_count: Option<u32>,
 ) -> ProjectValidationCompletedEvent {
     let text = if output.aggregated_output.text.is_empty() {
         match (output.stdout.text.is_empty(), output.stderr.text.is_empty()) {
@@ -514,12 +660,16 @@ fn completed_from_output(
     } else {
         output.aggregated_output.text
     };
-    completed_event(
+    terminal_event(
         turn_context,
         command,
         Some(cwd),
         status,
-        Some(output.exit_code),
+        ProjectValidationEventMetadata {
+            changed_file_count,
+            exit_code: Some(output.exit_code),
+            ..Default::default()
+        },
         text,
         output.duration,
     )
@@ -534,17 +684,132 @@ fn completed_event(
     output: String,
     duration: Duration,
 ) -> ProjectValidationCompletedEvent {
+    terminal_event(
+        turn_context,
+        command,
+        cwd,
+        status,
+        ProjectValidationEventMetadata {
+            exit_code,
+            ..Default::default()
+        },
+        output,
+        duration,
+    )
+}
+
+fn skipped_event(
+    turn_context: &TurnContext,
+    command: Vec<String>,
+    cwd: Option<AbsolutePathBuf>,
+    reason: ProjectValidationSkipReason,
+    changed_file_count: Option<u32>,
+) -> ProjectValidationCompletedEvent {
+    let output = match (reason, changed_file_count) {
+        (ProjectValidationSkipReason::ValidationDisabled, _) => {
+            "automatic validation skipped: validation is disabled".to_string()
+        }
+        (ProjectValidationSkipReason::NoChangedFiles, _) => {
+            "automatic validation skipped: no changed files".to_string()
+        }
+        (ProjectValidationSkipReason::NoApplicableProvider, Some(count)) => format!(
+            "automatic validation skipped: no applicable provider for {count} changed file(s)"
+        ),
+        (ProjectValidationSkipReason::NoApplicableProvider, None) => {
+            "automatic validation skipped: no applicable provider".to_string()
+        }
+        (ProjectValidationSkipReason::NonRootAgent, _) => {
+            "automatic validation skipped: non-root agents do not run project validation"
+                .to_string()
+        }
+        (ProjectValidationSkipReason::UnchangedFingerprint, _) => {
+            "automatic validation skipped: worktree fingerprint is unchanged".to_string()
+        }
+        (ProjectValidationSkipReason::UnsupportedEnvironment, _) => {
+            "automatic validation skipped: unsupported turn environment".to_string()
+        }
+    };
+    terminal_event(
+        turn_context,
+        command,
+        cwd,
+        ProjectValidationStatus::Skipped,
+        ProjectValidationEventMetadata {
+            skip_reason: Some(reason),
+            changed_file_count,
+            ..Default::default()
+        },
+        output,
+        Duration::ZERO,
+    )
+}
+
+fn cancelled_event(
+    turn_context: &TurnContext,
+    command: Vec<String>,
+    cwd: Option<AbsolutePathBuf>,
+    changed_file_count: Option<u32>,
+) -> ProjectValidationCompletedEvent {
+    terminal_event(
+        turn_context,
+        command,
+        cwd,
+        ProjectValidationStatus::Cancelled,
+        ProjectValidationEventMetadata {
+            changed_file_count,
+            ..Default::default()
+        },
+        "project validation cancelled".to_string(),
+        Duration::ZERO,
+    )
+}
+
+fn terminal_event(
+    turn_context: &TurnContext,
+    command: Vec<String>,
+    cwd: Option<AbsolutePathBuf>,
+    status: ProjectValidationStatus,
+    metadata: ProjectValidationEventMetadata,
+    output: String,
+    duration: Duration,
+) -> ProjectValidationCompletedEvent {
+    let (command, command_truncated) = truncate_command(command);
     let (output, output_truncated) = truncate_output(&output);
     ProjectValidationCompletedEvent {
         turn_id: turn_context.sub_id.clone(),
         command,
+        command_truncated,
         cwd,
         status,
-        exit_code,
+        skip_reason: metadata.skip_reason,
+        changed_file_count: metadata.changed_file_count,
+        exit_code: metadata.exit_code,
         output,
         output_truncated,
         duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
     }
+}
+
+fn truncate_command(command: Vec<String>) -> (Vec<String>, bool) {
+    let command_bytes = command.iter().fold(0usize, |total, argument| {
+        total.saturating_add(argument.len() + 1)
+    });
+    if command_bytes <= PROJECT_VALIDATION_COMMAND_MAX_BYTES {
+        return (command, false);
+    }
+
+    let mut bounded = Vec::new();
+    let mut used_bytes = COMMAND_TRUNCATED_MARKER.len() + 1;
+    for argument in command {
+        let argument_bytes = argument.len() + 1;
+        if used_bytes.saturating_add(argument_bytes) > PROJECT_VALIDATION_COMMAND_MAX_BYTES {
+            break;
+        }
+        used_bytes += argument_bytes;
+        bounded.push(argument);
+    }
+    bounded.push(COMMAND_TRUNCATED_MARKER.to_string());
+    (bounded, true)
 }
 
 fn truncate_output(output: &str) -> (String, bool) {

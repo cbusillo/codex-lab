@@ -145,6 +145,24 @@ pub fn project_rollout_line(
                 item: ThreadItem::from(event.item.clone()),
             })
         }
+        RolloutItem::EventMsg(EventMsg::ProjectValidationCompleted(event)) => {
+            Some(ThreadHistoryProjectionMutation::UpsertItem {
+                target: ThreadHistoryTurnTarget::Id(event.turn_id.clone()),
+                item: ThreadItem::ProjectValidation {
+                    id: format!("project-validation-{ordinal}"),
+                    command: event.command.clone(),
+                    command_truncated: event.command_truncated,
+                    cwd: event.cwd.clone(),
+                    status: event.status.into(),
+                    skip_reason: event.skip_reason.map(Into::into),
+                    changed_file_count: event.changed_file_count,
+                    exit_code: event.exit_code,
+                    output: event.output.clone(),
+                    output_truncated: event.output_truncated,
+                    duration_ms: event.duration_ms,
+                },
+            })
+        }
         RolloutItem::EventMsg(EventMsg::EnteredReviewMode(event)) => {
             Some(ThreadHistoryProjectionMutation::UpsertItem {
                 target: ThreadHistoryTurnTarget::Active,
