@@ -1,0 +1,90 @@
+{
+  "name": "auto-validation-cargo-provider",
+  "characterization": {
+    "issue": 372,
+    "implementation_issue": 372,
+    "selected_provider": "cargo",
+    "source_revision": "9bbcbf7d1fbce30a3aa4f7a0400b43b1bea3bbda",
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.5",
+  "prompt": "Apply the requested Rust fixture. AUTO_VALIDATION_CARGO_PROVIDER_MARKER",
+  "files": {
+    "Cargo.toml": "[package]\nname = \"cargo-validation-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+  },
+  "executable_home_files": {
+    "bin/cargo": "#!/bin/sh\nset -eu\nif [ \"$#\" -ne 13 ] || [ \"$1\" != \"check\" ] || [ \"$2\" != \"--quiet\" ] || [ \"$3\" != \"--message-format=json\" ] || [ \"$4\" != \"--color\" ] || [ \"$5\" != \"never\" ] || [ \"$6\" != \"--jobs\" ] || [ \"$7\" != \"2\" ] || [ \"$8\" != \"--manifest-path\" ] || [ \"$9\" != \"{workspace}/Cargo.toml\" ] || [ \"${10}\" != \"--target-dir\" ] || [ \"${12}\" != \"--locked\" ] || [ \"${13}\" != \"--all-targets\" ]; then\n  printf 'unexpected cargo argv: %s\\n' \"$*\" >&2\n  exit 64\nfi\ncase \"$PWD\" in\n  \"{workspace}\"|\"{workspace}\"/*) printf 'cargo ran inside workspace: %s\\n' \"$PWD\" >&2; exit 64 ;;\nesac\ncase \"${11}\" in\n  *codex-cargo-validation-*/target) ;;\n  *) printf 'unexpected cargo target dir: %s\\n' \"${11}\" >&2; exit 64 ;;\nesac\nstate=$(dirname \"$0\")/cargo-provider-ran\nif [ -f \"$state\" ]; then\n  exit 0\nfi\ntouch \"$state\"\nprintf '%s\\n' '{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"message\":\"mismatched types\",\"code\":{\"code\":\"E0308\"},\"spans\":[{\"file_name\":\"src/lib.rs\",\"line_start\":1,\"column_start\":25,\"is_primary\":true}]}}'\nexit 101\n"
+  },
+  "config_toml": "model_provider = \"harness\"\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n\n[validation.groups]\nfunctional = true\nstylistic = false\n\n[validation.providers.cargo]\nenabled = true\ncommand = [\"{home}/bin/cargo\"]\ntimeout_ms = 5000\n\n[validation.providers.shellcheck]\nenabled = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-cargo-provider-patch",
+        "events": [
+          {
+            "item": {
+              "type": "custom_tool_call",
+              "name": "apply_patch",
+              "input": "*** Begin Patch\n*** Update File: Cargo.toml\n@@\n edition = \"2021\"\n+[lib]\n+path = \"src/lib.rs\"\n*** Add File: src/lib.rs\n+pub fn value() -> u8 { \"bad\" }\n*** End Patch",
+              "call_id": "call-cargo-provider-patch"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-cargo-provider-complete"
+      },
+      {
+        "response_id": "resp-cargo-provider-correction"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 3,
+    "turn_count": 1,
+    "thread_id": "required",
+    "event_types": {
+      "validation.completed": 2,
+      "turn.completed": 1
+    },
+    "events": [
+      {
+        "type": "validation.completed",
+        "occurrence": 0,
+        "contains_all": [
+          "\"status\":\"actionable_failure\"",
+          "\"exit_code\":101",
+          "\"check\",\"--quiet\",\"--message-format=json\"",
+          "\"--jobs\",\"2\"",
+          "\"--locked\"",
+          "\"--all-targets\"",
+          "src/lib.rs:1:25: error[E0308]: mismatched types",
+          "\"output_truncated\":false"
+        ]
+      },
+      {
+        "type": "validation.completed",
+        "occurrence": 1,
+        "contains_all": [
+          "\"status\":\"passed\"",
+          "\"exit_code\":0",
+          "cargo check passed",
+          "\"output_truncated\":false"
+        ]
+      }
+    ],
+    "responses": [
+      {
+        "request": 2,
+        "scope": "input",
+        "contains": "<project_validation_failure>",
+        "count": {
+          "<project_validation_failure>": 1,
+          "src/lib.rs:1:25: error[E0308]: mismatched types": 1
+        }
+      }
+    ]
+  },
+  "timeout_seconds": 60
+}

@@ -488,6 +488,21 @@ def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
         file_text = str(content).replace("{workspace}", str(paths.workspace))
         save_text(resolve_under(paths.workspace, rel_path, "file path"), file_text)
 
+    executable_home_files = scenario.get("executable_home_files", {})
+    if not isinstance(executable_home_files, dict):
+        raise HarnessError("executable_home_files must be an object")
+    for rel_path, content in executable_home_files.items():
+        if not isinstance(rel_path, str):
+            raise HarnessError("executable home file paths must be strings")
+        file_text = (
+            str(content)
+            .replace("{workspace}", str(paths.workspace))
+            .replace("{home}", str(paths.home))
+        )
+        executable = resolve_under(paths.home, rel_path, "executable home file path")
+        save_text(executable, file_text)
+        executable.chmod(0o755)
+
     if scenario.get("git_init", True):
         subprocess.run(
             ["git", "init", "-q"],
@@ -507,6 +522,9 @@ def inherit_auth_home(scenario: dict[str, Any], paths: RunPaths) -> None:
 
 def save_config(scenario: dict[str, Any], paths: RunPaths, base_url: str | None) -> None:
     config = str(scenario.get("config_toml", ""))
+    config = config.replace("{workspace}", str(paths.workspace)).replace(
+        "{home}", str(paths.home)
+    )
     uses_responses_base_url = "{responses_base_url}" in config
     if uses_responses_base_url:
         if base_url is None:

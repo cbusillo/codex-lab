@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,10 +22,14 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use tokio_util::sync::CancellationToken;
 
 use super::Session;
+use super::cargo_validation_provider::classify_cargo_output;
+use super::cargo_validation_provider::render_cargo_output;
+use super::project_validation_coordinator::ProjectValidationSuccessKey;
 use super::turn_context::TurnContext;
 use super::validation_provider::AutomaticValidationCommand;
 use super::validation_provider::AutomaticValidationProviderError;
 use super::validation_provider::AutomaticValidationProviderErrorKind;
+use super::validation_provider::AutomaticValidationProviderKind;
 use super::validation_provider::AutomaticValidationProviderResolution;
 use super::validation_provider::AutomaticValidationProviderSkipReason;
 use super::validation_provider::automatic_validation_provider_enabled;
@@ -62,7 +67,9 @@ pub(crate) struct ProjectValidationWorktreeFingerprint {
     worktree_diff: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ValidationCommandKind {
+    Cargo,
     ProjectCommand,
     Shellcheck,
 }
@@ -71,6 +78,8 @@ struct ValidationCommandPlan {
     kind: ValidationCommandKind,
     command: Vec<String>,
     cwd: AbsolutePathBuf,
+    execution_cwd: AbsolutePathBuf,
+    _execution_cwd_guard: Option<tempfile::TempDir>,
     timeout_ms: u64,
     changed_file_count: Option<u32>,
 }
@@ -223,7 +232,8 @@ pub(crate) async fn run_project_validation(
         }
     }
 
-    let _lease = if let Some(repo_root) = project_validation_lease_root(turn_context, &cwd).await {
+    let lease_root = project_validation_lease_root(turn_context, &cwd).await;
+    let _lease = if let Some(repo_root) = lease_root.clone() {
         let Some(lease) = sess
             .services
             .project_validation_coordinator
@@ -288,11 +298,13 @@ pub(crate) async fn run_project_validation(
             kind: ValidationCommandKind::ProjectCommand,
             command,
             cwd: cwd.clone(),
+            execution_cwd: cwd.clone(),
+            _execution_cwd_guard: None,
             timeout_ms: configured.timeout_ms,
             changed_file_count: None,
         }
     } else {
-        let automatic = match resolve_automatic_validation_provider(
+        let mut automatic = match resolve_automatic_validation_provider(
             &turn_context.config.validation,
             &cwd,
             attempt_worktree_start(&attempt).map(|worktree| worktree.head_commit.as_str()),
@@ -319,26 +331,146 @@ pub(crate) async fn run_project_validation(
                 return ProjectValidationRun::Completed(provider_error_event(turn_context, error));
             }
         };
-        if which::which_in(
+        let resolved_program = match which::which_in(
             &automatic.command[0],
             search_path.as_ref(),
             automatic.cwd.as_ref(),
-        )
-        .is_err()
-        {
-            return ProjectValidationRun::Completed(configuration_error(
-                turn_context,
-                automatic.command,
-                Some(automatic.cwd),
-                "shellcheck validation executable was not found or is not executable",
-            ));
+        ) {
+            Ok(program) => program,
+            Err(_) => {
+                let label = automatic.kind.label();
+                return ProjectValidationRun::Completed(configuration_error(
+                    turn_context,
+                    automatic.command,
+                    Some(automatic.cwd),
+                    format!("{label} executable was not found or is not executable"),
+                ));
+            }
+        };
+        if automatic.kind == AutomaticValidationProviderKind::Cargo {
+            if !resolved_program
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| matches!(name, "cargo" | "cargo.exe"))
+            {
+                return ProjectValidationRun::Completed(configuration_error(
+                    turn_context,
+                    automatic.command,
+                    Some(automatic.cwd),
+                    "cargo validation executable must be named cargo",
+                ));
+            }
+            let checkout_root = project_validation_repo_root(&cwd);
+            if cargo_lookup_path_is_inside_repository(
+                &automatic.command[0],
+                search_path.as_ref(),
+                &automatic.cwd,
+                checkout_root.as_deref(),
+                lease_root.as_deref(),
+            ) {
+                return ProjectValidationRun::Completed(configuration_error(
+                    turn_context,
+                    automatic.command,
+                    Some(automatic.cwd),
+                    "cargo validation executable must not resolve inside the repository",
+                ));
+            }
+            let canonical_program =
+                dunce::canonicalize(&resolved_program).unwrap_or_else(|_| resolved_program.clone());
+            if checkout_root.as_ref().is_some_and(|repo_root| {
+                resolved_program.starts_with(&repo_root)
+                    || canonical_program.starts_with(&repo_root)
+            }) || lease_root.as_ref().is_some_and(|repo_root| {
+                resolved_program.starts_with(repo_root) || canonical_program.starts_with(repo_root)
+            }) {
+                return ProjectValidationRun::Completed(configuration_error(
+                    turn_context,
+                    automatic.command,
+                    Some(automatic.cwd),
+                    "cargo validation executable must not resolve inside the repository",
+                ));
+            }
+            let Some(execution_cwd) = automatic.execution_cwd.as_ref() else {
+                return ProjectValidationRun::Completed(completed_event(
+                    turn_context,
+                    automatic.command,
+                    Some(automatic.cwd),
+                    ProjectValidationStatus::InfrastructureFailure,
+                    None,
+                    "cargo validation requires an isolated execution directory".to_string(),
+                    Duration::ZERO,
+                ));
+            };
+            if project_validation_repo_root(&cwd)
+                .is_some_and(|repo_root| execution_cwd.as_ref().starts_with(repo_root))
+                || lease_root
+                    .as_ref()
+                    .is_some_and(|repo_root| execution_cwd.as_ref().starts_with(repo_root))
+            {
+                return ProjectValidationRun::Completed(completed_event(
+                    turn_context,
+                    automatic.command,
+                    Some(automatic.cwd),
+                    ProjectValidationStatus::InfrastructureFailure,
+                    None,
+                    "cargo validation execution directory must be outside the repository"
+                        .to_string(),
+                    Duration::ZERO,
+                ));
+            }
+            let Some(resolved_program) = resolved_program.to_str() else {
+                return ProjectValidationRun::Completed(configuration_error(
+                    turn_context,
+                    automatic.command,
+                    Some(automatic.cwd),
+                    "cargo validation executable path must be valid UTF-8",
+                ));
+            };
+            automatic.command[0] = resolved_program.to_string();
         }
         automatic_validation_plan(automatic)
     };
 
+    let successful_validation_key =
+        cargo_validation_success_key(&cwd, lease_root.as_ref(), &plan, &cancellation_token).await;
+    if matches!(attempt, ProjectValidationAttempt::Initial { .. })
+        && let Some(key) = successful_validation_key.as_ref()
+        && sess
+            .services
+            .project_validation_coordinator
+            .has_successful_validation(key)
+            .await
+    {
+        return ProjectValidationRun::Skipped(skipped_event(
+            turn_context,
+            plan.command,
+            Some(plan.cwd),
+            ProjectValidationSkipReason::UnchangedFingerprint,
+            plan.changed_file_count,
+        ));
+    }
+    let _cargo_permit = if plan.kind == ValidationCommandKind::Cargo {
+        let Some(permit) = sess
+            .services
+            .project_validation_coordinator
+            .acquire_cargo(&cancellation_token)
+            .await
+        else {
+            return ProjectValidationRun::Cancelled(cancelled_event(
+                turn_context,
+                plan.command,
+                Some(plan.cwd),
+                plan.changed_file_count,
+            ));
+        };
+        Some(permit)
+    } else {
+        None
+    };
+
     let params = ExecParams {
         command: plan.command.clone(),
-        cwd: plan.cwd.clone(),
+        cwd: plan.execution_cwd.clone(),
         expiration: ExecExpiration::TimeoutOrCancellation {
             timeout: Duration::from_millis(plan.timeout_ms),
             cancellation: cancellation_token.clone(),
@@ -375,15 +507,28 @@ pub(crate) async fn run_project_validation(
         ));
     }
 
-    ProjectValidationRun::Completed(match result {
+    let event = match result {
         Ok(output) if output.timed_out => completed_from_output(
             turn_context,
             plan.command,
             plan.cwd,
+            plan.kind,
             ProjectValidationStatus::TimedOut,
             output,
             plan.changed_file_count,
         ),
+        Ok(output) if plan.kind == ValidationCommandKind::Cargo => {
+            let cargo_output = classify_cargo_output(&output);
+            completed_from_output_text(
+                turn_context,
+                plan.command,
+                plan.cwd,
+                cargo_output.status,
+                output,
+                plan.changed_file_count,
+                cargo_output.text,
+            )
+        }
         Ok(output) => {
             let status = if output.exit_code == 0 {
                 ProjectValidationStatus::Passed
@@ -394,6 +539,7 @@ pub(crate) async fn run_project_validation(
                 turn_context,
                 plan.command,
                 plan.cwd,
+                plan.kind,
                 status,
                 output,
                 plan.changed_file_count,
@@ -403,6 +549,7 @@ pub(crate) async fn run_project_validation(
             turn_context,
             plan.command,
             plan.cwd,
+            plan.kind,
             ProjectValidationStatus::TimedOut,
             *output,
             plan.changed_file_count,
@@ -411,6 +558,7 @@ pub(crate) async fn run_project_validation(
             turn_context,
             plan.command,
             plan.cwd,
+            plan.kind,
             ProjectValidationStatus::InfrastructureFailure,
             *output,
             plan.changed_file_count,
@@ -441,7 +589,16 @@ pub(crate) async fn run_project_validation(
             format!("{} infrastructure failure: {error}", plan.kind.label()),
             Duration::ZERO,
         ),
-    })
+    };
+    if event.status == ProjectValidationStatus::Passed
+        && let Some(key) = successful_validation_key
+    {
+        sess.services
+            .project_validation_coordinator
+            .record_successful_validation(key)
+            .await;
+    }
+    ProjectValidationRun::Completed(event)
 }
 
 fn validate_project_command(
@@ -487,10 +644,19 @@ fn validate_project_command(
 }
 
 fn automatic_validation_plan(command: AutomaticValidationCommand) -> ValidationCommandPlan {
+    let execution_cwd = command
+        .execution_cwd
+        .clone()
+        .unwrap_or_else(|| command.cwd.clone());
     ValidationCommandPlan {
-        kind: ValidationCommandKind::Shellcheck,
+        kind: match command.kind {
+            AutomaticValidationProviderKind::Cargo => ValidationCommandKind::Cargo,
+            AutomaticValidationProviderKind::Shellcheck => ValidationCommandKind::Shellcheck,
+        },
         command: command.command,
         cwd: command.cwd,
+        execution_cwd,
+        _execution_cwd_guard: command.execution_cwd_guard,
         timeout_ms: command.timeout_ms,
         changed_file_count: Some(command.changed_file_count),
     }
@@ -538,6 +704,7 @@ fn provider_error_event(
 impl ValidationCommandKind {
     fn label(&self) -> &'static str {
         match self {
+            Self::Cargo => "cargo validation",
             Self::ProjectCommand => "project validation",
             Self::Shellcheck => "shellcheck validation",
         }
@@ -545,8 +712,18 @@ impl ValidationCommandKind {
 
     fn start_failure_label(&self) -> &'static str {
         match self {
+            Self::Cargo => "cargo validation command",
             Self::ProjectCommand => "project validation command",
             Self::Shellcheck => "shellcheck validation command",
+        }
+    }
+}
+
+impl AutomaticValidationProviderKind {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Cargo => "cargo validation",
+            Self::Shellcheck => "shellcheck validation",
         }
     }
 }
@@ -563,6 +740,53 @@ fn attempt_worktree_start(
             worktree_at_turn_start,
         } => worktree_at_turn_start.as_ref(),
     }
+}
+
+async fn cargo_validation_success_key(
+    cwd: &AbsolutePathBuf,
+    lease_root: Option<&PathBuf>,
+    plan: &ValidationCommandPlan,
+    cancellation_token: &CancellationToken,
+) -> Option<ProjectValidationSuccessKey> {
+    if plan.kind != ValidationCommandKind::Cargo {
+        return None;
+    }
+    let checkout_root = project_validation_repo_root(cwd)?;
+    let fingerprint = tokio::select! {
+        _ = cancellation_token.cancelled() => return None,
+        fingerprint = capture_worktree_fingerprint(cwd) => fingerprint?,
+    };
+    let validation_scope = plan
+        .cwd
+        .as_ref()
+        .strip_prefix(&checkout_root)
+        .unwrap_or(plan.cwd.as_ref())
+        .to_path_buf();
+    Some(ProjectValidationSuccessKey::new(
+        lease_root.cloned().unwrap_or(checkout_root),
+        validation_scope,
+        fingerprint.head_commit,
+        fingerprint.worktree_diff,
+        cargo_validation_cache_command(&plan.command),
+    ))
+}
+
+fn cargo_validation_cache_command(command: &[String]) -> Vec<String> {
+    let mut command = command.to_vec();
+    for (flag, replacement) in [
+        ("--manifest-path", "Cargo.toml"),
+        ("--target-dir", "target"),
+    ] {
+        if let Some(value_index) = command
+            .iter()
+            .position(|argument| argument == flag)
+            .and_then(|index| index.checked_add(1))
+            && let Some(value) = command.get_mut(value_index)
+        {
+            *value = replacement.to_string();
+        }
+    }
+    command
 }
 
 async fn initial_attempt_worktree_unchanged(
@@ -602,6 +826,71 @@ async fn capture_worktree_fingerprint(
 fn project_validation_repo_root(cwd: &AbsolutePathBuf) -> Option<PathBuf> {
     let repo_root = get_git_repo_root(cwd.as_ref())?;
     Some(dunce::canonicalize(&repo_root).unwrap_or(repo_root))
+}
+
+fn cargo_lookup_path_is_inside_repository(
+    program: &str,
+    search_path: Option<&OsString>,
+    cwd: &AbsolutePathBuf,
+    checkout_root: Option<&Path>,
+    lease_root: Option<&Path>,
+) -> bool {
+    let program_path = std::path::Path::new(program);
+    if program_path.is_absolute() || program_path.components().count() > 1 {
+        let candidate = if program_path.is_absolute() {
+            program_path.to_path_buf()
+        } else {
+            cwd.as_ref().join(program_path)
+        };
+        return path_is_inside_validation_repository(&candidate, checkout_root, lease_root);
+    }
+
+    let search_path = search_path.cloned().or_else(|| std::env::var_os("PATH"));
+    let Some(search_path) = search_path else {
+        return false;
+    };
+    for directory in std::env::split_paths(&search_path) {
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            cwd.as_ref().join(directory)
+        };
+        let Ok(single_directory_path) = std::env::join_paths([&directory]) else {
+            continue;
+        };
+        let Ok(resolved) = which::which_in(program, Some(&single_directory_path), cwd.as_ref())
+        else {
+            continue;
+        };
+        return path_is_inside_validation_repository(&directory, checkout_root, lease_root)
+            || path_is_inside_validation_repository(&resolved, checkout_root, lease_root);
+    }
+    false
+}
+
+fn path_is_inside_validation_repository(
+    path: &Path,
+    checkout_root: Option<&Path>,
+    lease_root: Option<&Path>,
+) -> bool {
+    let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical_parent_path = path
+        .parent()
+        .and_then(|parent| dunce::canonicalize(parent).ok())
+        .and_then(|parent| path.file_name().map(|name| parent.join(name)));
+    checkout_root.is_some_and(|repo_root| {
+        path.starts_with(repo_root)
+            || canonical.starts_with(repo_root)
+            || canonical_parent_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(repo_root))
+    }) || lease_root.is_some_and(|repo_root| {
+        path.starts_with(repo_root)
+            || canonical.starts_with(repo_root)
+            || canonical_parent_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(repo_root))
+    })
 }
 
 async fn project_validation_lease_root(
@@ -646,20 +935,43 @@ fn completed_from_output(
     turn_context: &TurnContext,
     command: Vec<String>,
     cwd: AbsolutePathBuf,
+    kind: ValidationCommandKind,
     status: ProjectValidationStatus,
     output: ExecToolCallOutput,
     changed_file_count: Option<u32>,
 ) -> ProjectValidationCompletedEvent {
-    let text = if output.aggregated_output.text.is_empty() {
+    let text = if kind == ValidationCommandKind::Cargo {
+        render_cargo_output(&output)
+    } else if output.aggregated_output.text.is_empty() {
         match (output.stdout.text.is_empty(), output.stderr.text.is_empty()) {
-            (false, false) => format!("{}\n{}", output.stdout.text, output.stderr.text),
-            (false, true) => output.stdout.text,
-            (true, false) => output.stderr.text,
+            (false, false) => format!("{}\n{}", &output.stdout.text, &output.stderr.text),
+            (false, true) => output.stdout.text.clone(),
+            (true, false) => output.stderr.text.clone(),
             (true, true) => String::new(),
         }
     } else {
-        output.aggregated_output.text
+        output.aggregated_output.text.clone()
     };
+    completed_from_output_text(
+        turn_context,
+        command,
+        cwd,
+        status,
+        output,
+        changed_file_count,
+        text,
+    )
+}
+
+fn completed_from_output_text(
+    turn_context: &TurnContext,
+    command: Vec<String>,
+    cwd: AbsolutePathBuf,
+    status: ProjectValidationStatus,
+    output: ExecToolCallOutput,
+    changed_file_count: Option<u32>,
+    text: String,
+) -> ProjectValidationCompletedEvent {
     terminal_event(
         turn_context,
         command,
