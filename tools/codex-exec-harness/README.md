@@ -104,6 +104,10 @@ points to a deterministic fake ShellCheck command; the default suite verifies
 changed-file selection, fixed argv, one bounded correction cycle, and the final
 passing rerun.
 
+`auto-validation-no-applicable-provider.json` proves issue #371's previously
+silent Rust-only path now emits one bounded typed `skipped` disposition with
+the changed-file count and `no_applicable_provider` reason.
+
 `gpt-5-6-luna-low-request-shape.json` is the deterministic catalog smoke test
 for the lowest-cost GPT-5.6 variant. It proves the local binary sends
 `gpt-5.6-luna` with low reasoning effort without making a paid model call.

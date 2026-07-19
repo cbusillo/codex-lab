@@ -20,6 +20,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ProjectValidationCompletedEvent;
+use codex_protocol::protocol::ProjectValidationSkipReason;
 use codex_protocol::protocol::ProjectValidationStatus;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::SessionSource;
@@ -126,6 +127,18 @@ fn validation_events(events: &[EventMsg]) -> Vec<&ProjectValidationCompletedEven
         .collect()
 }
 
+fn assert_single_validation_skip(
+    events: &[EventMsg],
+    reason: ProjectValidationSkipReason,
+) -> &ProjectValidationCompletedEvent {
+    let validation_events = validation_events(events);
+    assert_eq!(validation_events.len(), 1);
+    let event = validation_events[0];
+    assert_eq!(event.status, ProjectValidationStatus::Skipped);
+    assert_eq!(event.skip_reason, Some(reason));
+    event
+}
+
 fn shell_command(script: &str, timeout_ms: u64) -> ProjectValidationCommand {
     shell_command_with_args(script, &[], timeout_ms)
 }
@@ -208,22 +221,81 @@ async fn submit_user_input(codex: &CodexThread, test: &TestCodex, text: &str) ->
     submit_user_input_at_cwd(codex, test, text, test.config.cwd.clone()).await
 }
 
+async fn steer_user_input(codex: &CodexThread, text: &str) -> Result<()> {
+    codex
+        .steer_input(
+            vec![UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            Default::default(),
+            /*expected_turn_id*/ None,
+            /*client_user_message_id*/ None,
+            /*responsesapi_client_metadata*/ None,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to steer input: {error:?}"))?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum TestTurnEnvironmentOverride {
+    Inherit,
+    NoEnvironments,
+}
+
 async fn submit_user_input_at_cwd(
     codex: &CodexThread,
     test: &TestCodex,
     text: &str,
     cwd: AbsolutePathBuf,
 ) -> Result<()> {
+    submit_user_input_with_environment_override(
+        codex,
+        test,
+        text,
+        cwd,
+        TestTurnEnvironmentOverride::Inherit,
+    )
+    .await
+}
+
+async fn submit_user_input_without_environments(
+    codex: &CodexThread,
+    test: &TestCodex,
+    text: &str,
+) -> Result<()> {
+    submit_user_input_with_environment_override(
+        codex,
+        test,
+        text,
+        test.config.cwd.clone(),
+        TestTurnEnvironmentOverride::NoEnvironments,
+    )
+    .await
+}
+
+async fn submit_user_input_with_environment_override(
+    codex: &CodexThread,
+    test: &TestCodex,
+    text: &str,
+    cwd: AbsolutePathBuf,
+    environment_override: TestTurnEnvironmentOverride,
+) -> Result<()> {
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
     let session_model = test.session_configured.model.clone();
+    let environments = match environment_override {
+        TestTurnEnvironmentOverride::Inherit => None,
+        TestTurnEnvironmentOverride::NoEnvironments => Some(Vec::new()),
+    };
     codex
         .submit(Op::UserInput {
             items: vec![UserInput::Text {
                 text: text.to_string(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
+            environments,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -587,7 +659,16 @@ async fn project_validation_unchanged_turn_skips_without_waiting_for_repo_lease(
     let unchanged = start_root_thread_with_validation_command(&test, command).await?;
     submit_user_input(&unchanged, &test, "inspect without changes").await?;
     let unchanged_events = collect_events_until_terminal(&unchanged).await?;
-    assert!(validation_events(&unchanged_events).is_empty());
+    let unchanged_validation = validation_events(&unchanged_events);
+    assert_eq!(unchanged_validation.len(), 1);
+    assert_eq!(
+        unchanged_validation[0].status,
+        ProjectValidationStatus::Skipped
+    );
+    assert_eq!(
+        unchanged_validation[0].skip_reason,
+        Some(ProjectValidationSkipReason::UnchangedFingerprint)
+    );
     assert!(owner_started.exists());
 
     test.codex.submit(Op::Interrupt).await?;
@@ -686,7 +767,16 @@ async fn project_validation_waiter_rechecks_unchanged_worktree_after_lease() -> 
     assert_eq!(owner_validation.len(), 1);
     assert_eq!(owner_validation[0].status, ProjectValidationStatus::Passed);
     assert_eq!(owner_validation[0].output, "owner-pass");
-    assert!(validation_events(&waiter_events).is_empty());
+    let waiter_validation = validation_events(&waiter_events);
+    assert_eq!(waiter_validation.len(), 1);
+    assert_eq!(
+        waiter_validation[0].status,
+        ProjectValidationStatus::Skipped
+    );
+    assert_eq!(
+        waiter_validation[0].skip_reason,
+        Some(ProjectValidationSkipReason::UnchangedFingerprint)
+    );
     assert!(!waiter_started.exists());
     server.shutdown().await;
     Ok(())
@@ -814,7 +904,12 @@ async fn project_validation_owner_cancellation_releases_repo_lease() -> Result<(
 
     test.codex.submit(Op::Interrupt).await?;
     let owner_events = collect_events_until_terminal(&test.codex).await?;
-    assert!(validation_events(&owner_events).is_empty());
+    let owner_validation = validation_events(&owner_events);
+    assert_eq!(owner_validation.len(), 1);
+    assert_eq!(
+        owner_validation[0].status,
+        ProjectValidationStatus::Cancelled
+    );
     assert!(
         owner_events
             .iter()
@@ -995,7 +1090,16 @@ async fn project_validation_skips_when_git_worktree_is_unchanged() -> Result<()>
     submit_user_input(&test.codex, &test, "explain the current implementation").await?;
     let events = collect_events_until_terminal(&test.codex).await?;
 
-    assert!(validation_events(&events).is_empty());
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::Skipped
+    );
+    assert_eq!(
+        validation_events[0].skip_reason,
+        Some(ProjectValidationSkipReason::UnchangedFingerprint)
+    );
     assert!(!test.workspace_path("project-validation-ran").exists());
     assert_eq!(response_mock.requests().len(), 1);
     Ok(())
@@ -1018,7 +1122,16 @@ async fn project_validation_skips_when_preexisting_dirty_worktree_is_unchanged()
     submit_user_input(&test.codex, &test, "explain the current implementation").await?;
     let events = collect_events_until_terminal(&test.codex).await?;
 
-    assert!(validation_events(&events).is_empty());
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::Skipped
+    );
+    assert_eq!(
+        validation_events[0].skip_reason,
+        Some(ProjectValidationSkipReason::UnchangedFingerprint)
+    );
     assert!(!test.workspace_path("project-validation-ran").exists());
     assert_eq!(response_mock.requests().len(), 1);
     Ok(())
@@ -1084,7 +1197,7 @@ async fn project_validation_retries_unchanged_skip_after_pending_input() -> Resu
     timeout(Duration::from_secs(5), capture_started_rx)
         .await
         .context("timed out waiting for validation fingerprint capture")??;
-    let steering_result = submit_user_input(&test.codex, &test, "make the requested change").await;
+    let steering_result = steer_user_input(&test.codex, "make the requested change").await;
     let _ = capture_release_tx.send(());
     capture_task
         .await
@@ -1099,6 +1212,64 @@ async fn project_validation_retries_unchanged_skip_after_pending_input() -> Resu
     assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
     assert_eq!(validation_events[0].output, "validation-pass");
     assert_eq!(server.requests().await.len(), 3);
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_retries_pass_after_pending_input() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; if [ \"$count\" -eq 1 ]; then touch \"$2\"; while [ ! -f \"$3\" ]; do sleep 0.01; done; fi; printf 'validation-pass-%s' \"$count\"",
+        &[
+            "project-validation",
+            "validation-count",
+            "validation-started",
+            "validation-release",
+        ],
+        /*timeout_ms*/ 5_000,
+    );
+    let first_patch =
+        "*** Begin Patch\n*** Add File: first.rs\n+pub fn first() {}\n*** End Patch\n";
+    let second_patch =
+        "*** Begin Patch\n*** Add File: second.rs\n+pub fn second() {}\n*** End Patch\n";
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-pass-1")),
+            streaming_chunk(ev_apply_patch_custom_tool_call("pass-first", first_patch)),
+            streaming_chunk(ev_completed("resp-pass-1")),
+        ],
+        response_completed_chunks("resp-pass-2"),
+        vec![
+            streaming_chunk(ev_response_created("resp-pass-3")),
+            streaming_chunk(ev_apply_patch_custom_tool_call("pass-second", second_patch)),
+            streaming_chunk(ev_completed("resp-pass-3")),
+        ],
+        response_completed_chunks("resp-pass-4"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, command).await?;
+    init_git_repo(test.cwd_path())?;
+    let count_path = test.workspace_path("validation-count");
+    let started_path = test.workspace_path("validation-started");
+    let release_path = test.workspace_path("validation-release");
+
+    submit_user_input(&test.codex, &test, "make the first change").await?;
+    wait_for_path(&started_path).await?;
+    steer_user_input(&test.codex, "also make the second change").await?;
+    std::fs::write(&release_path, "release")?;
+
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    assert!(test.workspace_path("first.rs").exists());
+    assert!(test.workspace_path("second.rs").exists());
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass-2");
+    assert_eq!(std::fs::read_to_string(&count_path)?, "2");
+    assert_eq!(server.requests().await.len(), 4);
     server.shutdown().await;
     Ok(())
 }
@@ -1603,6 +1774,199 @@ async fn automatic_shellcheck_provider_runs_one_correction_cycle() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_validation_reports_disabled_disposition() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let patch = "*** Begin Patch\n*** Add File: changed.txt\n+changed\n*** End Patch\n";
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-disabled-1"),
+                ev_apply_patch_custom_tool_call("disabled-patch", patch),
+                ev_completed("resp-disabled-1"),
+            ]),
+            sse_completed("resp-disabled-2"),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.validation.groups.functional = false;
+        config.validation.project_command = None;
+    });
+    let test = builder.build(&server).await?;
+    init_git_repo(test.cwd_path())?;
+
+    submit_user_input(&test.codex, &test, "make the requested change").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let event =
+        assert_single_validation_skip(&events, ProjectValidationSkipReason::ValidationDisabled);
+    assert_eq!(event.changed_file_count, None);
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_validation_disabled_precedes_unsupported_environment() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once(&server, sse_completed("resp-disabled-no-environment")).await;
+    let mut builder = test_codex().with_config(|config| {
+        config.validation.groups.functional = false;
+        config.validation.project_command = None;
+    });
+    let test = builder.build(&server).await?;
+
+    submit_user_input_without_environments(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let event =
+        assert_single_validation_skip(&events, ProjectValidationSkipReason::ValidationDisabled);
+    assert_eq!(event.cwd, None);
+    assert_eq!(event.changed_file_count, None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_validation_reports_no_changed_files() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    init_git_repo(repo.path())?;
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-no-changes-1"),
+                ev_shell_command_call("no-changes-shell", "true"),
+                ev_completed("resp-no-changes-1"),
+            ]),
+            sse_completed("resp-no-changes-2"),
+        ],
+    )
+    .await;
+    let test = build_shellcheck_provider_codex(
+        &server,
+        repo.path(),
+        vec!["/usr/bin/true".to_string()],
+        None,
+    )
+    .await?;
+
+    submit_user_input(&test.codex, &test, "inspect without changing files").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let event = assert_single_validation_skip(&events, ProjectValidationSkipReason::NoChangedFiles);
+    assert_eq!(event.changed_file_count, Some(0));
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_validation_reports_no_applicable_provider() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    init_git_repo(repo.path())?;
+    let patch =
+        "*** Begin Patch\n*** Add File: lib.rs\n+pub fn value() -> u64 { 1 }\n*** End Patch\n";
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-no-provider-1"),
+                ev_apply_patch_custom_tool_call("no-provider-patch", patch),
+                ev_completed("resp-no-provider-1"),
+            ]),
+            sse_completed("resp-no-provider-2"),
+        ],
+    )
+    .await;
+    let test = build_shellcheck_provider_codex(
+        &server,
+        repo.path(),
+        vec!["/usr/bin/true".to_string()],
+        None,
+    )
+    .await?;
+
+    submit_user_input(&test.codex, &test, "add the Rust fixture").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let event =
+        assert_single_validation_skip(&events, ProjectValidationSkipReason::NoApplicableProvider);
+    assert_eq!(event.changed_file_count, Some(1));
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_validation_reports_unsupported_environment() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let workspace = tempdir()?;
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-unsupported-1"),
+                ev_shell_command_call("unsupported-shell", "true"),
+                ev_completed("resp-unsupported-1"),
+            ]),
+            sse_completed("resp-unsupported-2"),
+        ],
+    )
+    .await;
+    let test = build_shellcheck_provider_codex(
+        &server,
+        workspace.path(),
+        vec!["/usr/bin/true".to_string()],
+        None,
+    )
+    .await?;
+
+    submit_user_input(&test.codex, &test, "inspect this workspace").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let event =
+        assert_single_validation_skip(&events, ProjectValidationSkipReason::UnsupportedEnvironment);
+    assert_eq!(event.changed_file_count, None);
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_project_command_preserves_unsupported_environment_failure() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once(&server, sse_completed("resp-unsupported-command")).await;
+    let test = build_validation_codex(&server, shell_command("true", 5_000)).await?;
+
+    submit_user_input_without_environments(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::InfrastructureFailure
+    );
+    assert_eq!(validation_events[0].skip_reason, None);
+    assert_eq!(
+        validation_events[0].output,
+        "project validation requires exactly one local turn environment"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_project_command_takes_precedence_over_shellcheck_provider() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -1680,7 +2044,7 @@ async fn project_validation_steering_joins_the_single_correction_cycle() -> Resu
 
     submit_user_input(&test.codex, &test, "finish the work").await?;
     wait_for_path(&started_path).await?;
-    submit_user_input(&test.codex, &test, "also preserve the public API").await?;
+    steer_user_input(&test.codex, "also preserve the public API").await?;
     std::fs::write(&release_path, "release")?;
 
     let events = collect_events_until_terminal(&test.codex).await?;
@@ -1708,6 +2072,80 @@ async fn project_validation_steering_joins_the_single_correction_cycle() -> Resu
         .expect("correction request should include pending steering");
     assert!(correction_index < steering_index);
 
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_steering_during_rerun_does_not_reopen_correction_cycle() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; case \"$count\" in 1) printf validation-fail-1 >&2; exit 7 ;; 2) touch \"$2\"; while [ ! -f \"$3\" ]; do sleep 0.01; done; printf validation-pass-2 ;; 3) printf validation-fail-3 >&2; exit 9 ;; *) printf 'validation-pass-%s' \"$count\" ;; esac",
+        &[
+            "project-validation",
+            "validation-count",
+            "validation-rerun-started",
+            "validation-rerun-release",
+        ],
+        /*timeout_ms*/ 5_000,
+    );
+    let first_patch =
+        "*** Begin Patch\n*** Add File: first.rs\n+pub fn first() {}\n*** End Patch\n";
+    let second_patch =
+        "*** Begin Patch\n*** Add File: second.rs\n+pub fn second() {}\n*** End Patch\n";
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-rerun-steer-1")),
+            streaming_chunk(ev_apply_patch_custom_tool_call(
+                "rerun-steer-first",
+                first_patch,
+            )),
+            streaming_chunk(ev_completed("resp-rerun-steer-1")),
+        ],
+        response_completed_chunks("resp-rerun-steer-2"),
+        response_completed_chunks("resp-rerun-steer-3"),
+        vec![
+            streaming_chunk(ev_response_created("resp-rerun-steer-4")),
+            streaming_chunk(ev_apply_patch_custom_tool_call(
+                "rerun-steer-second",
+                second_patch,
+            )),
+            streaming_chunk(ev_completed("resp-rerun-steer-4")),
+        ],
+        response_completed_chunks("resp-rerun-steer-5"),
+        response_completed_chunks("resp-rerun-steer-6"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, command).await?;
+    init_git_repo(test.cwd_path())?;
+    let count_path = test.workspace_path("validation-count");
+    let rerun_started_path = test.workspace_path("validation-rerun-started");
+    let rerun_release_path = test.workspace_path("validation-rerun-release");
+
+    submit_user_input(&test.codex, &test, "make the first change").await?;
+    wait_for_path(&rerun_started_path).await?;
+    steer_user_input(&test.codex, "also make the second change").await?;
+    std::fs::write(&rerun_release_path, "release")?;
+
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    assert!(test.workspace_path("first.rs").exists());
+    assert!(test.workspace_path("second.rs").exists());
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 2);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[0].output, "validation-fail-1");
+    assert_eq!(
+        validation_events[1].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[1].output, "validation-fail-3");
+    assert_eq!(std::fs::read_to_string(&count_path)?, "3");
+    assert_eq!(server.requests().await.len(), 5);
     server.shutdown().await;
     Ok(())
 }
@@ -1793,10 +2231,14 @@ async fn project_validation_interrupt_during_rerun_cancels_command() -> Result<(
     let events = collect_events_until_terminal(&test.codex).await?;
 
     let validation_events = validation_events(&events);
-    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events.len(), 2);
     assert_eq!(
         validation_events[0].status,
         ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(
+        validation_events[1].status,
+        ProjectValidationStatus::Cancelled
     );
     assert!(
         events
@@ -1916,7 +2358,16 @@ async fn project_validation_is_skipped_for_non_root_agents() -> Result<()> {
     )
     .await?;
 
-    assert!(validation_events(&events).is_empty());
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::Skipped
+    );
+    assert_eq!(
+        validation_events[0].skip_reason,
+        Some(ProjectValidationSkipReason::NonRootAgent)
+    );
     assert!(!marker.exists());
     Ok(())
 }

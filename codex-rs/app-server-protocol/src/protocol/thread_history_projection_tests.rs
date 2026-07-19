@@ -8,6 +8,9 @@ use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
+use codex_protocol::protocol::ProjectValidationCompletedEvent;
+use codex_protocol::protocol::ProjectValidationSkipReason as CoreProjectValidationSkipReason;
+use codex_protocol::protocol::ProjectValidationStatus as CoreProjectValidationStatus;
 use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
@@ -278,6 +281,49 @@ fn review_items_use_stable_ordinal_derived_ids() {
             item: ThreadItem::ExitedReviewMode {
                 id: "review-exited-44".to_string(),
                 review: "No findings.".to_string(),
+            },
+        })
+    );
+}
+
+#[test]
+fn project_validation_uses_stable_ordinal_derived_item_id() {
+    let changes = project(
+        45,
+        EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
+            turn_id: "turn-1".to_string(),
+            command: vec!["shellcheck".to_string()],
+            command_truncated: false,
+            cwd: None,
+            status: CoreProjectValidationStatus::Skipped,
+            skip_reason: Some(CoreProjectValidationSkipReason::NoApplicableProvider),
+            changed_file_count: Some(2),
+            exit_code: None,
+            output: "automatic validation skipped".to_string(),
+            output_truncated: false,
+            duration_ms: 0,
+        }),
+    )
+    .expect("project validation projection");
+
+    assert_eq!(
+        changes.mutation(),
+        Some(&ThreadHistoryProjectionMutation::UpsertItem {
+            target: ThreadHistoryTurnTarget::Id("turn-1".to_string()),
+            item: ThreadItem::ProjectValidation {
+                id: "project-validation-45".to_string(),
+                command: vec!["shellcheck".to_string()],
+                command_truncated: false,
+                cwd: None,
+                status: crate::protocol::v2::ProjectValidationStatus::Skipped,
+                skip_reason: Some(
+                    crate::protocol::v2::ProjectValidationSkipReason::NoApplicableProvider,
+                ),
+                changed_file_count: Some(2),
+                exit_code: None,
+                output: "automatic validation skipped".to_string(),
+                output_truncated: false,
+                duration_ms: 0,
             },
         })
     );

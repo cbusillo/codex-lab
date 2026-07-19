@@ -1,4 +1,5 @@
 use super::shared::v2_enum_from_core;
+use codex_protocol::protocol::ProjectValidationSkipReason as CoreProjectValidationSkipReason;
 use codex_protocol::protocol::ProjectValidationStatus as CoreProjectValidationStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use schemars::JsonSchema;
@@ -13,6 +14,19 @@ v2_enum_from_core!(
         ConfigurationError,
         TimedOut,
         InfrastructureFailure,
+        Cancelled,
+        Skipped,
+    }
+);
+
+v2_enum_from_core!(
+    pub enum ProjectValidationSkipReason from CoreProjectValidationSkipReason {
+        ValidationDisabled,
+        NoChangedFiles,
+        NoApplicableProvider,
+        NonRootAgent,
+        UnchangedFingerprint,
+        UnsupportedEnvironment,
     }
 );
 
@@ -25,10 +39,13 @@ pub struct ProjectValidationCompletedNotification {
     pub thread_id: String,
     pub turn_id: String,
     pub command: Vec<String>,
+    pub command_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub cwd: Option<AbsolutePathBuf>,
     pub status: ProjectValidationStatus,
+    pub skip_reason: Option<ProjectValidationSkipReason>,
+    pub changed_file_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub exit_code: Option<i32>,

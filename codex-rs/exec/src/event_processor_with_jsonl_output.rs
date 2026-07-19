@@ -9,6 +9,7 @@ use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
+use codex_app_server_protocol::ProjectValidationSkipReason as AppProjectValidationSkipReason;
 use codex_app_server_protocol::ProjectValidationStatus as AppProjectValidationStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
@@ -43,6 +44,7 @@ use crate::exec_events::McpToolCallStatus as ExecMcpToolCallStatus;
 use crate::exec_events::PatchApplyStatus as ExecPatchApplyStatus;
 use crate::exec_events::PatchChangeKind as ExecPatchChangeKind;
 use crate::exec_events::ProjectValidationCompletedEvent;
+use crate::exec_events::ProjectValidationSkipReason;
 use crate::exec_events::ProjectValidationStatus;
 use crate::exec_events::ReasoningItem;
 use crate::exec_events::ThreadErrorEvent;
@@ -467,6 +469,7 @@ impl EventProcessorWithJsonOutput {
                 events.push(ThreadEvent::ProjectValidationCompleted(
                     ProjectValidationCompletedEvent {
                         command: notification.command,
+                        command_truncated: notification.command_truncated,
                         cwd: notification
                             .cwd
                             .map(|cwd| cwd.as_path().display().to_string()),
@@ -484,7 +487,32 @@ impl EventProcessorWithJsonOutput {
                             AppProjectValidationStatus::InfrastructureFailure => {
                                 ProjectValidationStatus::InfrastructureFailure
                             }
+                            AppProjectValidationStatus::Cancelled => {
+                                ProjectValidationStatus::Cancelled
+                            }
+                            AppProjectValidationStatus::Skipped => ProjectValidationStatus::Skipped,
                         },
+                        skip_reason: notification.skip_reason.map(|reason| match reason {
+                            AppProjectValidationSkipReason::ValidationDisabled => {
+                                ProjectValidationSkipReason::ValidationDisabled
+                            }
+                            AppProjectValidationSkipReason::NoChangedFiles => {
+                                ProjectValidationSkipReason::NoChangedFiles
+                            }
+                            AppProjectValidationSkipReason::NoApplicableProvider => {
+                                ProjectValidationSkipReason::NoApplicableProvider
+                            }
+                            AppProjectValidationSkipReason::NonRootAgent => {
+                                ProjectValidationSkipReason::NonRootAgent
+                            }
+                            AppProjectValidationSkipReason::UnchangedFingerprint => {
+                                ProjectValidationSkipReason::UnchangedFingerprint
+                            }
+                            AppProjectValidationSkipReason::UnsupportedEnvironment => {
+                                ProjectValidationSkipReason::UnsupportedEnvironment
+                            }
+                        }),
+                        changed_file_count: notification.changed_file_count,
                         exit_code: notification.exit_code,
                         output: notification.output,
                         output_truncated: notification.output_truncated,

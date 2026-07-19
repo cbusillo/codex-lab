@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
+use codex_app_server_protocol::ProjectValidationSkipReason;
 use codex_app_server_protocol::ProjectValidationStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
@@ -20,6 +21,17 @@ use owo_colors::Style;
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use crate::event_processor::handle_last_message;
+
+fn project_validation_skip_reason_label(reason: ProjectValidationSkipReason) -> &'static str {
+    match reason {
+        ProjectValidationSkipReason::ValidationDisabled => "skipped: validation disabled",
+        ProjectValidationSkipReason::NoChangedFiles => "skipped: no changed files",
+        ProjectValidationSkipReason::NoApplicableProvider => "skipped: no applicable provider",
+        ProjectValidationSkipReason::NonRootAgent => "skipped: non-root agent",
+        ProjectValidationSkipReason::UnchangedFingerprint => "skipped: unchanged worktree",
+        ProjectValidationSkipReason::UnsupportedEnvironment => "skipped: unsupported environment",
+    }
+}
 
 pub(crate) struct EventProcessorWithHumanOutput {
     bold: Style,
@@ -277,31 +289,54 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 CodexStatus::Running
             }
             ServerNotification::ProjectValidationCompleted(notification) => {
-                if notification.status != ProjectValidationStatus::Passed {
-                    let command = notification.command.join(" ");
-                    let status = match notification.status {
-                        ProjectValidationStatus::Passed => unreachable!(),
-                        ProjectValidationStatus::ActionableFailure => {
-                            let exit_code = notification.exit_code.unwrap_or(1);
-                            format!("failed with exit code {exit_code}")
-                        }
-                        ProjectValidationStatus::ConfigurationError => {
-                            "configuration error".to_string()
-                        }
-                        ProjectValidationStatus::TimedOut => "timed out".to_string(),
-                        ProjectValidationStatus::InfrastructureFailure => {
-                            "infrastructure failure".to_string()
-                        }
-                    };
+                let command = notification.command.join(" ");
+                let status = match notification.status {
+                    ProjectValidationStatus::Passed => "passed".to_string(),
+                    ProjectValidationStatus::ActionableFailure => {
+                        let exit_code = notification.exit_code.unwrap_or(1);
+                        format!("failed with exit code {exit_code}")
+                    }
+                    ProjectValidationStatus::ConfigurationError => {
+                        "configuration error".to_string()
+                    }
+                    ProjectValidationStatus::TimedOut => "timed out".to_string(),
+                    ProjectValidationStatus::InfrastructureFailure => {
+                        "infrastructure failure".to_string()
+                    }
+                    ProjectValidationStatus::Cancelled => "cancelled".to_string(),
+                    ProjectValidationStatus::Skipped => notification
+                        .skip_reason
+                        .map(project_validation_skip_reason_label)
+                        .unwrap_or("skipped")
+                        .to_string(),
+                };
+                let styled_status = match notification.status {
+                    ProjectValidationStatus::Passed => status.style(self.green),
+                    ProjectValidationStatus::Skipped => status.style(self.dimmed),
+                    ProjectValidationStatus::Cancelled | ProjectValidationStatus::TimedOut => {
+                        status.style(self.yellow)
+                    }
+                    ProjectValidationStatus::ActionableFailure
+                    | ProjectValidationStatus::ConfigurationError
+                    | ProjectValidationStatus::InfrastructureFailure => status.style(self.red),
+                };
+                if command.is_empty() {
+                    eprintln!("{} {}", "validation:".style(self.bold), styled_status);
+                } else {
                     eprintln!(
                         "{} {} {}",
                         "validation:".style(self.bold),
-                        status.style(self.red),
+                        styled_status,
                         command.style(self.dimmed)
                     );
-                    if !notification.output.trim().is_empty() {
-                        eprintln!("{}", notification.output);
-                    }
+                }
+                if !notification.output.trim().is_empty()
+                    && !matches!(
+                        notification.status,
+                        ProjectValidationStatus::Passed | ProjectValidationStatus::Skipped
+                    )
+                {
+                    eprintln!("{}", notification.output);
                 }
                 CodexStatus::Running
             }

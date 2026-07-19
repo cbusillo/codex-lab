@@ -95,15 +95,35 @@ pub enum ProjectValidationStatus {
     ConfigurationError,
     TimedOut,
     InfrastructureFailure,
+    Cancelled,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectValidationSkipReason {
+    ValidationDisabled,
+    NoChangedFiles,
+    NoApplicableProvider,
+    NonRootAgent,
+    UnchangedFingerprint,
+    UnsupportedEnvironment,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ProjectValidationCompletedEvent {
     pub command: Vec<String>,
+    pub command_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub cwd: Option<String>,
     pub status: ProjectValidationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub skip_reason: Option<ProjectValidationSkipReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub changed_file_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub exit_code: Option<i32>,

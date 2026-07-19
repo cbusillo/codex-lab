@@ -61,13 +61,20 @@
     "event_types": {
       "thread.started": 2,
       "turn.started": 2,
-      "turn.completed": 2
+      "turn.completed": 2,
+      "validation.completed": 2
     },
     "turns": [
       {
         "returncode": 0,
         "responses_request_count": 1,
         "thread_id": "required",
+        "event_types": {
+          "thread.started": 1,
+          "turn.started": 1,
+          "turn.completed": 1,
+          "validation.completed": 1
+        },
         "token_usage": {
           "input_tokens": 100,
           "cached_input_tokens": 40,
@@ -87,6 +94,12 @@
         "returncode": 0,
         "responses_request_count": 1,
         "thread_id": "required",
+        "event_types": {
+          "thread.started": 1,
+          "turn.started": 1,
+          "turn.completed": 1,
+          "validation.completed": 1
+        },
         "token_usage": {
           "input_tokens": 180,
           "cached_input_tokens": 120,

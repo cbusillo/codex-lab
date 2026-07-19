@@ -30,7 +30,6 @@ pub(crate) struct RegularTask;
 enum ProjectValidationPhase {
     Initial,
     Correcting,
-    Complete,
 }
 
 impl RegularTask {
@@ -119,7 +118,7 @@ impl SessionTask for RegularTask {
                 continue;
             }
             if validation_eligible {
-                match project_validation_phase {
+                let deferred_validation = match project_validation_phase {
                     ProjectValidationPhase::Initial => {
                         match run_project_validation(
                             &sess,
@@ -133,13 +132,16 @@ impl SessionTask for RegularTask {
                         )
                         .await
                         {
-                            ProjectValidationRun::Skipped => {}
+                            ProjectValidationRun::Skipped(event) => event,
                             ProjectValidationRun::Completed(event) => {
-                                project_validation_phase = ProjectValidationPhase::Complete;
-                                let correction = ProjectValidationFailure::from_event(&event);
-                                sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
+                                if let Some(correction) =
+                                    ProjectValidationFailure::from_event(&event)
+                                {
+                                    sess.send_event(
+                                        &ctx,
+                                        EventMsg::ProjectValidationCompleted(event),
+                                    )
                                     .await;
-                                if let Some(correction) = correction {
                                     if cancellation_token.is_cancelled() {
                                         return None;
                                     }
@@ -153,12 +155,16 @@ impl SessionTask for RegularTask {
                                     next_input = Vec::new();
                                     continue;
                                 }
+                                event
                             }
-                            ProjectValidationRun::Cancelled => return None,
+                            ProjectValidationRun::Cancelled(event) => {
+                                sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
+                                    .await;
+                                return None;
+                            }
                         }
                     }
                     ProjectValidationPhase::Correcting => {
-                        project_validation_phase = ProjectValidationPhase::Complete;
                         match run_project_validation(
                             &sess,
                             &ctx,
@@ -170,20 +176,25 @@ impl SessionTask for RegularTask {
                         )
                         .await
                         {
-                            ProjectValidationRun::Skipped => {}
-                            ProjectValidationRun::Completed(event) => {
+                            ProjectValidationRun::Skipped(event)
+                            | ProjectValidationRun::Completed(event) => event,
+                            ProjectValidationRun::Cancelled(event) => {
                                 sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
                                     .await;
+                                return None;
                             }
-                            ProjectValidationRun::Cancelled => return None,
                         }
                     }
-                    ProjectValidationPhase::Complete => {}
-                }
+                };
                 if sess.input_queue.has_pending_input(&sess.active_turn).await {
                     next_input = Vec::new();
                     continue;
                 }
+                sess.send_event(
+                    &ctx,
+                    EventMsg::ProjectValidationCompleted(deferred_validation),
+                )
+                .await;
             }
             return last_agent_message;
         }

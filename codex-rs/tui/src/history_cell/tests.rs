@@ -24,6 +24,8 @@ use codex_app_server_protocol::AutoReviewUsage;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::McpAuthStatus;
+use codex_app_server_protocol::ProjectValidationSkipReason;
+use codex_app_server_protocol::ProjectValidationStatus;
 use codex_app_server_protocol::ReviewTarget;
 use codex_config::types::McpServerConfig;
 use codex_otel::RuntimeMetricTotals;
@@ -274,6 +276,86 @@ fn auto_review_status_snapshot() {
     let cell = new_auto_review_status_cell(&notification);
 
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"○ Background Review queued for current turn changes · run-queued");
+}
+
+#[test]
+fn project_validation_disposition_snapshots() {
+    let cells = [
+        new_project_validation_cell(
+            ProjectValidationStatus::Passed,
+            None,
+            Some(1),
+            &["shellcheck".to_string(), "script.sh".to_string()],
+            false,
+            Some(0),
+            42,
+            false,
+        ),
+        new_project_validation_cell(
+            ProjectValidationStatus::ActionableFailure,
+            None,
+            Some(2),
+            &["cargo".to_string(), "check".to_string()],
+            false,
+            Some(7),
+            99,
+            true,
+        ),
+        new_project_validation_cell(
+            ProjectValidationStatus::ConfigurationError,
+            None,
+            None,
+            &[],
+            false,
+            None,
+            0,
+            false,
+        ),
+        new_project_validation_cell(
+            ProjectValidationStatus::InfrastructureFailure,
+            None,
+            None,
+            &[],
+            false,
+            None,
+            0,
+            false,
+        ),
+        new_project_validation_cell(
+            ProjectValidationStatus::Cancelled,
+            None,
+            Some(3),
+            &["shellcheck".to_string()],
+            false,
+            None,
+            12,
+            false,
+        ),
+        new_project_validation_cell(
+            ProjectValidationStatus::Skipped,
+            Some(ProjectValidationSkipReason::NoApplicableProvider),
+            Some(1),
+            &["shellcheck".to_string()],
+            true,
+            None,
+            0,
+            false,
+        ),
+    ];
+    let rendered = cells
+        .into_iter()
+        .flat_map(|cell| render_lines(&cell.display_lines(/*width*/ 160)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @"
+✔ Automatic Validation passed · 1 changed file · shellcheck script.sh · 42 ms
+✗ Automatic Validation failed · 2 changed files · exit 7 · cargo check · 99 ms · output truncated
+✗ Automatic Validation configuration error
+✗ Automatic Validation infrastructure failure
+○ Automatic Validation cancelled · 3 changed files · shellcheck · 12 ms
+○ Automatic Validation skipped · no applicable provider · 1 changed file · shellcheck · command truncated
+");
 }
 
 #[test]
