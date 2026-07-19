@@ -1,9 +1,16 @@
 # Codex Lab Desktop Launcher Packaging
 
 This helper builds a macOS `Codex Lab.app` launcher bundle. The bundle does not
-contain or modify OpenAI's Codex Desktop app. Instead, it embeds a Codex Lab CLI
-binary, sets `CODEX_CLI_PATH` to that binary, and launches the official
-`/Applications/Codex.app` through LaunchServices.
+contain or modify OpenAI's signed desktop app. Instead, it embeds a Codex Lab
+CLI binary, binds its source commit, version, and SHA-256 digest, sets
+`CODEX_CLI_PATH` to that exact path, and launches through LaunchServices.
+
+The launcher accepts only intact `com.openai.codex` bundles signed by OpenAI
+team `2DC432GLL2`. After an optional build-time override, it checks system and
+user `ChatGPT.app` installs, then legacy `Codex.app` installs. It never patches,
+re-signs, or redistributes the official bundle. If that app is already running,
+the launcher fails closed; quit it before launching `Codex Lab.app` so the new
+process inherits `CODEX_CLI_PATH`.
 
 Example:
 
@@ -25,12 +32,28 @@ in these locations, in order:
 4. `/Applications/Codex Lab.app`.
 5. `~/Applications/Codex Lab.app`.
 
+## Live desktop provenance smoke
+
+After building or installing `Codex Lab.app`, run the live smoke check on macOS:
+
+```shell
+python3 scripts/codex_lab_package/live_smoke.py \
+  "/Applications/Codex Lab.app"
+```
+
+The check launches a fresh GUI instance and emits bounded JSON only after a new
+descendant `app-server` executable resolves exactly to the embedded CLI. The
+evidence includes its PID, selected app, and fixed source/build provenance.
+
 The GitHub workflow uploads `codex-lab-distribution.json` beside the app zip,
 shim zip, and `SHA256SUMS`. The manifest records artifact roles, sizes,
 checksums, source workflow metadata, supported install layouts, release tags,
 download URLs when published, and the current signing state. Codex Lab artifacts
 are currently marked `signed: false` and `notarized: false` until a later
 signing/notarization stage is implemented.
+
+Packaging workflows bind the static smoke to the expected source commit before
+the interactive GUI smoke is performed.
 
 ## Installing a published release
 

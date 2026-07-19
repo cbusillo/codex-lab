@@ -59,9 +59,22 @@ class DistributionManifestTest(unittest.TestCase):
                 manifest["desktopIntegration"],
                 {
                     "cliOverrideEnv": "CODEX_CLI_PATH",
+                    "existingAppPolicy": "failClosed",
                     "launchesFreshInstance": True,
-                    "officialCodexAppPath": "/Applications/Codex.app",
+                    "officialAppBundleIdentifier": "com.openai.codex",
+                    "officialAppPaths": [
+                        "/Applications/ChatGPT.app",
+                        "~/Applications/ChatGPT.app",
+                        "/Applications/Codex.app",
+                        "~/Applications/Codex.app",
+                    ],
+                    "officialAppTeamIdentifier": "2DC432GLL2",
+                    "officialCodexAppPath": "/Applications/ChatGPT.app",
+                    "provenanceCommand": ["debug", "provenance", "--json"],
+                    "provenanceMaxBytes": 4096,
+                    "requiresOfficialAppNotRunning": True,
                     "requiresOfficialCodexApp": True,
+                    "requiresValidOfficialSignature": True,
                 },
             )
             self.assertEqual(

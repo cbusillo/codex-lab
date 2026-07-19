@@ -40,7 +40,11 @@ def parse_args() -> argparse.Namespace:
         "--codex-app-path",
         type=Path,
         default=DEFAULT_CODEX_APP_PATH,
-        help="Official Codex Desktop app path to launch.",
+        help=(
+            "Preferred official OpenAI coding desktop app path. The generated "
+            "launcher also checks ChatGPT.app and legacy Codex.app in "
+            "/Applications and ~/Applications."
+        ),
     )
     parser.add_argument(
         "--bundle-id",
@@ -61,6 +65,10 @@ def parse_args() -> argparse.Namespace:
         "--bundle-version",
         default="1",
         help="CFBundleVersion for the launcher bundle.",
+    )
+    parser.add_argument(
+        "--source-commit",
+        help="Expected 40-character source commit for the embedded CLI.",
     )
     parser.add_argument(
         "--force",
@@ -89,6 +97,7 @@ def main() -> int:
             display_name=args.display_name,
             short_version=args.short_version,
             bundle_version=args.bundle_version,
+            source_commit=args.source_commit,
             force=args.force,
         )
     )

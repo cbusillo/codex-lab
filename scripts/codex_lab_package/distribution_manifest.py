@@ -10,6 +10,11 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from codex_lab_package.layout import DEFAULT_CODEX_APP_PATH
+from codex_lab_package.layout import MAX_PROVENANCE_BYTES
+from codex_lab_package.layout import OFFICIAL_APP_BUNDLE_IDENTIFIER
+from codex_lab_package.layout import OFFICIAL_APP_CANDIDATE_PATHS
+from codex_lab_package.layout import OFFICIAL_APP_TEAM_IDENTIFIER
 from codex_package.version import read_workspace_version
 
 
@@ -170,9 +175,17 @@ def build_manifest(
         "channel": CHANNEL,
         "desktopIntegration": {
             "cliOverrideEnv": "CODEX_CLI_PATH",
+            "existingAppPolicy": "failClosed",
             "launchesFreshInstance": True,
-            "officialCodexAppPath": "/Applications/Codex.app",
+            "officialAppBundleIdentifier": OFFICIAL_APP_BUNDLE_IDENTIFIER,
+            "officialAppPaths": list(OFFICIAL_APP_CANDIDATE_PATHS),
+            "officialAppTeamIdentifier": OFFICIAL_APP_TEAM_IDENTIFIER,
+            "officialCodexAppPath": str(DEFAULT_CODEX_APP_PATH),
+            "provenanceCommand": ["debug", "provenance", "--json"],
+            "provenanceMaxBytes": MAX_PROVENANCE_BYTES,
+            "requiresOfficialAppNotRunning": True,
             "requiresOfficialCodexApp": True,
+            "requiresValidOfficialSignature": True,
         },
         "generatedAt": timestamp,
         "platform": PLATFORM,
