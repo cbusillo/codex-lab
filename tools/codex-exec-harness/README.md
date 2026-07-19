@@ -104,6 +104,11 @@ points to a deterministic fake ShellCheck command; the default suite verifies
 changed-file selection, fixed argv, one bounded correction cycle, and the final
 passing rerun.
 
+`auto-validation-cargo-provider.json` proves issue #372's bounded Rust
+provider. A trusted external Cargo executable verifies nearest-target
+selection, fixed JSON argv, compact compiler diagnostics, one correction
+fragment, and the final passing rerun.
+
 `auto-validation-no-applicable-provider.json` proves issue #371's previously
 silent Rust-only path now emits one bounded typed `skipped` disposition with
 the changed-file count and `no_applicable_provider` reason.

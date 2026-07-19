@@ -28,6 +28,15 @@ fn shellcheck_provider(input: &str) -> ShellcheckValidationProviderConfig {
         .shellcheck
 }
 
+fn cargo_provider(input: &str) -> CargoValidationProviderConfig {
+    toml::from_str::<ConfigToml>(input)
+        .expect("validation config should deserialize")
+        .validation
+        .expect("validation config should be present")
+        .providers
+        .cargo
+}
+
 #[test]
 fn validation_groups_deserialize_explicit_values() {
     assert_eq!(
@@ -123,6 +132,28 @@ fn shellcheck_provider_deserializes_trusted_override() {
             enabled: false,
             command: vec!["/bin/sh".to_string(), "fixture".to_string()],
             timeout_ms: 5_000,
+        }
+    );
+}
+
+#[test]
+fn cargo_provider_defaults_to_trusted_builtin_command() {
+    assert_eq!(
+        cargo_provider("[validation.groups]\nfunctional = true\n"),
+        CargoValidationProviderConfig::default()
+    );
+}
+
+#[test]
+fn cargo_provider_deserializes_trusted_override() {
+    assert_eq!(
+        cargo_provider(
+            "[validation.providers.cargo]\nenabled = false\ncommand = [\"/usr/bin/cargo\"]\ntimeout_ms = 25000\n"
+        ),
+        CargoValidationProviderConfig {
+            enabled: false,
+            command: vec!["/usr/bin/cargo".to_string()],
+            timeout_ms: 25_000,
         }
     );
 }

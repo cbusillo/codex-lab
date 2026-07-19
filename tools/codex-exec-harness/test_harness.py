@@ -365,6 +365,27 @@ class HarnessSafetyTest(unittest.TestCase):
                 (paths.workspace / "proof.txt").read_text(encoding="utf-8"),
             )
 
+    def test_materialize_workspace_creates_executable_home_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.make_paths(Path(tmp), "executable-home-file")
+
+            HARNESS.materialize_workspace(
+                {
+                    "git_init": False,
+                    "executable_home_files": {
+                        "bin/cargo": "home={home}\nworkspace={workspace}\n"
+                    },
+                },
+                paths,
+            )
+
+            executable = paths.home / "bin" / "cargo"
+            self.assertTrue(os.access(executable, os.X_OK))
+            self.assertEqual(
+                f"home={paths.home}\nworkspace={paths.workspace}\n",
+                executable.read_text(encoding="utf-8"),
+            )
+
     def test_fake_responses_rejects_empty_responses(self) -> None:
         with self.assertRaisesRegex(HARNESS.HarnessError, "must not be empty"):
             HARNESS.FakeResponsesServer({"responses": []})

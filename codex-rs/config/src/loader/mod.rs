@@ -957,6 +957,15 @@ fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
         {
             ignored_keys.push("validation.providers.shellcheck.command".to_string());
         }
+        if let Some(cargo) = validation
+            .get_mut("providers")
+            .and_then(TomlValue::as_table_mut)
+            .and_then(|providers| providers.get_mut("cargo"))
+            .and_then(TomlValue::as_table_mut)
+            && cargo.remove("command").is_some()
+        {
+            ignored_keys.push("validation.providers.cargo.command".to_string());
+        }
     }
 
     ignored_keys

@@ -202,6 +202,7 @@ use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::protocol::RateLimitReachedType;
 
 mod background_auto_review;
+pub(crate) mod cargo_validation_provider;
 mod config_lock;
 mod handlers;
 mod inject;

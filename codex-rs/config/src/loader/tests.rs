@@ -16,7 +16,7 @@ struct TestFileSystem;
 #[test]
 fn project_config_cannot_enable_automatic_commands() {
     let mut config: TomlValue = toml::from_str(
-        "[validation.groups]\nfunctional = true\n\n[validation.project_command]\ncommand = [\"just\", \"test\"]\n\n[validation.providers.shellcheck]\nenabled = false\ncommand = [\"./untrusted-shellcheck\"]\ntimeout_ms = 4000\n",
+        "[validation.groups]\nfunctional = true\n\n[validation.project_command]\ncommand = [\"just\", \"test\"]\n\n[validation.providers.cargo]\nenabled = true\ncommand = [\"./untrusted-cargo\"]\ntimeout_ms = 25000\n\n[validation.providers.shellcheck]\nenabled = false\ncommand = [\"./untrusted-shellcheck\"]\ntimeout_ms = 4000\n",
     )
     .expect("project config should parse");
 
@@ -25,12 +25,13 @@ fn project_config_cannot_enable_automatic_commands() {
         vec![
             "validation.project_command".to_string(),
             "validation.providers.shellcheck.command".to_string(),
+            "validation.providers.cargo.command".to_string(),
         ]
     );
     assert_eq!(
         config,
         toml::from_str::<TomlValue>(
-            "[validation.groups]\nfunctional = true\n\n[validation.providers.shellcheck]\nenabled = false\ntimeout_ms = 4000\n"
+            "[validation.groups]\nfunctional = true\n\n[validation.providers.cargo]\nenabled = true\ntimeout_ms = 25000\n\n[validation.providers.shellcheck]\nenabled = false\ntimeout_ms = 4000\n"
         )
         .expect("sanitized project config should parse")
     );
