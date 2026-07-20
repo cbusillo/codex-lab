@@ -2187,6 +2187,7 @@ dependencies = [
  "codex-uds",
  "codex-utils-absolute-path",
  "codex-utils-rustls-provider",
+ "codex-version",
  "constant_time_eq 0.3.1",
  "futures",
  "gethostname",

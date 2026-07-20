@@ -11,6 +11,7 @@ mod apply_patch;
 mod apps;
 mod client;
 mod client_common;
+mod execution_account;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;

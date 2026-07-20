@@ -11,11 +11,14 @@ use super::reasoning_effort_for_request;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
+use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountOptions;
 use codex_api::ApiError;
 use codex_api::RawMemory;
 use codex_api::RawMemoryMetadata;
 use codex_api::ResponseEvent;
 use codex_app_server_protocol::AuthMode;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::BearerAuthProvider;
@@ -146,6 +149,61 @@ fn test_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize test model info")
+}
+
+#[tokio::test]
+async fn model_client_uses_execution_lease_auth_without_changing_control_auth() {
+    let control_auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-control"));
+    let execution_auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-execution"));
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let thread_id = ThreadId::new();
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&control_auth_manager),
+        ExecutionAccountOptions {
+            codex_home: codex_home.path().to_path_buf(),
+            auth_home: codex_home.path().to_path_buf(),
+            auth_credentials_store_mode: AuthCredentialsStoreMode::Ephemeral,
+            chatgpt_base_url: CHATGPT_CODEX_BASE_URL.to_string(),
+            allow_api_key_fallback: false,
+            pooled: false,
+        },
+    )
+    .await;
+    lease.replace_auth_manager_for_testing(execution_auth_manager);
+    let model_client = ModelClient::new(
+        Some(Arc::clone(&control_auth_manager)),
+        thread_id.into(),
+        thread_id,
+        /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+        ModelProviderInfo::create_openai_provider(Some(CHATGPT_CODEX_BASE_URL.to_string())),
+        SessionSource::Exec,
+        /*parent_thread_id*/ None,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*attestation_provider*/ None,
+    );
+    model_client.set_execution_account_lease(lease);
+
+    let setup = model_client
+        .current_client_setup(/*generate_attestation*/ false)
+        .await
+        .expect("client setup");
+    let mut headers = http::HeaderMap::new();
+    setup.api_auth.add_auth_headers(&mut headers);
+
+    assert_eq!(
+        headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer sk-execution")
+    );
+    let control_auth = control_auth_manager.auth_cached().expect("control auth");
+    assert_eq!(control_auth.api_key(), Some("sk-control"));
 }
 
 fn test_session_telemetry() -> SessionTelemetry {

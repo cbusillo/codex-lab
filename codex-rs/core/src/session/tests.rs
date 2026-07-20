@@ -14,6 +14,7 @@ use crate::skills::render::SkillMetadataBudget;
 use crate::test_support::models_manager_with_provider;
 use crate::test_support::without_generated_response_item_ids;
 use crate::tools::format_exec_output_str;
+use codex_app_server_protocol::AuthMode;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::LoaderOverrides;
@@ -23,6 +24,7 @@ use codex_config::NetworkDomainPermissionsToml;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
 use codex_config::loader::project_trust_key;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::ToolSuggestDisabledTool;
 
 use codex_features::Feature;
@@ -5610,6 +5612,34 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         codex_exec_server::Environment::create_for_tests(/*exec_server_url*/ None)
             .expect("create environment"),
     );
+    let execution_account = crate::execution_account::ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&auth_manager),
+        crate::execution_account::ExecutionAccountOptions {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_home: config.auth_home.to_path_buf(),
+            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+            chatgpt_base_url: config.chatgpt_base_url.clone(),
+            allow_api_key_fallback: false,
+            pooled: false,
+        },
+    )
+    .await;
+    let model_client = ModelClient::new(
+        Some(auth_manager.clone()),
+        thread_id.into(),
+        thread_id,
+        /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+        session_configuration.provider.clone(),
+        session_configuration.session_source.clone(),
+        session_configuration.parent_thread_id,
+        config.model_verbosity,
+        config.features.enabled(Feature::EnableRequestCompression),
+        config.features.enabled(Feature::RuntimeMetrics),
+        Session::build_model_client_beta_features_header(config.as_ref()),
+        /*attestation_provider*/ None,
+    );
+    model_client.set_execution_account_lease(execution_account.clone());
 
     let services = SessionServices {
         mcp_connection_manager: Arc::new(RwLock::new(
@@ -5640,6 +5670,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: auth_manager.clone(),
+        execution_account,
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
         tool_approvals: Mutex::new(ApprovalStore::default()),
@@ -5666,20 +5697,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             /*state_db*/ None,
         )),
         attestation_provider: None,
-        model_client: ModelClient::new(
-            Some(auth_manager.clone()),
-            thread_id.into(),
-            thread_id,
-            /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
-            session_configuration.provider.clone(),
-            session_configuration.session_source.clone(),
-            session_configuration.parent_thread_id,
-            config.model_verbosity,
-            config.features.enabled(Feature::EnableRequestCompression),
-            config.features.enabled(Feature::RuntimeMetrics),
-            Session::build_model_client_beta_features_header(config.as_ref()),
-            /*attestation_provider*/ None,
-        ),
+        model_client,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(),
         environment_manager: Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
         project_validation_coordinator: Arc::new(ProjectValidationCoordinator::default()),
@@ -7871,6 +7889,34 @@ where
         codex_exec_server::Environment::create_for_tests(/*exec_server_url*/ None)
             .expect("create environment"),
     );
+    let execution_account = crate::execution_account::ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&auth_manager),
+        crate::execution_account::ExecutionAccountOptions {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_home: config.auth_home.to_path_buf(),
+            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+            chatgpt_base_url: config.chatgpt_base_url.clone(),
+            allow_api_key_fallback: false,
+            pooled: false,
+        },
+    )
+    .await;
+    let model_client = ModelClient::new(
+        Some(Arc::clone(&auth_manager)),
+        thread_id.into(),
+        thread_id,
+        /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+        session_configuration.provider.clone(),
+        session_configuration.session_source.clone(),
+        session_configuration.parent_thread_id,
+        config.model_verbosity,
+        config.features.enabled(Feature::EnableRequestCompression),
+        config.features.enabled(Feature::RuntimeMetrics),
+        Session::build_model_client_beta_features_header(config.as_ref()),
+        /*attestation_provider*/ None,
+    );
+    model_client.set_execution_account_lease(execution_account.clone());
 
     let services = SessionServices {
         mcp_connection_manager: Arc::new(RwLock::new(
@@ -7901,6 +7947,7 @@ where
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: Arc::clone(&auth_manager),
+        execution_account,
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
         tool_approvals: Mutex::new(ApprovalStore::default()),
@@ -7927,20 +7974,7 @@ where
             state_db,
         )),
         attestation_provider: None,
-        model_client: ModelClient::new(
-            Some(Arc::clone(&auth_manager)),
-            thread_id.into(),
-            thread_id,
-            /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
-            session_configuration.provider.clone(),
-            session_configuration.session_source.clone(),
-            session_configuration.parent_thread_id,
-            config.model_verbosity,
-            config.features.enabled(Feature::EnableRequestCompression),
-            config.features.enabled(Feature::RuntimeMetrics),
-            Session::build_model_client_beta_features_header(config.as_ref()),
-            /*attestation_provider*/ None,
-        ),
+        model_client,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(),
         environment_manager: Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
         project_validation_coordinator: Arc::new(ProjectValidationCoordinator::default()),

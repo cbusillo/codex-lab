@@ -3770,6 +3770,26 @@ fn dynamic_tool_spec_deserializes_defer_loading() {
 }
 
 #[test]
+fn dynamic_tool_spec_defaults_missing_input_schema_to_empty_object() {
+    let actual: DynamicToolSpec = serde_json::from_value(json!({
+        "name": "lookup_ticket",
+        "description": "Fetch a ticket",
+    }))
+    .expect("deserialize");
+
+    assert_eq!(
+        actual,
+        DynamicToolSpec {
+            namespace: None,
+            name: "lookup_ticket".to_string(),
+            description: "Fetch a ticket".to_string(),
+            input_schema: json!({}),
+            defer_loading: false,
+        }
+    );
+}
+
+#[test]
 fn dynamic_tool_spec_legacy_expose_to_context_inverts_to_defer_loading() {
     let value = json!({
         "name": "lookup_ticket",
