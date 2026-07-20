@@ -7,6 +7,9 @@ import plistlib
 import shutil
 import stat
 
+from .icon import ICON_FILE_NAME
+from .icon import write_codex_lab_icon
+
 
 DEFAULT_BUNDLE_IDENTIFIER = "dev.everycode.codex-lab"
 MAX_PROVENANCE_BYTES = 4096
@@ -72,6 +75,7 @@ def build_codex_lab_app(options: CodexLabAppOptions) -> CodexLabAppResult:
     shutil.copy(codex_bin, embedded_cli_path)
     _make_executable(embedded_cli_path)
     embedded_cli_sha256 = _sha256_file(embedded_cli_path)
+    write_codex_lab_icon(resources_dir / ICON_FILE_NAME)
 
     launcher_path = macos_dir / LAUNCHER_NAME
     with launcher_path.open("w", encoding="utf-8") as handle:
@@ -321,6 +325,7 @@ def _write_info_plist(path: Path, options: CodexLabAppOptions) -> None:
     info = {
         "CFBundleDisplayName": options.display_name,
         "CFBundleExecutable": LAUNCHER_NAME,
+        "CFBundleIconFile": ICON_FILE_NAME,
         "CFBundleIdentifier": options.bundle_identifier,
         "CFBundleName": options.display_name,
         "CFBundlePackageType": "APPL",

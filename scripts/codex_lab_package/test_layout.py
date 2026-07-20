@@ -60,6 +60,7 @@ class BuildCodexLabAppTest(unittest.TestCase):
                 {
                     "CFBundleDisplayName": "Codex Lab",
                     "CFBundleExecutable": "Codex Lab Launcher",
+                    "CFBundleIconFile": "CodexLab.icns",
                     "CFBundleIdentifier": "dev.example.codex-lab-test",
                     "CFBundleName": "Codex Lab",
                     "CFBundlePackageType": "APPL",
@@ -71,6 +72,8 @@ class BuildCodexLabAppTest(unittest.TestCase):
             )
 
             launcher = result.launcher_path.read_text(encoding="utf-8")
+            icon = root / "Codex Lab.app/Contents/Resources/CodexLab.icns"
+            self.assertEqual(icon.read_bytes()[:4], b"icns")
             for expected in (
                 "EXPECTED_SOURCE_COMMIT='" + "a" * 40 + "'",
                 "com.openai.codex",
@@ -311,6 +314,80 @@ printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
                 text=True,
             )
             self.assertEqual(completed.stdout, "built-app-ok")
+
+    def test_build_script_infers_version_and_source_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_bin = root / "fake-codex"
+            codex_bin.write_text(
+                """#!/bin/sh
+if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; then
+  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$0"
+  exit 0
+fi
+exit 2
+""",
+                encoding="utf-8",
+            )
+            os.chmod(codex_bin, 0o755)
+            app_dir = root / "Codex Lab.app"
+            script = Path(__file__).resolve().parents[1] / "build_codex_lab_app.py"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--codex-bin",
+                    str(codex_bin),
+                    "--app-dir",
+                    str(app_dir),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            with (app_dir / "Contents/Info.plist").open("rb") as handle:
+                info = plistlib.load(handle)
+            self.assertEqual(info["CFBundleShortVersionString"], "1.2.3")
+            launcher = (
+                app_dir / "Contents/MacOS/Codex Lab Launcher"
+            ).read_text(encoding="utf-8")
+            self.assertIn("EXPECTED_VERSION='1.2.3'", launcher)
+            self.assertIn("EXPECTED_SOURCE_COMMIT='" + "a" * 40 + "'", launcher)
+            self.assertIn("Built Codex Lab app bundle", completed.stdout)
+
+    def test_build_script_rejects_metadata_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_bin = root / "fake-codex"
+            codex_bin.write_text(
+                """#!/bin/sh
+printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$0"
+""",
+                encoding="utf-8",
+            )
+            os.chmod(codex_bin, 0o755)
+            script = Path(__file__).resolve().parents[1] / "build_codex_lab_app.py"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--codex-bin",
+                    str(codex_bin),
+                    "--app-dir",
+                    str(root / "Codex Lab.app"),
+                    "--short-version",
+                    "9.9.9",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("does not match the embedded CLI provenance", completed.stderr)
 
     def test_refuses_to_replace_existing_app_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

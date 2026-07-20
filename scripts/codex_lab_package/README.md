@@ -22,6 +22,11 @@ scripts/build_codex_lab_app.py \
   --force
 ```
 
+The builder reads version, source commit, and clean/dirty state directly from
+the embedded CLI. It rejects dirty builds or explicitly supplied metadata that
+does not match the binary, so launcher failures are caught while packaging.
+The generated bundle includes a distinct Codex Lab icon.
+
 The optional shim directory receives a `codex-lab` wrapper that executes the
 same embedded binary used by Desktop mode. The shim searches for `Codex Lab.app`
 in these locations, in order:

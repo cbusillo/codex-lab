@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from codex_lab_package.icon import ICON_FILE_NAME
 from codex_lab_package.live_smoke import read_cli_provenance
 
 
@@ -48,11 +49,14 @@ def smoke_check(
     contents_dir = app_dir / "Contents"
     launcher_path = contents_dir / "MacOS" / "Codex Lab Launcher"
     embedded_cli_path = contents_dir / "Resources" / "codex-lab"
+    icon_path = contents_dir / "Resources" / ICON_FILE_NAME
     info_plist_path = contents_dir / "Info.plist"
 
     _require_directory(app_dir)
     _require_executable(launcher_path)
     _require_executable(embedded_cli_path)
+    _require_file(icon_path)
+    _check_icns(icon_path)
     _require_file(info_plist_path)
     _check_plist(info_plist_path)
     _check_shell_syntax(launcher_path)
@@ -114,12 +118,21 @@ def _check_plist(path: Path) -> None:
     expected = {
         "CFBundleDisplayName": "Codex Lab",
         "CFBundleExecutable": "Codex Lab Launcher",
+        "CFBundleIconFile": ICON_FILE_NAME,
         "CFBundleName": "Codex Lab",
         "CFBundlePackageType": "APPL",
     }
     for key, value in expected.items():
         if info.get(key) != value:
             raise ValueError(f"{path}: expected {key}={value!r}, got {info.get(key)!r}")
+
+
+def _check_icns(path: Path) -> None:
+    contents = path.read_bytes()
+    if len(contents) < 8 or contents[:4] != b"icns":
+        raise ValueError(f"{path}: invalid ICNS header")
+    if int.from_bytes(contents[4:8], "big") != len(contents):
+        raise ValueError(f"{path}: invalid ICNS length")
 
 
 def _check_shell_syntax(path: Path) -> None:
