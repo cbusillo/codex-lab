@@ -67,4 +67,18 @@ impl AuthStorageBackend for CatalogAccountStorage {
     fn delete(&self) -> std::io::Result<bool> {
         Ok(false)
     }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        crate::auth_accounts::compare_and_swap_catalog_account_auth(
+            &self.codex_home,
+            self.auth_credentials_store_mode,
+            &self.catalog_id,
+            expected,
+            replacement,
+        )
+    }
 }

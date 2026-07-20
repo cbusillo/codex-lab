@@ -1173,6 +1173,9 @@ fn sync_account_store_from_auth(
     if !default_auth_home_is_current {
         return None;
     }
+    if auth_credentials_store_mode != AuthCredentialsStoreMode::File {
+        return None;
+    }
 
     let auth = match codex_login::load_auth_dot_json(codex_home, auth_credentials_store_mode) {
         Ok(Some(auth)) => auth,

@@ -984,3 +984,101 @@ fn saved_accounts_file_is_private() {
         & 0o777;
     assert_eq!(0o600, mode);
 }
+
+#[test]
+fn concurrent_account_upserts_preserve_all_updates() {
+    let temp = TempDir::new().expect("tempdir");
+    let codex_home = temp.path().to_path_buf();
+    let worker_count = 16;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(worker_count));
+    let workers = (0..worker_count)
+        .map(|index| {
+            let codex_home = codex_home.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::upsert_api_key_account(
+                    &codex_home,
+                    TEST_AUTH_CREDENTIALS_STORE_MODE,
+                    format!("sk-concurrent-{index}"),
+                    /*label*/ None,
+                    /*make_active*/ false,
+                )
+                .expect("upsert account");
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for worker in workers {
+        worker.join().expect("worker should finish");
+    }
+
+    assert_eq!(
+        super::list_accounts(&codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE)
+            .expect("list accounts")
+            .len(),
+        worker_count
+    );
+}
+
+#[test]
+fn inactive_profile_sync_does_not_replace_active_account_credentials() {
+    let temp = TempDir::new().expect("tempdir");
+    let initial_tokens = make_chatgpt_tokens(Some("acct-active"), Some("user@example.com"));
+    let active = upsert_chatgpt_account(
+        temp.path(),
+        initial_tokens.clone(),
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("store active account");
+    let mut profile_tokens = initial_tokens.clone();
+    profile_tokens.access_token = "profile-access".to_string();
+    profile_tokens.refresh_token = "profile-refresh".to_string();
+
+    assert_eq!(
+        super::upsert_inactive_chatgpt_account(
+            temp.path(),
+            TEST_AUTH_CREDENTIALS_STORE_MODE,
+            profile_tokens,
+            Utc::now(),
+            /*label*/ None,
+        )
+        .expect("sync inactive account"),
+        None
+    );
+    assert_eq!(
+        find_account(temp.path(), &active.id)
+            .expect("find active account")
+            .and_then(|account| account.tokens),
+        Some(initial_tokens)
+    );
+}
+
+#[test]
+fn same_workspace_different_users_remain_separate_accounts() {
+    let temp = TempDir::new().expect("tempdir");
+    let first_tokens = make_chatgpt_tokens(Some("shared-workspace"), None);
+    upsert_chatgpt_account(
+        temp.path(),
+        first_tokens,
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("store first user");
+    let mut second_tokens = make_chatgpt_tokens(Some("shared-workspace"), None);
+    second_tokens.id_token.chatgpt_user_id = Some("user-67890".to_string());
+
+    upsert_chatgpt_account(
+        temp.path(),
+        second_tokens,
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("store second user");
+
+    assert_eq!(list_accounts(temp.path()).expect("list accounts").len(), 2);
+}

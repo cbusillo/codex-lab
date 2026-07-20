@@ -31,6 +31,7 @@ use wiremock::matchers::path;
 
 const INITIAL_ACCESS_TOKEN: &str = "initial-access-token";
 const INITIAL_REFRESH_TOKEN: &str = "initial-refresh-token";
+const AUTH_REFRESH_CHILD_HOME_ENV: &str = "CODEX_AUTH_REFRESH_CHILD_HOME";
 
 #[serial_test::serial(auth_refresh)]
 #[tokio::test]
@@ -110,6 +111,360 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
     );
     assert_eq!(account.last_refresh, stored.last_refresh);
 
+    server.verify().await;
+    Ok(())
+}
+
+#[serial_test::serial(auth_refresh)]
+#[tokio::test]
+async fn concurrent_catalog_managers_refresh_once() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    let endpoint = format!("{}/oauth/token", server.uri());
+    let _env_guard = EnvGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, endpoint);
+    let initial_last_refresh = Utc::now() - Duration::days(1);
+    let initial_tokens = build_tokens(INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
+    let account = upsert_chatgpt_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        initial_tokens.clone(),
+        initial_last_refresh,
+        /*label*/ None,
+        /*make_active*/ false,
+    )?;
+    let first = AuthManager::for_catalog_account(
+        codex_home.path().to_path_buf(),
+        account.id.clone(),
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await?;
+    let second = AuthManager::for_catalog_account(
+        codex_home.path().to_path_buf(),
+        account.id.clone(),
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await?;
+
+    let (first_result, second_result) = tokio::join!(
+        first.refresh_token_from_authority(),
+        second.refresh_token_from_authority()
+    );
+    first_result.context("first refresh should succeed")?;
+    second_result.context("second refresh should reuse stored credentials")?;
+
+    let refreshed = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?
+        .into_iter()
+        .find(|stored| stored.id == account.id)
+        .context("catalog account should remain stored")?;
+    let refreshed_tokens = refreshed.tokens.context("catalog tokens should exist")?;
+    assert_eq!(refreshed_tokens.access_token, "new-access-token");
+    assert_eq!(refreshed_tokens.refresh_token, "new-refresh-token");
+    server.verify().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_refresh_lock_child() {
+    let Some(codex_home) = std::env::var_os(AUTH_REFRESH_CHILD_HOME_ENV) else {
+        return;
+    };
+    let manager = AuthManager::new(
+        std::path::PathBuf::from(codex_home),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await;
+    manager
+        .refresh_token_from_authority()
+        .await
+        .expect("child refresh should succeed");
+}
+
+#[serial_test::serial(auth_refresh)]
+#[tokio::test]
+async fn concurrent_processes_refresh_once() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(300))
+                .set_body_json(json!({
+                    "access_token": "new-access-token",
+                    "refresh_token": "new-refresh-token"
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    let endpoint = format!("{}/oauth/token", server.uri());
+    let _env_guard = EnvGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, endpoint);
+    let initial_auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(build_tokens(INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN)),
+        last_refresh: Some(Utc::now() - Duration::days(1)),
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    save_auth(
+        codex_home.path(),
+        &initial_auth,
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let test_executable = std::env::current_exe().context("resolve test executable")?;
+    let spawn_child = || {
+        let mut command = tokio::process::Command::new(&test_executable);
+        command
+            .arg("--exact")
+            .arg("suite::auth_refresh::auth_refresh_lock_child")
+            .env(AUTH_REFRESH_CHILD_HOME_ENV, codex_home.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command.spawn().context("spawn refresh child")
+    };
+    let mut first = spawn_child()?;
+    let mut second = spawn_child()?;
+    let (first_status, second_status) = tokio::join!(first.wait(), second.wait());
+    assert!(first_status?.success(), "first refresh child should pass");
+    assert!(second_status?.success(), "second refresh child should pass");
+
+    let stored = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+        .context("refreshed auth should remain stored")?;
+    let stored_tokens = stored.tokens.context("stored tokens should exist")?;
+    assert_eq!(stored_tokens.access_token, "new-access-token");
+    assert_eq!(stored_tokens.refresh_token, "new-refresh-token");
+    server.verify().await;
+    Ok(())
+}
+
+#[serial_test::serial(auth_refresh)]
+#[tokio::test]
+async fn refresh_response_does_not_overwrite_switched_account() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(300))
+                .set_body_json(json!({
+                    "access_token": "new-access-token",
+                    "refresh_token": "new-refresh-token"
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ctx = RefreshTokenTestContext::new(&server).await?;
+    let initial_last_refresh = Utc::now() - Duration::days(1);
+    let initial_tokens = build_tokens(INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
+    let initial_auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(initial_tokens.clone()),
+        last_refresh: Some(initial_last_refresh),
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    ctx.write_auth(&initial_auth).await?;
+    let initial_account = upsert_chatgpt_account(
+        ctx.codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        initial_tokens,
+        initial_last_refresh,
+        /*label*/ None,
+        /*make_active*/ true,
+    )?;
+
+    let manager = Arc::clone(&ctx.auth_manager);
+    let refresh = tokio::spawn(async move { manager.refresh_token_from_authority().await });
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if !server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("refresh request should reach the authority")?;
+
+    let mut switched_tokens = build_tokens("switched-access", "switched-refresh");
+    switched_tokens.account_id = Some("switched-account-id".to_string());
+    let switched_auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(switched_tokens.clone()),
+        last_refresh: Some(Utc::now()),
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    save_auth(
+        ctx.codex_home.path(),
+        &switched_auth,
+        AuthCredentialsStoreMode::File,
+    )?;
+    let switched_account = upsert_chatgpt_account(
+        ctx.codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        switched_tokens,
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )?;
+
+    refresh
+        .await
+        .context("refresh task should complete")?
+        .context("stale refresh should be discarded")?;
+
+    assert_eq!(ctx.load_auth()?, switched_auth);
+    let accounts = list_accounts(ctx.codex_home.path(), AuthCredentialsStoreMode::File)?;
+    assert_eq!(
+        accounts
+            .iter()
+            .find(|account| account.id == initial_account.id)
+            .and_then(|account| account.tokens.as_ref())
+            .map(|tokens| tokens.refresh_token.as_str()),
+        Some(INITIAL_REFRESH_TOKEN)
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(ctx.codex_home.path(), AuthCredentialsStoreMode::File,)?,
+        Some(switched_account.id)
+    );
+    server.verify().await;
+    Ok(())
+}
+
+#[serial_test::serial(auth_refresh)]
+#[tokio::test]
+async fn catalog_refresh_converges_control_auth_after_reactivation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(300))
+                .set_body_json(json!({
+                    "access_token": "new-access-token",
+                    "refresh_token": "new-refresh-token"
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    let endpoint = format!("{}/oauth/token", server.uri());
+    let _env_guard = EnvGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, endpoint);
+    let initial_last_refresh = Utc::now() - Duration::days(1);
+    let account_tokens = build_tokens(INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
+    let account = upsert_chatgpt_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        account_tokens,
+        initial_last_refresh,
+        /*label*/ None,
+        /*make_active*/ false,
+    )?;
+    let mut control_tokens = build_tokens("control-access", "control-refresh");
+    control_tokens.account_id = Some("control-account-id".to_string());
+    let control_auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(control_tokens.clone()),
+        last_refresh: Some(Utc::now()),
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    save_auth(
+        codex_home.path(),
+        &control_auth,
+        AuthCredentialsStoreMode::File,
+    )?;
+    upsert_chatgpt_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        control_tokens,
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )?;
+    let manager = AuthManager::for_catalog_account(
+        codex_home.path().to_path_buf(),
+        account.id.clone(),
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await?;
+
+    let refresh_manager = Arc::clone(&manager);
+    let refresh = tokio::spawn(async move { refresh_manager.refresh_token_from_authority().await });
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if !server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("catalog refresh request should reach the authority")?;
+
+    codex_login::activate_account(
+        codex_home.path(),
+        &account.id,
+        AuthCredentialsStoreMode::File,
+    )?;
+    refresh
+        .await
+        .context("catalog refresh task should complete")?
+        .context("catalog refresh should succeed")?;
+
+    let active_auth = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+        .context("active auth should exist")?;
+    let active_tokens = active_auth.tokens.context("active tokens should exist")?;
+    assert_eq!(active_tokens.access_token, "new-access-token");
+    assert_eq!(active_tokens.refresh_token, "new-refresh-token");
+    assert_eq!(
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File,)?,
+        Some(account.id)
+    );
     server.verify().await;
     Ok(())
 }

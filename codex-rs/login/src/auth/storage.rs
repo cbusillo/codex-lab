@@ -16,6 +16,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use tracing::warn;
 
 use crate::token_data::TokenData;
@@ -30,7 +31,11 @@ use once_cell::sync::Lazy;
 
 use super::encrypted_aggregate::PreparedMigration;
 use super::encrypted_aggregate::activate_encrypted_aggregate;
+use super::encrypted_aggregate::with_conditionally_invalidated_encrypted_aggregate;
 use super::encrypted_aggregate::with_invalidated_encrypted_aggregate;
+
+const AUTH_STORAGE_LOCK_FILE_NAME: &str = ".auth-storage.lock";
+static AUTH_FILE_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Expected structure for $CODEX_HOME/auth.json.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -105,6 +110,18 @@ pub(super) trait AuthStorageBackend: Debug + Send + Sync {
     fn load(&self) -> std::io::Result<Option<AuthDotJson>>;
     fn save(&self, auth: &AuthDotJson) -> std::io::Result<()>;
     fn delete(&self) -> std::io::Result<bool>;
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        if self.load()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save(replacement)?;
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +159,19 @@ impl AuthStorageBackend for AggregateAwareAuthStorage {
             || self.legacy.delete(),
         )
     }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        with_conditionally_invalidated_encrypted_aggregate(
+            &self.codex_home,
+            self.mode,
+            self.keyring_store.clone(),
+            || self.legacy.compare_and_swap(expected, replacement),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +183,17 @@ pub(crate) enum AuthStorageSource {
 #[derive(Clone, Debug)]
 pub(super) struct FileAuthStorage {
     codex_home: PathBuf,
+}
+
+struct AuthFileWriteGuard {
+    _process_guard: MutexGuard<'static, ()>,
+    lock_file: File,
+}
+
+impl Drop for AuthFileWriteGuard {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.lock_file);
+    }
 }
 
 impl FileAuthStorage {
@@ -170,25 +211,37 @@ impl FileAuthStorage {
 
         Ok(auth_dot_json)
     }
-}
 
-impl AuthStorageBackend for FileAuthStorage {
-    fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
-        let auth_file = get_auth_file(&self.codex_home);
-        let auth_dot_json = match self.try_read_auth_json(&auth_file) {
-            Ok(auth) => auth,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        Ok(Some(auth_dot_json))
+    fn acquire_write_guard(&self) -> std::io::Result<AuthFileWriteGuard> {
+        let process_guard = AUTH_FILE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::fs::create_dir_all(&self.codex_home)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let lock_file = options.open(self.codex_home.join(AUTH_STORAGE_LOCK_FILE_NAME))?;
+        fs2::FileExt::lock_exclusive(&lock_file)?;
+        Ok(AuthFileWriteGuard {
+            _process_guard: process_guard,
+            lock_file,
+        })
     }
 
-    fn save(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
+    fn load_unlocked(&self) -> std::io::Result<Option<AuthDotJson>> {
         let auth_file = get_auth_file(&self.codex_home);
-
-        if let Some(parent) = auth_file.parent() {
-            std::fs::create_dir_all(parent)?;
+        match self.try_read_auth_json(&auth_file) {
+            Ok(auth) => Ok(Some(auth)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
         }
+    }
+
+    fn save_unlocked(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
+        let auth_file = get_auth_file(&self.codex_home);
         let json_data = serde_json::to_string_pretty(auth_dot_json)?;
         let mut options = OpenOptions::new();
         options.truncate(true).write(true).create(true);
@@ -198,12 +251,37 @@ impl AuthStorageBackend for FileAuthStorage {
         }
         let mut file = options.open(auth_file)?;
         file.write_all(json_data.as_bytes())?;
-        file.flush()?;
-        Ok(())
+        file.flush()
+    }
+}
+
+impl AuthStorageBackend for FileAuthStorage {
+    fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
+        let _guard = self.acquire_write_guard()?;
+        self.load_unlocked()
+    }
+
+    fn save(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
+        let _guard = self.acquire_write_guard()?;
+        self.save_unlocked(auth_dot_json)
     }
 
     fn delete(&self) -> std::io::Result<bool> {
+        let _guard = self.acquire_write_guard()?;
         delete_file_if_exists(&self.codex_home)
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        let _guard = self.acquire_write_guard()?;
+        if self.load_unlocked()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save_unlocked(replacement)?;
+        Ok(true)
     }
 }
 
@@ -380,6 +458,20 @@ impl AuthStorageBackend for EphemeralAuthStorage {
 
     fn delete(&self) -> std::io::Result<bool> {
         self.with_store(|store, key| Ok(store.remove(&key).is_some()))
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        self.with_store(|store, key| {
+            if store.get(&key) != Some(expected) {
+                return Ok(false);
+            }
+            store.insert(key, replacement.clone());
+            Ok(true)
+        })
     }
 }
 
