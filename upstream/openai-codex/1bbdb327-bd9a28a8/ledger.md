@@ -13,7 +13,7 @@
 | Audit | 256 |
 | Classified | 256 |
 | Missing | 0 |
-| Blocking | 4 |
+| Blocking | 3 |
 
 ## Classifications
 
@@ -127,7 +127,7 @@
 | `2661d8577ee17885f63f3a7c95dc96f5b3c67593` | `tui` | `2661d8577ee1:missing_patch/tui` | `not_applicable` | `not_required` | Parallelizes bootstrap by tokio::try_join'ing model/list with configRequirements/read. Every Code's bootstrap is diverged: it reads the account then model/list sequentially and never issues configRequirements/read, so there is no co-located config request to overlap and the optimization has no target. | git_commit:openai/codex@2661d8577ee17885f63f3a7c95dc96f5b3c67593, github_pull_request:openai/codex#34355 |
 | `tui-exec-output-bounding` (`20440a0833c4`, `ef6b597f416e`) | `tui` | `20440a0833c4:missing_patch/tui`, `ef6b597f416e:missing_patch/tui` | `adapt` | `missing` | Dependent exec-output pair: encapsulate aggregated command output behind preview/transcript iterator APIs (#34357), then use them to bound live output (retain <=1 MiB then first/last 50 lines + partial, bound long lines on UTF-8/ANSI boundaries, show omitted counts) via a new exec_cell/live_output.rs (#34359). Every Code's exec_cell/model.rs stores a raw unbounded aggregated_output String; a real UX-safety improvement to adapt to Every Code's exec rendering. | git_commit:openai/codex@20440a0833c475b899074f1794e543350fccf5b8, github_pull_request:openai/codex#34357, git_commit:openai/codex@ef6b597f416ec2a105c50ee65caf84a1daa86983, github_pull_request:openai/codex#34359 |
 | `1e20272fa5a4885240bd92bd02f42e56f61f1045` | `app_server` | `1e20272fa5a4:missing_patch/app_server` | `adopt` | `missing` | Avoid cloning reconstructed thread history when attributing restored token usage on resume and fork. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34361, git_commit:openai/codex@1e20272fa5a4885240bd92bd02f42e56f61f1045 |
-| `f944456d81f32cadd96d037c190d7ce65a956306` | `tui` | `f944456d81f3:missing_patch/tui` | `decision_required` | `missing` | Net-new ~1.7k-line reasoning-effort UX: composer/status-line ignition animations for Max/Ultra, a distinct Ultra prompt glyph and tier accent, reduced-motion/color fallbacks. New effort_ignition*/effort_status_line* modules are absent from Every Code, which has its own reasoning-effort UX; this changes product-facing composer prompt/status presentation and needs product sign-off. | git_commit:openai/codex@f944456d81f32cadd96d037c190d7ce65a956306, github_pull_request:openai/codex#34365, github_issue:cbusillo/codex-lab#408, github_issue:cbusillo/codex-lab#410 |
+| `f944456d81f32cadd96d037c190d7ce65a956306` | `tui` | `f944456d81f3:missing_patch/tui` | `reject` | `not_required` | Retain Every Code's immediate text-first reasoning-effort feedback; do not import randomized composer ignition, delayed footer choreography, or tier-specific prompt glyphs. | git_commit:openai/codex@f944456d81f32cadd96d037c190d7ce65a956306, github_pull_request:openai/codex#34365, github_issue:cbusillo/codex-lab#408, github_issue:cbusillo/codex-lab#410 |
 | `28aacbb9d9e4fd1d8f566ab221834e74fd83875a` | `tui` | `28aacbb9d9e4:missing_patch/tui` | `adapt` | `missing` | Adds a borrowed Line conversion used when rendering/measuring hyperlink-aware history and pager content to avoid cloning span strings. Every Code has the target files but no borrowed-line helper yet; pure perf, style-preserving, adapt to local line_utils API. | git_commit:openai/codex@28aacbb9d9e4fd1d8f566ab221834e74fd83875a, github_pull_request:openai/codex#34366 |
 | `b6de5b524cdc07400b0ac049ae70ac8e90285e67` | `tui` | `b6de5b524cdc:missing_patch/tui` | `adapt` | `missing` | Uses codex_app_server_protocol::SkillMetadata directly across skill toggles/mentions/submission and drops the protocol-to-core conversion and codex-core-skills TUI dep. Every Code still has protocol_skill_to_core/path_to_skills_md/codex_core_skills, so the refactor is unapplied; skills is a product flow, so adapt and verify protocol SkillMetadata field parity. | git_commit:openai/codex@b6de5b524cdc07400b0ac049ae70ac8e90285e67, github_pull_request:openai/codex#34368 |
 | `5c18cc0acc3734f0e78e422a7fd94ea4a2be652e` | `tui` | `5c18cc0acc37:missing_patch/tui` | `adopt` | `missing` | Clears pending Guardian review state on both turn completion and finalization, restoring an active MCP-startup header (or 'Working') afterward, via new clear()/clear_guardian_review_status() and a factored mcp_startup_status_header(). Guardian infra is present in Every Code but lacks these; a real stale-state bugfix that applies cleanly. | git_commit:openai/codex@5c18cc0acc3734f0e78e422a7fd94ea4a2be652e, github_pull_request:openai/codex#34371 |
@@ -212,7 +212,6 @@
 
 ## Blocking Commits
 
-- `f944456d81f32cadd96d037c190d7ce65a956306`
 - `cc875d61ce4be88a05371e185fb2f5530220315c`
 - `a148e0b50a5cfa642512dca77c367bde5194f882`
 - `667b6bbaf12187619f51f9fec6329755dce72f64`
