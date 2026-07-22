@@ -32,6 +32,7 @@ use wiremock::matchers::path;
 const INITIAL_ACCESS_TOKEN: &str = "initial-access-token";
 const INITIAL_REFRESH_TOKEN: &str = "initial-refresh-token";
 const AUTH_REFRESH_CHILD_HOME_ENV: &str = "CODEX_AUTH_REFRESH_CHILD_HOME";
+const AUTH_REFRESH_CHILD_ACCOUNT_ID_ENV: &str = "CODEX_AUTH_REFRESH_CHILD_ACCOUNT_ID";
 
 #[serial_test::serial(auth_refresh)]
 #[tokio::test]
@@ -182,13 +183,29 @@ async fn auth_refresh_lock_child() {
     let Some(codex_home) = std::env::var_os(AUTH_REFRESH_CHILD_HOME_ENV) else {
         return;
     };
-    let manager = AuthManager::new(
-        std::path::PathBuf::from(codex_home),
-        /*enable_codex_api_key_env*/ false,
-        AuthCredentialsStoreMode::File,
-        /*chatgpt_base_url*/ None,
-    )
-    .await;
+    let codex_home = std::path::PathBuf::from(codex_home);
+    let manager = match std::env::var(AUTH_REFRESH_CHILD_ACCOUNT_ID_ENV) {
+        Ok(account_id) => AuthManager::for_catalog_account(
+            codex_home,
+            account_id,
+            AuthCredentialsStoreMode::File,
+            /*chatgpt_base_url*/ None,
+        )
+        .await
+        .expect("catalog auth manager should load"),
+        Err(std::env::VarError::NotPresent) => {
+            Arc::new(
+                AuthManager::new(
+                    codex_home,
+                    /*enable_codex_api_key_env*/ false,
+                    AuthCredentialsStoreMode::File,
+                    /*chatgpt_base_url*/ None,
+                )
+                .await,
+            )
+        }
+        Err(err) => panic!("catalog account id should be valid unicode: {err}"),
+    };
     manager
         .refresh_token_from_authority()
         .await
@@ -254,6 +271,73 @@ async fn concurrent_processes_refresh_once() -> Result<()> {
     let stored_tokens = stored.tokens.context("stored tokens should exist")?;
     assert_eq!(stored_tokens.access_token, "new-access-token");
     assert_eq!(stored_tokens.refresh_token, "new-refresh-token");
+    server.verify().await;
+    Ok(())
+}
+
+#[serial_test::serial(auth_refresh)]
+#[tokio::test]
+async fn concurrent_catalog_processes_refresh_once() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(300))
+                .set_body_json(json!({
+                    "access_token": "new-access-token",
+                    "refresh_token": "new-refresh-token"
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    let endpoint = format!("{}/oauth/token", server.uri());
+    let _env_guard = EnvGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, endpoint);
+    let account = upsert_chatgpt_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        build_tokens(INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN),
+        Utc::now() - Duration::days(1),
+        /*label*/ None,
+        /*make_active*/ false,
+    )?;
+
+    let test_executable = std::env::current_exe().context("resolve test executable")?;
+    let spawn_child = || {
+        let mut command = tokio::process::Command::new(&test_executable);
+        command
+            .arg("--exact")
+            .arg("suite::auth_refresh::auth_refresh_lock_child")
+            .env(AUTH_REFRESH_CHILD_HOME_ENV, codex_home.path())
+            .env(AUTH_REFRESH_CHILD_ACCOUNT_ID_ENV, &account.id)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command.spawn().context("spawn catalog refresh child")
+    };
+    let mut first = spawn_child()?;
+    let mut second = spawn_child()?;
+    let (first_status, second_status) = tokio::join!(first.wait(), second.wait());
+    assert!(
+        first_status?.success(),
+        "first catalog refresh child should pass"
+    );
+    assert!(
+        second_status?.success(),
+        "second catalog refresh child should pass"
+    );
+
+    let refreshed = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?
+        .into_iter()
+        .find(|stored| stored.id == account.id)
+        .context("catalog account should remain stored")?;
+    let refreshed_tokens = refreshed.tokens.context("catalog tokens should exist")?;
+    assert_eq!(refreshed_tokens.access_token, "new-access-token");
+    assert_eq!(refreshed_tokens.refresh_token, "new-refresh-token");
     server.verify().await;
     Ok(())
 }
