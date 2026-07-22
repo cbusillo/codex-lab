@@ -136,12 +136,12 @@ fn test_server_name() -> String {
     gethostname().to_string_lossy().trim().to_string()
 }
 
-fn remote_control_handle_with_current_enrollment(
+fn remote_control_handle_with_reconnect_receiver(
     remote_control_url: &str,
     auth_manager: Arc<AuthManager>,
-) -> RemoteControlHandle {
+) -> (RemoteControlHandle, mpsc::UnboundedReceiver<u64>) {
     let (enabled_tx, _enabled_rx) = watch::channel(/*init*/ true);
-    let (reconnect_tx, _reconnect_rx) = mpsc::unbounded_channel();
+    let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
     let (status_tx, _status_rx) = watch::channel(RemoteControlStatusChangedNotification {
         status: RemoteControlConnectionStatus::Connecting,
         server_name: test_server_name(),
@@ -164,19 +164,29 @@ fn remote_control_handle_with_current_enrollment(
             ),
         },
     )));
-    RemoteControlHandle {
-        enabled_tx: Arc::new(enabled_tx),
-        reconnect_tx,
-        next_reconnect_generation: Arc::new(AtomicU64::new(0)),
-        status_tx: Arc::new(status_tx),
-        state_db_available: true,
-        state_db: None,
-        remote_control_url: remote_control_url.to_string(),
-        current_enrollment,
-        pairing_persistence_key: watch::channel(None).0,
-        pairing_persistence_key_required: false,
-        auth_manager,
-    }
+    (
+        RemoteControlHandle {
+            enabled_tx: Arc::new(enabled_tx),
+            reconnect_tx,
+            next_reconnect_generation: Arc::new(AtomicU64::new(0)),
+            status_tx: Arc::new(status_tx),
+            state_db_available: true,
+            state_db: None,
+            remote_control_url: remote_control_url.to_string(),
+            current_enrollment,
+            pairing_persistence_key: watch::channel(None).0,
+            pairing_persistence_key_required: false,
+            auth_manager,
+        },
+        reconnect_rx,
+    )
+}
+
+fn remote_control_handle_with_current_enrollment(
+    remote_control_url: &str,
+    auth_manager: Arc<AuthManager>,
+) -> RemoteControlHandle {
+    remote_control_handle_with_reconnect_receiver(remote_control_url, auth_manager).0
 }
 
 #[test]
@@ -190,6 +200,25 @@ fn remote_control_reconnect_rejects_unavailable_worker() {
         handle.reconnect(),
         Err(RemoteControlReconnectUnavailable::WorkerUnavailable)
     );
+}
+
+#[test]
+fn remote_control_reconnect_coalesces_while_connecting() {
+    let (handle, mut reconnect_rx) = remote_control_handle_with_reconnect_receiver(
+        "http://127.0.0.1:1/backend-api/",
+        remote_control_auth_manager(),
+    );
+    handle.publish_status(RemoteControlConnectionStatus::Connected);
+
+    let first = handle.reconnect().expect("first reconnect should queue");
+    let second = handle
+        .reconnect()
+        .expect("second reconnect should coalesce");
+
+    assert_eq!(first.status, RemoteControlConnectionStatus::Connecting);
+    assert_eq!(second, first);
+    assert_eq!(reconnect_rx.try_recv(), Ok(1));
+    assert!(reconnect_rx.is_empty());
 }
 
 fn remote_control_server_token_response(
@@ -631,6 +660,250 @@ async fn remote_control_transport_reconnects_after_disconnect() {
         other => panic!("expected connection open after reconnect, got {other:?}"),
     }
 
+    shutdown_token.cancel();
+    let _ = remote_task.await;
+}
+
+#[tokio::test]
+async fn remote_control_handle_reconnects_without_disabling_or_reenrolling() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let remote_control_url = remote_control_url_for_listener(&listener);
+    let codex_home = TempDir::new().expect("temp dir should create");
+    let (transport_event_tx, mut transport_event_rx) =
+        mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
+    let shutdown_token = CancellationToken::new();
+    let (remote_task, remote_handle) = start_remote_control(
+        RemoteControlStartConfig {
+            remote_control_url,
+            installation_id: TEST_INSTALLATION_ID.to_string(),
+        },
+        Some(remote_control_state_runtime(&codex_home).await),
+        remote_control_auth_manager(),
+        transport_event_tx,
+        shutdown_token.clone(),
+        /*app_server_client_name_rx*/ None,
+        /*initial_enabled*/ true,
+    )
+    .await
+    .expect("remote control should start");
+    let mut status_rx = remote_handle.status_receiver();
+
+    let enroll_request = accept_http_request(&listener).await;
+    assert_eq!(
+        enroll_request.request_line,
+        "POST /backend-api/wham/remote/control/server/enroll HTTP/1.1"
+    );
+    respond_with_json(
+        enroll_request.stream,
+        remote_control_server_token_response(
+            "srv_e_test",
+            "env_test",
+            TEST_REMOTE_CONTROL_SERVER_TOKEN,
+        ),
+    )
+    .await;
+    let (_, mut first_websocket) = accept_remote_control_backend_connection(&listener).await;
+    expect_remote_control_status_snapshot(
+        &mut status_rx,
+        RemoteControlStatusChangedNotification {
+            status: RemoteControlConnectionStatus::Connected,
+            server_name: test_server_name(),
+            installation_id: TEST_INSTALLATION_ID.to_string(),
+            environment_id: Some("env_test".to_string()),
+        },
+    )
+    .await;
+
+    let client_id = ClientId("client-1".to_string());
+    let stream_id = StreamId("stream-1".to_string());
+    let initialize_message = JSONRPCMessage::Request(codex_app_server_protocol::JSONRPCRequest {
+        id: codex_app_server_protocol::RequestId::Integer(1),
+        method: "initialize".to_string(),
+        params: Some(json!({
+            "clientInfo": {
+                "name": "remote-test-client",
+                "version": "0.1.0"
+            }
+        })),
+        trace: None,
+    });
+    send_client_event(
+        &mut first_websocket,
+        ClientEnvelope {
+            event: ClientEvent::ClientMessage {
+                message: initialize_message.clone(),
+            },
+            client_id: client_id.clone(),
+            stream_id: Some(stream_id.clone()),
+            seq_id: Some(1),
+            cursor: None,
+        },
+    )
+    .await;
+    let (connection_id, connection_writer) =
+        match timeout(Duration::from_secs(5), transport_event_rx.recv())
+            .await
+            .expect("connection open should arrive in time")
+            .expect("connection open should exist")
+        {
+            TransportEvent::ConnectionOpened {
+                connection_id,
+                origin,
+                writer,
+                ..
+            } => {
+                assert_eq!(origin, ConnectionOrigin::RemoteControl);
+                (connection_id, writer)
+            }
+            other => panic!("expected connection open event, got {other:?}"),
+        };
+    match timeout(Duration::from_secs(5), transport_event_rx.recv())
+        .await
+        .expect("initialize message should arrive in time")
+        .expect("initialize message should exist")
+    {
+        TransportEvent::IncomingMessage {
+            connection_id: incoming_connection_id,
+            message,
+        } => {
+            assert_eq!(incoming_connection_id, connection_id);
+            assert_eq!(message, initialize_message);
+        }
+        other => panic!("expected initialize incoming message, got {other:?}"),
+    }
+
+    connection_writer
+        .send(QueuedOutgoingMessage::new(
+            OutgoingMessage::AppServerNotification(ServerNotification::ConfigWarning(
+                ConfigWarningNotification {
+                    summary: "survives reconnect".to_string(),
+                    details: None,
+                    path: None,
+                    range: None,
+                },
+            )),
+        ))
+        .await
+        .expect("remote writer should accept outgoing message");
+    let expected_replayed_event = json!({
+        "type": "server_message",
+        "client_id": "client-1",
+        "seq_id": 1,
+        "message": {
+            "method": "configWarning",
+            "params": {
+                "summary": "survives reconnect",
+                "details": null,
+            }
+        }
+    });
+    assert_eq!(
+        read_server_event(&mut first_websocket).await,
+        expected_replayed_event
+    );
+
+    let connecting_status = RemoteControlStatusChangedNotification {
+        status: RemoteControlConnectionStatus::Connecting,
+        server_name: test_server_name(),
+        installation_id: TEST_INSTALLATION_ID.to_string(),
+        environment_id: Some("env_test".to_string()),
+    };
+    assert_eq!(
+        remote_handle.reconnect().expect("reconnect should succeed"),
+        connecting_status
+    );
+    assert_eq!(
+        remote_handle
+            .reconnect()
+            .expect("duplicate reconnect should coalesce"),
+        connecting_status
+    );
+    expect_remote_control_status_snapshot(&mut status_rx, connecting_status).await;
+    timeout(Duration::from_secs(1), first_websocket.next())
+        .await
+        .expect("reconnect should close the first websocket");
+
+    let (second_handshake_request, mut second_websocket) =
+        accept_remote_control_backend_connection(&listener).await;
+    assert_eq!(
+        second_handshake_request.headers.get("authorization"),
+        Some(&format!("Bearer {TEST_REMOTE_CONTROL_SERVER_TOKEN}"))
+    );
+    expect_remote_control_status_snapshot(
+        &mut status_rx,
+        RemoteControlStatusChangedNotification {
+            status: RemoteControlConnectionStatus::Connected,
+            server_name: test_server_name(),
+            installation_id: TEST_INSTALLATION_ID.to_string(),
+            environment_id: Some("env_test".to_string()),
+        },
+    )
+    .await;
+    assert_eq!(
+        read_server_event(&mut second_websocket).await,
+        expected_replayed_event
+    );
+
+    let followup_message =
+        JSONRPCMessage::Notification(codex_app_server_protocol::JSONRPCNotification {
+            method: "initialized".to_string(),
+            params: None,
+        });
+    send_client_event(
+        &mut second_websocket,
+        ClientEnvelope {
+            event: ClientEvent::ClientMessage {
+                message: followup_message.clone(),
+            },
+            client_id,
+            stream_id: Some(stream_id),
+            seq_id: Some(2),
+            cursor: None,
+        },
+    )
+    .await;
+    match timeout(Duration::from_secs(5), transport_event_rx.recv())
+        .await
+        .expect("followup message should arrive in time")
+        .expect("followup message should exist")
+    {
+        TransportEvent::IncomingMessage {
+            connection_id: incoming_connection_id,
+            message,
+        } => {
+            assert_eq!(incoming_connection_id, connection_id);
+            assert_eq!(message, followup_message);
+        }
+        other => panic!("expected followup incoming message, got {other:?}"),
+    }
+    second_websocket
+        .close(None)
+        .await
+        .expect("second websocket should close");
+    assert_eq!(
+        remote_handle
+            .reconnect()
+            .expect("reconnect racing a relay close should succeed")
+            .status,
+        RemoteControlConnectionStatus::Connecting
+    );
+    let (_, mut third_websocket) = accept_remote_control_backend_connection(&listener).await;
+    expect_remote_control_status_snapshot(
+        &mut status_rx,
+        RemoteControlStatusChangedNotification {
+            status: RemoteControlConnectionStatus::Connected,
+            server_name: test_server_name(),
+            installation_id: TEST_INSTALLATION_ID.to_string(),
+            environment_id: Some("env_test".to_string()),
+        },
+    )
+    .await;
+    assert_eq!(
+        read_server_event(&mut third_websocket).await,
+        expected_replayed_event
+    );
     shutdown_token.cancel();
     let _ = remote_task.await;
 }

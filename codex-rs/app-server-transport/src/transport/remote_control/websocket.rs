@@ -16,6 +16,7 @@ use crate::transport::TransportEvent;
 use crate::transport::remote_control::auth::RemoteControlConnectionAuth;
 use crate::transport::remote_control::auth::load_remote_control_auth;
 use crate::transport::remote_control::auth::recover_remote_control_auth;
+use crate::transport::remote_control::client_tracker::ClientCloseReason;
 use crate::transport::remote_control::client_tracker::ClientTracker;
 use crate::transport::remote_control::client_tracker::REMOTE_CONTROL_IDLE_SWEEP_INTERVAL;
 use crate::transport::remote_control::enroll::RemoteControlEnrollment;
@@ -1218,7 +1219,14 @@ impl RemoteControlWebsocket {
                     let Some(client_key) = client_key else {
                         continue;
                     };
-                    if client_tracker.close_client(&client_key).await.is_err() {
+                    if client_tracker
+                        .close_client_with_reason(
+                            &client_key,
+                            ClientCloseReason::OutboundStopped,
+                        )
+                        .await
+                        .is_err()
+                    {
                         return Ok(());
                     }
                     state
@@ -1894,6 +1902,10 @@ mod tests {
     const TEST_HTTP_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
     #[cfg(not(windows))]
     const TEST_HTTP_ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
+    #[cfg(windows)]
+    const TEST_RECONNECT_WAKE_TIMEOUT: Duration = Duration::from_secs(15);
+    #[cfg(not(windows))]
+    const TEST_RECONNECT_WAKE_TIMEOUT: Duration = Duration::from_secs(10);
     const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
     const TEST_REMOTE_CONTROL_SERVER_TOKEN: &str = "Remote Control Token";
 
@@ -2032,6 +2044,12 @@ mod tests {
         reconnect_tx
             .send(7)
             .expect("reconnect command should queue");
+        reconnect_tx
+            .send(8)
+            .expect("second reconnect command should queue");
+        reconnect_tx
+            .send(9)
+            .expect("third reconnect command should queue");
         let mut websocket = test_remote_control_websocket(
             transport_event_tx,
             status_publisher,
@@ -2039,6 +2057,7 @@ mod tests {
             enabled_rx,
             reconnect_rx,
         );
+        websocket.reconnect_attempt = 4;
 
         websocket.prepare_connection_attempt("test retry boundary");
 
@@ -2047,6 +2066,101 @@ mod tests {
             RemoteControlConnectionStatus::Connecting
         );
         assert!(websocket.reconnect_rx.try_recv().is_err());
+        assert_eq!(websocket.reconnect_attempt, 0);
+    }
+
+    #[tokio::test]
+    async fn reconnect_interrupts_connection_retry_backoff() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let remote_control_url = remote_control_url_for_listener(&listener);
+        let remote_control_target =
+            normalize_remote_control_url(&remote_control_url).expect("target should normalize");
+        let (second_connection_tx, mut second_connection_rx) = mpsc::channel(1);
+        let server_task = tokio::spawn(async move {
+            let (first_stream, _) = accept_http_request(&listener).await;
+            respond_with_status_and_headers(
+                first_stream,
+                "503 Service Unavailable",
+                &[],
+                "retry later",
+            )
+            .await;
+
+            let (second_stream, _) = accept_http_request(&listener).await;
+            second_connection_tx
+                .send(())
+                .await
+                .expect("connection signal should send");
+            respond_with_status_and_headers(
+                second_stream,
+                "503 Service Unavailable",
+                &[],
+                "retry later",
+            )
+            .await;
+        });
+
+        let (transport_event_tx, _transport_event_rx) = mpsc::channel(1);
+        let (status_publisher, mut status_rx) = remote_control_status_channel();
+        let codex_home = TempDir::new().expect("temp dir should create");
+        let state_db = remote_control_state_runtime(&codex_home).await;
+        let shutdown_token = CancellationToken::new();
+        let (_enabled_tx, enabled_rx) = watch::channel(true);
+        let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        let mut enrollment = remote_control_enrollment(Some(TEST_REMOTE_CONTROL_SERVER_TOKEN));
+        enrollment.remote_control_target = remote_control_target.clone();
+        let auth_manager = remote_control_auth_manager();
+        let mut websocket = RemoteControlWebsocket::new(
+            RemoteControlWebsocketConfig {
+                remote_control_url,
+                installation_id: TEST_INSTALLATION_ID.to_string(),
+                remote_control_target: Some(remote_control_target),
+                server_name: "test-server".to_string(),
+            },
+            Some(state_db),
+            auth_manager,
+            RemoteControlChannels {
+                transport_event_tx,
+                status_publisher,
+                current_enrollment: test_current_enrollment(Some(enrollment)),
+                pairing_persistence_key: watch::channel(None).0,
+            },
+            shutdown_token.clone(),
+            enabled_rx,
+            reconnect_rx,
+        );
+        websocket.reconnect_attempt = 8;
+        let connect_shutdown_token = shutdown_token.child_token();
+        let connect_task = tokio::spawn(async move {
+            websocket
+                .connect(
+                    &connect_shutdown_token,
+                    /*app_server_client_name*/ None,
+                )
+                .await
+        });
+
+        timeout(
+            TEST_HTTP_ACCEPT_TIMEOUT,
+            status_rx.wait_for(|status| status.status == RemoteControlConnectionStatus::Errored),
+        )
+        .await
+        .expect("connection failure status should arrive")
+        .expect("status channel should remain open");
+        reconnect_tx
+            .send(10)
+            .expect("reconnect command should send");
+        timeout(TEST_RECONNECT_WAKE_TIMEOUT, second_connection_rx.recv())
+            .await
+            .expect("reconnect should bypass the retry backoff")
+            .expect("replacement connection should be observed");
+
+        shutdown_token.cancel();
+        let outcome = connect_task.await.expect("connect task should join");
+        assert!(matches!(outcome, ConnectOutcome::Shutdown));
+        server_task.await.expect("server task should join");
     }
 
     #[test]
