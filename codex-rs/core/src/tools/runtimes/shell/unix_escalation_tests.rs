@@ -30,6 +30,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::GuardianCommandSource;
 use codex_sandboxing::SandboxType;
+use codex_sandboxing::policy_transforms::effective_permission_profile;
 use codex_shell_escalation::EscalationExecution;
 use codex_shell_escalation::EscalationPermissions;
 use codex_shell_escalation::ExecResult;
@@ -347,6 +348,57 @@ fn shell_request_escalation_execution_is_explicit() {
             ResolvedPermissionProfile { permission_profile },
         )),
     );
+}
+
+#[tokio::test]
+async fn preapproved_additional_permissions_escalate_intercepted_exec() -> anyhow::Result<()> {
+    let (session, turn_context) = make_session_and_context().await;
+    let requested_permissions = AdditionalPermissionProfile {
+        file_system: Some(FileSystemPermissions::from_read_write_roots(
+            /*read*/ None,
+            Some(vec![AbsolutePathBuf::from_absolute_path("/tmp/output")?]),
+        )),
+        ..Default::default()
+    };
+    let workdir = test_sandbox_cwd();
+    let permission_profile = effective_permission_profile(
+        &PermissionProfile::workspace_write(),
+        Some(&requested_permissions),
+    );
+    let provider = CoreShellActionProvider {
+        policy: Arc::new(RwLock::new(codex_execpolicy::Policy::empty())),
+        session: Arc::new(session),
+        turn: Arc::new(turn_context),
+        call_id: "preapproved-additional-permissions".to_string(),
+        tool_name: GuardianCommandSource::Shell,
+        approval_policy: AskForApproval::OnRequest,
+        permission_profile: permission_profile.clone(),
+        file_system_sandbox_policy: read_only_file_system_sandbox_policy(),
+        sandbox_permissions: SandboxPermissions::WithAdditionalPermissions,
+        approval_sandbox_permissions: SandboxPermissions::UseDefault,
+        prompt_permissions: Some(requested_permissions),
+        stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
+    };
+
+    let action = codex_shell_escalation::EscalationPolicy::determine_action(
+        &provider,
+        &AbsolutePathBuf::from_absolute_path("/usr/bin/printf")?,
+        &["printf".to_string(), "hello".to_string()],
+        &workdir,
+    )
+    .await?;
+
+    let expected = codex_shell_escalation::EscalationDecision::Escalate(
+        EscalationExecution::Permissions(EscalationPermissions::ResolvedPermissionProfile(
+            ResolvedPermissionProfile { permission_profile },
+        )),
+    );
+    assert_eq!(
+        action, expected,
+        "preapproved with_additional_permissions should escalate through the resolved permission profile"
+    );
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
