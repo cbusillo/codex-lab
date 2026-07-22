@@ -655,7 +655,7 @@ def parse_args() -> argparse.Namespace:
         subparser.add_argument("--audit", required=True, type=Path)
         subparser.add_argument("--ledger", required=True, type=Path)
         subparser.add_argument("--review", type=Path)
-        subparser.add_argument("--require-complete", action="store_true")
+        subparser.add_argument("--require-complete", "--re", action="store_true")
     return parser.parse_args()
 
 
