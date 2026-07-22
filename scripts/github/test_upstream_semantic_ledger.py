@@ -364,20 +364,21 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
             second = subprocess.run(
                 command, capture_output=True, text=True, check=False
             )
-            abbreviated = subprocess.run(
-                [*command[:-1], "--re"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
             self.assertEqual(first.returncode, 3)
             self.assertEqual(
                 (first.stdout, first.stderr), (second.stdout, second.stderr)
             )
-            self.assertEqual(
-                (first.returncode, first.stdout, first.stderr),
-                (abbreviated.returncode, abbreviated.stdout, abbreviated.stderr),
-            )
+            for alias in ("--re", "--r"):
+                abbreviated = subprocess.run(
+                    [*command[:-1], alias],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    (first.returncode, first.stdout, first.stderr),
+                    (abbreviated.returncode, abbreviated.stdout, abbreviated.stderr),
+                )
             self.assertEqual(json.loads(first.stdout)["range"]["missingCommitCount"], 2)
             self.assertIn("is incomplete", first.stderr)
 
