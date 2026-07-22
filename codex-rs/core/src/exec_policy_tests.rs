@@ -253,6 +253,26 @@ async fn rules_path_file_returns_read_dir_error() {
 }
 
 #[tokio::test]
+async fn warning_tolerant_loader_propagates_read_dir_error() {
+    let temp_dir = tempdir().expect("create temp dir");
+    let rules_path = temp_dir.path().join(RULES_DIR_NAME);
+    fs::write(&rules_path, "rules should be a directory").expect("write malformed rules path");
+    let config_stack = config_stack_for_dot_codex_folder(temp_dir.path());
+
+    let err = load_exec_policy_with_warning(&config_stack)
+        .await
+        .expect_err("rules file should fail policy loading");
+
+    assert!(
+        matches!(
+            err,
+            ExecPolicyError::ReadDir { ref dir, .. } if dir == &rules_path
+        ),
+        "expected malformed rules path to surface as ReadDir, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn collect_policy_files_returns_empty_when_dir_missing() {
     let temp_dir = tempdir().expect("create temp dir");
 
@@ -371,6 +391,42 @@ async fn merges_requirements_exec_policy_network_rules() -> anyhow::Result<()> {
 
     assert!(allowed.is_empty());
     assert_eq!(denied, vec!["blocked.example.com".to_string()]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_custom_rules_preserve_requirements_exec_policy() -> anyhow::Result<()> {
+    let temp_dir = tempdir()?;
+    let policy_dir = temp_dir.path().join(RULES_DIR_NAME);
+    fs::create_dir_all(&policy_dir)?;
+    fs::write(policy_dir.join("broken.rules"), "prefix_rule(")?;
+
+    let mut requirements_exec_policy = Policy::empty();
+    requirements_exec_policy.add_prefix_rule(&["rm".to_string()], Decision::Forbidden)?;
+    let requirements = ConfigRequirements {
+        exec_policy: Some(Sourced::new(
+            RequirementsExecPolicy::new(requirements_exec_policy),
+            RequirementSource::Unknown,
+        )),
+        ..ConfigRequirements::default()
+    };
+    let dot_codex_folder = AbsolutePathBuf::from_absolute_path(temp_dir.path())?;
+    let layer = ConfigLayerEntry::new(
+        ConfigLayerSource::Project { dot_codex_folder },
+        TomlValue::Table(Default::default()),
+    );
+    let config_stack =
+        ConfigLayerStack::new(vec![layer], requirements, ConfigRequirementsToml::default())?;
+
+    let (policy, warning) = load_exec_policy_with_warning(&config_stack).await?;
+
+    assert!(matches!(warning, Some(ExecPolicyError::ParsePolicy { .. })));
+    assert_eq!(
+        policy
+            .check_multiple([vec!["rm".to_string()]].iter(), &|_| Decision::Allow)
+            .decision,
+        Decision::Forbidden
+    );
     Ok(())
 }
 
