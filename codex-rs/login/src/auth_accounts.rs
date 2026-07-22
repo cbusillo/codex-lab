@@ -17,6 +17,8 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 
 use crate::auth::AuthDotJson;
 use crate::auth::encrypted_aggregate::with_invalidated_encrypted_aggregate;
@@ -24,6 +26,7 @@ use crate::auth::save_auth;
 
 const ACCOUNTS_FILE_NAME: &str = "auth_accounts.json";
 pub(crate) const ACCOUNTS_FILE_VERSION: u32 = 1;
+static CATALOG_REFRESH_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredAccount {
@@ -548,6 +551,44 @@ pub fn auth_for_account(
         };
 
     Ok((account, auth))
+}
+
+pub(crate) fn update_catalog_account_from_auth(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    catalog_id: &str,
+    auth: &AuthDotJson,
+) -> io::Result<()> {
+    let _guard = CATALOG_REFRESH_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
+    let account = data
+        .accounts
+        .iter_mut()
+        .find(|account| account.id == catalog_id)
+        .ok_or_else(|| io::Error::other(format!("catalog account {catalog_id} was not found")))?;
+
+    match auth.resolved_mode() {
+        AuthMode::ApiKey => {
+            account.mode = AuthMode::ApiKey;
+            account.openai_api_key = auth.openai_api_key.clone();
+            account.tokens = None;
+            account.last_refresh = None;
+        }
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
+            account.mode = auth.resolved_mode();
+            account.openai_api_key = None;
+            account.tokens = auth.tokens.clone();
+            account.last_refresh = auth.last_refresh;
+        }
+        AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => {
+            return Err(io::Error::other(
+                "catalog account storage does not support this authentication mode",
+            ));
+        }
+    }
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)
 }
 
 pub fn update_account_last_refresh(

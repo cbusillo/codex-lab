@@ -1674,3 +1674,147 @@ async fn missing_plan_type_maps_to_unknown() {
 
     pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Unknown));
 }
+
+fn catalog_chatgpt_tokens(account_id: &str, email: &str) -> TokenData {
+    let header = serde_json::json!({"alg": "none", "typ": "JWT"});
+    let payload = serde_json::json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_user_id": "catalog-user",
+            "user_id": "catalog-user"
+        }
+    });
+    let encode = |value: &serde_json::Value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(value).expect("serialize jwt segment"))
+    };
+    TokenData {
+        id_token: IdTokenInfo {
+            email: Some(email.to_string()),
+            chatgpt_plan_type: None,
+            chatgpt_user_id: Some("catalog-user".to_string()),
+            chatgpt_account_id: Some(account_id.to_string()),
+            chatgpt_account_is_fedramp: false,
+            raw_jwt: format!("{}.{}.signature", encode(&header), encode(&payload)),
+        },
+        access_token: "catalog-access".to_string(),
+        refresh_token: "catalog-refresh".to_string(),
+        account_id: Some(account_id.to_string()),
+    }
+}
+
+fn api_key_auth(api_key: &str) -> AuthDotJson {
+    AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some(api_key.to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    }
+}
+
+#[tokio::test]
+async fn catalog_account_manager_refresh_storage_preserves_active_account() {
+    let codex_home = tempdir().expect("tempdir");
+    let active = crate::auth_accounts::upsert_api_key_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        "sk-control".to_string(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("store control account");
+    save_auth(
+        codex_home.path(),
+        &api_key_auth("sk-control"),
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("save control auth");
+    let execution = crate::auth_accounts::upsert_chatgpt_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        catalog_chatgpt_tokens("execution-account", "execution@example.com"),
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("store execution account");
+
+    let manager = AuthManager::for_catalog_account(
+        codex_home.path().to_path_buf(),
+        execution.id,
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await
+    .expect("create catalog account manager");
+    let auth = manager.auth_cached().expect("execution auth");
+    let CodexAuth::Chatgpt(chatgpt_auth) = auth else {
+        panic!("expected ChatGPT auth");
+    };
+    persist_tokens(
+        chatgpt_auth.storage(),
+        /*id_token*/ None,
+        Some("refreshed-access".to_string()),
+        Some("refreshed-refresh".to_string()),
+    )
+    .expect("persist refreshed tokens");
+    manager.reload().await;
+
+    let refreshed = manager
+        .auth_cached()
+        .expect("refreshed auth")
+        .get_token_data()
+        .expect("refreshed token data");
+    assert_eq!(refreshed.access_token, "refreshed-access");
+    assert_eq!(
+        get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)
+            .expect("active account id"),
+        Some(active.id)
+    );
+    assert_eq!(
+        load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)
+            .expect("load auth.json"),
+        Some(api_key_auth("sk-control"))
+    );
+}
+
+#[tokio::test]
+async fn catalog_account_manager_supports_non_active_api_key() {
+    let codex_home = tempdir().expect("tempdir");
+    let active = crate::auth_accounts::upsert_api_key_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        "sk-control".to_string(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("store control account");
+    let execution = crate::auth_accounts::upsert_api_key_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        "sk-execution".to_string(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("store execution account");
+
+    let manager = AuthManager::for_catalog_account(
+        codex_home.path().to_path_buf(),
+        execution.id,
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await
+    .expect("create catalog account manager");
+
+    let execution_auth = manager.auth_cached().expect("execution auth");
+    assert_eq!(execution_auth.api_key(), Some("sk-execution"));
+    assert_eq!(
+        get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)
+            .expect("active account id"),
+        Some(active.id)
+    );
+}

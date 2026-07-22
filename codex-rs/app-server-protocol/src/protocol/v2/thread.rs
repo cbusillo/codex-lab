@@ -51,12 +51,17 @@ pub struct DynamicToolSpec {
     pub defer_loading: bool,
 }
 
+fn default_dynamic_tool_input_schema() -> JsonValue {
+    JsonValue::Object(Default::default())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DynamicToolSpecDe {
     namespace: Option<String>,
     name: String,
     description: String,
+    #[serde(default = "default_dynamic_tool_input_schema")]
     input_schema: JsonValue,
     defer_loading: Option<bool>,
     expose_to_context: Option<bool>,

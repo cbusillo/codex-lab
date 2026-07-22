@@ -26,6 +26,7 @@ use codex_protocol::config_types::ModelProviderAuthInfo;
 
 use super::access_token::CodexAccessToken;
 use super::access_token::classify_codex_access_token;
+use super::catalog_storage::CatalogAccountStorage;
 use super::external_bearer::BearerTokenRefresher;
 use super::revoke::revoke_auth_tokens;
 pub use crate::auth::agent_identity::AgentIdentityAuth;
@@ -214,6 +215,23 @@ impl CodexAuth {
         auth_credentials_store_mode: AuthCredentialsStoreMode,
         chatgpt_base_url: Option<&str>,
     ) -> std::io::Result<Self> {
+        Self::from_auth_dot_json_with_storage(
+            codex_home,
+            auth_dot_json,
+            auth_credentials_store_mode,
+            chatgpt_base_url,
+            /*storage*/ None,
+        )
+        .await
+    }
+
+    async fn from_auth_dot_json_with_storage(
+        codex_home: &Path,
+        auth_dot_json: AuthDotJson,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        chatgpt_base_url: Option<&str>,
+        storage: Option<Arc<dyn AuthStorageBackend>>,
+    ) -> std::io::Result<Self> {
         let auth_mode = auth_dot_json.resolved_mode();
         let client = create_client();
         if auth_mode == ApiAuthMode::ApiKey {
@@ -247,7 +265,8 @@ impl CodexAuth {
 
         match auth_mode {
             ApiAuthMode::Chatgpt => {
-                let storage = create_auth_storage(codex_home.to_path_buf(), storage_mode);
+                let storage = storage
+                    .unwrap_or_else(|| create_auth_storage(codex_home.to_path_buf(), storage_mode));
                 Ok(Self::Chatgpt(ChatgptAuth { state, storage }))
             }
             ApiAuthMode::ChatgptAuthTokens => {
@@ -1557,6 +1576,7 @@ pub struct AuthManager {
     refresh_lock: Semaphore,
     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
     external_api_key_token: RwLock<Option<String>>,
+    catalog_account_id: Option<String>,
 }
 
 /// Configuration view required to construct a shared [`AuthManager`].
@@ -1634,6 +1654,7 @@ impl AuthManager {
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
             external_api_key_token: RwLock::new(None),
+            catalog_account_id: None,
         }
     }
 
@@ -1656,6 +1677,7 @@ impl AuthManager {
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
             external_api_key_token: RwLock::new(None),
+            catalog_account_id: None,
         })
     }
 
@@ -1677,6 +1699,7 @@ impl AuthManager {
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
             external_api_key_token: RwLock::new(None),
+            catalog_account_id: None,
         })
     }
 
@@ -1698,7 +1721,40 @@ impl AuthManager {
                 Arc::new(BearerTokenRefresher::new(config)) as Arc<dyn ExternalAuth>
             )),
             external_api_key_token: RwLock::new(None),
+            catalog_account_id: None,
         })
+    }
+
+    pub async fn for_catalog_account(
+        codex_home: PathBuf,
+        catalog_account_id: String,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        chatgpt_base_url: Option<String>,
+    ) -> std::io::Result<Arc<Self>> {
+        let auth = load_catalog_account_auth(
+            &codex_home,
+            &catalog_account_id,
+            auth_credentials_store_mode,
+            chatgpt_base_url.as_deref(),
+        )
+        .await?;
+        let (auth_change_tx, _auth_change_rx) = watch::channel(0);
+        Ok(Arc::new(Self {
+            codex_home,
+            inner: RwLock::new(CachedAuth {
+                auth,
+                permanent_refresh_failure: None,
+            }),
+            auth_change_tx,
+            enable_codex_api_key_env: false,
+            auth_credentials_store_mode,
+            forced_chatgpt_workspace_id: RwLock::new(None),
+            chatgpt_base_url,
+            refresh_lock: Semaphore::new(/*permits*/ 1),
+            external_auth: RwLock::new(None),
+            external_api_key_token: RwLock::new(None),
+            catalog_account_id: Some(catalog_account_id),
+        }))
     }
 
     /// Current cached auth (clone) without attempting a refresh.
@@ -1846,6 +1902,17 @@ impl AuthManager {
     }
 
     async fn load_auth_from_storage(&self) -> Option<CodexAuth> {
+        if let Some(catalog_account_id) = self.catalog_account_id.as_deref() {
+            return load_catalog_account_auth(
+                &self.codex_home,
+                catalog_account_id,
+                self.auth_credentials_store_mode,
+                self.chatgpt_base_url.as_deref(),
+            )
+            .await
+            .ok()
+            .flatten();
+        }
         load_auth(
             &self.codex_home,
             self.enable_codex_api_key_env,
@@ -2248,15 +2315,44 @@ impl AuthManager {
             refresh_response.refresh_token,
         )
         .map_err(RefreshTokenError::from)?;
-        upsert_login_account_best_effort(
-            &self.codex_home,
-            &auth_dot_json,
-            self.auth_credentials_store_mode,
-        );
+        if self.catalog_account_id.is_none() {
+            upsert_login_account_best_effort(
+                &self.codex_home,
+                &auth_dot_json,
+                self.auth_credentials_store_mode,
+            );
+        }
         self.reload().await;
 
         Ok(())
     }
+}
+
+async fn load_catalog_account_auth(
+    codex_home: &Path,
+    catalog_account_id: &str,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    chatgpt_base_url: Option<&str>,
+) -> std::io::Result<Option<CodexAuth>> {
+    let (_account, auth_dot_json) = crate::auth_accounts::auth_for_account(
+        codex_home,
+        auth_credentials_store_mode,
+        catalog_account_id,
+    )?;
+    let storage = CatalogAccountStorage::new(
+        codex_home.to_path_buf(),
+        auth_credentials_store_mode,
+        catalog_account_id.to_string(),
+    );
+    CodexAuth::from_auth_dot_json_with_storage(
+        codex_home,
+        auth_dot_json,
+        auth_credentials_store_mode,
+        chatgpt_base_url,
+        Some(storage),
+    )
+    .await
+    .map(Some)
 }
 
 #[cfg(test)]
