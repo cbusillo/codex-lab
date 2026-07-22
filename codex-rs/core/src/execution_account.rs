@@ -219,7 +219,11 @@ impl ExecutionAccountLease {
         )
         .ok()
         .flatten()?;
-        let use_control_auth_manager = !config.pooled && control_account_id == Some(account_id);
+        let use_control_auth_manager = control_account_id == Some(account_id)
+            && control_auth_manager
+                .auth_cached()
+                .as_ref()
+                .is_some_and(|auth| auth_matches_account(auth, &account));
         let auth_manager = if use_control_auth_manager {
             control_auth_manager
         } else {
@@ -387,16 +391,18 @@ impl ExecutionAccountLease {
 
     pub(crate) async fn reconcile_after_control_auth_reload(&self) {
         let current = self.inner.current.load_full();
-        if !Arc::ptr_eq(&current.auth_manager, &self.inner.control_auth_manager) {
-            return;
-        }
         let active_account_id = codex_login::get_active_account_id(
             &self.inner.config.auth_home,
             self.inner.config.auth_credentials_store_mode,
         )
         .ok()
         .flatten();
-        if current.stored_account_id == active_account_id {
+        let uses_control_auth_manager =
+            Arc::ptr_eq(&current.auth_manager, &self.inner.control_auth_manager);
+        if uses_control_auth_manager && current.stored_account_id == active_account_id {
+            return;
+        }
+        if !uses_control_auth_manager && current.stored_account_id != active_account_id {
             return;
         }
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
@@ -420,6 +426,11 @@ impl ExecutionAccountLease {
                 generation,
             ))
         });
+        if !uses_control_auth_manager
+            && !Arc::ptr_eq(&replacement.auth_manager, &self.inner.control_auth_manager)
+        {
+            return;
+        }
         let account_id = replacement.stored_account_id.clone();
         self.inner.current.store(replacement);
         if self.inner.config.pooled
@@ -489,6 +500,46 @@ impl ExecutionAccount {
             label: self.label.clone(),
             mode: self.mode,
         }
+    }
+}
+
+fn auth_matches_account(auth: &CodexAuth, account: &StoredAccount) -> bool {
+    match (account.mode, auth.auth_mode()) {
+        (AuthMode::ApiKey, AuthMode::ApiKey) => auth.api_key() == account.openai_api_key.as_deref(),
+        (
+            AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens,
+            AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens,
+        ) => {
+            let Some(tokens) = account.tokens.as_ref() else {
+                return false;
+            };
+            let Some(account_id) = tokens
+                .account_id
+                .as_deref()
+                .or(tokens.id_token.chatgpt_account_id.as_deref())
+            else {
+                return false;
+            };
+            if auth.get_account_id().as_deref() != Some(account_id) {
+                return false;
+            }
+            if let (Some(stored_user_id), Some(auth_user_id)) = (
+                tokens.id_token.chatgpt_user_id.as_deref(),
+                auth.get_chatgpt_user_id().as_deref(),
+            ) && stored_user_id != auth_user_id
+            {
+                return false;
+            }
+            if let (Some(stored_email), Some(auth_email)) = (
+                tokens.id_token.email.as_deref(),
+                auth.get_account_email().as_deref(),
+            ) && !stored_email.trim().eq_ignore_ascii_case(auth_email.trim())
+            {
+                return false;
+            }
+            true
+        }
+        _ => false,
     }
 }
 

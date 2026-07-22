@@ -1704,6 +1704,38 @@ fn catalog_chatgpt_tokens(account_id: &str, email: &str) -> TokenData {
     }
 }
 
+#[tokio::test]
+async fn chatgpt_account_id_falls_back_to_id_token_claim() {
+    let codex_home = tempdir().expect("tempdir");
+    let mut tokens = catalog_chatgpt_tokens("claim-account", "claim@example.com");
+    tokens.account_id = None;
+    save_auth(
+        codex_home.path(),
+        &AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(tokens),
+            last_refresh: Some(Utc::now()),
+            agent_identity: None,
+            personal_access_token: None,
+        },
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("save auth");
+
+    let auth = super::load_auth(
+        codex_home.path(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await
+    .expect("load auth")
+    .expect("auth should exist");
+
+    assert_eq!(auth.get_account_id().as_deref(), Some("claim-account"));
+}
+
 fn api_key_auth(api_key: &str) -> AuthDotJson {
     AuthDotJson {
         auth_mode: Some(AuthMode::ApiKey),
