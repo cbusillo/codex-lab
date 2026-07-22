@@ -88,6 +88,9 @@ pub(crate) async fn build_prompt_input_from_session(
         .clone_history()
         .await
         .for_prompt(&turn_context.model_info.input_modalities);
+    let prompt_input = sess
+        .insert_current_apps_instructions(turn_context.as_ref(), prompt_input)
+        .await;
     let router = built_tools(sess, turn_context.as_ref(), &CancellationToken::new()).await?;
     let base_instructions = sess.get_base_instructions().await;
     let prompt = build_prompt(

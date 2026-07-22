@@ -115,10 +115,11 @@ enum TurnMultiAgentRuntime {
 }
 
 impl TurnContext {
-    pub(crate) fn with_refreshed_model_info(
+    pub(crate) fn with_refreshed_execution_account(
         &self,
         model_info: ModelInfo,
         models_manager: &SharedModelsManager,
+        auth_manager: Arc<AuthManager>,
     ) -> Self {
         let mut config = self.config.as_ref().clone();
         let tool_mode = model_info.tool_mode.unwrap_or_else(|| {
@@ -147,11 +148,11 @@ impl TurnContext {
             trace_id: self.trace_id.clone(),
             realtime_active: self.realtime_active,
             config: Arc::new(config),
-            auth_manager: self.auth_manager.clone(),
+            auth_manager: Some(Arc::clone(&auth_manager)),
             model_info: model_info.clone(),
             tool_mode,
             session_telemetry,
-            provider: Arc::clone(&self.provider),
+            provider: create_model_provider(self.provider.info().clone(), Some(auth_manager)),
             reasoning_effort: self.reasoning_effort.clone(),
             reasoning_summary,
             session_source: self.session_source.clone(),
@@ -248,6 +249,13 @@ impl TurnContext {
             .as_deref()
             .is_some_and(AuthManager::current_auth_uses_codex_backend);
         self.features.apps_enabled_for_auth(uses_codex_backend)
+    }
+
+    pub(crate) async fn auth(&self) -> Option<CodexAuth> {
+        match self.auth_manager.as_ref() {
+            Some(auth_manager) => auth_manager.auth().await,
+            None => None,
+        }
     }
 
     pub(crate) fn tool_environment_mode(&self) -> ToolEnvironmentMode {
@@ -891,7 +899,7 @@ impl Session {
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
-            Some(Arc::clone(&self.services.auth_manager)),
+            Some(self.services.execution_account.auth_manager()),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,
@@ -934,7 +942,7 @@ impl Session {
     }
 
     pub(crate) async fn refresh_turn_context_for_execution_account(
-        &self,
+        self: &Arc<Self>,
         turn_context: &Arc<TurnContext>,
     ) -> Arc<TurnContext> {
         let _ = self
@@ -948,9 +956,23 @@ impl Session {
             .models_manager
             .get_model_info(&model_slug, &turn_context.config.to_models_manager_config())
             .await;
-        let refreshed = Arc::new(
-            turn_context.with_refreshed_model_info(model_info, &self.services.models_manager),
-        );
+        let refreshed = Arc::new(turn_context.with_refreshed_execution_account(
+            model_info,
+            &self.services.models_manager,
+            self.services.execution_account.auth_manager(),
+        ));
+        let mcp_servers = self
+            .services
+            .mcp_manager
+            .configured_servers(refreshed.config.as_ref())
+            .await;
+        self.refresh_mcp_servers_now(
+            refreshed.as_ref(),
+            mcp_servers,
+            refreshed.config.mcp_oauth_credentials_store_mode,
+            Some(self.mcp_elicitation_reviewer()),
+        )
+        .await;
         let mut active_turn = self.active_turn.lock().await;
         if let Some(running_task) = active_turn
             .as_mut()

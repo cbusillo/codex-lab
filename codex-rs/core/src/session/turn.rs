@@ -264,10 +264,7 @@ pub(crate) async fn run_turn(
         };
         let auto_review_awareness_input_item =
             build_auto_review_awareness_input_item(sess.as_ref(), turn_context.as_ref()).await;
-        let mut sampling_request_input = prompt_history_input.clone();
-        if let Some(auto_review_awareness_input_item) = &auto_review_awareness_input_item {
-            sampling_request_input.push(auto_review_awareness_input_item.clone());
-        }
+        let sampling_request_input = prompt_history_input.clone();
 
         let window_id = sess.services.model_client.current_window_id();
         let turn_metadata_header = turn_context
@@ -1089,15 +1086,16 @@ async fn run_sampling_request(
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            let mut input = sess
-                .clone_history()
+            sess.clone_history()
                 .await
-                .for_prompt(&turn_context.model_info.input_modalities);
-            if let Some(request_only_input_item) = &request_only_input_item {
-                input.push(request_only_input_item.clone());
-            }
-            input
+                .for_prompt(&turn_context.model_info.input_modalities)
         };
+        let mut prompt_input = sess
+            .insert_current_apps_instructions(turn_context.as_ref(), prompt_input)
+            .await;
+        if let Some(request_only_input_item) = &request_only_input_item {
+            prompt_input.push(request_only_input_item.clone());
+        }
         let prompt = build_prompt(
             prompt_input,
             router.as_ref(),
@@ -1317,7 +1315,7 @@ pub(crate) async fn built_tools(
     } else {
         None
     };
-    let auth = sess.services.auth_manager.auth().await;
+    let auth = turn_context.auth().await;
     let loaded_plugin_app_connector_ids = loaded_plugins
         .effective_apps()
         .into_iter()
