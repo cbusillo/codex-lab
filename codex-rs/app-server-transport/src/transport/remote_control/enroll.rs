@@ -807,6 +807,7 @@ mod tests {
             &RemoteControlConnectionAuth {
                 auth_provider: codex_model_provider::unauthenticated_auth_provider(),
                 account_id: "account_id".to_string(),
+                revision: 0,
             },
             "11111111-1111-4111-8111-111111111111",
             "test-server",
