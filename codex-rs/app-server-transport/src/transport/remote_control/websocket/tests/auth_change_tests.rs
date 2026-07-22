@@ -237,7 +237,7 @@ async fn active_relay_reconnects_under_new_control_account() {
 }
 
 #[tokio::test]
-async fn active_relay_reconnects_after_same_control_identity_token_refresh() {
+async fn active_relay_stays_connected_after_same_control_identity_token_refresh() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
@@ -270,36 +270,19 @@ async fn active_relay_reconnects_after_same_control_identity_token_refresh() {
         revision_before_token_refresh + 1
     );
 
-    reconnect_after_control_auth_change(&mut websocket, &shutdown_token, active_control_auth).await;
-
-    let connect_shutdown_token = shutdown_token.child_token();
-    let backend = async {
-        let (stream, _) = timeout(TEST_HTTP_ACCEPT_TIMEOUT, listener.accept())
-            .await
-            .expect("websocket handshake should arrive in time")
-            .expect("listener should accept websocket handshake");
-        let _websocket = accept_async(stream)
-            .await
-            .expect("same-identity refresh should reconnect without re-enrolling");
-    };
-    let (connect_outcome, ()) = tokio::join!(
-        websocket.connect(
-            &connect_shutdown_token,
-            /*app_server_client_name*/ None
-        ),
-        backend,
-    );
-    let ConnectOutcome::Connected {
-        active_control_auth,
-        ..
-    } = connect_outcome
-    else {
-        panic!("same-identity token refresh should reconnect the relay");
-    };
-    assert_eq!(active_control_auth.account_id, "account-a");
-    assert_eq!(
-        active_control_auth.revision,
-        control_auth_manager.auth_revision()
+    let (client_websocket, _server_websocket) = connected_websocket_pair().await;
+    assert!(
+        timeout(
+            Duration::from_millis(100),
+            websocket.run_connection(
+                client_websocket,
+                shutdown_token.child_token(),
+                active_control_auth,
+            ),
+        )
+        .await
+        .is_err(),
+        "same-account token refresh must not interrupt the active relay"
     );
 }
 

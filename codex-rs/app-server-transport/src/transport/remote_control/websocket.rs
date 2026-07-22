@@ -867,7 +867,7 @@ impl RemoteControlWebsocket {
         &mut self,
         websocket_connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
         shutdown_token: CancellationToken,
-        active_control_auth: ActiveControlAuth,
+        mut active_control_auth: ActiveControlAuth,
     ) -> ConnectionEndReason {
         let (websocket_writer, websocket_reader) = websocket_connection.split();
         let mut join_set = tokio::task::JoinSet::new();
@@ -942,6 +942,12 @@ impl RemoteControlWebsocket {
                         .auth_manager
                         .auth_cached()
                         .and_then(|auth| auth.get_account_id());
+                    if current_account_id.as_deref()
+                        == Some(active_control_auth.account_id.as_str())
+                    {
+                        active_control_auth.revision = current_auth_revision;
+                        continue;
+                    }
                     self.auth_recovery = self.auth_manager.unauthorized_recovery();
                     self.reconnect_attempt = 0;
                     self.status_publisher.publish_status_if_enabled(
