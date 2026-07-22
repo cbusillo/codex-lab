@@ -13,7 +13,7 @@
 | Audit | 256 |
 | Classified | 256 |
 | Missing | 0 |
-| Blocking | 6 |
+| Blocking | 4 |
 
 ## Classifications
 
@@ -60,7 +60,7 @@
 | `693b8c2ba4396772eeb82ce2982acad19dd960f5` | `other_codex_rs` | `693b8c2ba439:missing_patch/other_codex_rs` | `defer` | `missing` | Preserve project scope and source provenance when importing external-agent memory. | git_commit:openai/codex@693b8c2ba4396772eeb82ce2982acad19dd960f5, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `d3fc1950a920f98e7fa9f11056667cdf911c38df` | `tui` | `d3fc1950a920:missing_patch/tui` | `adopt` | `missing` | Pure refactor extracting the four ApprovalRequest enum variants (Exec, Permissions, ApplyPatch, McpElicitation) into named payload structs with routing/rendering updated to use them. No behavior/UX change; Every Code still carries the inline-field enum form with the same fields, so the port is mechanical and keeps the approval overlay aligned with upstream. | git_commit:openai/codex@d3fc1950a920f98e7fa9f11056667cdf911c38df, github_pull_request:openai/codex#33684 |
 | `18110b810f0a328147f6cd85e6f1ab6414927366` | `history_storage_protocol` | `18110b810f0a:missing_patch/history_storage_protocol` | `not_applicable` | `not_required` | Upstream recency migration repair optimization targets a migration hook absent from Every Code's remapped migration lineage. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#33687 |
-| `bedrock-custom-transport` (`315195492c80`, `03cef233f11e`) | `cross_cutting` | `315195492c80:missing_patch/app_server`, `03cef233f11e:missing_patch/app_server` | `decision_required` | `missing` | Decide whether Every Code should permit custom Bedrock endpoint, command-auth, and header overrides before adapting provider and account UX. | github_issue:cbusillo/codex-lab#408, github_issue:cbusillo/codex-lab#409, github_pull_request:openai/codex#33695, github_pull_request:openai/codex#33848, git_commit:openai/codex@315195492c80fdade38e917c18f9584efd599304, git_commit:openai/codex@03cef233f11e8ef29fd17ce1ffeb8fc644aaf7de |
+| `bedrock-custom-transport` (`315195492c80`, `03cef233f11e`) | `cross_cutting` | `315195492c80:missing_patch/app_server`, `03cef233f11e:missing_patch/app_server` | `reject` | `not_required` | Keep the reserved Amazon Bedrock provider canonical and AWS-authenticated; custom endpoints, command auth, and headers must use a separate custom provider. | github_issue:cbusillo/codex-lab#408, github_issue:cbusillo/codex-lab#409, github_pull_request:openai/codex#33695, github_pull_request:openai/codex#33848, git_commit:openai/codex@315195492c80fdade38e917c18f9584efd599304, git_commit:openai/codex@03cef233f11e8ef29fd17ce1ffeb8fc644aaf7de, git_commit:cbusillo/codex-lab@62ef260b959d48a70de7452f10d48ef88ac3cd70 |
 | `3f0669dbd65c7cd369c84fd44b5696f871142fea` | `cross_cutting` | `3f0669dbd65c:missing_patch/tui` | `defer` | `missing` | Multi-agent V2 feature: adds a Thread.canAcceptDirectInput capability across app-server-protocol and app-server, then threads it through the TUI to present parent-owned sub-agent threads as view-only (preserve drafts/queued input, block agent-directed commands/settings, keep navigation). Not present in Every Code and spans protocol+app-server+tui, so defer pending Every Code's multi-agent V2 posture. | git_commit:openai/codex@3f0669dbd65c7cd369c84fd44b5696f871142fea, github_pull_request:openai/codex#33841 |
 | `761d504c1a121881947114db002aaf88dffa7ed5` | `app_server` | `761d504c1a12:missing_patch/app_server` | `adopt` | `missing` | Increase the zsh fork-decline integration-test command timeout from five to twenty seconds. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#33842, git_commit:openai/codex@761d504c1a121881947114db002aaf88dffa7ed5 |
 | `a238b753af596d67d6f776729272613bd4317327` | `app_server` | `a238b753af59:missing_patch/app_server` | `adopt` | `missing` | Add app/installed for effective connector runtime state with thread-scoped policy and refresh support. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#33843, git_commit:openai/codex@a238b753af596d67d6f776729272613bd4317327 |
@@ -212,8 +212,6 @@
 
 ## Blocking Commits
 
-- `315195492c80fdade38e917c18f9584efd599304`
-- `03cef233f11e8ef29fd17ce1ffeb8fc644aaf7de`
 - `f944456d81f32cadd96d037c190d7ce65a956306`
 - `cc875d61ce4be88a05371e185fb2f5530220315c`
 - `a148e0b50a5cfa642512dca77c367bde5194f882`
