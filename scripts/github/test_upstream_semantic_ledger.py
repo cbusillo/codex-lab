@@ -137,6 +137,47 @@ def ledger_payload(*, window: str = "post_checkpoint") -> dict[str, object]:
     }
 
 
+def review_payload(ledger: dict[str, object] | None = None) -> dict[str, object]:
+    ledger = ledger or ledger_payload()
+    row_keys = [row.get("stackId", row["commits"][0]) for row in ledger["rows"]]
+    return {
+        "crossStackDependencies": [
+            {
+                "dependsOn": ["openai/codex#402"],
+                "from": row_keys[-1],
+                "reason": "The bounded stack follows the direct adoption.",
+                "sourceReview": "core_a",
+            }
+        ],
+        "issue": "cbusillo/codex-lab#408",
+        "kind": upstream_semantic_ledger.REVIEW_KIND,
+        "range": ledger["range"],
+        "reviewerNotes": [
+            {
+                "note": "Preserve Every Code behavior while adapting upstream work.",
+                "sourceReview": "core_a",
+            }
+        ],
+        "riskFlags": [
+            {
+                "priority": "P1",
+                "reason": "The stack changes model-visible behavior.",
+                "rowKey": row_keys[-1],
+            }
+        ],
+        "rows": [
+            {
+                "confidence": "high",
+                "rationale": "The disposition matches the current implementation.",
+                "rowKey": row_key,
+                "sourceReview": "core_a",
+            }
+            for row_key in row_keys
+        ],
+        "schemaVersion": upstream_semantic_ledger.REVIEW_SCHEMA_VERSION,
+    }
+
+
 class UpstreamSemanticLedgerTests(unittest.TestCase):
     def test_complete_ledger_reconciles_and_renders_deterministically(self) -> None:
         audit = upstream_semantic_ledger.validate_audit(audit_payload())
@@ -206,6 +247,47 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
             (list(PRE_COMMITS[1:]), [PRE_COMMITS[0]]),
         )
 
+    def test_review_reconciles_with_ledger(self) -> None:
+        audit = upstream_semantic_ledger.validate_audit(audit_payload())
+        summary, rows = upstream_semantic_ledger.validate_ledger(
+            ledger_payload(), audit
+        )
+        review = upstream_semantic_ledger.validate_review(
+            review_payload(), summary, rows
+        )
+        self.assertEqual(
+            review,
+            {"dependencyCount": 1, "riskFlagCount": 1, "rowCount": 2},
+        )
+
+    def test_rejects_review_drift(self) -> None:
+        audit = upstream_semantic_ledger.validate_audit(audit_payload())
+        summary, rows = upstream_semantic_ledger.validate_ledger(
+            ledger_payload(), audit
+        )
+        wrong_row = review_payload()
+        wrong_row["rows"][0]["rowKey"] = "wrong-row"
+        string_dependency = review_payload()
+        string_dependency["crossStackDependencies"][0]["dependsOn"] = "openai/codex#402"
+        unknown_source = review_payload()
+        unknown_source["crossStackDependencies"][0]["from"] = "unknown-stack"
+        unknown_target = review_payload()
+        unknown_target["crossStackDependencies"][0]["dependsOn"] = ["unknown-stack"]
+        duplicate_risk = review_payload()
+        duplicate_risk["riskFlags"].append(duplicate_risk["riskFlags"][0])
+        for payload, expected in (
+            (wrong_row, "same position"),
+            (string_dependency, "between 1 and 25"),
+            (unknown_source, "must resolve"),
+            (unknown_target, r"dependsOn\[0\]: must resolve"),
+            (duplicate_risk, "one unique ledger row"),
+        ):
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(
+                    upstream_semantic_ledger.LedgerError, expected
+                ):
+                    upstream_semantic_ledger.validate_review(payload, summary, rows)
+
     def test_rejects_invalid_rows_and_evidence(self) -> None:
         outside = ledger_payload()
         outside["rows"][0]["commits"] = ["f" * 40]
@@ -261,10 +343,14 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
             root = Path(temp_dir)
             audit_path = root / "audit.json"
             ledger_path = root / "ledger.json"
+            review_path = root / "review.json"
             audit_path.write_text(json.dumps(audit_payload()), encoding="utf-8")
             incomplete = ledger_payload()
             incomplete["rows"] = incomplete["rows"][:1]
             ledger_path.write_text(json.dumps(incomplete), encoding="utf-8")
+            review_path.write_text(
+                json.dumps(review_payload(incomplete)), encoding="utf-8"
+            )
             command = [
                 sys.executable,
                 str(SCRIPT),
@@ -273,6 +359,8 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
                 str(audit_path),
                 "--ledger",
                 str(ledger_path),
+                "--review",
+                str(review_path),
                 "--require-complete",
             ]
             first = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -283,5 +371,45 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
             self.assertEqual(
                 (first.stdout, first.stderr), (second.stdout, second.stderr)
             )
+            for alias in ("--re", "--r"):
+                abbreviated = subprocess.run(
+                    [*command[:-1], alias],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    (first.returncode, first.stdout, first.stderr),
+                    (abbreviated.returncode, abbreviated.stdout, abbreviated.stderr),
+                )
             self.assertEqual(json.loads(first.stdout)["range"]["missingCommitCount"], 2)
             self.assertIn("is incomplete", first.stderr)
+
+    def test_committed_upstream_waves_validate(self) -> None:
+        upstream_root = SCRIPT.parents[2] / "upstream" / "openai-codex"
+        audit_paths = sorted(upstream_root.glob("*/audit.json"))
+        self.assertTrue(audit_paths)
+        for audit_path in audit_paths:
+            with self.subTest(wave=audit_path.parent.name):
+                wave = audit_path.parent
+                audit = upstream_semantic_ledger.validate_audit(
+                    json.loads(audit_path.read_text(encoding="utf-8"))
+                )
+                summary, rows = upstream_semantic_ledger.validate_ledger(
+                    json.loads((wave / "ledger.json").read_text(encoding="utf-8")),
+                    audit,
+                )
+                upstream_semantic_ledger.validate_review(
+                    json.loads((wave / "review.json").read_text(encoding="utf-8")),
+                    summary,
+                    rows,
+                )
+                self.assertEqual(
+                    upstream_semantic_ledger.render(summary, rows),
+                    (wave / "ledger.md").read_text(encoding="utf-8"),
+                )
+                semantic_lines = sum(
+                    len((wave / name).read_text(encoding="utf-8").splitlines())
+                    for name in ("ledger.json", "review.json", "ledger.md")
+                )
+                self.assertLessEqual(semantic_lines, 800)
