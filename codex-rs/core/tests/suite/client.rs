@@ -3089,6 +3089,200 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_selected_execution_account_routes_first_response_and_persists_lease()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_divergent_chatgpt_accounts(&home)?;
+    let now = chrono::Utc::now();
+    codex_core::account_usage::record_usage_limit_hint(
+        home.path(),
+        &accounts.current_id,
+        /*plan*/ None,
+        Some(now + chrono::Duration::hours(1)),
+        now,
+        /*reached_type*/ None,
+    )?;
+
+    mount_models_for_authorization(
+        &server,
+        format!("Bearer access-{}", accounts.candidate_chatgpt_id),
+        vec![account_model(
+            "execution-default",
+            345_000,
+            /*supports_parallel_tool_calls*/ true,
+            &["priority"],
+        )],
+    )
+    .await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+
+    let fixture = test_codex()
+        .with_home(home)
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.auto_switch_accounts_on_rate_limit = true;
+            config.model = None;
+            config.service_tier = Some("priority".to_string());
+            let _ = config.features.enable(Feature::FastMode);
+        })
+        .build(&server)
+        .await?;
+
+    assert_eq!(fixture.session_configured.model, "execution-default");
+    assert_eq!(
+        fixture.session_configured.service_tier.as_deref(),
+        Some("priority")
+    );
+    submit_prompt_without_waiting(&fixture).await?;
+
+    let turn_started = wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::TurnStarted(_))
+    })
+    .await;
+    let EventMsg::TurnStarted(turn_started) = turn_started else {
+        unreachable!();
+    };
+    assert_eq!(turn_started.model_context_window, Some(345_000));
+    wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = response_mock.single_request();
+    let expected_prompt_cache_key = format!(
+        "{}:{}",
+        fixture.session_configured.thread_id, accounts.candidate_id
+    );
+    assert_eq!(request.path(), "/v1/responses");
+    assert_eq!(
+        request.header("authorization"),
+        Some(format!("Bearer access-{}", accounts.candidate_chatgpt_id))
+    );
+    assert_eq!(
+        request.body_json()["prompt_cache_key"].as_str(),
+        Some(expected_prompt_cache_key.as_str())
+    );
+
+    let lease_path = fixture
+        .codex_home_path()
+        .join("execution-account-leases")
+        .join(format!("{}.json", fixture.session_configured.thread_id));
+    let lease: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(lease_path)?)?;
+    assert_eq!(
+        lease["account_id"].as_str(),
+        Some(accounts.candidate_id.as_str())
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_failover_refreshes_model_metadata_and_service_tier() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_divergent_chatgpt_accounts(&home)?;
+    let model_slug = "lease-routed-model";
+    let (fixture, response_mock) = start_usage_limit_failover(
+        &server,
+        home,
+        &accounts,
+        model_slug,
+        vec![account_model(
+            model_slug,
+            300_000,
+            /*supports_parallel_tool_calls*/ false,
+            &[],
+        )],
+    )
+    .await?;
+    wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer Access Token".to_string())
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some(format!("Bearer access-{}", accounts.candidate_chatgpt_id))
+    );
+    let first_body = requests[0].body_json();
+    let second_body = requests[1].body_json();
+    assert_eq!(first_body["model"].as_str(), Some(model_slug));
+    assert_eq!(first_body["parallel_tool_calls"].as_bool(), Some(true));
+    assert_eq!(first_body["service_tier"].as_str(), Some("priority"));
+    assert_eq!(second_body["model"].as_str(), Some(model_slug));
+    assert_eq!(second_body["parallel_tool_calls"].as_bool(), Some(false));
+    assert_eq!(second_body.get("service_tier"), None);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_failover_preserves_missing_model_slug_with_fallback_metadata()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_divergent_chatgpt_accounts(&home)?;
+    let model_slug = "lease-only-missing-model";
+    let (fixture, response_mock) = start_usage_limit_failover(
+        &server,
+        home,
+        &accounts,
+        model_slug,
+        vec![account_model(
+            "candidate-other-model",
+            300_000,
+            /*supports_parallel_tool_calls*/ false,
+            &[],
+        )],
+    )
+    .await?;
+    let fallback_warning = wait_for_event(&fixture.codex, |msg| {
+        matches!(
+            msg,
+            EventMsg::Warning(warning)
+                if warning.message.starts_with("Model metadata for")
+        )
+    })
+    .await;
+    let EventMsg::Warning(fallback_warning) = fallback_warning else {
+        unreachable!();
+    };
+    assert_eq!(
+        fallback_warning.message,
+        format!(
+            "Model metadata for `{model_slug}` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+        )
+    );
+    wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let second_body = requests[1].body_json();
+    assert_eq!(second_body["model"].as_str(), Some(model_slug));
+    assert_eq!(second_body.get("service_tier"), None);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_limit_auto_switch_emits_user_visible_notice() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let server = MockServer::start().await;
