@@ -13,7 +13,7 @@
 | Audit | 256 |
 | Classified | 256 |
 | Missing | 0 |
-| Blocking | 7 |
+| Blocking | 6 |
 
 ## Classifications
 
@@ -135,7 +135,7 @@
 | `7e51abbbd12282a1d7da4e77f72a28f82249b652` | `cross_cutting` | `7e51abbbd122:missing_patch/core` | `adapt` | `partially_implemented` | Avoid duplicate generated-image rendering by moving file hints to the image-generation artifact output and leaving the extension as the result owner. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34378, git_commit:openai/codex@7e51abbbd12282a1d7da4e77f72a28f82249b652, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `8431dc590a5bba9a1185d5579a5aabfbc469e50b` | `core` | `8431dc590a5b:missing_patch/core` | `adopt` | `partially_implemented` | Stop replacing invalid tool images with placeholder text and retrying; surface the bad-request error without mutating history. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34380, git_commit:openai/codex@8431dc590a5bba9a1185d5579a5aabfbc469e50b, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `6b9a5592a652f107dc7f75720d69c4b22af4d57b` | `other_codex_rs` | `6b9a5592a652:missing_patch/other_codex_rs` | `adapt` | `missing` | Makes Responses WebSocket request construction borrow shared request fields instead of cloning the full model input payload. | git_commit:openai/codex@6b9a5592a652f107dc7f75720d69c4b22af4d57b, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
-| `b00c9b2e16ccdbf2c7c8d58a590e0fc2ca97573b` | `cross_cutting` | `b00c9b2e16cc:missing_patch/other_codex_rs` | `decision_required` | `not_evaluated` | Marks multi-agent v2 stable while keeping it disabled by default and removes it from under-development feature warnings. | git_commit:openai/codex@b00c9b2e16ccdbf2c7c8d58a590e0fc2ca97573b, github_issue:cbusillo/codex-lab#411, git_commit:cbusillo/codex-lab@43a89704be8401f4467787f76308908feb86cd4a, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
+| `b00c9b2e16ccdbf2c7c8d58a590e0fc2ca97573b` | `cross_cutting` | `b00c9b2e16cc:missing_patch/other_codex_rs` | `defer` | `missing` | Marks multi-agent v2 stable while keeping it disabled by default and removes it from under-development feature warnings. | git_commit:openai/codex@b00c9b2e16ccdbf2c7c8d58a590e0fc2ca97573b, github_issue:cbusillo/codex-lab#411, git_commit:cbusillo/codex-lab@43a89704be8401f4467787f76308908feb86cd4a, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2, git_commit:cbusillo/codex-lab@d691b837eddc45a593b0a5d2f784bea26bd9e5d9 |
 | `692a0fb7e52dccead1d96894273d76eaf5af1b5a` | `repository_tooling` | `692a0fb7e52d:missing_patch/repository_tooling` | `adopt` | `missing` | Upgrade the packaged ripgrep manifest from 15.1.0 to 15.2.0 for every supported target. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34384, git_commit:openai/codex@692a0fb7e52dccead1d96894273d76eaf5af1b5a, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `5a4f5ee64c4e7de22c21f1c38feb3edfb167b7d8` | `other_codex_rs` | `5a4f5ee64c4e:missing_patch/other_codex_rs` | `adapt` | `implemented` | Adds GPT-5.6 personality instruction variables, a GPT-5.5 availability notice, and removes obsolete catalog message fields. | git_commit:openai/codex@5a4f5ee64c4e7de22c21f1c38feb3edfb167b7d8, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `6bf4845b60e0abccd0c64690e9c7591e0efb85d8` | `other_codex_rs` | `6bf4845b60e0:missing_patch/core` | `adapt` | `partially_implemented` | Route the default hosted Codex Apps MCP server through plugin-service ps/mcp while preserving Every Code's configured override and integration boundaries. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34389, git_commit:openai/codex@6bf4845b60e0abccd0c64690e9c7591e0efb85d8, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
@@ -215,7 +215,6 @@
 - `315195492c80fdade38e917c18f9584efd599304`
 - `03cef233f11e8ef29fd17ce1ffeb8fc644aaf7de`
 - `f944456d81f32cadd96d037c190d7ce65a956306`
-- `b00c9b2e16ccdbf2c7c8d58a590e0fc2ca97573b`
 - `cc875d61ce4be88a05371e185fb2f5530220315c`
 - `a148e0b50a5cfa642512dca77c367bde5194f882`
 - `667b6bbaf12187619f51f9fec6329755dce72f64`
