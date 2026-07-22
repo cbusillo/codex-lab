@@ -3,7 +3,24 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use pretty_assertions::assert_eq;
 use std::num::NonZeroU64;
+use std::path::Path;
 use tempfile::tempdir;
+
+fn provider_auth_for_test(base_dir: &Path) -> ModelProviderAuthInfo {
+    let provider: ModelProviderInfo = {
+        let _guard = AbsolutePathBufGuard::new(base_dir);
+        toml::from_str(
+            r#"
+name = "Bedrock Proxy"
+
+[auth]
+command = "token-helper"
+"#,
+        )
+        .expect("provider auth should deserialize")
+    };
+    provider.auth.expect("provider auth should be configured")
+}
 
 #[test]
 fn test_deserialize_ollama_model_provider_toml() {
@@ -389,28 +406,79 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_profile_override
 }
 
 #[test]
-fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fields() {
-    let configured_model_providers = std::collections::HashMap::from([(
-        AMAZON_BEDROCK_PROVIDER_ID.to_string(),
-        ModelProviderInfo {
-            name: "Custom Bedrock".to_string(),
-            aws: Some(ModelProviderAwsAuthInfo {
-                profile: Some("codex-bedrock".to_string()),
-                region: None,
-            }),
-            ..ModelProviderInfo::default()
-        },
-    )]);
+fn test_merge_configured_model_providers_rejects_amazon_bedrock_transport_overrides() {
+    let base_dir = tempdir().expect("tempdir");
+    let custom_transport_overrides = [
+        (
+            "base_url",
+            ModelProviderInfo {
+                base_url: Some("https://bedrock-proxy.example.com/v1".to_string()),
+                ..ModelProviderInfo::default()
+            },
+        ),
+        (
+            "auth",
+            ModelProviderInfo {
+                auth: Some(provider_auth_for_test(base_dir.path())),
+                ..ModelProviderInfo::default()
+            },
+        ),
+        (
+            "http_headers",
+            ModelProviderInfo {
+                http_headers: Some(std::collections::HashMap::from([(
+                    "x-bedrock-proxy".to_string(),
+                    "enabled".to_string(),
+                )])),
+                ..ModelProviderInfo::default()
+            },
+        ),
+    ];
+    let expected_error = "model_providers.amazon-bedrock only supports changing \
+`aws.profile` and `aws.region`; define a separate custom provider for custom endpoints, \
+command auth, or headers"
+        .to_string();
+
+    for (field, provider) in custom_transport_overrides {
+        let configured_model_providers =
+            std::collections::HashMap::from([(AMAZON_BEDROCK_PROVIDER_ID.to_string(), provider)]);
+
+        assert_eq!(
+            merge_configured_model_providers(
+                built_in_model_providers(/*openai_base_url*/ None),
+                configured_model_providers,
+            ),
+            Err(expected_error.clone()),
+            "override field: {field}"
+        );
+    }
+}
+
+#[test]
+fn test_merge_configured_model_providers_keeps_custom_transport_on_separate_provider() {
+    let base_dir = tempdir().expect("tempdir");
+    let custom_provider = ModelProviderInfo {
+        name: "Bedrock Proxy".to_string(),
+        base_url: Some("https://bedrock-proxy.example.com/v1".to_string()),
+        auth: Some(provider_auth_for_test(base_dir.path())),
+        http_headers: Some(std::collections::HashMap::from([(
+            "x-bedrock-proxy".to_string(),
+            "enabled".to_string(),
+        )])),
+        ..ModelProviderInfo::default()
+    };
+    assert_eq!(custom_provider.validate(), Ok(()));
+    let configured_model_providers =
+        std::collections::HashMap::from([("bedrock-proxy".to_string(), custom_provider.clone())]);
+    let mut expected = built_in_model_providers(/*openai_base_url*/ None);
+    expected.insert("bedrock-proxy".to_string(), custom_provider);
 
     assert_eq!(
         merge_configured_model_providers(
             built_in_model_providers(/*openai_base_url*/ None),
             configured_model_providers,
         ),
-        Err(
-            "model_providers.amazon-bedrock only supports changing `aws.profile` and `aws.region`; other non-default provider fields are not supported"
-                .to_string()
-        )
+        Ok(expected)
     );
 }
 

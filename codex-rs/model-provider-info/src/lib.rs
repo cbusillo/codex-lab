@@ -472,7 +472,8 @@ pub fn merge_configured_model_providers(
             if provider != ModelProviderInfo::default() {
                 return Err(format!(
                     "model_providers.{AMAZON_BEDROCK_PROVIDER_ID} only supports changing \
-`aws.profile` and `aws.region`; other non-default provider fields are not supported"
+`aws.profile` and `aws.region`; define a separate custom provider for custom endpoints, \
+command auth, or headers"
                 ));
             }
 
