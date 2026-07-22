@@ -350,9 +350,9 @@ exit 2
             with (app_dir / "Contents/Info.plist").open("rb") as handle:
                 info = plistlib.load(handle)
             self.assertEqual(info["CFBundleShortVersionString"], "1.2.3")
-            launcher = (
-                app_dir / "Contents/MacOS/Codex Lab Launcher"
-            ).read_text(encoding="utf-8")
+            launcher = (app_dir / "Contents/MacOS/Codex Lab Launcher").read_text(
+                encoding="utf-8"
+            )
             self.assertIn("EXPECTED_VERSION='1.2.3'", launcher)
             self.assertIn("EXPECTED_SOURCE_COMMIT='" + "a" * 40 + "'", launcher)
             self.assertIn("Built Codex Lab app bundle", completed.stdout)
@@ -387,7 +387,9 @@ printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state"
             )
 
             self.assertEqual(completed.returncode, 2)
-            self.assertIn("does not match the embedded CLI provenance", completed.stderr)
+            self.assertIn(
+                "does not match the embedded CLI provenance", completed.stderr
+            )
 
     def test_refuses_to_replace_existing_app_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
