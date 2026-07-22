@@ -435,8 +435,8 @@ fn test_merge_configured_model_providers_rejects_amazon_bedrock_transport_overri
         ),
     ];
     let expected_error = "model_providers.amazon-bedrock only supports changing \
-`aws.profile` and `aws.region`; define a separate custom provider for custom endpoints, \
-command auth, or headers"
+`aws.profile` and `aws.region`; define a separate custom provider for any other settings, \
+including custom endpoints, command auth, or headers"
         .to_string();
 
     for (field, provider) in custom_transport_overrides {

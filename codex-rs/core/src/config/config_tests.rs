@@ -666,7 +666,7 @@ region = "us-west-2"
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(err.to_string().contains(
-        "model_providers.amazon-bedrock only supports changing `aws.profile` and `aws.region`; define a separate custom provider for custom endpoints, command auth, or headers"
+        "model_providers.amazon-bedrock only supports changing `aws.profile` and `aws.region`; define a separate custom provider for any other settings, including custom endpoints, command auth, or headers"
     ));
 }
 
