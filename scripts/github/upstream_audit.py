@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_COMMITS = 2_000
 MAX_ERROR_CHARS = 4_000
@@ -42,6 +42,12 @@ BUCKET_ORDER = (
     "other_codex_rs",
     "repository_tooling",
     "other",
+)
+MECHANICAL_STATUS_ORDER = (
+    "exact_commit",
+    "patch_equivalent",
+    "missing_patch",
+    "uncomparable",
 )
 
 
@@ -371,6 +377,105 @@ def patch_counts(
     }
 
 
+def patch_statuses(
+    audit_repo: Path,
+    baseline: str,
+    classified: str,
+    observed_head: str,
+    commits: list[str],
+    config: Config,
+) -> dict[str, str]:
+    non_reachable = set(
+        git(
+            audit_repo,
+            ["rev-list", f"{classified}..{observed_head}", "--not", baseline],
+            config,
+            "failed to enumerate upstream commits absent from the implementation baseline",
+        ).splitlines()
+    )
+    output = git(
+        audit_repo,
+        ["cherry", baseline, observed_head, classified],
+        config,
+        "failed to calculate patch-equivalent commits",
+    )
+    cherry_statuses = {}
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or fields[0] not in {"+", "-"}:
+            raise AuditError("git cherry returned an unexpected result")
+        marker, commit = fields
+        if commit in cherry_statuses:
+            raise AuditError("git cherry returned a duplicate commit")
+        cherry_statuses[commit] = (
+            "patch_equivalent" if marker == "-" else "missing_patch"
+        )
+
+    statuses = {}
+    for commit in commits:
+        if commit not in non_reachable:
+            statuses[commit] = "exact_commit"
+        else:
+            statuses[commit] = cherry_statuses.get(commit, "uncomparable")
+    if set(cherry_statuses) - set(commits):
+        raise AuditError("git cherry returned a commit outside the upstream range")
+    return statuses
+
+
+def range_evidence(
+    audit_repo: Path,
+    baseline: str,
+    after: str,
+    through: str,
+    config: Config,
+) -> dict[str, object]:
+    commit_count = int(
+        git(
+            audit_repo,
+            ["rev-list", "--count", f"{after}..{through}"],
+            config,
+            "failed to count upstream commits",
+        ).strip()
+    )
+    if commit_count > config.max_commits:
+        raise AuditError(
+            f"upstream range has {commit_count} commits, exceeding the configured maximum of {config.max_commits}"
+        )
+    commits = git(
+        audit_repo,
+        ["rev-list", "--reverse", "--topo-order", f"{after}..{through}"],
+        config,
+        "failed to enumerate upstream commits",
+    ).splitlines()
+    if len(commits) != commit_count:
+        raise AuditError("enumerated upstream commit count does not match the summary")
+    mechanical_statuses = patch_statuses(
+        audit_repo, baseline, after, through, commits, config
+    )
+    buckets = {bucket: 0 for bucket in BUCKET_ORDER}
+    commit_rows = []
+    for commit in commits:
+        bucket = primary_bucket(changed_paths(audit_repo, commit, config))
+        buckets[bucket] += 1
+        commit_rows.append(
+            {
+                "mechanicalStatus": mechanical_statuses[commit],
+                "primaryPathBucket": bucket,
+                "sha": commit,
+            }
+        )
+    return {
+        "after": after,
+        "commitCount": commit_count,
+        "commits": commit_rows,
+        "patchEquivalence": patch_counts(
+            audit_repo, baseline, after, through, commit_count, config
+        ),
+        "primaryPathBuckets": buckets,
+        "through": through,
+    }
+
+
 def collect(config: Config) -> dict[str, object]:
     repo, objects, baseline, object_format = resolve_source(config)
     classified = full_sha(config.classified_checkpoint, "classified checkpoint")
@@ -414,53 +519,37 @@ def collect(config: Config) -> dict[str, object]:
                 raise AuditError(
                     "adopted checkpoint is not an ancestor of the classified checkpoint"
                 )
-        merge_base = git(
+        classified_merge_base = git(
+            audit_repo,
+            ["merge-base", baseline, classified],
+            config,
+            "implementation baseline and classified checkpoint have no merge base",
+        ).strip()
+        observed_merge_base = git(
             audit_repo,
             ["merge-base", baseline, observed_head],
             config,
             "implementation baseline and observed upstream head have no merge base",
         ).strip()
-        commit_count = int(
-            git(
-                audit_repo,
-                ["rev-list", "--count", f"{classified}..{observed_head}"],
-                config,
-                "failed to count upstream commits",
-            ).strip()
-        )
-        if commit_count > config.max_commits:
-            raise AuditError(
-                f"upstream range has {commit_count} commits, exceeding the configured maximum of {config.max_commits}"
-            )
-        commits = git(
-            audit_repo,
-            ["rev-list", "--reverse", "--topo-order", f"{classified}..{observed_head}"],
-            config,
-            "failed to enumerate upstream commits",
-        ).splitlines()
-        if len(commits) != commit_count:
-            raise AuditError(
-                "enumerated upstream commit count does not match the summary"
-            )
-        buckets = {bucket: 0 for bucket in BUCKET_ORDER}
-        for commit in commits:
-            buckets[primary_bucket(changed_paths(audit_repo, commit, config))] += 1
         return {
-            "delta": {
-                "commitCount": commit_count,
-                "patchEquivalence": patch_counts(
-                    audit_repo,
-                    baseline,
-                    classified,
-                    observed_head,
-                    commit_count,
-                    config,
-                ),
-                "primaryPathBuckets": buckets,
-            },
             "implementation": {
                 "baseline": baseline,
-                "mergeBaseWithObservedUpstream": merge_base,
+                "mergeBaseWithClassifiedCheckpoint": classified_merge_base,
+                "mergeBaseWithObservedUpstream": observed_merge_base,
+            },
+            "ranges": {
+                "postCheckpoint": range_evidence(
+                    audit_repo, baseline, classified, observed_head, config
+                ),
+                "preCheckpoint": (
+                    range_evidence(
+                        audit_repo,
+                        baseline,
+                        classified_merge_base,
+                        classified,
+                        config,
+                    )
+                ),
             },
             "schemaVersion": SCHEMA_VERSION,
             "upstream": {

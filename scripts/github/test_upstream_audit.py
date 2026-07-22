@@ -157,54 +157,91 @@ class UpstreamAuditTests(unittest.TestCase):
     def test_collects_deterministic_evidence_without_source_writes(self) -> None:
         before = source_state(self.fixture.implementation)
         first = self.fixture.run(
-            adopted=self.fixture.base,
+            checkpoint=self.fixture.upstream_core,
             environment={"GIT_DIR": str(self.fixture.upstream / ".git")},
         )
-        second = self.fixture.run(adopted=self.fixture.base)
+        second = self.fixture.run(checkpoint=self.fixture.upstream_core)
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(first.stdout, second.stdout)
-        buckets = {bucket: 0 for bucket in upstream_audit.BUCKET_ORDER}
-        buckets.update({"core": 1, "tui": 1})
+        core_buckets = {bucket: 0 for bucket in upstream_audit.BUCKET_ORDER}
+        core_buckets["core"] = 1
+        tui_buckets = {bucket: 0 for bucket in upstream_audit.BUCKET_ORDER}
+        tui_buckets["tui"] = 1
         self.assertEqual(
             json.loads(first.stdout),
             {
-                "delta": {
-                    "commitCount": 2,
-                    "patchEquivalence": {
-                        "algorithm": "git-reachability-and-cherry-v1",
-                        "equivalenceScope": "exact_commit_or-git-cherry-patch-only",
-                        "exactCommitCount": 0,
-                        "missingPatchCount": 1,
-                        "patchEquivalentCommitCount": 1,
-                        "uncomparableCommitCount": 0,
-                    },
-                    "primaryPathBuckets": buckets,
-                },
                 "implementation": {
                     "baseline": self.fixture.baseline,
+                    "mergeBaseWithClassifiedCheckpoint": self.fixture.base,
                     "mergeBaseWithObservedUpstream": self.fixture.base,
                 },
-                "schemaVersion": 1,
+                "ranges": {
+                    "postCheckpoint": {
+                        "after": self.fixture.upstream_core,
+                        "commitCount": 1,
+                        "commits": [
+                            {
+                                "mechanicalStatus": "missing_patch",
+                                "primaryPathBucket": "tui",
+                                "sha": self.fixture.head,
+                            }
+                        ],
+                        "patchEquivalence": {
+                            "algorithm": "git-reachability-and-cherry-v1",
+                            "equivalenceScope": "exact_commit_or-git-cherry-patch-only",
+                            "exactCommitCount": 0,
+                            "missingPatchCount": 1,
+                            "patchEquivalentCommitCount": 0,
+                            "uncomparableCommitCount": 0,
+                        },
+                        "primaryPathBuckets": tui_buckets,
+                        "through": self.fixture.head,
+                    },
+                    "preCheckpoint": {
+                        "after": self.fixture.base,
+                        "commitCount": 1,
+                        "commits": [
+                            {
+                                "mechanicalStatus": "patch_equivalent",
+                                "primaryPathBucket": "core",
+                                "sha": self.fixture.upstream_core,
+                            }
+                        ],
+                        "patchEquivalence": {
+                            "algorithm": "git-reachability-and-cherry-v1",
+                            "equivalenceScope": "exact_commit_or-git-cherry-patch-only",
+                            "exactCommitCount": 0,
+                            "missingPatchCount": 0,
+                            "patchEquivalentCommitCount": 1,
+                            "uncomparableCommitCount": 0,
+                        },
+                        "primaryPathBuckets": core_buckets,
+                        "through": self.fixture.upstream_core,
+                    },
+                },
+                "schemaVersion": 2,
                 "upstream": {
-                    "adoptedCheckpoint": self.fixture.base,
+                    "adoptedCheckpoint": None,
                     "branch": "main",
-                    "classifiedCheckpoint": self.fixture.base,
+                    "classifiedCheckpoint": self.fixture.upstream_core,
                     "observedHead": self.fixture.head,
                 },
             },
         )
         self.assertEqual(source_state(self.fixture.implementation), before)
 
-    def test_empty_delta_keeps_the_complete_schema(self) -> None:
+    def test_empty_post_range_keeps_the_complete_schema(self) -> None:
         completed = self.fixture.run(
             checkpoint=self.fixture.head, adopted=self.fixture.base
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         self.assertEqual(
-            payload["delta"],
+            payload["ranges"]["postCheckpoint"],
             {
+                "after": self.fixture.head,
                 "commitCount": 0,
+                "commits": [],
                 "patchEquivalence": {
                     "algorithm": "git-reachability-and-cherry-v1",
                     "equivalenceScope": "exact_commit_or-git-cherry-patch-only",
@@ -216,6 +253,7 @@ class UpstreamAuditTests(unittest.TestCase):
                 "primaryPathBuckets": {
                     bucket: 0 for bucket in upstream_audit.BUCKET_ORDER
                 },
+                "through": self.fixture.head,
             },
         )
 
@@ -247,8 +285,23 @@ class UpstreamAuditTests(unittest.TestCase):
         )
         completed = self.fixture.run(baseline=self.fixture.upstream_core)
         self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
         self.assertEqual(
-            json.loads(completed.stdout)["delta"]["patchEquivalence"],
+            payload["implementation"],
+            {
+                "baseline": self.fixture.upstream_core,
+                "mergeBaseWithClassifiedCheckpoint": self.fixture.base,
+                "mergeBaseWithObservedUpstream": self.fixture.upstream_core,
+            },
+        )
+        ranges = payload["ranges"]
+        self.assertEqual(
+            (ranges["preCheckpoint"]["after"], ranges["preCheckpoint"]["through"]),
+            (self.fixture.base, self.fixture.base),
+        )
+        delta = ranges["postCheckpoint"]
+        self.assertEqual(
+            delta["patchEquivalence"],
             {
                 "algorithm": "git-reachability-and-cherry-v1",
                 "equivalenceScope": "exact_commit_or-git-cherry-patch-only",
@@ -257,6 +310,21 @@ class UpstreamAuditTests(unittest.TestCase):
                 "patchEquivalentCommitCount": 0,
                 "uncomparableCommitCount": 0,
             },
+        )
+        self.assertEqual(
+            delta["commits"],
+            [
+                {
+                    "mechanicalStatus": "exact_commit",
+                    "primaryPathBucket": "core",
+                    "sha": self.fixture.upstream_core,
+                },
+                {
+                    "mechanicalStatus": "missing_patch",
+                    "primaryPathBucket": "tui",
+                    "sha": self.fixture.head,
+                },
+            ],
         )
 
     def test_rejects_invalid_checkpoint_order(self) -> None:
