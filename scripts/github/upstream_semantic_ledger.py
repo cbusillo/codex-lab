@@ -46,6 +46,7 @@ MAX_DEPENDENCIES = 500
 MAX_DEPENDENCY_TARGETS = 25
 MAX_REVIEWER_NOTES = 200
 MAX_RISK_FLAGS = 100
+MAX_RENDERED_STATUS_COMMITS = 100
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
 REVIEW_PRIORITIES = {"P0", "P1", "P2", "P3"}
 FULL_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -650,7 +651,16 @@ def render(summary: dict[str, object], rows: list[dict[str, object]]) -> str:
     ):
         if range_summary[key]:
             lines.extend(["", f"## {heading}", ""])
-            lines.extend(f"- `{commit}`" for commit in range_summary[key])
+            displayed_commits = range_summary[key][:MAX_RENDERED_STATUS_COMMITS]
+            lines.extend(f"- `{commit}`" for commit in displayed_commits)
+            omitted_count = len(range_summary[key]) - len(displayed_commits)
+            if omitted_count:
+                lines.extend(
+                    [
+                        "",
+                        f"_{omitted_count} additional commits omitted; run `validate` for the complete machine-readable list._",
+                    ]
+                )
     return "\n".join(lines) + "\n"
 
 
