@@ -12,6 +12,7 @@ pub use transport::AppServerTransportParseError;
 pub use transport::CHANNEL_CAPACITY;
 pub use transport::ConnectionOrigin;
 pub use transport::RemoteControlHandle;
+pub use transport::RemoteControlReconnectUnavailable;
 pub use transport::RemoteControlStartConfig;
 pub use transport::RemoteControlUnavailable;
 pub use transport::TransportEvent;
