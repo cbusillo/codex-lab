@@ -5621,7 +5621,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
             chatgpt_base_url: config.chatgpt_base_url.clone(),
             allow_api_key_fallback: false,
-            pooled: false,
+            pooling: crate::execution_account::ExecutionAccountPooling::Disabled,
+            start: crate::execution_account::ExecutionAccountStart::New,
         },
     )
     .await;
@@ -7898,7 +7899,8 @@ where
             auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
             chatgpt_base_url: config.chatgpt_base_url.clone(),
             allow_api_key_fallback: false,
-            pooled: false,
+            pooling: crate::execution_account::ExecutionAccountPooling::Disabled,
+            start: crate::execution_account::ExecutionAccountStart::New,
         },
     )
     .await;

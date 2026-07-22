@@ -13,6 +13,8 @@ use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
 use crate::execution_account::ExecutionAccountLease;
 use crate::execution_account::ExecutionAccountOptions;
+use crate::execution_account::ExecutionAccountPooling;
+use crate::execution_account::ExecutionAccountStart;
 use codex_api::ApiError;
 use codex_api::RawMemory;
 use codex_api::RawMemoryMetadata;
@@ -168,11 +170,11 @@ async fn model_client_uses_execution_lease_auth_without_changing_control_auth() 
             auth_credentials_store_mode: AuthCredentialsStoreMode::Ephemeral,
             chatgpt_base_url: CHATGPT_CODEX_BASE_URL.to_string(),
             allow_api_key_fallback: false,
-            pooled: false,
+            pooling: ExecutionAccountPooling::Disabled,
+            start: ExecutionAccountStart::New,
         },
     )
     .await;
-    lease.replace_auth_manager_for_testing(execution_auth_manager);
     let model_client = ModelClient::new(
         Some(Arc::clone(&control_auth_manager)),
         thread_id.into(),
@@ -187,7 +189,17 @@ async fn model_client_uses_execution_lease_auth_without_changing_control_auth() 
         /*beta_features_header*/ None,
         /*attestation_provider*/ None,
     );
-    model_client.set_execution_account_lease(lease);
+    model_client.set_execution_account_lease(lease.clone());
+    assert_eq!(model_client.prompt_cache_key(), thread_id.to_string());
+
+    lease.replace_with_detached_auth_manager_for_testing(
+        "execution".to_string(),
+        execution_auth_manager,
+    );
+    assert_eq!(
+        model_client.prompt_cache_key(),
+        format!("{thread_id}:execution")
+    );
 
     let setup = model_client
         .current_client_setup(/*generate_attestation*/ false)

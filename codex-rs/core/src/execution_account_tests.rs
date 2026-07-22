@@ -104,41 +104,59 @@ async fn test_accounts() -> (
     (codex_home, control_manager, control, execution)
 }
 
-fn options(codex_home: &Path) -> ExecutionAccountOptions {
+fn options(
+    codex_home: &Path,
+    pooling: ExecutionAccountPooling,
+    start: ExecutionAccountStart,
+) -> ExecutionAccountOptions {
     ExecutionAccountOptions {
         codex_home: codex_home.to_path_buf(),
         auth_home: codex_home.to_path_buf(),
         auth_credentials_store_mode: AuthCredentialsStoreMode::File,
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
         allow_api_key_fallback: false,
-        pooled: true,
+        pooling,
+        start,
     }
 }
 
-#[tokio::test]
-async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control() {
-    let (codex_home, control_manager, control, execution) = test_accounts().await;
-    let now = Utc::now();
+fn prefer_execution_account(
+    codex_home: &Path,
+    control: &StoredAccount,
+    execution: &StoredAccount,
+    now: DateTime<Utc>,
+) {
     crate::account_usage::record_rate_limit_snapshot(
-        codex_home.path(),
+        codex_home,
         &control.id,
         rate_limit_snapshot(now + Duration::hours(4), 40.0),
         now,
     )
     .expect("record control usage");
     crate::account_usage::record_rate_limit_snapshot(
-        codex_home.path(),
+        codex_home,
         &execution.id,
         rate_limit_snapshot(now + Duration::hours(1), 40.0),
         now,
     )
     .expect("record execution usage");
+}
+
+#[tokio::test]
+async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    let now = Utc::now();
+    prefer_execution_account(codex_home.path(), &control, &execution, now);
     let thread_id = ThreadId::default();
 
     let first = ExecutionAccountLease::resolve(
         thread_id,
         Arc::clone(&control_manager),
-        options(codex_home.path()),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::New,
+        ),
     )
     .await;
     assert_eq!(
@@ -147,6 +165,10 @@ async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control()
     );
     assert_eq!(
         first.prompt_cache_discriminator(),
+        Some(execution.id.clone())
+    );
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), thread_id),
         Some(execution.id.clone())
     );
     assert_eq!(
@@ -171,7 +193,11 @@ async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control()
     let resumed = ExecutionAccountLease::resolve(
         thread_id,
         Arc::clone(&control_manager),
-        options(codex_home.path()),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Resumed,
+        ),
     )
     .await;
     assert_eq!(
@@ -181,27 +207,270 @@ async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control()
 }
 
 #[tokio::test]
+async fn cleared_thread_selects_and_persists_preferred_account() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    prefer_execution_account(codex_home.path(), &control, &execution, Utc::now());
+    let thread_id = ThreadId::new();
+
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        control_manager,
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Cleared,
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        lease.identity().stored_account_id,
+        Some(execution.id.clone())
+    );
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), thread_id),
+        Some(execution.id)
+    );
+}
+
+#[tokio::test]
+async fn resumed_thread_without_lease_binds_and_persists_current_control() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    prefer_execution_account(codex_home.path(), &control, &execution, Utc::now());
+    let thread_id = ThreadId::new();
+
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&control_manager),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Resumed,
+        ),
+    )
+    .await;
+
+    assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
+    assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(lease.prompt_cache_discriminator(), None);
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), thread_id),
+        Some(control.id)
+    );
+}
+
+#[tokio::test]
+async fn fork_inherits_source_lease_or_binds_current_control() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    prefer_execution_account(codex_home.path(), &control, &execution, Utc::now());
+    let source_thread_id = ThreadId::new();
+    persist_lease(codex_home.path(), source_thread_id, &execution.id)
+        .expect("persist source lease");
+    let inherited_thread_id = ThreadId::new();
+
+    let inherited = ExecutionAccountLease::resolve(
+        inherited_thread_id,
+        Arc::clone(&control_manager),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Forked {
+                source_thread_id: Some(source_thread_id),
+            },
+        ),
+    )
+    .await;
+    assert_eq!(
+        inherited.identity().stored_account_id,
+        Some(execution.id.clone())
+    );
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), inherited_thread_id),
+        Some(execution.id)
+    );
+
+    let missing_source_thread_id = ThreadId::new();
+    let fallback_thread_id = ThreadId::new();
+    let fallback = ExecutionAccountLease::resolve(
+        fallback_thread_id,
+        Arc::clone(&control_manager),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Forked {
+                source_thread_id: Some(missing_source_thread_id),
+            },
+        ),
+    )
+    .await;
+    assert_eq!(
+        fallback.identity().stored_account_id,
+        Some(control.id.clone())
+    );
+    assert!(Arc::ptr_eq(&fallback.auth_manager(), &control_manager));
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), fallback_thread_id),
+        Some(control.id)
+    );
+}
+
+#[tokio::test]
+async fn invalid_or_corrupt_resumed_lease_falls_back_to_control_and_is_repaired() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    prefer_execution_account(codex_home.path(), &control, &execution, Utc::now());
+    let corrupt_thread_id = ThreadId::new();
+    let corrupt_path = lease_path(codex_home.path(), corrupt_thread_id);
+    std::fs::create_dir_all(corrupt_path.parent().expect("lease parent"))
+        .expect("create lease directory");
+    std::fs::write(corrupt_path, b"{not-json").expect("write corrupt lease");
+    let invalid_thread_id = ThreadId::new();
+    persist_lease(codex_home.path(), invalid_thread_id, "missing-account")
+        .expect("persist invalid lease");
+
+    for thread_id in [corrupt_thread_id, invalid_thread_id] {
+        let lease = ExecutionAccountLease::resolve(
+            thread_id,
+            Arc::clone(&control_manager),
+            options(
+                codex_home.path(),
+                ExecutionAccountPooling::Enabled,
+                ExecutionAccountStart::Resumed,
+            ),
+        )
+        .await;
+        assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
+        assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+        assert_eq!(
+            read_persisted_lease(codex_home.path(), thread_id),
+            Some(control.id.clone())
+        );
+    }
+}
+
+#[tokio::test]
+async fn pooled_execution_disabled_stays_on_control_and_does_not_persist() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    prefer_execution_account(codex_home.path(), &control, &execution, Utc::now());
+    let thread_id = ThreadId::new();
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&control_manager),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Disabled,
+            ExecutionAccountStart::New,
+        ),
+    )
+    .await;
+
+    assert_eq!(lease.identity().stored_account_id, Some(control.id));
+    assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(read_persisted_lease(codex_home.path(), thread_id), None);
+    assert_eq!(
+        lease
+            .failover_after_usage_limit(
+                &mut RateLimitSwitchState::default(),
+                /*blocked_until*/ None,
+            )
+            .await
+            .expect("pooled-disabled failover"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn pooled_execution_requires_control_to_match_active_catalog_account() {
+    let (codex_home, _catalog_manager, control, execution) = test_accounts().await;
+    prefer_execution_account(codex_home.path(), &control, &execution, Utc::now());
+    let non_catalog_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-non-catalog"));
+    let thread_id = ThreadId::new();
+
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&non_catalog_manager),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::New,
+        ),
+    )
+    .await;
+
+    assert_eq!(lease.identity().stored_account_id, None);
+    assert!(Arc::ptr_eq(&lease.auth_manager(), &non_catalog_manager));
+    assert_eq!(lease.prompt_cache_discriminator(), None);
+    assert_eq!(read_persisted_lease(codex_home.path(), thread_id), None);
+    assert_eq!(
+        lease
+            .failover_after_usage_limit(
+                &mut RateLimitSwitchState::default(),
+                /*blocked_until*/ None,
+            )
+            .await
+            .expect("non-catalog failover"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn execution_auth_revision_is_strictly_monotonic_across_replacements() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let control_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-control"));
+    let lease = ExecutionAccountLease::resolve(
+        ThreadId::new(),
+        control_manager,
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Disabled,
+            ExecutionAccountStart::New,
+        ),
+    )
+    .await;
+    let initial_revision = lease.auth_revision();
+
+    lease.replace_with_detached_auth_manager_for_testing(
+        "first".to_string(),
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-first")),
+    );
+    let first_replacement_revision = lease.auth_revision();
+    lease.replace_with_detached_auth_manager_for_testing(
+        "second".to_string(),
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-second")),
+    );
+    let second_replacement_revision = lease.auth_revision();
+
+    assert!(initial_revision < first_replacement_revision);
+    assert!(first_replacement_revision < second_replacement_revision);
+}
+
+#[test]
+fn persist_lease_atomically_replaces_existing_lease() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let thread_id = ThreadId::new();
+
+    persist_lease(codex_home.path(), thread_id, "first").expect("persist first lease");
+    persist_lease(codex_home.path(), thread_id, "second").expect("replace lease");
+
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), thread_id),
+        Some("second".to_string())
+    );
+}
+
+#[tokio::test]
 async fn usage_limit_failover_changes_only_execution_lease() {
     let (codex_home, control_manager, control, execution) = test_accounts().await;
     let now = Utc::now();
-    crate::account_usage::record_rate_limit_snapshot(
-        codex_home.path(),
-        &control.id,
-        rate_limit_snapshot(now + Duration::hours(4), 40.0),
-        now,
-    )
-    .expect("record control usage");
-    crate::account_usage::record_rate_limit_snapshot(
-        codex_home.path(),
-        &execution.id,
-        rate_limit_snapshot(now + Duration::hours(1), 40.0),
-        now,
-    )
-    .expect("record execution usage");
+    prefer_execution_account(codex_home.path(), &control, &execution, now);
     let lease = ExecutionAccountLease::resolve(
         ThreadId::default(),
         Arc::clone(&control_manager),
-        options(codex_home.path()),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::New,
+        ),
     )
     .await;
     let previous_revision = lease.auth_revision();
@@ -215,7 +484,7 @@ async fn usage_limit_failover_changes_only_execution_lease() {
         .expect("replacement account");
 
     assert_eq!(switched.stored_account_id, Some(control.id.clone()));
-    assert_ne!(lease.auth_revision(), previous_revision);
+    assert!(lease.auth_revision() > previous_revision);
     assert_eq!(
         codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)
             .expect("active account"),
@@ -237,11 +506,16 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
     let lease = ExecutionAccountLease::resolve(
         thread_id,
         Arc::clone(&control_manager),
-        options(codex_home.path()),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Resumed,
+        ),
     )
     .await;
     assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
     assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(lease.prompt_cache_discriminator(), None);
 
     let (_account, execution_auth) = codex_login::auth_for_account(
         codex_home.path(),
@@ -261,9 +535,20 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
         Some(execution.id.clone()),
     )
     .expect("switch control account");
+    assert_eq!(
+        lease
+            .failover_after_usage_limit(
+                &mut RateLimitSwitchState::default(),
+                /*blocked_until*/ None,
+            )
+            .await
+            .expect("mismatched-control failover"),
+        None
+    );
 
     lease.prepare_for_control_auth_reload().await;
     assert!(!Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(lease.prompt_cache_discriminator(), Some(control.id.clone()));
     control_manager.reload().await;
     lease.reconcile_after_control_auth_reload().await;
 
@@ -307,4 +592,5 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
 
     assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
     assert_eq!(lease.identity().stored_account_id, Some(control.id));
+    assert_eq!(lease.prompt_cache_discriminator(), None);
 }

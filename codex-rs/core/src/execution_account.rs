@@ -1,10 +1,7 @@
 use std::fmt;
 use std::fs;
-use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,6 +29,26 @@ use crate::account_switching::RateLimitSwitchState;
 const LEASE_VERSION: u32 = 1;
 const LEASE_SUBDIR: &str = "execution-account-leases";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionAccountPooling {
+    Disabled,
+    Enabled,
+}
+
+impl ExecutionAccountPooling {
+    fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionAccountStart {
+    New,
+    Cleared,
+    Resumed,
+    Forked { source_thread_id: Option<ThreadId> },
+}
+
 #[derive(Clone)]
 pub(crate) struct ExecutionAccountLease {
     inner: Arc<ExecutionAccountLeaseInner>,
@@ -53,7 +70,7 @@ struct ExecutionAccountConfig {
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     chatgpt_base_url: String,
     allow_api_key_fallback: bool,
-    pooled: bool,
+    pooling: ExecutionAccountPooling,
 }
 
 struct ExecutionAccount {
@@ -90,7 +107,34 @@ pub(crate) struct ExecutionAccountOptions {
     pub(crate) auth_credentials_store_mode: AuthCredentialsStoreMode,
     pub(crate) chatgpt_base_url: String,
     pub(crate) allow_api_key_fallback: bool,
-    pub(crate) pooled: bool,
+    pub(crate) pooling: ExecutionAccountPooling,
+    pub(crate) start: ExecutionAccountStart,
+}
+
+impl ExecutionAccountConfig {
+    fn matching_control_account_id(
+        &self,
+        control_auth_manager: &AuthManager,
+    ) -> io::Result<Option<String>> {
+        let Some(account_id) =
+            codex_login::get_active_account_id(&self.auth_home, self.auth_credentials_store_mode)?
+        else {
+            return Ok(None);
+        };
+        let Some(account) = codex_login::find_account(
+            &self.auth_home,
+            self.auth_credentials_store_mode,
+            &account_id,
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(control_auth_manager
+            .auth_cached()
+            .as_ref()
+            .is_some_and(|auth| auth_matches_account(auth, &account))
+            .then_some(account_id))
+    }
 }
 
 impl fmt::Debug for ExecutionAccountLease {
@@ -109,17 +153,32 @@ impl ExecutionAccountLease {
         control_auth_manager: Arc<AuthManager>,
         options: ExecutionAccountOptions,
     ) -> Self {
-        let config = ExecutionAccountConfig {
+        let start = options.start;
+        let mut config = ExecutionAccountConfig {
             codex_home: options.codex_home,
             auth_home: options.auth_home,
             auth_credentials_store_mode: options.auth_credentials_store_mode,
             chatgpt_base_url: options.chatgpt_base_url,
             allow_api_key_fallback: options.allow_api_key_fallback,
-            pooled: options.pooled,
+            pooling: options.pooling,
         };
-        let initial =
-            Self::resolve_initial_account(&config, thread_id, Arc::clone(&control_auth_manager))
-                .await;
+        let control_account_id = config
+            .matching_control_account_id(&control_auth_manager)
+            .unwrap_or_else(|error| {
+                warn!("failed to resolve active control catalog account: {error}");
+                None
+            });
+        if config.pooling.is_enabled() && control_account_id.is_none() {
+            config.pooling = ExecutionAccountPooling::Disabled;
+        }
+        let initial = Self::resolve_initial_account(
+            &config,
+            thread_id,
+            start,
+            control_account_id,
+            Arc::clone(&control_auth_manager),
+        )
+        .await;
         let generation = initial.generation;
         Self {
             inner: Arc::new(ExecutionAccountLeaseInner {
@@ -140,27 +199,13 @@ impl ExecutionAccountLease {
     async fn resolve_initial_account(
         config: &ExecutionAccountConfig,
         thread_id: ThreadId,
+        start: ExecutionAccountStart,
+        control_account_id: Option<String>,
         control_auth_manager: Arc<AuthManager>,
     ) -> Arc<ExecutionAccount> {
-        let control_account_id = codex_login::get_active_account_id(
-            &config.auth_home,
-            config.auth_credentials_store_mode,
-        )
-        .ok()
-        .flatten();
-        let selected_account_id = if config.pooled {
-            read_persisted_lease(&config.codex_home, thread_id)
-                .filter(|account_id| {
-                    codex_login::find_account(
-                        &config.auth_home,
-                        config.auth_credentials_store_mode,
-                        account_id,
-                    )
-                    .ok()
-                    .flatten()
-                    .is_some()
-                })
-                .or_else(|| {
+        let selected_account_id = if config.pooling.is_enabled() {
+            match start {
+                ExecutionAccountStart::New | ExecutionAccountStart::Cleared => {
                     account_switching::select_preferred_account_id(
                         &config.codex_home,
                         &config.auth_home,
@@ -171,7 +216,16 @@ impl ExecutionAccountLease {
                     .map_err(|err| warn!("failed to select execution account: {err}"))
                     .ok()
                     .flatten()
-                })
+                }
+                ExecutionAccountStart::Resumed => {
+                    read_persisted_lease(&config.codex_home, thread_id)
+                }
+                ExecutionAccountStart::Forked { source_thread_id } => {
+                    source_thread_id.and_then(|source_thread_id| {
+                        read_persisted_lease(&config.codex_home, source_thread_id)
+                    })
+                }
+            }
         } else {
             control_account_id.clone()
         };
@@ -196,7 +250,7 @@ impl ExecutionAccountLease {
                 /*generation*/ 0,
             ))
         });
-        if config.pooled
+        if config.pooling.is_enabled()
             && let Some(account_id) = account.stored_account_id.as_deref()
             && let Err(err) = persist_lease(&config.codex_home, thread_id, account_id)
         {
@@ -242,6 +296,17 @@ impl ExecutionAccountLease {
                 }
             }
         };
+        if !auth_manager
+            .auth_cached()
+            .as_ref()
+            .is_some_and(|auth| auth_matches_account(auth, &account))
+        {
+            warn!(
+                account_id,
+                "execution account auth does not match catalog account"
+            );
+            return None;
+        }
         Some(Arc::new(ExecutionAccount::from_stored(
             account,
             auth_manager,
@@ -285,6 +350,9 @@ impl ExecutionAccountLease {
 
     pub(crate) fn prompt_cache_discriminator(&self) -> Option<String> {
         let account = self.inner.current.load();
+        if Arc::ptr_eq(&account.auth_manager, &self.inner.control_auth_manager) {
+            return None;
+        }
         account
             .stored_account_id
             .clone()
@@ -306,9 +374,16 @@ impl ExecutionAccountLease {
         switch_state: &mut RateLimitSwitchState,
         blocked_until: Option<DateTime<Utc>>,
     ) -> io::Result<Option<ExecutionAccountIdentity>> {
-        if !self.inner.config.pooled {
+        if !self.inner.config.pooling.is_enabled() {
             return Ok(None);
         }
+        let Some(control_account_id) = self
+            .inner
+            .config
+            .matching_control_account_id(&self.inner.control_auth_manager)?
+        else {
+            return Ok(None);
+        };
         let current = self.inner.current.load_full();
         let Some(current_account_id) = current.stored_account_id.as_deref() else {
             return Ok(None);
@@ -326,15 +401,11 @@ impl ExecutionAccountLease {
         else {
             return Ok(None);
         };
-        let control_account_id = codex_login::get_active_account_id(
-            &self.inner.config.auth_home,
-            self.inner.config.auth_credentials_store_mode,
-        )?;
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
         let Some(next) = Self::load_account(
             &self.inner.config,
             &next_account_id,
-            control_account_id.as_deref(),
+            Some(&control_account_id),
             Arc::clone(&self.inner.control_auth_manager),
             generation,
         )
@@ -355,7 +426,7 @@ impl ExecutionAccountLease {
     }
 
     pub(crate) async fn prepare_for_control_auth_reload(&self) {
-        if !self.inner.config.pooled {
+        if !self.inner.config.pooling.is_enabled() {
             return;
         }
         let current = self.inner.current.load_full();
@@ -391,14 +462,30 @@ impl ExecutionAccountLease {
 
     pub(crate) async fn reconcile_after_control_auth_reload(&self) {
         let current = self.inner.current.load_full();
-        let active_account_id = codex_login::get_active_account_id(
-            &self.inner.config.auth_home,
-            self.inner.config.auth_credentials_store_mode,
-        )
-        .ok()
-        .flatten();
         let uses_control_auth_manager =
             Arc::ptr_eq(&current.auth_manager, &self.inner.control_auth_manager);
+        let active_account_id = self
+            .inner
+            .config
+            .matching_control_account_id(&self.inner.control_auth_manager)
+            .unwrap_or_else(|error| {
+                warn!("failed to reconcile active control catalog account: {error}");
+                None
+            });
+        if active_account_id.is_none() {
+            if uses_control_auth_manager && current.stored_account_id.is_none() {
+                return;
+            }
+            let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+            self.inner
+                .current
+                .store(Arc::new(ExecutionAccount::from_control(
+                    /*stored_account_id*/ None,
+                    Arc::clone(&self.inner.control_auth_manager),
+                    generation,
+                )));
+            return;
+        }
         if uses_control_auth_manager && current.stored_account_id == active_account_id {
             return;
         }
@@ -433,7 +520,7 @@ impl ExecutionAccountLease {
         }
         let account_id = replacement.stored_account_id.clone();
         self.inner.current.store(replacement);
-        if self.inner.config.pooled
+        if self.inner.config.pooling.is_enabled()
             && let Some(account_id) = account_id.as_deref()
             && let Err(error) = persist_lease(
                 &self.inner.config.codex_home,
@@ -447,10 +534,31 @@ impl ExecutionAccountLease {
 
     #[cfg(test)]
     pub(crate) fn replace_auth_manager_for_testing(&self, auth_manager: Arc<AuthManager>) {
-        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
         let stored_account_id = auth_manager
             .auth_cached()
             .and_then(|auth| auth.get_account_id());
+        self.replace_auth_manager_for_testing_inner(stored_account_id, auth_manager);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_with_detached_auth_manager_for_testing(
+        &self,
+        stored_account_id: String,
+        auth_manager: Arc<AuthManager>,
+    ) {
+        self.replace_auth_manager_for_testing_inner(Some(stored_account_id), auth_manager);
+    }
+
+    #[cfg(test)]
+    fn replace_auth_manager_for_testing_inner(
+        &self,
+        stored_account_id: Option<String>,
+        auth_manager: Arc<AuthManager>,
+    ) {
+        let generation = self
+            .inner
+            .next_generation
+            .fetch_add(/*val*/ 1, Ordering::Relaxed);
         self.inner
             .current
             .store(Arc::new(ExecutionAccount::from_control(
@@ -550,39 +658,48 @@ fn lease_path(codex_home: &Path, thread_id: ThreadId) -> PathBuf {
 }
 
 fn read_persisted_lease(codex_home: &Path, thread_id: ThreadId) -> Option<String> {
-    let contents = fs::read(lease_path(codex_home, thread_id)).ok()?;
-    let persisted: PersistedExecutionAccountLease = serde_json::from_slice(&contents).ok()?;
-    (persisted.version == LEASE_VERSION).then_some(persisted.account_id)
+    let path = lease_path(codex_home, thread_id);
+    let contents = match fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            warn!(path = %path.display(), "failed to read execution account lease: {error}");
+            return None;
+        }
+    };
+    let persisted: PersistedExecutionAccountLease = match serde_json::from_slice(&contents) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            warn!(path = %path.display(), "ignoring corrupt execution account lease: {error}");
+            return None;
+        }
+    };
+    if persisted.version != LEASE_VERSION || persisted.account_id.trim().is_empty() {
+        warn!(path = %path.display(), "ignoring invalid execution account lease");
+        return None;
+    }
+    Some(persisted.account_id)
 }
 
 fn persist_lease(codex_home: &Path, thread_id: ThreadId, account_id: &str) -> io::Result<()> {
     let path = lease_path(codex_home, thread_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("lease path {} has no parent", path.display()),
+        )
+    })?;
+    fs::create_dir_all(parent)?;
     let persisted = PersistedExecutionAccountLease {
         version: LEASE_VERSION,
         account_id: account_id.to_string(),
     };
     let mut contents = serde_json::to_vec_pretty(&persisted).map_err(io::Error::other)?;
     contents.push(b'\n');
-    let temp_path = path.with_extension(format!(
-        "tmp-{}-{}",
-        std::process::id(),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&temp_path)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(&contents)?;
-    file.sync_all()?;
-    drop(file);
-    if let Err(error) = fs::rename(&temp_path, &path) {
-        let _ = fs::remove_file(temp_path);
-        return Err(error);
-    }
+    file.as_file().sync_all()?;
+    file.persist(&path).map_err(|error| error.error)?;
     Ok(())
 }
 

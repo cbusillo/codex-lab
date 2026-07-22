@@ -4,6 +4,8 @@ use crate::agents_md::LoadedAgentsMd;
 use crate::config::ConstraintError;
 use crate::execution_account::ExecutionAccountLease;
 use crate::execution_account::ExecutionAccountOptions;
+use crate::execution_account::ExecutionAccountPooling;
+use crate::execution_account::ExecutionAccountStart;
 use crate::skills::SkillError;
 use crate::state::ActiveTurn;
 use codex_protocol::SessionId;
@@ -559,6 +561,22 @@ impl Session {
             .unwrap_or(u64::MAX),
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => 0,
         };
+        let execution_account_start = match &initial_history {
+            InitialHistory::New => ExecutionAccountStart::New,
+            InitialHistory::Cleared => ExecutionAccountStart::Cleared,
+            InitialHistory::Resumed(_) => ExecutionAccountStart::Resumed,
+            InitialHistory::Forked(_) => ExecutionAccountStart::Forked {
+                source_thread_id: forked_from_id,
+            },
+        };
+        let execution_account_pooling = if config.auto_switch_accounts_on_rate_limit
+            && codex_login::auth::read_codex_api_key_from_env().is_none()
+            && session_configuration.provider.requires_openai_auth
+        {
+            ExecutionAccountPooling::Enabled
+        } else {
+            ExecutionAccountPooling::Disabled
+        };
         let execution_account = ExecutionAccountLease::resolve(
             thread_id,
             Arc::clone(&auth_manager),
@@ -568,9 +586,8 @@ impl Session {
                 auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
                 chatgpt_base_url: config.chatgpt_base_url.clone(),
                 allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
-                pooled: config.auto_switch_accounts_on_rate_limit
-                    && codex_login::auth::read_codex_api_key_from_env().is_none()
-                    && session_configuration.provider.requires_openai_auth,
+                pooling: execution_account_pooling,
+                start: execution_account_start,
             },
         )
         .await;
