@@ -9,9 +9,10 @@ Each wave lives under `upstream/openai-codex/<after>-<through>/` and contains:
   implementation baseline, classified checkpoint, and observed upstream head.
 - `ledger.json`: the validated semantic disposition for every commit in the
   selected pre- or post-checkpoint window.
-- `review.json`: reviewer confidence, rationale, source-review attribution,
-  dependency edges, and reviewer notes. Dependency edges use
-  `from`, `dependsOn`, and `reason` fields.
+- `review.json`: reviewer confidence and rationale keyed to ledger rows,
+  source-review attribution, dependency edges, exceptional P0-P3 risk flags,
+  and reviewer notes. Dependency edges use `from`, `dependsOn`, and `reason`
+  fields without embedding a second copy of the ledger.
 - `ledger.md`: deterministic review rendering generated from the audit and
   ledger.
 
@@ -29,12 +30,18 @@ From the repository root, validate a wave and reproduce its Markdown rendering:
 wave=upstream/openai-codex/1bbdb327-bd9a28a8
 python3 scripts/github/upstream_semantic_ledger.py validate \
   --audit "$wave/audit.json" \
-  --ledger "$wave/ledger.json"
+  --ledger "$wave/ledger.json" \
+  --review "$wave/review.json"
 python3 scripts/github/upstream_semantic_ledger.py render \
   --audit "$wave/audit.json" \
-  --ledger "$wave/ledger.json" > /tmp/upstream-ledger.md
+  --ledger "$wave/ledger.json" \
+  --review "$wave/review.json" > /tmp/upstream-ledger.md
 cmp /tmp/upstream-ledger.md "$wave/ledger.md"
 ```
+
+Semantic JSON arrays use one item per line so the ledger, review metadata, and
+Markdown review surface remain under the repository's 800-line reviewability
+guideline. The larger audit is mechanical collector output.
 
 Use `--require-complete` only when a wave must have no `decision_required` or
 `unclear` commits. A ledger can have exact coverage while still reporting

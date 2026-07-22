@@ -10,8 +10,10 @@ import sys
 
 SCHEMA_VERSION = 1
 AUDIT_SCHEMA_VERSION = 2
+REVIEW_SCHEMA_VERSION = 2
 LEDGER_KIND = "codex_lab_upstream_semantic_ledger"
 SUMMARY_KIND = "codex_lab_upstream_semantic_summary"
+REVIEW_KIND = "codex_lab_upstream_semantic_review"
 AUDIT_BUCKETS = "app_server core tui history_storage_protocol other_codex_rs repository_tooling other".split()
 AUDIT_MECHANICAL_STATUSES = (
     "exact_commit patch_equivalent missing_patch uncomparable".split()
@@ -40,6 +42,12 @@ MAX_AUDIT_COMMITS = 50_000
 MAX_ROWS = 5_000
 MAX_STACK_COMMITS = 25
 MAX_EVIDENCE = 8
+MAX_DEPENDENCIES = 500
+MAX_DEPENDENCY_TARGETS = 25
+MAX_REVIEWER_NOTES = 200
+MAX_RISK_FLAGS = 100
+CONFIDENCE_LEVELS = {"high", "medium", "low"}
+REVIEW_PRIORITIES = {"P0", "P1", "P2", "P3"}
 FULL_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 STACK_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 GITHUB_REF = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$")
@@ -407,6 +415,173 @@ def validate_ledger(
     return summary, normalized
 
 
+def ledger_row_key(row: dict[str, object]) -> str:
+    return row["stackId"] or row["commits"][0]
+
+
+def validate_review_reference(value: object, path: str) -> str:
+    reference = text(value, path, 300, one_line=True)
+    if not (
+        STACK_ID.fullmatch(reference)
+        or GITHUB_REF.fullmatch(reference)
+        or COMMIT_REF.fullmatch(reference)
+    ):
+        fail(
+            path,
+            "must be a row key or repository issue, pull request, or commit reference",
+        )
+    return reference
+
+
+def validate_review(
+    value: object,
+    summary: dict[str, object],
+    ledger_rows: list[dict[str, object]],
+) -> dict[str, int]:
+    root = obj(
+        value,
+        "review",
+        (
+            "crossStackDependencies issue kind range reviewerNotes riskFlags rows "
+            "schemaVersion"
+        ).split(),
+    )
+    if root["kind"] != REVIEW_KIND:
+        fail("review.kind", f"must equal {REVIEW_KIND}")
+    if count(root["schemaVersion"], "review.schemaVersion") != REVIEW_SCHEMA_VERSION:
+        fail("review.schemaVersion", f"must equal {REVIEW_SCHEMA_VERSION}")
+    issue = text(root["issue"], "review.issue", 120, one_line=True)
+    if GITHUB_REF.fullmatch(issue) is None:
+        fail("review.issue", "must use owner/repository#number form")
+
+    range_summary = summary["range"]
+    expected_range = {
+        "after": range_summary["after"],
+        "implementationBaseline": range_summary["implementationBaseline"],
+        "through": range_summary["through"],
+        "window": range_summary["window"],
+    }
+    review_range = obj(
+        root["range"],
+        "review.range",
+        ("after", "implementationBaseline", "through", "window"),
+    )
+    for key, expected in expected_range.items():
+        if review_range[key] != expected:
+            fail(f"review.range.{key}", "does not match ledger")
+
+    expected_row_keys = [ledger_row_key(row) for row in ledger_rows]
+    row_keys = set(expected_row_keys)
+    if len(row_keys) != len(expected_row_keys):
+        fail("review.rows", "ledger row keys must be unique")
+    known_sources = row_keys | {
+        item
+        for row in ledger_rows
+        for item in (
+            *row["commits"],
+            *(evidence["reference"] for evidence in row["evidence"]),
+        )
+    }
+    rows = array(root["rows"], "review.rows", MAX_ROWS)
+    if len(rows) != len(expected_row_keys):
+        fail("review.rows", "length must match ledger rows")
+    for index, (value, expected_row_key) in enumerate(
+        zip(rows, expected_row_keys, strict=True)
+    ):
+        path = f"review.rows[{index}]"
+        row = obj(
+            value,
+            path,
+            ("confidence", "rationale", "rowKey", "sourceReview"),
+        )
+        row_key = text(row["rowKey"], f"{path}.rowKey", 80, one_line=True)
+        if row_key != expected_row_key:
+            fail(f"{path}.rowKey", "must match the ledger row in the same position")
+        confidence = text(row["confidence"], f"{path}.confidence", 16, one_line=True)
+        if confidence not in CONFIDENCE_LEVELS:
+            fail(f"{path}.confidence", "has an unsupported value")
+        text(row["rationale"], f"{path}.rationale", 4_000, one_line=True)
+        source_review = text(
+            row["sourceReview"], f"{path}.sourceReview", 80, one_line=True
+        )
+        if STACK_ID.fullmatch(source_review) is None:
+            fail(f"{path}.sourceReview", "must be a lowercase slug")
+
+    dependencies = array(
+        root["crossStackDependencies"],
+        "review.crossStackDependencies",
+        MAX_DEPENDENCIES,
+    )
+    dependency_keys = set()
+    for index, value in enumerate(dependencies):
+        path = f"review.crossStackDependencies[{index}]"
+        dependency = obj(
+            value,
+            path,
+            ("dependsOn", "from", "reason", "sourceReview"),
+        )
+        source_review = text(
+            dependency["sourceReview"],
+            f"{path}.sourceReview",
+            80,
+            one_line=True,
+        )
+        if STACK_ID.fullmatch(source_review) is None:
+            fail(f"{path}.sourceReview", "must be a lowercase slug")
+        source = validate_review_reference(dependency["from"], f"{path}.from")
+        if source not in known_sources:
+            fail(f"{path}.from", "must resolve to a ledger row or its evidence")
+        targets = [
+            validate_review_reference(target, f"{path}.dependsOn[{target_index}]")
+            for target_index, target in enumerate(
+                array(
+                    dependency["dependsOn"],
+                    f"{path}.dependsOn",
+                    MAX_DEPENDENCY_TARGETS,
+                    1,
+                )
+            )
+        ]
+        if len(set(targets)) != len(targets):
+            fail(f"{path}.dependsOn", "must not contain duplicates")
+        text(dependency["reason"], f"{path}.reason", 2_000, one_line=True)
+        dependency_key = (source, tuple(targets))
+        if dependency_key in dependency_keys:
+            fail(path, "duplicates an existing dependency edge")
+        dependency_keys.add(dependency_key)
+
+    risk_flags = array(root["riskFlags"], "review.riskFlags", MAX_RISK_FLAGS)
+    flagged_rows = set()
+    for index, value in enumerate(risk_flags):
+        path = f"review.riskFlags[{index}]"
+        risk_flag = obj(value, path, ("priority", "reason", "rowKey"))
+        row_key = text(risk_flag["rowKey"], f"{path}.rowKey", 80, one_line=True)
+        if row_key not in row_keys or row_key in flagged_rows:
+            fail(f"{path}.rowKey", "must name one unique ledger row")
+        priority = text(risk_flag["priority"], f"{path}.priority", 8, one_line=True)
+        if priority not in REVIEW_PRIORITIES:
+            fail(f"{path}.priority", "has an unsupported value")
+        text(risk_flag["reason"], f"{path}.reason", 2_000, one_line=True)
+        flagged_rows.add(row_key)
+
+    notes = array(root["reviewerNotes"], "review.reviewerNotes", MAX_REVIEWER_NOTES)
+    for index, value in enumerate(notes):
+        path = f"review.reviewerNotes[{index}]"
+        note = obj(value, path, ("note", "sourceReview"))
+        source_review = text(
+            note["sourceReview"], f"{path}.sourceReview", 80, one_line=True
+        )
+        if STACK_ID.fullmatch(source_review) is None:
+            fail(f"{path}.sourceReview", "must be a lowercase slug")
+        text(note["note"], f"{path}.note", 6_000, one_line=True)
+
+    return {
+        "dependencyCount": len(dependencies),
+        "riskFlagCount": len(risk_flags),
+        "rowCount": len(rows),
+    }
+
+
 def render(summary: dict[str, object], rows: list[dict[str, object]]) -> str:
     range_summary = summary["range"]
     window = range_summary["window"]
@@ -479,6 +654,7 @@ def parse_args() -> argparse.Namespace:
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--audit", required=True, type=Path)
         subparser.add_argument("--ledger", required=True, type=Path)
+        subparser.add_argument("--review", type=Path)
         subparser.add_argument("--require-complete", action="store_true")
     return parser.parse_args()
 
@@ -488,6 +664,10 @@ def main() -> int:
     try:
         audit = validate_audit(load(config.audit, "audit"))
         summary, rows = validate_ledger(load(config.ledger, "ledger"), audit)
+        if config.review:
+            summary["review"] = validate_review(
+                load(config.review, "review"), summary, rows
+            )
     except LedgerError as error:
         print(f"upstream semantic ledger failed: {error}", file=sys.stderr)
         return 1
