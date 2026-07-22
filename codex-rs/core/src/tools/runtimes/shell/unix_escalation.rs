@@ -860,7 +860,7 @@ impl ShellCommandExecutor for CoreShellCommandExecutor {
             EscalationExecution::Unsandboxed => PreparedExec {
                 command,
                 cwd: workdir.to_path_buf(),
-                env,
+                env: exec_env_for_sandbox_permissions(&env, SandboxPermissions::RequireEscalated),
                 arg0: Some(first_arg.clone()),
             },
             EscalationExecution::TurnDefault => {

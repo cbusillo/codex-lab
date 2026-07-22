@@ -1,4 +1,5 @@
 use super::CoreShellActionProvider;
+use super::CoreShellCommandExecutor;
 use super::InterceptedExecPolicyContext;
 use super::ParsedShellCommand;
 use super::commands_for_intercepted_exec_policy;
@@ -16,6 +17,8 @@ use codex_execpolicy::PolicyParser;
 use codex_execpolicy::RuleMatch;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
+use codex_network_proxy::PROXY_ACTIVE_ENV_KEY;
+use codex_network_proxy::PROXY_ENV_KEYS;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
@@ -35,9 +38,11 @@ use codex_shell_escalation::EscalationExecution;
 use codex_shell_escalation::EscalationPermissions;
 use codex_shell_escalation::ExecResult;
 use codex_shell_escalation::ResolvedPermissionProfile;
+use codex_shell_escalation::ShellCommandExecutor;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -348,6 +353,55 @@ fn shell_request_escalation_execution_is_explicit() {
             ResolvedPermissionProfile { permission_profile },
         )),
     );
+}
+
+#[tokio::test]
+async fn unsandboxed_intercepted_exec_strips_managed_network_env() -> anyhow::Result<()> {
+    let workdir = test_sandbox_cwd();
+    let executor = CoreShellCommandExecutor {
+        command: Vec::new(),
+        cwd: workdir.clone(),
+        permission_profile: PermissionProfile::workspace_write(),
+        file_system_sandbox_policy: read_only_file_system_sandbox_policy(),
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox: SandboxType::None,
+        env: HashMap::new(),
+        network: None,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+        arg0: None,
+        sandbox_policy_cwd: workdir.clone(),
+        windows_sandbox_workspace_roots: vec![workdir.clone()],
+        codex_linux_sandbox_exe: None,
+        use_legacy_landlock: false,
+    };
+    let mut env = HashMap::new();
+    env.insert(PROXY_ACTIVE_ENV_KEY.to_string(), "1".to_string());
+    for key in PROXY_ENV_KEYS {
+        env.insert((*key).to_string(), format!("proxy-{key}"));
+    }
+
+    let prepared = executor
+        .prepare_escalated_exec(
+            &AbsolutePathBuf::from_absolute_path("/usr/bin/curl")?,
+            &["curl".to_string(), "example.com".to_string()],
+            &workdir,
+            env,
+            EscalationExecution::Unsandboxed,
+        )
+        .await?;
+
+    assert!(
+        !prepared.env.contains_key(PROXY_ACTIVE_ENV_KEY),
+        "unsandboxed intercepted exec should strip the managed-network active marker"
+    );
+    for key in PROXY_ENV_KEYS {
+        assert!(
+            !prepared.env.contains_key(*key),
+            "unsandboxed intercepted exec should strip managed-network proxy env var {key}"
+        );
+    }
+
+    Ok(())
 }
 
 #[tokio::test]
