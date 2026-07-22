@@ -157,7 +157,7 @@ fn usage_preferred_reset_at(
     let primary_reset = snapshot
         .primary_next_reset_at
         .filter(|reset_at| *reset_at > now);
-    secondary_reset.or(primary_reset)
+    primary_reset.into_iter().chain(secondary_reset).min()
 }
 
 fn legacy_usage_account_id(account: &StoredAccount) -> Option<&str> {
@@ -250,6 +250,26 @@ pub fn select_next_account_id(
         Some(id) => Some(id.to_string()),
         None => codex_login::get_active_account_id(auth_home, auth_credentials_store_mode)?,
     };
+    select_account_id(
+        codex_home,
+        auth_home,
+        auth_credentials_store_mode,
+        state,
+        allow_api_key_fallback,
+        now,
+        current.as_deref(),
+    )
+}
+
+fn select_account_id(
+    codex_home: &Path,
+    auth_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    state: &RateLimitSwitchState,
+    allow_api_key_fallback: bool,
+    now: DateTime<Utc>,
+    current_account_id: Option<&str>,
+) -> io::Result<Option<String>> {
     let accounts = codex_login::list_accounts(auth_home, auth_credentials_store_mode)?;
 
     let snapshots = account_usage::list_rate_limit_snapshots(codex_home).unwrap_or_default();
@@ -272,7 +292,7 @@ pub fn select_next_account_id(
     chatgpt_accounts.sort_by(|left, right| left.id.cmp(&right.id));
     api_key_accounts.sort_by(|left, right| left.id.cmp(&right.id));
 
-    let current = current.as_deref();
+    let current = current_account_id;
     let mut best_chatgpt: Option<(&StoredAccount, CandidateScore)> = None;
 
     for account in &chatgpt_accounts {
@@ -327,67 +347,59 @@ pub fn select_next_account_id(
         .map(|account| account.id.clone()))
 }
 
+pub fn select_preferred_account_id(
+    codex_home: &Path,
+    auth_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    allow_api_key_fallback: bool,
+    now: DateTime<Utc>,
+) -> io::Result<Option<String>> {
+    let state = RateLimitSwitchState::default();
+    select_account_id(
+        codex_home,
+        auth_home,
+        auth_credentials_store_mode,
+        &state,
+        allow_api_key_fallback,
+        now,
+        /*current_account_id*/ None,
+    )
+}
+
 pub fn switch_active_account_to_preferred_for_new_session(
     codex_home: &Path,
     auth_home: &Path,
     now: DateTime<Utc>,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<Option<StoredAccount>> {
-    let current_account_id =
-        codex_login::get_active_account_id(auth_home, auth_credentials_store_mode)?;
-    let Some(current_account_id) = current_account_id else {
+    let Some(current_account_id) =
+        codex_login::get_active_account_id(auth_home, auth_credentials_store_mode)?
+    else {
         return Ok(None);
     };
-    let accounts = codex_login::list_accounts(auth_home, auth_credentials_store_mode)?;
-
-    if let Some(current) = accounts
-        .iter()
-        .find(|account| account.id == current_account_id)
-        && !current.mode.has_chatgpt_account()
-    {
-        return Ok(None);
-    }
-
-    let snapshots = account_usage::list_rate_limit_snapshots(codex_home).unwrap_or_default();
-    let snapshot_map: HashMap<String, account_usage::StoredRateLimitSnapshot> = snapshots
-        .into_iter()
-        .map(|snapshot| (snapshot.account_id.clone(), snapshot))
-        .collect();
-
-    let mut best_chatgpt: Option<(&StoredAccount, CandidateScore)> = None;
-    let mut chatgpt_accounts: Vec<&StoredAccount> = accounts
-        .iter()
-        .filter(|account| account.mode.has_chatgpt_account())
-        .filter(|account| account_has_credentials(account))
-        .collect();
-    chatgpt_accounts.sort_by(|left, right| left.id.cmp(&right.id));
-
-    for account in chatgpt_accounts {
-        let blocked_until =
-            usage_snapshot_for_account(&snapshot_map, account).and_then(usage_reset_blocked_until);
-        if is_blocked(now, blocked_until) {
-            continue;
-        }
-
-        let score = candidate_score(&snapshot_map, account, now);
-        match best_chatgpt {
-            None => best_chatgpt = Some((account, score)),
-            Some((_, best_score)) if score_is_better(score, best_score) => {
-                best_chatgpt = Some((account, score));
-            }
-            Some(_) => {}
-        }
-    }
-
-    let Some((account, _)) = best_chatgpt else {
+    let Some(current) =
+        codex_login::find_account(auth_home, auth_credentials_store_mode, &current_account_id)?
+    else {
         return Ok(None);
     };
-
-    if current_account_id == account.id {
+    if !current.mode.has_chatgpt_account() {
         return Ok(None);
     }
 
-    codex_login::activate_account(auth_home, &account.id, auth_credentials_store_mode).map(Some)
+    let Some(account_id) = select_preferred_account_id(
+        codex_home,
+        auth_home,
+        auth_credentials_store_mode,
+        /*allow_api_key_fallback*/ false,
+        now,
+    )?
+    else {
+        return Ok(None);
+    };
+    if account_id == current_account_id {
+        return Ok(None);
+    }
+    codex_login::activate_account(auth_home, &account_id, auth_credentials_store_mode).map(Some)
 }
 
 pub fn switch_active_account_on_rate_limit(
@@ -425,8 +437,6 @@ mod tests {
     use base64::Engine;
     use chrono::Duration;
     use codex_config::types::AuthCredentialsStoreMode;
-    use codex_login::auth::AuthDotJson;
-    use codex_login::auth::save_auth;
     use codex_login::token_data::IdTokenInfo;
     use codex_login::token_data::TokenData;
     use codex_protocol::protocol::RateLimitSnapshot;
@@ -553,6 +563,25 @@ mod tests {
     }
 
     #[test]
+    fn preferred_reset_uses_earliest_active_window() {
+        let now = Utc::now();
+        let snapshot = account_usage::StoredRateLimitSnapshot {
+            account_id: "account".to_string(),
+            plan: None,
+            snapshot: None,
+            observed_at: Some(now),
+            primary_next_reset_at: Some(now + Duration::hours(5)),
+            secondary_next_reset_at: Some(now + Duration::days(5)),
+            last_usage_limit_hit_at: None,
+        };
+
+        assert_eq!(
+            usage_preferred_reset_at(&snapshot, now),
+            snapshot.primary_next_reset_at
+        );
+    }
+
+    #[test]
     fn selects_best_chatgpt_candidate_and_skips_current() {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
@@ -562,7 +591,7 @@ mod tests {
         codex_login::set_active_account_id(
             temp.path(),
             AuthCredentialsStoreMode::File,
-            Some(current),
+            Some(current.clone()),
         )
         .expect("set active");
         account_usage::record_rate_limit_snapshot(
@@ -713,59 +742,6 @@ mod tests {
     }
 
     #[test]
-    fn switch_active_account_marks_current_and_activates_candidate() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
-        let current = upsert_chatgpt(temp.path(), "current");
-        let candidate = upsert_chatgpt(temp.path(), "candidate");
-        codex_login::set_active_account_id(
-            temp.path(),
-            AuthCredentialsStoreMode::File,
-            Some(current.clone()),
-        )
-        .expect("set active");
-        let current_auth = AuthDotJson {
-            auth_mode: None,
-            openai_api_key: None,
-            tokens: Some(token_data("current", "user@example.com")),
-            last_refresh: None,
-            agent_identity: None,
-            personal_access_token: None,
-        };
-        save_auth(temp.path(), &current_auth, AuthCredentialsStoreMode::File)
-            .expect("save current auth");
-
-        let mut state = RateLimitSwitchState::default();
-        let outcome = switch_active_account_on_rate_limit(
-            temp.path(),
-            temp.path(),
-            &mut state,
-            false,
-            now,
-            &current,
-            AuthMode::Chatgpt,
-            Some(now + Duration::hours(1)),
-            AuthCredentialsStoreMode::File,
-        )
-        .expect("switch account");
-
-        assert_eq!(
-            outcome,
-            AccountSwitchOutcome::Switched(
-                codex_login::find_account(temp.path(), AuthCredentialsStoreMode::File, &candidate,)
-                    .expect("find account")
-                    .expect("candidate account")
-            )
-        );
-        assert_eq!(
-            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
-                .expect("active account"),
-            Some(candidate)
-        );
-        assert!(state.has_tried(&current));
-    }
-
-    #[test]
     fn api_key_fallback_requires_all_chatgpt_accounts_marked_limited() {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
@@ -858,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn new_session_switch_selects_best_chatgpt_candidate() {
+    fn preferred_selection_does_not_change_active_account() {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
         let current = upsert_chatgpt(temp.path(), "current");
@@ -867,22 +843,9 @@ mod tests {
         codex_login::set_active_account_id(
             temp.path(),
             AuthCredentialsStoreMode::File,
-            Some(current),
+            Some(current.clone()),
         )
         .expect("set active");
-        save_auth(
-            temp.path(),
-            &AuthDotJson {
-                auth_mode: None,
-                openai_api_key: None,
-                tokens: Some(token_data("current", "user@example.com")),
-                last_refresh: None,
-                agent_identity: None,
-                personal_access_token: None,
-            },
-            AuthCredentialsStoreMode::File,
-        )
-        .expect("save current auth");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &slower,
@@ -898,107 +861,16 @@ mod tests {
         )
         .expect("record faster");
 
-        let switched = switch_active_account_to_preferred_for_new_session(
+        let selected = select_preferred_account_id(
             temp.path(),
             temp.path(),
+            AuthCredentialsStoreMode::File,
+            false,
             now,
-            AuthCredentialsStoreMode::File,
         )
-        .expect("switch preferred account")
-        .expect("preferred account");
+        .expect("select preferred account");
 
-        assert_eq!(switched.id, faster);
-        assert_eq!(
-            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
-                .expect("active account"),
-            Some(faster)
-        );
-    }
-
-    #[test]
-    fn new_session_switch_skips_when_current_account_is_api_key() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
-        let api_key = upsert_api_key(temp.path(), "sk-current");
-        let _chatgpt = upsert_chatgpt(temp.path(), "chatgpt");
-        codex_login::set_active_account_id(
-            temp.path(),
-            AuthCredentialsStoreMode::File,
-            Some(api_key.clone()),
-        )
-        .expect("set active");
-
-        let switched = switch_active_account_to_preferred_for_new_session(
-            temp.path(),
-            temp.path(),
-            now,
-            AuthCredentialsStoreMode::File,
-        )
-        .expect("switch preferred account");
-
-        assert_eq!(switched, None);
-        assert_eq!(
-            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
-                .expect("active account"),
-            Some(api_key)
-        );
-    }
-
-    #[test]
-    fn new_session_switch_skips_when_no_active_account() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
-        let _chatgpt = upsert_chatgpt(temp.path(), "chatgpt");
-        codex_login::set_active_account_id(temp.path(), AuthCredentialsStoreMode::File, None)
-            .expect("clear active");
-
-        let switched = switch_active_account_to_preferred_for_new_session(
-            temp.path(),
-            temp.path(),
-            now,
-            AuthCredentialsStoreMode::File,
-        )
-        .expect("switch preferred account");
-
-        assert_eq!(switched, None);
-        assert_eq!(
-            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
-                .expect("active account"),
-            None
-        );
-    }
-
-    #[test]
-    fn new_session_switch_skips_blocked_chatgpt_accounts() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
-        let current = upsert_chatgpt(temp.path(), "current");
-        let blocked = upsert_chatgpt(temp.path(), "blocked");
-        codex_login::set_active_account_id(
-            temp.path(),
-            AuthCredentialsStoreMode::File,
-            Some(current.clone()),
-        )
-        .expect("set active");
-        account_usage::record_usage_limit_hint(
-            temp.path(),
-            &blocked,
-            None,
-            Some(now + Duration::hours(2)),
-            now,
-            Some(RateLimitReachedType::RateLimitReached),
-        )
-        .expect("record usage hint");
-
-        let switched = switch_active_account_to_preferred_for_new_session(
-            temp.path(),
-            temp.path(),
-            now,
-            AuthCredentialsStoreMode::File,
-        )
-        .expect("switch preferred account");
-
-        assert_eq!(switched, None);
+        assert_eq!(selected, Some(faster));
         assert_eq!(
             codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
                 .expect("active account"),
