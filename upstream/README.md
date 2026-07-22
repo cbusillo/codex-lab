@@ -5,20 +5,13 @@ Codex Lab tracks OpenAI Codex updates as immutable audit waves. Adding an audit 
 Each wave lives under `upstream/openai-codex/<after>-<through>/` and contains:
 
 - `audit.json`: mechanical commit and patch-equivalence evidence pinned to one implementation baseline, classified checkpoint, and observed upstream head.
-- `ledger.json`: the validated semantic disposition for every commit in the
-  selected pre- or post-checkpoint window.
-- `review.json`: reviewer confidence and rationale keyed to ledger rows,
-  source-review attribution, dependency edges, exceptional P0-P3 risk flags,
-  and reviewer notes. Dependency edges use `from`, `dependsOn`, and `reason`
-  fields without embedding a second copy of the ledger.
-- `ledger.md`: deterministic review rendering generated from the audit and
-  ledger.
+- `ledger.json`: the validated semantic disposition for every commit in the selected pre- or post-checkpoint window.
+- `review.json`: reviewer confidence and rationale keyed to ledger rows, source-review attribution, dependency edges, exceptional P0-P3 risk flags, and reviewer notes.
+  Dependency edges use `from`, `dependsOn`, and `reason` fields without embedding a second copy of the ledger.
+- `ledger.md`: deterministic review rendering generated from the audit and ledger.
 
-Mechanical states such as `missing_patch` are not semantic judgments. A commit
-can still be implemented differently, intentionally inapplicable, rejected, or
-blocked on an Every Code product decision. Likewise, a post-checkpoint ledger
-does not prove that earlier applicable commits are complete; the pre-checkpoint
-range is tracked separately in issue #407.
+Mechanical states such as `missing_patch` are not semantic judgments. A commit can still be implemented differently, intentionally inapplicable, rejected, or blocked on an Every Code product decision.
+A post-checkpoint ledger does not prove earlier applicable commits are complete; the pre-checkpoint range is tracked separately in issue #407.
 
 ## Validation
 
@@ -27,20 +20,16 @@ From the repository root, validate a wave and reproduce its Markdown rendering:
 ```sh
 wave=upstream/openai-codex/1bbdb327-bd9a28a8
 python3 scripts/github/upstream_semantic_ledger.py validate \
-  --audit "$wave/audit.json" \
-  --ledger "$wave/ledger.json" \
+  --audit "$wave/audit.json" --ledger "$wave/ledger.json" \
   --review "$wave/review.json"
 python3 scripts/github/upstream_semantic_ledger.py render \
-  --audit "$wave/audit.json" \
-  --ledger "$wave/ledger.json" \
+  --audit "$wave/audit.json" --ledger "$wave/ledger.json" \
   --review "$wave/review.json" > /tmp/upstream-ledger.md
 cmp /tmp/upstream-ledger.md "$wave/ledger.md"
 ```
 
-Semantic JSON arrays use one item per line so the ledger, review metadata, and
-Markdown review surface remain under the repository's 800-line reviewability
+Semantic JSON arrays use one item per line so the ledger, review metadata, and Markdown review surface remain under the repository's 800-line reviewability
 guideline. The larger audit is mechanical collector output.
 
-Use `--require-complete` only when a wave must have no `decision_required` or
-`unclear` commits. A ledger can have exact coverage while still reporting
+Use `--require-complete` only when a wave must have no `decision_required` or `unclear` commits. A ledger can have exact coverage while still reporting
 explicit product-decision blockers.

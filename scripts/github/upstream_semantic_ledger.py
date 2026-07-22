@@ -531,17 +531,24 @@ def validate_review(
         source = validate_review_reference(dependency["from"], f"{path}.from")
         if source not in known_sources:
             fail(f"{path}.from", "must resolve to a ledger row or its evidence")
-        targets = [
-            validate_review_reference(target, f"{path}.dependsOn[{target_index}]")
-            for target_index, target in enumerate(
-                array(
-                    dependency["dependsOn"],
-                    f"{path}.dependsOn",
-                    MAX_DEPENDENCY_TARGETS,
-                    1,
-                )
+        targets = []
+        for target_index, value in enumerate(
+            array(
+                dependency["dependsOn"],
+                f"{path}.dependsOn",
+                MAX_DEPENDENCY_TARGETS,
+                1,
             )
-        ]
+        ):
+            target_path = f"{path}.dependsOn[{target_index}]"
+            target = validate_review_reference(value, target_path)
+            is_qualified_reference = (
+                GITHUB_REF.fullmatch(target) is not None
+                or COMMIT_REF.fullmatch(target) is not None
+            )
+            if not is_qualified_reference and target not in known_sources:
+                fail(target_path, "must resolve to a ledger row or its evidence")
+            targets.append(target)
         if len(set(targets)) != len(targets):
             fail(f"{path}.dependsOn", "must not contain duplicates")
         text(dependency["reason"], f"{path}.reason", 2_000, one_line=True)

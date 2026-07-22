@@ -271,12 +271,15 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
         string_dependency["crossStackDependencies"][0]["dependsOn"] = "openai/codex#402"
         unknown_source = review_payload()
         unknown_source["crossStackDependencies"][0]["from"] = "unknown-stack"
+        unknown_target = review_payload()
+        unknown_target["crossStackDependencies"][0]["dependsOn"] = ["unknown-stack"]
         duplicate_risk = review_payload()
         duplicate_risk["riskFlags"].append(duplicate_risk["riskFlags"][0])
         for payload, expected in (
             (wrong_row, "same position"),
             (string_dependency, "between 1 and 25"),
             (unknown_source, "must resolve"),
+            (unknown_target, r"dependsOn\[0\]: must resolve"),
             (duplicate_risk, "one unique ledger row"),
         ):
             with self.subTest(expected=expected):
