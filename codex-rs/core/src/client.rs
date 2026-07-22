@@ -111,6 +111,7 @@ use crate::attestation::X_OAI_ATTESTATION_HEADER;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::execution_account::ExecutionAccountLease;
 use crate::feedback_tags;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_api::map_api_error;
@@ -181,6 +182,7 @@ struct ModelClientState {
     thread_id: ThreadId,
     window_generation: AtomicU64,
     auth_revision: AtomicU64,
+    execution_account: arc_swap::ArcSwapOption<ExecutionAccountLease>,
     installation_id: String,
     provider: SharedModelProvider,
     auth_env_telemetry: AuthEnvTelemetry,
@@ -368,6 +370,7 @@ impl ModelClient {
                 thread_id,
                 window_generation: AtomicU64::new(0),
                 auth_revision: AtomicU64::new(auth_revision),
+                execution_account: arc_swap::ArcSwapOption::empty(),
                 installation_id,
                 provider: model_provider,
                 auth_env_telemetry,
@@ -393,10 +396,30 @@ impl ModelClient {
         self
     }
 
+    pub(crate) fn set_execution_account_lease(&self, lease: ExecutionAccountLease) {
+        self.state.execution_account.store(Some(Arc::new(lease)));
+        let mut cached_websocket_session = self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let auth_revision = self.current_auth_revision();
+        self.state
+            .auth_revision
+            .store(auth_revision, Ordering::Relaxed);
+        *cached_websocket_session = WebsocketSession::default();
+    }
+
     fn prompt_cache_key(&self) -> String {
-        self.prompt_cache_key_override
+        let base = self
+            .prompt_cache_key_override
             .clone()
-            .unwrap_or_else(|| self.state.thread_id.to_string())
+            .unwrap_or_else(|| self.state.thread_id.to_string());
+        self.state
+            .execution_account
+            .load_full()
+            .and_then(|lease| lease.prompt_cache_discriminator())
+            .map_or(base.clone(), |account_id| format!("{base}:{account_id}"))
     }
 
     /// Creates a fresh turn-scoped streaming session.
@@ -415,7 +438,11 @@ impl ModelClient {
     }
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
-        self.state.provider.auth_manager()
+        self.state
+            .execution_account
+            .load_full()
+            .map(|lease| lease.auth_manager())
+            .or_else(|| self.state.provider.auth_manager())
     }
 
     pub(crate) fn set_window_generation(&self, window_generation: u64) {
@@ -447,11 +474,16 @@ impl ModelClient {
     }
 
     fn current_auth_revision(&self) -> u64 {
-        self.state
-            .provider
-            .auth_manager()
-            .as_ref()
-            .map_or(0, |manager| manager.auth_revision())
+        self.state.execution_account.load_full().map_or_else(
+            || {
+                self.state
+                    .provider
+                    .auth_manager()
+                    .as_ref()
+                    .map_or(0, |manager| manager.auth_revision())
+            },
+            |lease| lease.auth_revision(),
+        )
     }
 
     fn sync_auth_revision_locked(&self, cached_websocket_session: &mut WebsocketSession) -> u64 {
@@ -957,7 +989,10 @@ impl ModelClient {
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self, generate_attestation: bool) -> Result<CurrentClientSetup> {
         for _ in 0..MAX_CLIENT_SETUP_ATTEMPTS {
-            let (auth, auth_revision) = self.state.provider.auth_with_revision().await;
+            let (auth, auth_revision) = match self.state.execution_account.load_full() {
+                Some(lease) => lease.auth_with_revision().await,
+                None => self.state.provider.auth_with_revision().await,
+            };
             let api_provider = self
                 .state
                 .provider
@@ -1494,7 +1529,7 @@ impl ModelClientSession {
         turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let auth_manager = self.client.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
@@ -1621,7 +1656,7 @@ impl ModelClientSession {
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<WebsocketStreamOutcome> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let auth_manager = self.client.auth_manager();
 
         let mut auth_recovery = auth_manager
             .as_ref()

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::SkillInjections;
-use crate::account_switching::AccountSwitchOutcome;
 use crate::account_switching::RateLimitSwitchState;
 use crate::build_skill_injections;
 use crate::client::ModelClientSession;
@@ -1136,13 +1135,13 @@ async fn run_sampling_request(
                 if let Some(rate_limits) = rate_limits {
                     sess.update_rate_limits(&turn_context, *rate_limits).await;
                 }
-                if maybe_switch_account_after_usage_limit(
+                if Box::pin(maybe_switch_account_after_usage_limit(
                     &sess,
                     turn_context.as_ref(),
                     client_session,
                     rate_limit_switch_state,
                     &e,
-                )
+                ))
                 .await
                 {
                     turn_context.turn_timing_state.record_sampling_retry();
@@ -1184,53 +1183,44 @@ async fn maybe_switch_account_after_usage_limit(
     if codex_login::auth::read_codex_api_key_from_env().is_some() {
         return false;
     }
-    let Some((codex_home, current_account_id, _)) = sess.account_usage_context().await else {
+    let current_identity = sess.services.execution_account.identity();
+    let Some(current_account_id) = current_identity.stored_account_id.as_deref() else {
         return false;
     };
-
-    let now = chrono::Utc::now();
-    let auth_home = sess.auth_home().await;
-    let allow_api_key_fallback = sess.api_key_fallback_on_all_accounts_limited().await;
-    let current_mode = sess
-        .current_auth_mode()
-        .unwrap_or(codex_app_server_protocol::AuthMode::ApiKey);
-    let auth_credentials_store_mode = sess.cli_auth_credentials_store_mode().await;
-    match crate::account_switching::switch_active_account_on_rate_limit(
-        codex_home.as_path(),
-        auth_home.as_path(),
-        rate_limit_switch_state,
-        allow_api_key_fallback,
-        now,
-        current_account_id.as_str(),
-        current_mode,
-        limit_err.resets_at,
-        auth_credentials_store_mode,
-    ) {
-        Ok(AccountSwitchOutcome::Switched(account)) => {
+    let failover = Box::pin(
+        sess.services
+            .execution_account
+            .failover_after_usage_limit(rate_limit_switch_state, limit_err.resets_at),
+    )
+    .await;
+    match failover {
+        Ok(Some(account)) => {
             info!(
                 from_account_id = %current_account_id,
-                to_account_id = %account.id,
+                to_account_id = account.stored_account_id.as_deref(),
                 reason = "usage_limit_reached",
-                "usage limit hit; auto-switching active account"
+                "usage limit hit; switching thread execution account"
             );
-            sess.services.auth_manager.reload().await;
             *client_session = sess.services.model_client.new_session();
             let next_label = account
                 .label
                 .as_deref()
                 .map(str::trim)
                 .filter(|label| !label.is_empty())
-                .unwrap_or(account.id.as_str());
+                .or(account.stored_account_id.as_deref())
+                .unwrap_or("another account");
             sess.send_event(
                 turn_context,
                 EventMsg::Warning(WarningEvent {
-                    message: format!("Auto-switch: now using {next_label} due to usage limit."),
+                    message: format!(
+                        "Execution switched to {next_label} due to a usage limit; your signed-in account is unchanged."
+                    ),
                 }),
             )
             .await;
             true
         }
-        Ok(AccountSwitchOutcome::NoCandidate) => false,
+        Ok(None) => false,
         Err(err) => {
             warn!(
                 from_account_id = %current_account_id,
@@ -1958,7 +1948,7 @@ async fn try_run_sampling_request(
         approval_policy = turn_context.approval_policy.value(),
         sandbox_policy = &turn_context.sandbox_policy(),
         effort = turn_context.reasoning_effort,
-        auth_mode = sess.services.auth_manager.auth_mode(),
+        auth_mode = sess.services.execution_account.auth_manager().auth_mode(),
         features = sess.features.enabled_features(),
     );
     let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(

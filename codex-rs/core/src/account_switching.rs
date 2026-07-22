@@ -63,12 +63,6 @@ struct CandidateScore {
     used_percent: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum AccountSwitchOutcome {
-    Switched(StoredAccount),
-    NoCandidate,
-}
-
 fn account_has_credentials(account: &StoredAccount) -> bool {
     match account.mode {
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => account.tokens.is_some(),
@@ -364,71 +358,6 @@ pub fn select_preferred_account_id(
         now,
         /*current_account_id*/ None,
     )
-}
-
-pub fn switch_active_account_to_preferred_for_new_session(
-    codex_home: &Path,
-    auth_home: &Path,
-    now: DateTime<Utc>,
-    auth_credentials_store_mode: AuthCredentialsStoreMode,
-) -> io::Result<Option<StoredAccount>> {
-    let Some(current_account_id) =
-        codex_login::get_active_account_id(auth_home, auth_credentials_store_mode)?
-    else {
-        return Ok(None);
-    };
-    let Some(current) =
-        codex_login::find_account(auth_home, auth_credentials_store_mode, &current_account_id)?
-    else {
-        return Ok(None);
-    };
-    if !current.mode.has_chatgpt_account() {
-        return Ok(None);
-    }
-
-    let Some(account_id) = select_preferred_account_id(
-        codex_home,
-        auth_home,
-        auth_credentials_store_mode,
-        /*allow_api_key_fallback*/ false,
-        now,
-    )?
-    else {
-        return Ok(None);
-    };
-    if account_id == current_account_id {
-        return Ok(None);
-    }
-    codex_login::activate_account(auth_home, &account_id, auth_credentials_store_mode).map(Some)
-}
-
-pub fn switch_active_account_on_rate_limit(
-    codex_home: &Path,
-    auth_home: &Path,
-    state: &mut RateLimitSwitchState,
-    allow_api_key_fallback: bool,
-    now: DateTime<Utc>,
-    current_account_id: &str,
-    current_mode: AuthMode,
-    blocked_until: Option<DateTime<Utc>>,
-    auth_credentials_store_mode: AuthCredentialsStoreMode,
-) -> io::Result<AccountSwitchOutcome> {
-    state.mark_limited(current_account_id, current_mode, blocked_until);
-    match select_next_account_id(
-        codex_home,
-        auth_home,
-        auth_credentials_store_mode,
-        state,
-        allow_api_key_fallback,
-        now,
-        Some(current_account_id),
-    )? {
-        Some(account_id) => {
-            codex_login::activate_account(auth_home, &account_id, auth_credentials_store_mode)
-                .map(AccountSwitchOutcome::Switched)
-        }
-        None => Ok(AccountSwitchOutcome::NoCandidate),
-    }
 }
 
 #[cfg(test)]

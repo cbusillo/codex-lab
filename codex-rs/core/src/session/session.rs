@@ -2,6 +2,8 @@ use super::input_queue::InputQueue;
 use super::*;
 use crate::agents_md::LoadedAgentsMd;
 use crate::config::ConstraintError;
+use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountOptions;
 use crate::skills::SkillError;
 use crate::state::ActiveTurn;
 use codex_protocol::SessionId;
@@ -557,34 +559,28 @@ impl Session {
             .unwrap_or(u64::MAX),
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => 0,
         };
-        if config.auto_switch_accounts_on_rate_limit
-            && codex_login::auth::read_codex_api_key_from_env().is_none()
-            && matches!(
-                initial_history,
-                InitialHistory::New | InitialHistory::Cleared
-            )
-            && matches!(session_configuration.session_source, SessionSource::Cli)
-        {
-            match crate::account_switching::switch_active_account_to_preferred_for_new_session(
-                &config.codex_home,
-                &config.auth_home,
-                Utc::now(),
-                config.cli_auth_credentials_store_mode,
-            ) {
-                Ok(Some(account)) => {
-                    info!(
-                        to_account_id = %account.id,
-                        reason = "new_session_preferred_reset",
-                        "auto-switching active account for new session"
-                    );
-                    auth_manager.reload().await;
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    warn!("failed to auto-switch account for new session: {err}");
-                }
-            }
-        }
+        let execution_account = ExecutionAccountLease::resolve(
+            thread_id,
+            Arc::clone(&auth_manager),
+            ExecutionAccountOptions {
+                codex_home: config.codex_home.to_path_buf(),
+                auth_home: config.auth_home.to_path_buf(),
+                auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+                chatgpt_base_url: config.chatgpt_base_url.clone(),
+                allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
+                pooled: config.auto_switch_accounts_on_rate_limit
+                    && codex_login::auth::read_codex_api_key_from_env().is_none()
+                    && session_configuration.provider.requires_openai_auth,
+            },
+        )
+        .await;
+        let execution_identity = execution_account.identity();
+        info!(
+            thread_id = %thread_id,
+            execution_account_id = execution_identity.stored_account_id.as_deref(),
+            execution_auth_mode = ?execution_identity.mode,
+            "resolved execution account lease"
+        );
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
         // - initialize thread persistence with new or resumed session info
@@ -1026,6 +1022,28 @@ impl Session {
                 }).await;
             }
 
+            let model_client = ModelClient::new(
+                Some(Arc::clone(&auth_manager)),
+                session_id,
+                thread_id,
+                installation_id.clone(),
+                session_configuration.provider.clone(),
+                session_configuration.session_source.clone(),
+                session_configuration.parent_thread_id,
+                config.model_verbosity,
+                config.features.enabled(Feature::EnableRequestCompression),
+                config.features.enabled(Feature::RuntimeMetrics),
+                Self::build_model_client_beta_features_header(config.as_ref()),
+                attestation_provider.clone(),
+            )
+            .with_prompt_cache_key_override(
+                crate::guardian::prompt_cache_key_override_for_review_session(
+                    &session_configuration.session_source,
+                    session_configuration.parent_thread_id,
+                ),
+            );
+            model_client.set_execution_account_lease(execution_account.clone());
+
             let services = SessionServices {
                 // Initialize the MCP connection manager with an uninitialized
                 // instance. It will be replaced with one created via
@@ -1055,6 +1073,7 @@ impl Session {
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
                 auth_manager: Arc::clone(&auth_manager),
+                execution_account,
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
                 tool_approvals: Mutex::new(ApprovalStore::default()),
@@ -1077,26 +1096,7 @@ impl Session {
                 live_thread: live_thread_init.as_ref().cloned(),
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
-                model_client: ModelClient::new(
-                    Some(Arc::clone(&auth_manager)),
-                    session_id,
-                    thread_id,
-                    installation_id.clone(),
-                    session_configuration.provider.clone(),
-                    session_configuration.session_source.clone(),
-                    session_configuration.parent_thread_id,
-                    config.model_verbosity,
-                    config.features.enabled(Feature::EnableRequestCompression),
-                    config.features.enabled(Feature::RuntimeMetrics),
-                    Self::build_model_client_beta_features_header(config.as_ref()),
-                    attestation_provider,
-                )
-                .with_prompt_cache_key_override(
-                    crate::guardian::prompt_cache_key_override_for_review_session(
-                        &session_configuration.session_source,
-                        session_configuration.parent_thread_id,
-                    ),
-                ),
+                model_client,
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(),
                 environment_manager,
                 project_validation_coordinator,

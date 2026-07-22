@@ -3142,7 +3142,7 @@ async fn usage_limit_auto_switch_emits_user_visible_notice() -> anyhow::Result<(
     let warning_event = wait_for_event(&codex, |msg| {
         matches!(
             msg,
-            EventMsg::Warning(warning) if warning.message.starts_with("Auto-switch:")
+            EventMsg::Warning(warning) if warning.message.starts_with("Execution switched")
         )
     })
     .await;
@@ -3151,7 +3151,7 @@ async fn usage_limit_auto_switch_emits_user_visible_notice() -> anyhow::Result<(
     };
     assert_eq!(
         warning.message,
-        "Auto-switch: now using Candidate ChatGPT due to usage limit."
+        "Execution switched to Candidate ChatGPT due to a usage limit; your signed-in account is unchanged."
     );
 
     wait_for_event(&codex, |msg| matches!(msg, EventMsg::TurnComplete(_))).await;
@@ -3165,7 +3165,7 @@ async fn usage_limit_auto_switch_emits_user_visible_notice() -> anyhow::Result<(
     );
     assert_eq!(
         codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
-        Some(accounts.candidate_id.clone())
+        Some(accounts.current_id.clone())
     );
     assert_ne!(accounts.current_id, accounts.candidate_id);
 
@@ -3222,7 +3222,7 @@ async fn usage_limit_auto_switch_stops_after_all_stored_accounts_are_limited() -
     wait_for_event(&codex, |msg| {
         matches!(
             msg,
-            EventMsg::Warning(warning) if warning.message.starts_with("Auto-switch:")
+            EventMsg::Warning(warning) if warning.message.starts_with("Execution switched")
         )
     })
     .await;
@@ -3250,7 +3250,7 @@ async fn usage_limit_auto_switch_stops_after_all_stored_accounts_are_limited() -
     );
     assert_eq!(
         codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
-        Some(accounts.candidate_id)
+        Some(accounts.current_id)
     );
 
     Ok(())

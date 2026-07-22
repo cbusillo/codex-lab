@@ -11,7 +11,6 @@ mod apply_patch;
 mod apps;
 mod client;
 mod client_common;
-#[allow(dead_code)]
 mod execution_account;
 mod realtime_context;
 mod realtime_conversation;
