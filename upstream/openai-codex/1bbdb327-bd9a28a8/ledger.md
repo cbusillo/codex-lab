@@ -4,7 +4,7 @@
 - Branch: `main`
 - Window: `post_checkpoint`
 - Range: `1bbdb32789e1f79932df44941236ea3658f6e965..bd9a28a839d3dc4cf1facdf66cd02bb5732189e3`
-- Complete: no
+- Complete: yes
 
 ## Coverage
 
@@ -13,7 +13,7 @@
 | Audit | 256 |
 | Classified | 256 |
 | Missing | 0 |
-| Blocking | 3 |
+| Blocking | 0 |
 
 ## Classifications
 
@@ -163,7 +163,7 @@
 | `1836ae0612052137d0cabaff7807ff8314cee940` | `history_storage_protocol` | `1836ae061205:missing_patch/core` | `adapt` | `partially_implemented` | Complete settings snapshot persistence for goal-first and forked threads without overriding Every Code's thread-goal and resume semantics. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34469, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `c04452a240a13dbd0ede548fd1842d433d18419e` | `other_codex_rs` | `c04452a240a1:missing_patch/other_codex_rs` | `adopt` | `missing` | Propagate CARGO_HTTP_CAINFO through managed MITM CA bundle handling for Cargo child processes. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34478 |
 | `http-route-integrations` (`dc21b46aea67`, `0e15c31d91bb`, `99eb57564988`, `adb143a2919a`, `4f3852107e5e`, `21db216db05d`) | `other_codex_rs` | `dc21b46aea67:missing_patch/other_codex_rs`, `0e15c31d91bb:missing_patch/other_codex_rs`, `99eb57564988:missing_patch/other_codex_rs`, `adb143a2919a:missing_patch/other_codex_rs`, `4f3852107e5e:missing_patch/other_codex_rs`, `21db216db05d:missing_patch/other_codex_rs` | `adapt` | `missing` | Migrates backend, cloud-task, daemon-updater, and LM Studio traffic to policy-aware shared clients and documents the intended HTTP-client construction rules. | git_commit:openai/codex@dc21b46aea67947c3ab1b574cabcd79ff7084c73, git_commit:openai/codex@0e15c31d91bb4b1dc714957e4697bba40318eb5d, git_commit:openai/codex@99eb575649888646df3bb13f01bb78f115f894ab, git_commit:openai/codex@adb143a2919ae77eaba55c2150685e489168be38, git_commit:openai/codex@4f3852107e5eedeb4cb89b57a6d4a35b49f8a59a, git_commit:openai/codex@21db216db05d13713f09189fc44872d22cf47fc4, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
-| `r2-release-publication` (`cc875d61ce4b`, `a148e0b50a5c`, `667b6bbaf121`) | `repository_tooling` | `cc875d61ce4b:missing_patch/repository_tooling`, `a148e0b50a5c:missing_patch/repository_tooling`, `667b6bbaf121:missing_patch/repository_tooling` | `decision_required` | `missing` | Decide whether and how Every Code should mirror owned release artifacts, metadata channels, and stable installer aliases to R2. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34505, github_pull_request:openai/codex#34508, github_pull_request:openai/codex#34729, git_commit:openai/codex@cc875d61ce4be88a05371e185fb2f5530220315c, git_commit:openai/codex@a148e0b50a5cfa642512dca77c367bde5194f882, git_commit:openai/codex@667b6bbaf12187619f51f9fec6329755dce72f64, github_issue:cbusillo/codex-lab#412 |
+| `r2-release-publication` (`cc875d61ce4b`, `a148e0b50a5c`, `667b6bbaf121`) | `repository_tooling` | `cc875d61ce4b:missing_patch/repository_tooling`, `a148e0b50a5c:missing_patch/repository_tooling`, `667b6bbaf121:missing_patch/repository_tooling` | `reject` | `not_required` | Keep GitHub Releases and the Codex Lab distribution manifest authoritative; do not import OpenAI-owned R2 storage, channels, or stable installer aliases. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34505, github_pull_request:openai/codex#34508, github_pull_request:openai/codex#34729, git_commit:openai/codex@cc875d61ce4be88a05371e185fb2f5530220315c, git_commit:openai/codex@a148e0b50a5cfa642512dca77c367bde5194f882, git_commit:openai/codex@667b6bbaf12187619f51f9fec6329755dce72f64, github_issue:cbusillo/codex-lab#412 |
 | `plugin-route-aware-http` (`94bb6a09a66c`, `d937bfac8478`) | `cross_cutting` | `94bb6a09a66c:missing_patch/other_codex_rs`, `d937bfac8478:missing_patch/other_codex_rs` | `defer` | `missing` | Route plugin startup-sync and remote-plugin HTTP traffic through the configured system and PAC-aware client. | git_commit:openai/codex@94bb6a09a66cbf6a70b854cfc9276eefc2c621ed, git_commit:openai/codex@d937bfac84786b453ddb2d3fdb2712c1eca830ea, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `765675a122c9d1d4add7ce53d48c2d416fae39e9` | `repository_tooling` | `765675a122c9:missing_patch/repository_tooling` | `adapt` | `missing` | Adapt optional alternate-source installer downloads, fallback handling, and binary-version verification to Every Code's owned release layout. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34514, git_commit:openai/codex@765675a122c9d1d4add7ce53d48c2d416fae39e9, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `7982aa27ff7b5438121af6ec0e229b6b67ae810f` | `other` | `7982aa27ff7b:missing_patch/other` | `not_applicable` | `not_required` | Do not add an unused codespell exception for absent Symphonia code. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34516, git_commit:openai/codex@7982aa27ff7b5438121af6ec0e229b6b67ae810f, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
@@ -209,9 +209,3 @@
 | `9fc715c0861c956c894a91890b78dc05b304ba29` | `core` | `9fc715c0861c:missing_patch/core` | `adapt` | `partially_implemented` | Adapt unified-exec lifecycle ordering fixes to Every Code's output-closure, network-denial, and interaction-event architecture. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34713, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `33d394c69e23e8906e1d0b9a3807f10ea4b7c294` | `core` | `33d394c69e23:missing_patch/core` | `adapt` | `missing` | Skip Git enrichment for startup prewarm and Guardian review turns while retaining fresh metadata for regular turns. | github_issue:cbusillo/codex-lab#408, github_pull_request:openai/codex#34728, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `fd51e505401b7b2da958edc269e4d7280be86bd5` | `cross_cutting` | `fd51e505401b:missing_patch/other_codex_rs` | `not_applicable` | `not_required` | Remove step-scoped extension data after moving required MCP resource capability to session-owned state. | git_commit:openai/codex@fd51e505401b7b2da958edc269e4d7280be86bd5, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
-
-## Blocking Commits
-
-- `cc875d61ce4be88a05371e185fb2f5530220315c`
-- `a148e0b50a5cfa642512dca77c367bde5194f882`
-- `667b6bbaf12187619f51f9fec6329755dce72f64`
