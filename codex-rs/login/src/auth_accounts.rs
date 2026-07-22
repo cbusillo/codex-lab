@@ -5,6 +5,7 @@ use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
+use fs2::FileExt;
 use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
@@ -19,14 +20,47 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 use crate::auth::AuthDotJson;
 use crate::auth::encrypted_aggregate::with_invalidated_encrypted_aggregate;
 use crate::auth::save_auth;
 
 const ACCOUNTS_FILE_NAME: &str = "auth_accounts.json";
+const ACCOUNTS_LOCK_FILE_NAME: &str = ".auth_accounts.lock";
 pub(crate) const ACCOUNTS_FILE_VERSION: u32 = 1;
-static CATALOG_REFRESH_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static CATALOG_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct CatalogWriteGuard {
+    _process_guard: MutexGuard<'static, ()>,
+    lock_file: File,
+}
+
+impl Drop for CatalogWriteGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.lock_file);
+    }
+}
+
+fn acquire_catalog_write_guard(codex_home: &Path) -> io::Result<CatalogWriteGuard> {
+    let process_guard = CATALOG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    fs::create_dir_all(codex_home)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock_file = options.open(codex_home.join(ACCOUNTS_LOCK_FILE_NAME))?;
+    FileExt::lock_exclusive(&lock_file)?;
+    Ok(CatalogWriteGuard {
+        _process_guard: process_guard,
+        lock_file,
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredAccount {
@@ -353,14 +387,22 @@ fn match_chatgpt_account(existing: &StoredAccount, tokens: &TokenData) -> bool {
         chatgpt_account_id(existing_tokens),
         chatgpt_account_id(tokens),
     ) {
-        (Some(a), Some(b)) if a == b => {
-            match (
-                existing_tokens.id_token.email.as_ref(),
-                tokens.id_token.email.as_ref(),
-            ) {
-                (Some(a), Some(b)) => normalize_email(a) == normalize_email(b),
-                _ => true,
+        (Some(existing_account_id), Some(account_id)) if existing_account_id == account_id => {
+            if let (Some(existing_user_id), Some(user_id)) = (
+                existing_tokens.id_token.chatgpt_user_id.as_deref(),
+                tokens.id_token.chatgpt_user_id.as_deref(),
+            ) && existing_user_id != user_id
+            {
+                return false;
             }
+            if let (Some(existing_email), Some(email)) = (
+                existing_tokens.id_token.email.as_deref(),
+                tokens.id_token.email.as_deref(),
+            ) && normalize_email(existing_email) != normalize_email(email)
+            {
+                return false;
+            }
+            true
         }
         (Some(_), Some(_)) => false,
         _ => false,
@@ -515,20 +557,24 @@ pub fn auth_for_account(
 ) -> io::Result<(StoredAccount, AuthDotJson)> {
     let account = find_account(codex_home, auth_credentials_store_mode, account_id)?
         .ok_or_else(|| io::Error::other(format!("account with id {account_id} was not found")))?;
+    let auth = auth_from_stored_account(&account)?;
+    Ok((account, auth))
+}
 
-    let auth =
-        match account.mode {
-            AuthMode::ApiKey => AuthDotJson {
-                auth_mode: Some(AuthMode::ApiKey),
-                openai_api_key: Some(account.openai_api_key.clone().ok_or_else(|| {
-                    io::Error::other("stored API key account is missing the key value")
-                })?),
-                tokens: None,
-                last_refresh: None,
-                agent_identity: None,
-                personal_access_token: None,
-            },
-            AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => AuthDotJson {
+fn auth_from_stored_account(account: &StoredAccount) -> io::Result<AuthDotJson> {
+    match account.mode {
+        AuthMode::ApiKey => Ok(AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: Some(account.openai_api_key.clone().ok_or_else(|| {
+                io::Error::other("stored API key account is missing the key value")
+            })?),
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+        }),
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
+            Ok(AuthDotJson {
                 auth_mode: Some(account.mode),
                 openai_api_key: None,
                 tokens: Some(account.tokens.clone().ok_or_else(|| {
@@ -537,38 +583,21 @@ pub fn auth_for_account(
                 last_refresh: account.last_refresh,
                 agent_identity: None,
                 personal_access_token: None,
-            },
-            AuthMode::AgentIdentity => {
-                return Err(io::Error::other(
-                    "stored agent identity account activation is not supported",
-                ));
-            }
-            AuthMode::PersonalAccessToken => {
-                return Err(io::Error::other(
-                    "stored personal access token account activation is not supported",
-                ));
-            }
-        };
-
-    Ok((account, auth))
+            })
+        }
+        AuthMode::AgentIdentity => Err(io::Error::other(
+            "stored agent identity account activation is not supported",
+        )),
+        AuthMode::PersonalAccessToken => Err(io::Error::other(
+            "stored personal access token account activation is not supported",
+        )),
+    }
 }
 
-pub(crate) fn update_catalog_account_from_auth(
-    codex_home: &Path,
-    auth_credentials_store_mode: AuthCredentialsStoreMode,
-    catalog_id: &str,
+fn update_stored_account_from_auth(
+    account: &mut StoredAccount,
     auth: &AuthDotJson,
 ) -> io::Result<()> {
-    let _guard = CATALOG_REFRESH_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
-    let account = data
-        .accounts
-        .iter_mut()
-        .find(|account| account.id == catalog_id)
-        .ok_or_else(|| io::Error::other(format!("catalog account {catalog_id} was not found")))?;
-
     match auth.resolved_mode() {
         AuthMode::ApiKey => {
             account.mode = AuthMode::ApiKey;
@@ -588,6 +617,24 @@ pub(crate) fn update_catalog_account_from_auth(
             ));
         }
     }
+    Ok(())
+}
+
+pub(crate) fn update_catalog_account_from_auth(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    catalog_id: &str,
+    auth: &AuthDotJson,
+) -> io::Result<()> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
+    let account = data
+        .accounts
+        .iter_mut()
+        .find(|account| account.id == catalog_id)
+        .ok_or_else(|| io::Error::other(format!("catalog account {catalog_id} was not found")))?;
+
+    update_stored_account_from_auth(account, auth)?;
     write_accounts_file(codex_home, auth_credentials_store_mode, &data)
 }
 
@@ -597,6 +644,7 @@ pub fn update_account_last_refresh(
     account_id: &str,
     last_refresh: DateTime<Utc>,
 ) -> io::Result<Option<StoredAccount>> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
     let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == account_id) else {
@@ -613,6 +661,7 @@ pub fn set_active_account_id(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     account_id: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
     let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let mut updated = None;
@@ -652,71 +701,35 @@ fn restore_previous_auth(
     }
 }
 
-fn restore_previous_activation(
-    codex_home: &Path,
-    previous_auth: Option<AuthDotJson>,
-    previous_active_account_id: Option<String>,
-    auth_credentials_store_mode: AuthCredentialsStoreMode,
-) -> io::Result<()> {
-    let auth_result = restore_previous_auth(codex_home, previous_auth, auth_credentials_store_mode);
-    let active_account_result = set_active_account_id(
-        codex_home,
-        auth_credentials_store_mode,
-        previous_active_account_id,
-    );
-
-    auth_result?;
-    active_account_result?;
-    Ok(())
-}
-
 pub fn commit_active_account(
     codex_home: &Path,
     account_id: &str,
-    auth: &AuthDotJson,
+    _auth: &AuthDotJson,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<StoredAccount> {
+    let _catalog_guard = acquire_catalog_write_guard(codex_home)?;
     let previous_auth = crate::load_auth_dot_json(codex_home, auth_credentials_store_mode)?;
-    let previous_active_account_id =
-        get_active_account_id(codex_home, auth_credentials_store_mode)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
+    let account_index = data
+        .accounts
+        .iter()
+        .position(|account| account.id == account_id)
+        .ok_or_else(|| io::Error::other(format!("account with id {account_id} was not found")))?;
+    let auth = auth_from_stored_account(&data.accounts[account_index])?;
 
-    save_auth(codex_home, auth, auth_credentials_store_mode)?;
-    match set_active_account_id(
-        codex_home,
-        auth_credentials_store_mode,
-        Some(account_id.to_string()),
-    ) {
-        Ok(Some(activated)) => Ok(activated),
-        Ok(None) => {
-            let rollback_result = restore_previous_activation(
-                codex_home,
-                previous_auth,
-                previous_active_account_id,
-                auth_credentials_store_mode,
-            );
-            if let Err(rollback_err) = rollback_result {
-                tracing::warn!(
-                    "failed to roll back missing stored account activation: {rollback_err}"
-                );
-            }
-            Err(io::Error::other(format!(
-                "account with id {account_id} disappeared before activation"
-            )))
+    save_auth(codex_home, &auth, auth_credentials_store_mode)?;
+    data.active_account_id = Some(account_id.to_string());
+    touch_account(&mut data.accounts[account_index], true);
+    let activated = data.accounts[account_index].clone();
+    if let Err(err) = write_accounts_file(codex_home, auth_credentials_store_mode, &data) {
+        if let Err(rollback_err) =
+            restore_previous_auth(codex_home, previous_auth, auth_credentials_store_mode)
+        {
+            tracing::warn!("failed to roll back stored account activation: {rollback_err}");
         }
-        Err(err) => {
-            if let Err(rollback_err) = restore_previous_activation(
-                codex_home,
-                previous_auth,
-                previous_active_account_id,
-                auth_credentials_store_mode,
-            ) {
-                tracing::warn!(
-                    "failed to roll back stored account activation error: {rollback_err}"
-                );
-            }
-            Err(err)
-        }
+        return Err(err);
     }
+    Ok(activated)
 }
 
 pub fn remove_account(
@@ -724,6 +737,7 @@ pub fn remove_account(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     account_id: &str,
 ) -> io::Result<Option<StoredAccount>> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
     let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let removed = if let Some(pos) = data.accounts.iter().position(|acc| acc.id == account_id) {
@@ -759,6 +773,7 @@ pub fn remove_account_matching_credentials(
     openai_api_key: Option<&str>,
     tokens: Option<&TokenData>,
 ) -> io::Result<Option<StoredAccount>> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
     let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let removed = match mode {
@@ -796,6 +811,7 @@ pub fn upsert_api_key_account(
     label: Option<String>,
     make_active: bool,
 ) -> io::Result<StoredAccount> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
     let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let new_account = StoredAccount {
@@ -829,6 +845,7 @@ pub(crate) fn insert_api_key_account_if_missing(
     api_key: String,
     label: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
     let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     if data
@@ -863,6 +880,7 @@ pub fn upsert_chatgpt_account(
     label: Option<String>,
     make_active: bool,
 ) -> io::Result<StoredAccount> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
     let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     let new_account = StoredAccount {
@@ -890,6 +908,38 @@ pub fn upsert_chatgpt_account(
     Ok(stored)
 }
 
+pub fn upsert_inactive_chatgpt_account(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    tokens: TokenData,
+    last_refresh: DateTime<Utc>,
+    label: Option<String>,
+) -> io::Result<Option<StoredAccount>> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
+    let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
+    if data.active_account_id.as_deref().is_some_and(|active_id| {
+        data.accounts
+            .iter()
+            .any(|account| account.id == active_id && match_chatgpt_account(account, &tokens))
+    }) {
+        return Ok(None);
+    }
+
+    let new_account = StoredAccount {
+        id: next_id(),
+        mode: AuthMode::Chatgpt,
+        label,
+        openai_api_key: None,
+        tokens: Some(tokens),
+        last_refresh: Some(last_refresh),
+        created_at: None,
+        last_used_at: None,
+    };
+    let (data, stored) = upsert_account(data, new_account);
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
+    Ok(Some(stored))
+}
+
 pub(crate) fn insert_chatgpt_account_if_missing(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -897,6 +947,7 @@ pub(crate) fn insert_chatgpt_account_if_missing(
     last_refresh: DateTime<Utc>,
     label: Option<String>,
 ) -> io::Result<Option<StoredAccount>> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
     let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
     if data

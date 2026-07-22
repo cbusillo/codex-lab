@@ -3334,6 +3334,7 @@ dependencies = [
  "codex-utils-template",
  "codex-version",
  "core_test_support",
+ "fs2",
  "jsonwebtoken",
  "keyring",
  "once_cell",
