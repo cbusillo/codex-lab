@@ -452,3 +452,35 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
                         for name in (ledger_name, review_name, markdown_name)
                     )
                     self.assertLessEqual(semantic_lines, 800)
+
+    def test_committed_pre_checkpoint_review_preserves_semantic_metadata(self) -> None:
+        review_path = (
+            SCRIPT.parents[2]
+            / "upstream"
+            / "openai-codex"
+            / "1bbdb327-bd9a28a8"
+            / "pre-checkpoint-review.json"
+        )
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        dependency_shapes = [
+            {"dependsOn": item["dependsOn"], "from": item["from"]}
+            for item in review["crossStackDependencies"]
+        ]
+        self.assertIn(
+            {
+                "dependsOn": ["feca160da47b678b73b33dd8a08e010e86b81786"],
+                "from": "7e5e41daea443bac9df2af36d86a5332efa7b4d7",
+            },
+            dependency_shapes,
+        )
+        risk_shapes = [
+            {"priority": item["priority"], "rowKey": item["rowKey"]}
+            for item in review["riskFlags"]
+        ]
+        self.assertIn(
+            {
+                "priority": "P1",
+                "rowKey": "ee6c91d5cfd0e63239c75b41f4a2dc14130d5688",
+            },
+            risk_shapes,
+        )

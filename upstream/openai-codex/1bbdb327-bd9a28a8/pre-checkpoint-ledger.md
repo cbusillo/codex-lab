@@ -11,9 +11,9 @@
 | Measure | Commits |
 |---|---:|
 | Audit | 1017 |
-| Classified | 6 |
-| Missing | 1011 |
-| Blocking | 4 |
+| Classified | 8 |
+| Missing | 1009 |
+| Blocking | 6 |
 
 ## Classifications
 
@@ -24,7 +24,9 @@
 | `ee6c91d5cfd0e63239c75b41f4a2dc14130d5688` | `other_codex_rs` | `ee6c91d5cfd0:missing_patch/other_codex_rs` | `missing` | `missing` | Stop emitting the free-form codex_error_subreason analytics field copied from InvalidRequest text; the bounded 512-byte fork copy still carries provider or user-derived content. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#27060, git_commit:openai/codex@ee6c91d5cfd0e63239c75b41f4a2dc14130d5688, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `daf76a57d2564be85b6e34c25a29380b3d4315b4` | `other_codex_rs` | `daf76a57d256:missing_patch/other_codex_rs` | `missing` | `missing` | Prune stale curated plugin cache entries when their names disappear from the raw marketplace while preserving user configuration. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#26934, git_commit:openai/codex@daf76a57d2564be85b6e34c25a29380b3d4315b4, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `381f0de531e0bc7759863295fc333dd0087b4faf` | `other_codex_rs` | `381f0de531e0:missing_patch/other_codex_rs` | `missing` | `missing` | Serve plugin/list from the cached global remote catalog when present and refresh it asynchronously without duplicating cache-miss fetches. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#26932, git_commit:openai/codex@381f0de531e0bc7759863295fc333dd0087b4faf, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
+| `feca160da47b678b73b33dd8a08e010e86b81786` | `other_codex_rs` | `feca160da47b:missing_patch/other_codex_rs` | `missing` | `missing` | Add description-aware OTEL counters by caching instruments on name plus description and expose counter_with_description without changing existing counter callers. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#26091, git_commit:openai/codex@feca160da47b678b73b33dd8a08e010e86b81786, git_commit:openai/codex@2dec46e30ae81aa4844cc7a5474ff5c95c6998c0, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `51b3cd51f6f94488c0e05564cbcad9512f73e3db` | `other_codex_rs` | `51b3cd51f6f9:missing_patch/other_codex_rs` | `missing` | `missing` | Restrict list_available_server_infos to codex-mcp and make new_uninitialized test-only without importing method-order churn or hiding the production cross-crate permission-profile constructor. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#27257, git_commit:openai/codex@51b3cd51f6f94488c0e05564cbcad9512f73e3db, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
+| `7e5e41daea443bac9df2af36d86a5332efa7b4d7` | `other_codex_rs` | `7e5e41daea44:missing_patch/other_codex_rs` | `missing` | `missing` | Add reusable described i64 OTEL gauges with in-memory and OTLP export coverage, ordered after the counter-description InstrumentKey foundation. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#27057, git_commit:openai/codex@7e5e41daea443bac9df2af36d86a5332efa7b4d7, git_commit:openai/codex@2dec46e30ae81aa4844cc7a5474ff5c95c6998c0, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 
 ## Missing Commits
 
@@ -54,7 +56,6 @@
 - `123cf62a485de23a8960260f5bb00b86af6778c5`
 - `56554904babcaacf4444a2cc90716880837dff7c`
 - `b89d91f6ffee5474f23a97b23b401644c4e087d5`
-- `feca160da47b678b73b33dd8a08e010e86b81786`
 - `0473a5cc522cd8d0a798595c0a08ce661eb2a0ab`
 - `6042e5810e7062cc937bb0397afaa5bea431fbc4`
 - `ffec7c093365eacb2b5ef58dafd53abaeea72e03`
@@ -128,12 +129,15 @@
 - `980f60b6641c5907c16db3c39f36ac113e15c93d`
 - `387adc6c4bc484aefb658a6006ad0a26fc45c79b`
 - `22dd6ebc7d3abe50d8aa40be3025eccd9c166418`
+- `c72205239f83f5f6162c7464c8e373a81cb62785`
 
-_911 additional commits omitted; run `validate` for the complete machine-readable list._
+_909 additional commits omitted; run `validate` for the complete machine-readable list._
 
 ## Blocking Commits
 
 - `ee6c91d5cfd0e63239c75b41f4a2dc14130d5688`
 - `daf76a57d2564be85b6e34c25a29380b3d4315b4`
 - `381f0de531e0bc7759863295fc333dd0087b4faf`
+- `feca160da47b678b73b33dd8a08e010e86b81786`
 - `51b3cd51f6f94488c0e05564cbcad9512f73e3db`
+- `7e5e41daea443bac9df2af36d86a5332efa7b4d7`
