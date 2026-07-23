@@ -1,5 +1,8 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use base64::Engine as _;
@@ -32,6 +35,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodexBuilder;
@@ -44,12 +48,18 @@ use tempfile::TempDir;
 use walkdir::WalkDir;
 use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::Request;
+use wiremock::Respond;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 fn chatgpt_tokens(account_id: &str) -> TokenData {
+    chatgpt_tokens_with_access(account_id, &format!("access-{account_id}"))
+}
+
+fn chatgpt_tokens_with_access(account_id: &str, access_token: &str) -> TokenData {
     let header = json!({ "alg": "none", "typ": "JWT" });
     let payload = json!({
         "email": format!("{account_id}@example.com"),
@@ -73,7 +83,7 @@ fn chatgpt_tokens(account_id: &str) -> TokenData {
             chatgpt_account_is_fedramp: false,
             raw_jwt: format!("{}.{}.signature", encode(&header), encode(&payload)),
         },
-        access_token: format!("access-{account_id}"),
+        access_token: access_token.to_string(),
         refresh_token: format!("refresh-{account_id}"),
         account_id: Some(account_id.to_string()),
     }
@@ -593,5 +603,180 @@ async fn model_catalog_cache_isolated_per_execution_account_across_restart() -> 
     assert!(cached_catalogs.contains(&vec!["catalog-b-model".to_string()]));
 
     second.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct StaleExecutionCatalogResponder {
+    auth_home: PathBuf,
+    refreshed_access_token: String,
+    stale_authorization: String,
+    refreshed_authorization: String,
+    models_etag: String,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for StaleExecutionCatalogResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let authorization = request
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        match call {
+            0 => {
+                assert_eq!(authorization, Some(self.stale_authorization.as_str()));
+                // The execution account's token is refreshed out-of-band before
+                // we reject the stale request, mirroring a real token rotation.
+                codex_login::upsert_chatgpt_account(
+                    &self.auth_home,
+                    AuthCredentialsStoreMode::File,
+                    chatgpt_tokens_with_access("execution", &self.refreshed_access_token),
+                    Utc::now(),
+                    Some("Execution".to_string()),
+                    /*make_active*/ false,
+                )
+                .expect("refresh execution catalog account");
+                ResponseTemplate::new(401).set_body_string("stale execution token")
+            }
+            1 => {
+                assert_eq!(authorization, Some(self.refreshed_authorization.as_str()));
+                // A mismatched models etag forces the catalog to be refreshed,
+                // which must now use the refreshed execution auth.
+                sse_response(sse(vec![
+                    ev_response_created("resp-2"),
+                    ev_assistant_message("msg-1", "done"),
+                    ev_completed("resp-2"),
+                ]))
+                .insert_header("X-Models-Etag", self.models_etag.as_str())
+            }
+            other => panic!("unexpected responses request {other}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_catalog_refresh_after_401_uses_refreshed_execution_auth() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    let control = add_chatgpt_account(
+        home.path(),
+        "account_id",
+        "Control",
+        /*make_active*/ true,
+    )?;
+    let execution = add_chatgpt_account(
+        home.path(),
+        "execution",
+        "Execution",
+        /*make_active*/ false,
+    )?;
+    let now = Utc::now();
+    // The control account is limited, so the execution account backs the session.
+    codex_core::account_usage::record_usage_limit_hint(
+        home.path(),
+        &control.id,
+        /*plan*/ None,
+        Some(now + Duration::hours(1)),
+        now,
+        /*reached_type*/ None,
+    )?;
+
+    let stale_authorization = "Bearer access-execution".to_string();
+    let refreshed_access_token = "access-execution-refreshed".to_string();
+    let refreshed_authorization = format!("Bearer {refreshed_access_token}");
+
+    // Spawn catalog fetch is served to the stale execution token; the etag-driven
+    // refresh must be served only to the refreshed execution token.
+    mount_models_for_authorization(
+        &server,
+        stale_authorization.clone(),
+        vec![account_model("catalog-exec", &["priority"])],
+    )
+    .await;
+    mount_models_for_authorization(
+        &server,
+        refreshed_authorization.clone(),
+        vec![account_model("catalog-exec-refreshed", &["priority"])],
+    )
+    .await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(StaleExecutionCatalogResponder {
+            auth_home: home.path().to_path_buf(),
+            refreshed_access_token: refreshed_access_token.clone(),
+            stale_authorization: stale_authorization.clone(),
+            refreshed_authorization: refreshed_authorization.clone(),
+            models_etag: "\"models-etag-refreshed\"".to_string(),
+            calls: Arc::clone(&calls),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let mut builder = model_catalog_builder(home.clone());
+    let fixture = builder.build(&server).await?;
+    assert_eq!(fixture.session_configured.model, "catalog-exec");
+
+    submit_text(&fixture.codex, "trigger a catalog refresh").await?;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let model_authorizations = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request.method.as_str() == "GET" && request.url.path() == "/v1/models")
+        .map(|request| {
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .expect("model catalog request should include authorization")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    // The catalog was fetched with the stale token on spawn and refreshed with
+    // the rotated execution token; the control token was never used.
+    assert!(
+        model_authorizations
+            .iter()
+            .any(|authorization| authorization == &refreshed_authorization),
+        "catalog refresh never used the refreshed execution auth: {model_authorizations:?}"
+    );
+    assert!(
+        model_authorizations
+            .iter()
+            .all(|authorization| authorization != "Bearer Access Token"),
+        "catalog fetch leaked the control account's auth: {model_authorizations:?}"
+    );
+
+    // The control auth manager is untouched by the execution-account refresh.
+    assert_eq!(
+        fixture
+            .thread_manager
+            .auth_manager()
+            .auth_cached()
+            .expect("control auth should remain loaded")
+            .get_token()?,
+        "Access Token"
+    );
+    assert_eq!(
+        codex_login::find_account(home.path(), AuthCredentialsStoreMode::File, &execution.id,)?
+            .and_then(|account| account.tokens)
+            .map(|tokens| tokens.access_token),
+        Some(refreshed_access_token)
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
+        Some(control.id)
+    );
+
+    fixture.codex.shutdown_and_wait().await?;
     Ok(())
 }
