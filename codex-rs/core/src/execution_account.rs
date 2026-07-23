@@ -137,6 +137,15 @@ pub(crate) struct ExecutionAccountIdentity {
     pub(crate) mode: AuthMode,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ExecutionAccountCacheIdentity(String);
+
+impl fmt::Debug for ExecutionAccountCacheIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExecutionAccountCacheIdentity([redacted])")
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ExecutionAccountModelsContext {
     pub(crate) generation: u64,
@@ -145,15 +154,24 @@ pub(crate) struct ExecutionAccountModelsContext {
 }
 
 #[derive(Clone, Debug)]
-struct ExecutionAccountAuthProvider {
+struct ExecutionAccountCodexAppsAuthProvider {
     lease: ExecutionAccountLease,
+    expected_cache_identity: ExecutionAccountCacheIdentity,
 }
 
-impl AuthProvider for ExecutionAccountAuthProvider {
+impl AuthProvider for ExecutionAccountCodexAppsAuthProvider {
     fn add_auth_headers(&self, headers: &mut HeaderMap) {
-        if let Some(auth) = self.lease.auth_manager().auth_cached() {
-            codex_model_provider::auth_provider_from_auth(&auth).add_auth_headers(headers);
+        let account = self.lease.inner.current.load_full();
+        if account.cache_identity != self.expected_cache_identity.0 {
+            return;
         }
+        let Some(auth) = account.auth_manager.auth_cached() else {
+            return;
+        };
+        if !auth.uses_codex_backend() {
+            return;
+        }
+        codex_model_provider::auth_provider_from_auth(&auth).add_auth_headers(headers);
     }
 }
 
@@ -420,9 +438,17 @@ impl ExecutionAccountLease {
         Arc::clone(&self.inner.current.load().auth_manager)
     }
 
-    pub(crate) fn auth_provider(&self) -> SharedAuthProvider {
-        Arc::new(ExecutionAccountAuthProvider {
+    pub(crate) fn cache_identity(&self) -> ExecutionAccountCacheIdentity {
+        ExecutionAccountCacheIdentity(self.inner.current.load().cache_identity.clone())
+    }
+
+    pub(crate) fn codex_apps_auth_provider(
+        &self,
+        expected_cache_identity: ExecutionAccountCacheIdentity,
+    ) -> SharedAuthProvider {
+        Arc::new(ExecutionAccountCodexAppsAuthProvider {
             lease: self.clone(),
+            expected_cache_identity,
         })
     }
 
