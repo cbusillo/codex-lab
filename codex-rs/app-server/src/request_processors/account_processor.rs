@@ -118,6 +118,32 @@ impl AccountRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn switch_active_account(
+        &self,
+        params: SwitchActiveAccountParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.switch_active_account_response(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn list_accounts(
+        &self,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.list_accounts_response()
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn remove_account(
+        &self,
+        params: RemoveAccountParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.remove_account_response(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn get_account(
         &self,
         params: GetAccountParams,
@@ -192,6 +218,29 @@ impl AccountRequestProcessor {
                 .map(auth_mode_to_api),
             plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
         }
+    }
+
+    async fn sync_auth_after_account_change(&self) {
+        self.thread_manager.reload_auth_for_loaded_threads().await;
+        self.config_manager.replace_cloud_config_bundle_loader(
+            self.auth_manager.clone(),
+            self.config.chatgpt_base_url.clone(),
+            self.config.http_client_factory(),
+        );
+        self.config_manager
+            .sync_default_client_residency_requirement()
+            .await;
+        Self::maybe_refresh_plugin_caches_for_current_config(
+            &self.config_manager,
+            &self.thread_manager,
+            self.auth_manager.auth_cached(),
+        )
+        .await;
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountUpdated(
+                self.current_account_updated_notification(),
+            ))
+            .await;
     }
 
     async fn load_latest_config(&self) -> Config {
@@ -683,6 +732,198 @@ impl AccountRequestProcessor {
             Err(CancelLoginError::NotFound) => CancelLoginAccountStatus::NotFound,
         };
         Ok(CancelLoginAccountResponse { status })
+    }
+
+    fn stored_account_policy_error(&self, account: &codex_login::StoredAccount) -> Option<String> {
+        let is_chatgpt = matches!(
+            account.mode,
+            codex_protocol::auth::AuthMode::Chatgpt
+                | codex_protocol::auth::AuthMode::ChatgptAuthTokens
+        );
+        match self.config.forced_login_method {
+            Some(ForcedLoginMethod::Chatgpt) if !is_chatgpt => {
+                return Some(
+                    "Stored account activation is disabled. Use a ChatGPT account instead."
+                        .to_string(),
+                );
+            }
+            Some(ForcedLoginMethod::Api) if is_chatgpt => {
+                return Some(
+                    "Stored ChatGPT account activation is disabled. Use an API account instead."
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+
+        if is_chatgpt
+            && let Some(expected_workspaces) = self.config.forced_chatgpt_workspace_id.as_deref()
+        {
+            let actual_workspace = account.tokens.as_ref().and_then(|tokens| {
+                tokens
+                    .account_id
+                    .as_deref()
+                    .or(tokens.id_token.chatgpt_account_id.as_deref())
+            });
+            let Some(actual_workspace) = actual_workspace else {
+                return Some(
+                    "Stored account activation is restricted to a specific workspace, but the account has no workspace identifier."
+                        .to_string(),
+                );
+            };
+            if !expected_workspaces
+                .iter()
+                .any(|workspace_id| workspace_id == actual_workspace)
+            {
+                return Some(format!(
+                    "Stored account activation is restricted to workspace id(s) {}.",
+                    expected_workspaces.join(", ")
+                ));
+            }
+        }
+
+        None
+    }
+
+    fn activation_account(
+        &self,
+        account_id: &str,
+    ) -> Result<codex_login::StoredAccount, JSONRPCErrorError> {
+        let account = codex_login::find_account(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            account_id,
+        )
+        .map_err(|err| internal_error(format!("failed to read stored account: {err}")))?
+        .ok_or_else(|| invalid_request(format!("stored account not found: {account_id}")))?;
+        if let Some(message) = self.stored_account_policy_error(&account) {
+            return Err(invalid_request(message));
+        }
+        Ok(account)
+    }
+
+    fn activate_policy_compatible_fallback(&self) -> Result<Option<String>, JSONRPCErrorError> {
+        let accounts = codex_login::list_accounts(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to read stored accounts: {err}")))?;
+        for account in accounts {
+            if self.stored_account_policy_error(&account).is_some() {
+                continue;
+            }
+            match codex_login::activate_account(
+                &self.config.codex_home,
+                &account.id,
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+            ) {
+                Ok(_) => return Ok(Some(account.id)),
+                Err(err) => {
+                    warn!(account_id = %account.id, "failed to activate fallback stored account: {err}");
+                }
+            }
+        }
+
+        codex_login::clear_active_account(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+        )
+        .map_err(|err| internal_error(format!("failed to clear active auth: {err}")))?;
+        Ok(None)
+    }
+
+    async fn switch_active_account_response(
+        &self,
+        params: SwitchActiveAccountParams,
+    ) -> Result<SwitchActiveAccountResponse, JSONRPCErrorError> {
+        if self.auth_manager.is_external_chatgpt_auth_active() {
+            return Err(self.external_auth_active_error());
+        }
+        let account = self.activation_account(&params.account_id)?;
+        self.cancel_active_login().await;
+
+        codex_login::activate_account(
+            &self.config.codex_home,
+            &account.id,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+        )
+        .map_err(|err| internal_error(format!("failed to activate stored account: {err}")))?;
+        self.sync_auth_after_account_change().await;
+        Ok(SwitchActiveAccountResponse {
+            account_id: account.id,
+        })
+    }
+
+    async fn list_accounts_response(&self) -> Result<ListAccountsResponse, JSONRPCErrorError> {
+        let active_account_id = codex_login::get_active_account_id(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
+        let accounts = codex_login::list_accounts(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to read stored accounts: {err}")))?
+        .into_iter()
+        .map(|account| AccountListEntry {
+            is_active: active_account_id.as_deref() == Some(account.id.as_str()),
+            account_id: account.id,
+            auth_mode: auth_mode_to_api(account.mode),
+            label: account.label,
+            created_at: account.created_at.map(|timestamp| timestamp.timestamp()),
+            last_used_at: account.last_used_at.map(|timestamp| timestamp.timestamp()),
+        })
+        .collect();
+        Ok(ListAccountsResponse {
+            active_account_id,
+            accounts,
+        })
+    }
+
+    async fn remove_account_response(
+        &self,
+        params: RemoveAccountParams,
+    ) -> Result<RemoveAccountResponse, JSONRPCErrorError> {
+        if self.auth_manager.is_external_chatgpt_auth_active() {
+            return Err(self.external_auth_active_error());
+        }
+        self.cancel_active_login().await;
+
+        let previous_active_account_id = codex_login::get_active_account_id(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
+        let removed_was_active = previous_active_account_id.as_deref() == Some(&params.account_id);
+        let removed = codex_login::remove_account(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            &params.account_id,
+        )
+        .map_err(|err| internal_error(format!("failed to remove stored account: {err}")))?;
+        let Some(_removed_account) = removed else {
+            return Ok(RemoveAccountResponse {
+                status: RemoveAccountStatus::NotFound,
+                active_account_id: previous_active_account_id,
+            });
+        };
+
+        let active_account_id = if removed_was_active {
+            let active_account_id = self.activate_policy_compatible_fallback()?;
+            self.sync_auth_after_account_change().await;
+            active_account_id
+        } else {
+            previous_active_account_id
+        };
+
+        Ok(RemoveAccountResponse {
+            status: RemoveAccountStatus::Removed,
+            active_account_id,
+        })
     }
 
     async fn login_chatgpt_auth_tokens(

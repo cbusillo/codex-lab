@@ -1068,6 +1068,24 @@ client_request_definitions! {
         response: v2::CancelLoginAccountResponse,
     },
 
+    SwitchActiveAccount => "account/switchActive" {
+        params: v2::SwitchActiveAccountParams,
+        serialization: global("account-auth"),
+        response: v2::SwitchActiveAccountResponse,
+    },
+
+    ListAccounts => "account/list" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: global_shared_read("account-auth"),
+        response: v2::ListAccountsResponse,
+    },
+
+    RemoveAccount => "account/remove" {
+        params: v2::RemoveAccountParams,
+        serialization: global("account-auth"),
+        response: v2::RemoveAccountResponse,
+    },
+
     LogoutAccount => "account/logout" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global("account-auth"),

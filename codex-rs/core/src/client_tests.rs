@@ -110,6 +110,40 @@ fn test_model_client_with_thread_id(
     )
 }
 
+#[test]
+fn model_client_session_is_recached_without_invalidation() {
+    let model_client = test_model_client(SessionSource::Exec);
+    let mut session = model_client.new_session();
+    session.websocket_session.last_response_from_untraced_warmup = true;
+
+    drop(session);
+
+    let cached = model_client
+        .state
+        .cached_websocket_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(cached.session.last_response_from_untraced_warmup);
+}
+
+#[test]
+fn invalidated_model_client_session_is_not_recached() {
+    let model_client = test_model_client(SessionSource::Exec);
+    let mut session = model_client.new_session();
+    session.websocket_session.last_response_from_untraced_warmup = true;
+
+    model_client.invalidate_cached_websocket_session();
+    drop(session);
+
+    let cached = model_client
+        .state
+        .cached_websocket_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(cached.generation, 1);
+    assert!(!cached.session.last_response_from_untraced_warmup);
+}
+
 #[tokio::test]
 async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::Result<()> {
     let server = MockServer::start().await;

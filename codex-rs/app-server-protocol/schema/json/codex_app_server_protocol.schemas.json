@@ -1866,6 +1866,77 @@
             },
             "method": {
               "enum": [
+                "account/switchActive"
+              ],
+              "title": "Account/switchActiveRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/SwitchActiveAccountParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Account/switchActiveRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "account/list"
+              ],
+              "title": "Account/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "id",
+            "method"
+          ],
+          "title": "Account/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "account/remove"
+              ],
+              "title": "Account/removeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/RemoveAccountParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Account/removeRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "account/logout"
               ],
               "title": "Account/logoutRequestMethod",
@@ -6055,6 +6126,45 @@
             "type": "object"
           }
         ]
+      },
+      "AccountListEntry": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "authMode": {
+            "$ref": "#/definitions/v2/AuthMode"
+          },
+          "createdAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastUsedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "accountId",
+          "authMode",
+          "isActive"
+        ],
+        "type": "object"
       },
       "AccountLoginCompletedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -12101,6 +12211,28 @@
       "LegacyAppPathString": {
         "type": "string"
       },
+      "ListAccountsResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/definitions/v2/AccountListEntry"
+            },
+            "type": "array"
+          },
+          "activeAccountId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "accounts"
+        ],
+        "title": "ListAccountsResponse",
+        "type": "object"
+      },
       "ListMcpServerStatusParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -15964,6 +16096,45 @@
         "title": "RemoteControlStatusChangedNotification",
         "type": "object"
       },
+      "RemoveAccountParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId"
+        ],
+        "title": "RemoveAccountParams",
+        "type": "object"
+      },
+      "RemoveAccountResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "activeAccountId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/v2/RemoveAccountStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "RemoveAccountResponse",
+        "type": "object"
+      },
+      "RemoveAccountStatus": {
+        "enum": [
+          "removed",
+          "notFound"
+        ],
+        "type": "string"
+      },
       "RequestId": {
         "anyOf": [
           {
@@ -18002,6 +18173,32 @@
         "required": [
           "name"
         ],
+        "type": "object"
+      },
+      "SwitchActiveAccountParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId"
+        ],
+        "title": "SwitchActiveAccountParams",
+        "type": "object"
+      },
+      "SwitchActiveAccountResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId"
+        ],
+        "title": "SwitchActiveAccountResponse",
         "type": "object"
       },
       "TerminalInteractionNotification": {

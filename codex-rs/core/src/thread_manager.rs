@@ -522,6 +522,20 @@ impl ThreadManager {
         self.state.auth_manager.clone()
     }
 
+    pub async fn reload_auth_for_loaded_threads(&self) {
+        self.state.auth_manager.reload().await;
+        let threads = self.state.threads.read().await;
+        for thread in threads.values() {
+            if !thread.session_source.is_internal() {
+                thread
+                    .session
+                    .services
+                    .model_client
+                    .invalidate_cached_websocket_session();
+            }
+        }
+    }
+
     pub fn skills_service(&self) -> Arc<SkillsService> {
         self.state.skills_service.clone()
     }

@@ -1,6 +1,7 @@
 // GENERATED CODE! DO NOT MODIFY BY HAND!
 
 export type { Account } from "./Account";
+export type { AccountListEntry } from "./AccountListEntry";
 export type { AccountLoginCompletedNotification } from "./AccountLoginCompletedNotification";
 export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUpdatedNotification";
 export type { AccountTokenUsageDailyBucket } from "./AccountTokenUsageDailyBucket";
@@ -213,6 +214,7 @@ export type { ItemCompletedNotification } from "./ItemCompletedNotification";
 export type { ItemGuardianApprovalReviewCompletedNotification } from "./ItemGuardianApprovalReviewCompletedNotification";
 export type { ItemGuardianApprovalReviewStartedNotification } from "./ItemGuardianApprovalReviewStartedNotification";
 export type { ItemStartedNotification } from "./ItemStartedNotification";
+export type { ListAccountsResponse } from "./ListAccountsResponse";
 export type { ListMcpServerStatusParams } from "./ListMcpServerStatusParams";
 export type { ListMcpServerStatusResponse } from "./ListMcpServerStatusResponse";
 export type { LoginAccountParams } from "./LoginAccountParams";
@@ -376,6 +378,9 @@ export type { RemoteControlConnectionStatus } from "./RemoteControlConnectionSta
 export type { RemoteControlDisableParams } from "./RemoteControlDisableParams";
 export type { RemoteControlEnableParams } from "./RemoteControlEnableParams";
 export type { RemoteControlStatusChangedNotification } from "./RemoteControlStatusChangedNotification";
+export type { RemoveAccountParams } from "./RemoveAccountParams";
+export type { RemoveAccountResponse } from "./RemoveAccountResponse";
+export type { RemoveAccountStatus } from "./RemoveAccountStatus";
 export type { RequestPermissionProfile } from "./RequestPermissionProfile";
 export type { ResidencyRequirement } from "./ResidencyRequirement";
 export type { ReviewDelivery } from "./ReviewDelivery";
@@ -414,6 +419,8 @@ export type { SortDirection } from "./SortDirection";
 export type { SpendControlLimitSnapshot } from "./SpendControlLimitSnapshot";
 export type { SubAgentActivityKind } from "./SubAgentActivityKind";
 export type { SubagentMigration } from "./SubagentMigration";
+export type { SwitchActiveAccountParams } from "./SwitchActiveAccountParams";
+export type { SwitchActiveAccountResponse } from "./SwitchActiveAccountResponse";
 export type { TerminalInteractionNotification } from "./TerminalInteractionNotification";
 export type { TextElement } from "./TextElement";
 export type { TextPosition } from "./TextPosition";
