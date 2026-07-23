@@ -370,6 +370,7 @@ export type { SandboxPolicy } from "./SandboxPolicy";
 export type { SandboxWorkspaceWrite } from "./SandboxWorkspaceWrite";
 export type { SendAddCreditsNudgeEmailParams } from "./SendAddCreditsNudgeEmailParams";
 export type { SendAddCreditsNudgeEmailResponse } from "./SendAddCreditsNudgeEmailResponse";
+export type { ServerBuildInfo } from "./ServerBuildInfo";
 export type { ServerRequestResolvedNotification } from "./ServerRequestResolvedNotification";
 export type { SessionMigration } from "./SessionMigration";
 export type { SessionProvenance } from "./SessionProvenance";

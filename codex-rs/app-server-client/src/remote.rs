@@ -830,14 +830,7 @@ where
                     })?;
                     match message {
                         JSONRPCMessage::Response(response) if response.id == initialize_request_id => {
-                            server_version = response
-                                .result
-                                .get("userAgent")
-                                .and_then(serde_json::Value::as_str)
-                                .and_then(|user_agent| {
-                                    let (_, rest) = user_agent.split_once('/')?;
-                                    rest.split_whitespace().next().map(str::to_string)
-                                });
+                            server_version = initialize_response_server_version(&response.result);
                             break Ok(());
                         }
                         JSONRPCMessage::Error(error) if error.id == initialize_request_id => {
@@ -932,6 +925,28 @@ where
     Ok((pending_events, server_version))
 }
 
+fn initialize_response_server_version(result: &serde_json::Value) -> Option<String> {
+    result
+        .get("serverBuild")
+        .and_then(|server_build| server_build.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.is_empty())
+        .or_else(|| {
+            result
+                .get("userAgent")
+                .and_then(serde_json::Value::as_str)
+                .and_then(version_from_user_agent)
+        })
+        .map(str::to_string)
+}
+
+fn version_from_user_agent(user_agent: &str) -> Option<&str> {
+    let (_originator, rest) = user_agent.split_once('/')?;
+    rest.split_whitespace()
+        .next()
+        .filter(|version| !version.is_empty())
+}
+
 fn app_server_event_from_notification(notification: JSONRPCNotification) -> Option<AppServerEvent> {
     match ServerNotification::try_from(notification) {
         Ok(notification) => Some(AppServerEvent::ServerNotification(notification)),
@@ -1011,6 +1026,39 @@ fn websocket_close_error_is_already_closed(err: &TungsteniteError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn initialize_response_version_prefers_server_build() {
+        let result = serde_json::json!({
+            "userAgent": "codex_cli_rs/9.8.7-test (Test OS; x86_64) rust",
+            "serverBuild": {
+                "schemaVersion": 1,
+                "version": "1.2.3",
+                "sourceCommit": "unavailable",
+                "dirtyState": "unavailable",
+                "buildProfile": "release",
+                "buildChannel": "lab"
+            }
+        });
+
+        assert_eq!(
+            initialize_response_server_version(&result),
+            Some("1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn initialize_response_version_falls_back_to_legacy_user_agent() {
+        let result = serde_json::json!({
+            "userAgent": "codex_cli_rs/9.8.7-test (Test OS; x86_64) rust"
+        });
+
+        assert_eq!(
+            initialize_response_server_version(&result),
+            Some("9.8.7-test".to_string())
+        );
+    }
 
     #[tokio::test]
     async fn shutdown_tolerates_worker_exit_after_command_is_queued() {

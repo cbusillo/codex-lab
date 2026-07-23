@@ -61,7 +61,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--short-version",
-        help="CFBundleShortVersionString. Defaults to the embedded CLI version.",
+        help="CFBundleShortVersionString for the GUI bundle. Defaults to the embedded CLI version.",
+    )
+    parser.add_argument(
+        "--embedded-cli-version",
+        help="Expected version reported by the embedded CLI provenance. Defaults to the inspected CLI version.",
     )
     parser.add_argument(
         "--bundle-version",
@@ -90,10 +94,11 @@ def main() -> int:
         return 2
 
     short_version = args.short_version or provenance["version"]
-    if short_version != provenance["version"]:
+    embedded_cli_version = args.embedded_cli_version or provenance["version"]
+    if embedded_cli_version != provenance["version"]:
         print(
-            "Requested short version does not match the embedded CLI provenance: "
-            f"{short_version} != {provenance['version']}",
+            "Requested embedded CLI version does not match the embedded CLI provenance: "
+            f"{embedded_cli_version} != {provenance['version']}",
             file=sys.stderr,
         )
         return 2
@@ -123,6 +128,7 @@ def main() -> int:
             display_name=args.display_name,
             short_version=short_version,
             bundle_version=args.bundle_version,
+            embedded_cli_version=embedded_cli_version,
             source_commit=source_commit,
             force=args.force,
         )

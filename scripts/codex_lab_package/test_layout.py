@@ -102,6 +102,7 @@ class BuildCodexLabAppTest(unittest.TestCase):
                     bundle_identifier="dev.example.codex-lab-test",
                     short_version="1.2.3",
                     bundle_version="42",
+                    embedded_cli_version="1.2.3",
                     source_commit="a" * 40,
                 )
             )
@@ -308,7 +309,7 @@ printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
                         embedded_cli.read_bytes()
                     ).hexdigest(),
                     expected_source_commit=source_commit,
-                    expected_version="1.2.3",
+                    expected_cli_version="1.2.3",
                     codesign_path=fake_codesign,
                     lsappinfo_path=fake_lsappinfo,
                     open_path=fake_open,
@@ -423,9 +424,56 @@ exit 2
             launcher = (app_dir / "Contents/MacOS/Codex Lab Launcher").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("EXPECTED_VERSION='1.2.3'", launcher)
+            self.assertIn("EXPECTED_CLI_VERSION='1.2.3'", launcher)
             self.assertIn("EXPECTED_SOURCE_COMMIT='" + source_commit + "'", launcher)
             self.assertIn("Built Codex Lab app bundle", completed.stdout)
+
+    def test_build_script_allows_gui_short_version_to_differ_from_cli_version(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_bin = root / "fake-codex"
+            source_commit = "a" * 64
+            codex_bin.write_text(
+                """#!/bin/sh
+if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; then
+  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
+  exit 0
+fi
+exit 2
+""".replace("__SOURCE_COMMIT__", source_commit),
+                encoding="utf-8",
+            )
+            os.chmod(codex_bin, 0o755)
+            app_dir = root / "Codex Lab.app"
+            script = Path(__file__).resolve().parents[1] / "build_codex_lab_app.py"
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--codex-bin",
+                    str(codex_bin),
+                    "--app-dir",
+                    str(app_dir),
+                    "--short-version",
+                    "2026.7.22",
+                    "--embedded-cli-version",
+                    "1.2.3",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            with (app_dir / "Contents/Info.plist").open("rb") as handle:
+                info = plistlib.load(handle)
+            self.assertEqual(info["CFBundleShortVersionString"], "2026.7.22")
+            launcher = (app_dir / "Contents/MacOS/Codex Lab Launcher").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("EXPECTED_CLI_VERSION='1.2.3'", launcher)
 
     def test_build_script_rejects_metadata_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -442,7 +490,11 @@ printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state"
             script = Path(__file__).resolve().parents[1] / "build_codex_lab_app.py"
 
             for option, value, message in (
-                ("--short-version", "9.9.9", "Requested short version"),
+                (
+                    "--embedded-cli-version",
+                    "9.9.9",
+                    "Requested embedded CLI version",
+                ),
                 ("--source-commit", "b" * 64, "Requested source commit"),
             ):
                 with self.subTest(option=option):

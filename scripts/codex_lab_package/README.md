@@ -25,7 +25,10 @@ scripts/build_codex_lab_app.py \
 The builder reads version, source commit, and clean/dirty state directly from
 the embedded CLI. It rejects dirty builds or explicitly supplied metadata that
 does not match the binary, so launcher failures are caught while packaging.
-The generated bundle includes a distinct Codex Lab icon.
+`--short-version` controls the GUI bundle `CFBundleShortVersionString` and may
+differ from the embedded CLI version. Use `--embedded-cli-version` when release
+automation wants to pin the expected backend version explicitly. The generated
+bundle includes a distinct Codex Lab icon.
 
 The optional shim directory receives a `codex-lab` wrapper that executes the
 same embedded binary used by Desktop mode. The shim searches for `Codex Lab.app`

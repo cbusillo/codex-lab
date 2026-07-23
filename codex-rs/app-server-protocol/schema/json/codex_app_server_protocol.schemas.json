@@ -3048,6 +3048,17 @@
           "description": "Operating system for the running app-server target, for example `\"macos\"`, `\"linux\"`, or `\"windows\"`.",
           "type": "string"
         },
+        "serverBuild": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ServerBuildInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Actual compiled identity for the running app-server binary."
+        },
         "userAgent": {
           "type": "string"
         }
@@ -4142,6 +4153,40 @@
           "type": "string"
         }
       ]
+    },
+    "ServerBuildInfo": {
+      "description": "Compiled identity for the running app-server binary.\n\n`initialize.userAgent` remains the negotiated HTTP user-agent string for compatibility. This struct carries the immutable build identity consumers should use when comparing backend versions or release provenance.",
+      "properties": {
+        "buildChannel": {
+          "type": "string"
+        },
+        "buildProfile": {
+          "type": "string"
+        },
+        "dirtyState": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceCommit": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "buildChannel",
+        "buildProfile",
+        "dirtyState",
+        "schemaVersion",
+        "sourceCommit",
+        "version"
+      ],
+      "type": "object"
     },
     "ServerNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
