@@ -47,6 +47,7 @@ class SupervisorTest(unittest.TestCase):
             self.assertIn("EXPECTED_SOURCE_COMMIT=" + "b" * 40, runner)
             self.assertIn("LISTEN_URL=ws://127.0.0.1:4766", runner)
             self.assertIn("app-server --remote-control --listen", runner)
+            self.assertEqual(runner.count("in ''|*[!0-9]*) return 0"), 2)
             self.assertNotIn("app-server daemon start", runner)
             self.assertNotIn('"$MANAGED_CLI" app-server daemon pid-update-loop', runner)
 

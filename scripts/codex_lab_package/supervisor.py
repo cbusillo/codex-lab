@@ -206,7 +206,7 @@ json_field() {{
 verify_no_updater() {{
   [ ! -f "$UPDATER_PID_FILE" ] && return 0
   updater_pid=$(json_field "$UPDATER_PID_FILE" pid)
-  case "$updater_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$updater_pid" in ''|*[!0-9]*) return 0 ;; esac
   /bin/kill -0 "$updater_pid" 2>/dev/null || return 0
   updater_command=$(/bin/ps -p "$updater_pid" -o command= 2>/dev/null || true)
   case " $updater_command " in
@@ -217,7 +217,7 @@ verify_no_updater() {{
 verify_no_pid_daemon() {{
   [ ! -f "$DAEMON_PID_FILE" ] && return 0
   daemon_pid=$(json_field "$DAEMON_PID_FILE" pid)
-  case "$daemon_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$daemon_pid" in ''|*[!0-9]*) return 0 ;; esac
   /bin/kill -0 "$daemon_pid" 2>/dev/null || return 0
   daemon_command=$(/bin/ps -p "$daemon_pid" -o command= 2>/dev/null || true)
   case " $daemon_command " in
