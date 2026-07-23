@@ -10,10 +10,17 @@ use codex_login::StoredAccount;
 use codex_login::TokenData;
 use codex_login::token_data::IdTokenInfo;
 use codex_models_manager::bundled_models_response;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::PathExt;
+use core_test_support::apps_test_server::AppsTestServer;
+use core_test_support::apps_test_server::CALENDAR_EXTRACT_TEXT_TOOL_NAME;
+use core_test_support::apps_test_server::SEARCH_CALENDAR_EXTRACT_TEXT_TOOL as DOCUMENT_EXTRACT_TOOL;
+use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE as DOCUMENT_EXTRACT_NAMESPACE;
+use core_test_support::apps_test_server::recorded_apps_tool_call_by_name;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -1114,6 +1121,179 @@ async fn legacy_resume_compaction_and_fork_preserve_incremental_apps_context() -
 
     resumed.codex.shutdown_and_wait().await?;
     forked.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn divergent_execution_account_uploads_apps_files_with_execution_auth() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_accounts(home.as_ref())?;
+    let now = chrono::Utc::now();
+    codex_core::account_usage::record_usage_limit_hint(
+        home.path(),
+        CONTROL_STORED_ACCOUNT_ID,
+        /*plan*/ None,
+        Some(now + chrono::Duration::hours(1)),
+        now,
+        /*reached_type*/ None,
+    )?;
+
+    // Reuse the shared Apps test server for the file-capable tool surface, then
+    // record model-catalog fetches against the execution account.
+    let apps_server = AppsTestServer::mount(&server).await?;
+    mount_models(&server, &accounts.execution_authorization).await;
+
+    // File-upload endpoints must only ever be reached with the execution
+    // account's credentials.
+    Mock::given(method("POST"))
+        .and(path("/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "file_id": "file_exec",
+            "upload_url": format!("{}/upload/file_exec", server.uri()),
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/upload/file_exec"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/files/file_exec/uploaded"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "download_url": format!("{}/download/file_exec", server.uri()),
+            "file_name": "report.txt",
+            "mime_type": "text/plain",
+            "file_size_bytes": 11,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let call_id = "execution-file-call";
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call_with_namespace(
+                    call_id,
+                    DOCUMENT_EXTRACT_NAMESPACE,
+                    DOCUMENT_EXTRACT_TOOL,
+                    &json!({ "file": "report.txt" }).to_string(),
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let apps_base_url = apps_server.chatgpt_base_url.clone();
+    let fixture = test_codex()
+        .with_home(home.clone())
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.auto_switch_accounts_on_rate_limit = true;
+            config.model = Some(MODEL.to_string());
+            config.chatgpt_base_url = apps_base_url;
+            config
+                .features
+                .enable(Feature::Apps)
+                .expect("Apps feature should be configurable");
+            config
+                .features
+                .disable(Feature::ToolSuggest)
+                .expect("tool suggest feature should be configurable");
+        })
+        .build(&server)
+        .await?;
+
+    tokio::fs::write(fixture.cwd.path().join("report.txt"), b"hello world").await?;
+    fixture
+        .submit_turn_with_approval_and_permission_profile(
+            "Extract the report text with the app tool.",
+            AskForApproval::Never,
+            PermissionProfile::Disabled,
+        )
+        .await?;
+
+    // The model turn itself is authorized with the execution account.
+    let responses = response_mock.requests();
+    assert_eq!(responses.len(), 2);
+    for request in &responses {
+        assert_eq!(
+            request.header("authorization").as_deref(),
+            Some(accounts.execution_authorization.as_str())
+        );
+    }
+
+    let received_requests = server.received_requests().await.unwrap_or_default();
+    let authorization_of = |request: &Request| {
+        request
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    // The `/files` create + finalize calls carry the execution account's auth.
+    let file_requests = received_requests
+        .iter()
+        .filter(|request| request.url.path().starts_with("/files"))
+        .collect::<Vec<_>>();
+    assert_eq!(file_requests.len(), 2);
+    for request in &file_requests {
+        assert_eq!(
+            authorization_of(request).as_deref(),
+            Some(accounts.execution_authorization.as_str())
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("chatgpt-account-id")
+                .and_then(|value| value.to_str().ok()),
+            Some(EXECUTION_CHATGPT_ACCOUNT_ID)
+        );
+    }
+    // The control account's token must never appear on any upload-path request.
+    assert!(
+        received_requests
+            .iter()
+            .filter(|request| {
+                let path = request.url.path();
+                path.starts_with("/files") || path.starts_with("/upload/")
+            })
+            .all(|request| authorization_of(request).as_deref() != Some(CONTROL_AUTHORIZATION)),
+        "an upload-path request leaked the control account's auth"
+    );
+    // The Apps tool call that consumes the uploaded file also uses execution auth.
+    assert_eq!(
+        apps_tool_call_authorizations(&received_requests),
+        vec![accounts.execution_authorization.clone()]
+    );
+    let apps_tool_call =
+        recorded_apps_tool_call_by_name(&server, CALENDAR_EXTRACT_TEXT_TOOL_NAME).await;
+    assert_eq!(
+        apps_tool_call.pointer("/params/arguments/file/file_id"),
+        Some(&json!("file_exec"))
+    );
+
+    assert_eq!(
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
+        Some(CONTROL_STORED_ACCOUNT_ID.to_string())
+    );
+
     Ok(())
 }
 
