@@ -1,4 +1,4 @@
-"""Install and manage the pinned macOS Codex Lab daemon supervisor."""
+"""Install and manage the pinned macOS Codex Lab app-server supervisor."""
 
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -7,8 +7,10 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
@@ -20,9 +22,11 @@ from .live_smoke import process_executable_path
 from .live_smoke import read_cli_provenance
 
 
-DEFAULT_LABEL = "dev.everycode.codex-lab.daemon-supervisor"
+DEFAULT_LABEL = "dev.everycode.codex-lab.app-server.v1"
+LEGACY_LABEL = "dev.everycode.codex-lab.daemon-supervisor"
+DEFAULT_LISTEN_HOST = "127.0.0.1"
+DEFAULT_LISTEN_PORT = 4766
 MANAGED_CLI_RELATIVE_PATH = Path("packages/standalone/current/codex")
-SUPERVISOR_RELATIVE_PATH = Path("supervisor/codex-lab-daemon-supervisor")
 
 
 @dataclass(frozen=True)
@@ -48,14 +52,20 @@ class SupervisorPaths:
     lab_home: Path
     launch_agents_dir: Path
     label: str = DEFAULT_LABEL
+    listen_host: str = DEFAULT_LISTEN_HOST
+    listen_port: int = DEFAULT_LISTEN_PORT
 
     @property
     def managed_cli(self) -> Path:
         return self.lab_home / MANAGED_CLI_RELATIVE_PATH
 
     @property
+    def supervisor_dir(self) -> Path:
+        return self.lab_home / "supervisor/v1"
+
+    @property
     def runner(self) -> Path:
-        return self.lab_home / SUPERVISOR_RELATIVE_PATH
+        return self.supervisor_dir / "codex-lab-app-server"
 
     @property
     def plist(self) -> Path:
@@ -63,18 +73,25 @@ class SupervisorPaths:
 
     @property
     def stdout_log(self) -> Path:
-        return self.lab_home / "supervisor/supervisor.stdout.log"
+        return self.supervisor_dir / "app-server.stdout.log"
 
     @property
     def stderr_log(self) -> Path:
-        return self.lab_home / "supervisor/supervisor.stderr.log"
+        return self.supervisor_dir / "app-server.stderr.log"
+
+    @property
+    def listen_url(self) -> str:
+        return f"ws://{self.listen_host}:{self.listen_port}"
+
+    @property
+    def websocket_url(self) -> str:
+        return f"{self.listen_url}/rpc"
 
 
 def default_supervisor_paths(
     *,
     lab_home: Path | None = None,
     launch_agents_dir: Path | None = None,
-    label: str = DEFAULT_LABEL,
 ) -> SupervisorPaths:
     home = Path.home()
     return SupervisorPaths(
@@ -82,7 +99,6 @@ def default_supervisor_paths(
         launch_agents_dir=(launch_agents_dir or home / "Library/LaunchAgents")
         .expanduser()
         .resolve(),
-        label=label,
     )
 
 
@@ -112,7 +128,6 @@ def inspect_engine(
     provenance = read_cli_provenance(managed_cli)
     if provenance["build_profile"] != "release":
         raise ValueError("managed Codex Lab engine must use the release build profile")
-
     subprocess.run(
         [str(codesign_path), "--verify", "--strict", str(managed_cli)],
         check=True,
@@ -130,7 +145,6 @@ def inspect_engine(
     team_identifier = _signature_field(signature_output, "TeamIdentifier")
     if not signing_identifier or not team_identifier or team_identifier == "not set":
         raise ValueError("managed Codex Lab engine lacks a stable signing identity")
-
     return EngineIdentity(
         build_channel=provenance["build_channel"],
         build_profile=provenance["build_profile"],
@@ -147,184 +161,114 @@ def build_supervisor_runner(
     identity: EngineIdentity,
     *,
     tools: SupervisorTools = SupervisorTools(),
-    poll_seconds: int = 2,
     blocked_retry_seconds: int = 60,
 ) -> str:
-    if poll_seconds <= 0 or blocked_retry_seconds <= 0:
-        raise ValueError("supervisor retry intervals must be greater than zero")
-
+    if blocked_retry_seconds <= 0:
+        raise ValueError("supervisor retry interval must be greater than zero")
     quote = lambda value: shlex.quote(str(value))
     return f"""#!/bin/sh
 set -u
-
 LAB_HOME={quote(paths.lab_home)}
 MANAGED_CLI={quote(paths.managed_cli)}
+LISTEN_HOST={quote(paths.listen_host)}
+LISTEN_PORT={paths.listen_port}
+LISTEN_URL={quote(paths.listen_url)}
 EXPECTED_SHA256={quote(identity.sha256)}
 EXPECTED_SOURCE_COMMIT={quote(identity.source_commit)}
 EXPECTED_VERSION={quote(identity.version)}
-EXPECTED_BUILD_PROFILE={quote(identity.build_profile)}
-EXPECTED_BUILD_CHANNEL={quote(identity.build_channel)}
 EXPECTED_SIGNING_IDENTIFIER={quote(identity.signing_identifier)}
 EXPECTED_TEAM_IDENTIFIER={quote(identity.team_identifier)}
-EXPECTED_SOCKET="$LAB_HOME/app-server-control/app-server-control.sock"
 CODESIGN={quote(tools.codesign)}
 PLUTIL={quote(tools.plutil)}
 SHASUM={quote(tools.shasum)}
-POLL_SECONDS={poll_seconds}
 BLOCKED_RETRY_SECONDS={blocked_retry_seconds}
-RECOVERY_ATTEMPTS=120
 MAX_PROVENANCE_BYTES={MAX_PROVENANCE_BYTES}
 UPDATER_PID_FILE="$LAB_HOME/app-server-daemon/app-server-updater.pid"
+DAEMON_PID_FILE="$LAB_HOME/app-server-daemon/app-server.pid"
 PROVENANCE_FILE=
-DAEMON_FILE=
 LAST_STATE=
 
 cleanup() {{
   [ -z "$PROVENANCE_FILE" ] || /bin/rm -f "$PROVENANCE_FILE"
-  [ -z "$DAEMON_FILE" ] || /bin/rm -f "$DAEMON_FILE"
 }}
-
+discard_provenance() {{
+  cleanup
+  PROVENANCE_FILE=
+}}
 log_state() {{
-  state=$1
-  if [ "$state" != "$LAST_STATE" ]; then
-    printf '%s %s\n' "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')" "$state" >&2
-    LAST_STATE=$state
-  fi
+  [ "$1" = "$LAST_STATE" ] && return
+  printf '%s %s\n' "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >&2
+  LAST_STATE=$1
 }}
-
 json_field() {{
   "$PLUTIL" -extract "$2" raw -o - "$1" 2>/dev/null || true
 }}
-
 verify_no_updater() {{
-  if [ ! -f "$UPDATER_PID_FILE" ]; then
-    return 0
-  fi
+  [ ! -f "$UPDATER_PID_FILE" ] && return 0
   updater_pid=$(json_field "$UPDATER_PID_FILE" pid)
-  case "$updater_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  if ! /bin/kill -0 "$updater_pid" 2>/dev/null; then
-    return 0
-  fi
+  case "$updater_pid" in ''|*[!0-9]*) return 1 ;; esac
+  /bin/kill -0 "$updater_pid" 2>/dev/null || return 0
   updater_command=$(/bin/ps -p "$updater_pid" -o command= 2>/dev/null || true)
   case " $updater_command " in
     *" $MANAGED_CLI app-server daemon pid-update-loop "*) return 1 ;;
     *) return 0 ;;
   esac
 }}
-
+verify_no_pid_daemon() {{
+  [ ! -f "$DAEMON_PID_FILE" ] && return 0
+  daemon_pid=$(json_field "$DAEMON_PID_FILE" pid)
+  case "$daemon_pid" in ''|*[!0-9]*) return 1 ;; esac
+  /bin/kill -0 "$daemon_pid" 2>/dev/null || return 0
+  daemon_command=$(/bin/ps -p "$daemon_pid" -o command= 2>/dev/null || true)
+  case " $daemon_command " in
+    *" $MANAGED_CLI app-server --remote-control --listen unix:// "*) return 1 ;;
+    *) return 0 ;;
+  esac
+}}
 verify_engine() {{
-  if [ ! -x "$MANAGED_CLI" ]; then
-    return 1
-  fi
+  [ -x "$MANAGED_CLI" ] || return 1
   actual_sha256=$("$SHASUM" -a 256 "$MANAGED_CLI" | /usr/bin/awk '{{ print $1 }}')
-  if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
-    return 1
-  fi
-  if ! "$CODESIGN" --verify --strict "$MANAGED_CLI" >/dev/null 2>&1; then
-    return 1
-  fi
+  [ "$actual_sha256" = "$EXPECTED_SHA256" ] || return 1
+  "$CODESIGN" --verify --strict "$MANAGED_CLI" >/dev/null 2>&1 || return 1
   signature=$("$CODESIGN" -dvvv "$MANAGED_CLI" 2>&1 || true)
   signing_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "Identifier" {{ print substr($0, index($0, "=") + 1); exit }}')
   team_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "TeamIdentifier" {{ print substr($0, index($0, "=") + 1); exit }}')
-  if [ "$signing_identifier" != "$EXPECTED_SIGNING_IDENTIFIER" ] \
-    || [ "$team_identifier" != "$EXPECTED_TEAM_IDENTIFIER" ]; then
-    return 1
-  fi
-
-  PROVENANCE_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-supervisor-provenance.XXXXXX")
+  [ "$signing_identifier" = "$EXPECTED_SIGNING_IDENTIFIER" ] || return 1
+  [ "$team_identifier" = "$EXPECTED_TEAM_IDENTIFIER" ] || return 1
+  PROVENANCE_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-supervisor.XXXXXX")
   if ! "$MANAGED_CLI" debug provenance --json >"$PROVENANCE_FILE"; then
-    /bin/rm -f "$PROVENANCE_FILE"
-    PROVENANCE_FILE=
+    discard_provenance
     return 1
   fi
   provenance_bytes=$(/usr/bin/wc -c <"$PROVENANCE_FILE" | /usr/bin/tr -d '[:space:]')
   case "$provenance_bytes" in
-    ''|*[!0-9]*)
-      /bin/rm -f "$PROVENANCE_FILE"
-      PROVENANCE_FILE=
-      return 1
-      ;;
+    ''|*[!0-9]*) discard_provenance; return 1 ;;
   esac
   if [ "$provenance_bytes" -eq 0 ] || [ "$provenance_bytes" -gt "$MAX_PROVENANCE_BYTES" ]; then
-    /bin/rm -f "$PROVENANCE_FILE"
-    PROVENANCE_FILE=
+    discard_provenance
     return 1
   fi
-
   schema_version=$(json_field "$PROVENANCE_FILE" schema_version)
   version=$(json_field "$PROVENANCE_FILE" version)
   source_commit=$(json_field "$PROVENANCE_FILE" source_commit)
   dirty_state=$(json_field "$PROVENANCE_FILE" dirty_state)
-  build_profile=$(json_field "$PROVENANCE_FILE" build_profile)
-  build_channel=$(json_field "$PROVENANCE_FILE" build_channel)
   executable_path=$(json_field "$PROVENANCE_FILE" executable_path)
-  /bin/rm -f "$PROVENANCE_FILE"
-  PROVENANCE_FILE=
-
+  discard_provenance
   [ "$schema_version" = 1 ] \
     && [ "$version" = "$EXPECTED_VERSION" ] \
     && [ "$source_commit" = "$EXPECTED_SOURCE_COMMIT" ] \
     && [ "$dirty_state" = clean ] \
-    && [ "$build_profile" = "$EXPECTED_BUILD_PROFILE" ] \
-    && [ "$build_channel" = "$EXPECTED_BUILD_CHANNEL" ] \
     && [ "$executable_path" -ef "$MANAGED_CLI" ] \
-    && verify_no_updater
-}}
-
-verify_daemon() {{
-  DAEMON_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-supervisor-daemon.XXXXXX")
-  if ! CODEX_HOME="$LAB_HOME" CODEX_LAB_HOME="$LAB_HOME" \
-    "$MANAGED_CLI" app-server daemon version >"$DAEMON_FILE" 2>/dev/null; then
-    /bin/rm -f "$DAEMON_FILE"
-    DAEMON_FILE=
-    return 1
-  fi
-  daemon_status=$(json_field "$DAEMON_FILE" status)
-  daemon_backend=$(json_field "$DAEMON_FILE" backend)
-  daemon_managed_path=$(json_field "$DAEMON_FILE" managedCodexPath)
-  daemon_socket=$(json_field "$DAEMON_FILE" socketPath)
-  daemon_version=$(json_field "$DAEMON_FILE" appServerVersion)
-  /bin/rm -f "$DAEMON_FILE"
-  DAEMON_FILE=
-
-  [ "$daemon_status" = running ] \
-    && [ "$daemon_backend" = pid ] \
-    && [ "$daemon_managed_path" -ef "$MANAGED_CLI" ] \
-    && [ "$daemon_socket" = "$EXPECTED_SOCKET" ] \
-    && [ "$daemon_version" = "$EXPECTED_VERSION" ]
-}}
-
-recover_daemon() {{
-  CODEX_HOME="$LAB_HOME" CODEX_LAB_HOME="$LAB_HOME" \
-    "$MANAGED_CLI" app-server daemon start || true
-  attempt=0
-  while [ "$attempt" -lt "$RECOVERY_ATTEMPTS" ]; do
-    verify_daemon && return 0
-    attempt=$((attempt + 1))
-    /bin/sleep 0.5
-  done
-  return 1
+    && verify_no_updater \
+    && verify_no_pid_daemon
 }}
 
 command=${{1:-run}}
-case "$command" in
-  check)
-    verify_engine
-    exit $?
-    ;;
-  status)
-    verify_engine && verify_daemon
-    exit $?
-    ;;
-  run) ;;
-  *)
-    echo "usage: $0 [run|check|status]" >&2
-    exit 64
-    ;;
-esac
-
+if [ "$command" = check ]; then
+  verify_engine
+  exit $?
+fi
+[ "$command" = run ] || {{ echo "usage: $0 [run|check]" >&2; exit 64; }}
 trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
 while :; do
@@ -333,20 +277,16 @@ while :; do
     /bin/sleep "$BLOCKED_RETRY_SECONDS"
     continue
   fi
-  if verify_daemon; then
-    log_state "state=running version=$EXPECTED_VERSION"
-    /bin/sleep "$POLL_SECONDS"
-    continue
-  fi
-
-  log_state "state=recovering reason=daemon-unavailable"
-  if ! recover_daemon; then
-    log_state "state=blocked reason=daemon-recovery-timeout"
+  if /usr/bin/nc -z "$LISTEN_HOST" "$LISTEN_PORT" >/dev/null 2>&1; then
+    log_state "state=blocked reason=listen-port-occupied"
     /bin/sleep "$BLOCKED_RETRY_SECONDS"
     continue
   fi
-  log_state "state=running version=$EXPECTED_VERSION"
+  break
 done
+log_state "state=starting url=$LISTEN_URL"
+exec /usr/bin/env CODEX_HOME="$LAB_HOME" CODEX_LAB_HOME="$LAB_HOME" \
+  "$MANAGED_CLI" app-server --remote-control --listen "$LISTEN_URL"
 """
 
 
@@ -357,6 +297,7 @@ def build_launch_agent_plist(paths: SupervisorPaths) -> bytes:
                 "CODEX_HOME": str(paths.lab_home),
                 "CODEX_LAB_HOME": str(paths.lab_home),
             },
+            "ExitTimeOut": 10,
             "KeepAlive": True,
             "Label": paths.label,
             "ProcessType": "Background",
@@ -364,7 +305,7 @@ def build_launch_agent_plist(paths: SupervisorPaths) -> bytes:
             "RunAtLoad": True,
             "StandardErrorPath": str(paths.stderr_log),
             "StandardOutPath": str(paths.stdout_log),
-            "ThrottleInterval": 10,
+            "ThrottleInterval": 1,
         },
         sort_keys=True,
     )
@@ -389,32 +330,49 @@ def install_supervisor(
         expected_source_commit=expected_source_commit,
         expected_version=expected_version,
     )
-    runner = build_supervisor_runner(paths, identity, tools=tools)
-    plist = build_launch_agent_plist(paths)
+    _stop_pid_daemon(paths)
     service = _service_name(paths.label, uid)
     domain = service.rsplit("/", maxsplit=1)[0]
-    was_loaded = _launchctl_loaded(launchctl_path, service)
+    current_pid = _launchctl_pid(launchctl_path, service)
+    if _port_is_listening(paths.listen_host, paths.listen_port) and not (
+        current_pid and _pid_listens(current_pid, paths.listen_port)
+    ):
+        raise RuntimeError(f"listen port {paths.listen_port} is already occupied")
     previous_runner = _snapshot(paths.runner)
     previous_plist = _snapshot(paths.plist)
-
+    was_loaded = current_pid is not None
+    old_service_stopped = False
+    new_service_bootstrapped = False
     try:
-        _write_atomic(paths.runner, runner.encode(), 0o755)
-        _write_atomic(paths.plist, plist, 0o644)
+        _write_atomic(
+            paths.runner,
+            build_supervisor_runner(paths, identity, tools=tools).encode(),
+            0o755,
+        )
+        _write_atomic(paths.plist, build_launch_agent_plist(paths), 0o644)
         subprocess.run([str(paths.runner), "check"], check=True)
         if was_loaded:
             _launchctl(launchctl_path, "bootout", service)
+            old_service_stopped = True
         _launchctl(launchctl_path, "bootstrap", domain, str(paths.plist))
+        new_service_bootstrapped = True
         _launchctl(launchctl_path, "kickstart", "-k", service)
-        _wait_for_health(paths.runner, health_timeout_seconds)
-    except Exception:
-        _launchctl(launchctl_path, "bootout", service, check=False)
-        _restore(paths.runner, previous_runner)
-        _restore(paths.plist, previous_plist)
-        if was_loaded and previous_plist is not None:
-            _launchctl(launchctl_path, "bootstrap", domain, str(paths.plist))
-            _launchctl(launchctl_path, "kickstart", "-k", service)
+        _wait_for_health(paths, launchctl_path, service, health_timeout_seconds)
+    except Exception as install_error:
+        try:
+            if new_service_bootstrapped:
+                _launchctl(launchctl_path, "bootout", service, check=False)
+            _restore(paths.runner, previous_runner)
+            _restore(paths.plist, previous_plist)
+            if old_service_stopped and previous_plist is not None:
+                _launchctl(launchctl_path, "bootstrap", domain, str(paths.plist))
+                _launchctl(launchctl_path, "kickstart", "-k", service)
+        except Exception as rollback_error:
+            raise RuntimeError(
+                f"supervisor rollback failed: {rollback_error}"
+            ) from install_error
         raise
-
+    _remove_legacy_supervisor(paths, launchctl_path, uid)
     return {
         "engine": asdict(identity),
         "label": paths.label,
@@ -423,6 +381,7 @@ def install_supervisor(
         "schemaVersion": 1,
         "service": service,
         "status": "installed",
+        "websocketUrl": paths.websocket_url,
     }
 
 
@@ -433,41 +392,26 @@ def supervisor_status(
     uid: int | None = None,
 ) -> dict[str, Any]:
     service = _service_name(paths.label, uid)
-    loaded = _launchctl_loaded(launchctl_path, service)
-    healthy = False
-    if paths.runner.is_file():
-        healthy = (
-            subprocess.run(
-                [str(paths.runner), "status"], capture_output=True
-            ).returncode
-            == 0
-        )
-    daemon = None
-    if paths.managed_cli.is_file():
-        completed = subprocess.run(
-            [str(paths.managed_cli), "app-server", "daemon", "version"],
-            capture_output=True,
-            env={
-                **os.environ,
-                "CODEX_HOME": str(paths.lab_home),
-                "CODEX_LAB_HOME": str(paths.lab_home),
-            },
-            text=True,
-        )
-        if completed.returncode == 0:
-            try:
-                daemon = json.loads(completed.stdout)
-            except json.JSONDecodeError:
-                daemon = {"error": "invalid daemon JSON"}
+    pid = _launchctl_pid(launchctl_path, service)
+    pin_valid = (
+        paths.runner.is_file()
+        and subprocess.run([str(paths.runner), "check"], capture_output=True).returncode
+        == 0
+    )
+    process_matches = pid is not None and _pid_matches(paths, pid)
+    listening = pid is not None and _pid_listens(pid, paths.listen_port)
     return {
-        "daemon": daemon,
-        "healthy": healthy,
+        "healthy": bool(pin_valid and process_matches and listening),
         "installed": paths.runner.is_file() and paths.plist.is_file(),
         "label": paths.label,
-        "loaded": loaded,
+        "listening": listening,
+        "loaded": pid is not None,
+        "pid": pid,
+        "processMatches": process_matches,
         "schemaVersion": 1,
         "service": service,
         "updaterRunning": _updater_pid(paths) is not None,
+        "websocketUrl": paths.websocket_url,
     }
 
 
@@ -478,32 +422,14 @@ def uninstall_supervisor(
     uid: int | None = None,
 ) -> dict[str, Any]:
     service = _service_name(paths.label, uid)
-    if _launchctl_loaded(launchctl_path, service):
+    if _launchctl_pid(launchctl_path, service) is not None:
         _launchctl(launchctl_path, "bootout", service)
     _stop_updater(paths)
-
-    daemon_stopped = False
-    if paths.managed_cli.is_file():
-        completed = subprocess.run(
-            [str(paths.managed_cli), "app-server", "daemon", "stop"],
-            capture_output=True,
-            env={
-                **os.environ,
-                "CODEX_HOME": str(paths.lab_home),
-                "CODEX_LAB_HOME": str(paths.lab_home),
-            },
-            text=True,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                completed.stderr.strip() or "failed to stop managed daemon"
-            )
-        daemon_stopped = True
-
+    _stop_pid_daemon(paths)
+    _remove_legacy_supervisor(paths, launchctl_path, uid)
     paths.plist.unlink(missing_ok=True)
-    shutil.rmtree(paths.runner.parent, ignore_errors=True)
+    shutil.rmtree(paths.supervisor_dir, ignore_errors=True)
     return {
-        "daemonStopped": daemon_stopped,
         "label": paths.label,
         "schemaVersion": 1,
         "service": service,
@@ -513,10 +439,14 @@ def uninstall_supervisor(
 
 def _signature_field(output: str, name: str) -> str:
     prefix = f"{name}="
-    for line in output.splitlines():
-        if line.startswith(prefix):
-            return line.removeprefix(prefix).strip()
-    return ""
+    return next(
+        (
+            line.removeprefix(prefix).strip()
+            for line in output.splitlines()
+            if line.startswith(prefix)
+        ),
+        "",
+    )
 
 
 def _require_expected_identity(
@@ -526,29 +456,18 @@ def _require_expected_identity(
     expected_source_commit: str,
     expected_version: str,
 ) -> None:
-    expected = {
-        "sha256": expected_sha256,
-        "source_commit": expected_source_commit,
-        "version": expected_version,
-    }
-    actual = {
-        "sha256": identity.sha256,
-        "source_commit": identity.source_commit,
-        "version": identity.version,
-    }
-    mismatched = [field for field in expected if expected[field] != actual[field]]
-    if mismatched:
+    actual = (identity.sha256, identity.source_commit, identity.version)
+    expected = (expected_sha256, expected_source_commit, expected_version)
+    if actual != expected:
         raise ValueError(
-            "managed Codex Lab engine does not match the expected candidate: "
-            + ", ".join(mismatched)
+            "managed Codex Lab engine does not match the expected candidate"
         )
 
 
 def _updater_pid(paths: SupervisorPaths) -> int | None:
     pid_file = paths.lab_home / "app-server-daemon/app-server-updater.pid"
     try:
-        record = json.loads(pid_file.read_text(encoding="utf-8"))
-        pid = record["pid"]
+        pid = json.loads(pid_file.read_text(encoding="utf-8"))["pid"]
     except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     if not isinstance(pid, int) or pid <= 1:
@@ -562,43 +481,58 @@ def _updater_pid(paths: SupervisorPaths) -> int | None:
         return None
     if executable != paths.managed_cli.resolve():
         return None
-    if "app-server daemon pid-update-loop" not in command:
-        return None
-    return pid
+    return pid if "app-server daemon pid-update-loop" in command else None
 
 
 def _stop_updater(paths: SupervisorPaths) -> None:
+    pid_file = paths.lab_home / "app-server-daemon/app-server-updater.pid"
     pid = _updater_pid(paths)
     if pid is None:
+        pid_file.unlink(missing_ok=True)
         return
     os.kill(pid, 15)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         if _updater_pid(paths) is None:
+            pid_file.unlink(missing_ok=True)
             return
         time.sleep(0.1)
+    os.kill(pid, 9)
+    time.sleep(0.1)
+    if _updater_pid(paths) is None:
+        pid_file.unlink(missing_ok=True)
+        return
     raise TimeoutError(f"timed out stopping Codex Lab updater process {pid}")
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _stop_pid_daemon(paths: SupervisorPaths) -> None:
+    completed = subprocess.run(
+        [str(paths.managed_cli), "app-server", "daemon", "stop"],
+        capture_output=True,
+        env={
+            **os.environ,
+            "CODEX_HOME": str(paths.lab_home),
+            "CODEX_LAB_HOME": str(paths.lab_home),
+        },
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"failed to stop legacy PID daemon: {detail}")
 
 
 def _service_name(label: str, uid: int | None) -> str:
     return f"gui/{os.getuid() if uid is None else uid}/{label}"
 
 
-def _launchctl_loaded(launchctl_path: Path, service: str) -> bool:
-    return (
-        subprocess.run(
-            [str(launchctl_path), "print", service], capture_output=True
-        ).returncode
-        == 0
+def _launchctl_pid(launchctl_path: Path, service: str) -> int | None:
+    completed = subprocess.run(
+        [str(launchctl_path), "print", service], capture_output=True, text=True
     )
+    if completed.returncode != 0:
+        return None
+    match = re.search(r"^\s*pid = ([0-9]+)$", completed.stdout, re.MULTILINE)
+    return int(match.group(1)) if match else None
 
 
 def _launchctl(
@@ -611,22 +545,87 @@ def _launchctl(
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"launchctl {' '.join(args)} failed: {detail}")
     if args[:1] == ("bootout",) and completed.returncode == 0:
-        service = args[1]
         deadline = time.monotonic() + 10
-        while _launchctl_loaded(launchctl_path, service):
+        while _launchctl_pid(launchctl_path, args[1]) is not None:
             if time.monotonic() >= deadline:
-                raise TimeoutError(f"timed out unloading {service}")
+                raise TimeoutError(f"timed out unloading {args[1]}")
             time.sleep(0.1)
     return completed
 
 
-def _wait_for_health(runner: Path, timeout_seconds: float) -> None:
+def _wait_for_health(
+    paths: SupervisorPaths,
+    launchctl_path: Path,
+    service: str,
+    timeout_seconds: float,
+) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if subprocess.run([str(runner), "status"], capture_output=True).returncode == 0:
+        pid = _launchctl_pid(launchctl_path, service)
+        if pid and _pid_matches(paths, pid) and _pid_listens(pid, paths.listen_port):
             return
         time.sleep(0.25)
-    raise TimeoutError("Codex Lab supervisor did not produce a healthy daemon")
+    raise TimeoutError("Codex Lab app-server supervisor did not become healthy")
+
+
+def _pid_matches(paths: SupervisorPaths, pid: int) -> bool:
+    try:
+        command = subprocess.check_output(
+            ["/bin/ps", "-p", str(pid), "-o", "command="], text=True
+        )
+    except subprocess.SubprocessError:
+        return False
+    return (
+        process_executable_path(pid) == paths.managed_cli.resolve()
+        and " app-server " in f" {command.strip()} "
+        and " --remote-control " in f" {command.strip()} "
+        and f" --listen {paths.listen_url} " in f" {command.strip()} "
+    )
+
+
+def _pid_listens(pid: int, port: int) -> bool:
+    return (
+        subprocess.run(
+            [
+                "/usr/sbin/lsof",
+                "-n",
+                "-P",
+                "-a",
+                "-p",
+                str(pid),
+                f"-iTCP:{port}",
+                "-sTCP:LISTEN",
+            ],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
+def _port_is_listening(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def _remove_legacy_supervisor(
+    paths: SupervisorPaths, launchctl_path: Path, uid: int | None
+) -> None:
+    service = _service_name(LEGACY_LABEL, uid)
+    if _launchctl_pid(launchctl_path, service) is not None:
+        _launchctl(launchctl_path, "bootout", service)
+    (paths.launch_agents_dir / f"{LEGACY_LABEL}.plist").unlink(missing_ok=True)
+    (paths.lab_home / "supervisor/codex-lab-daemon-supervisor").unlink(missing_ok=True)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _write_atomic(path: Path, contents: bytes, mode: int) -> None:
@@ -654,6 +653,5 @@ def _snapshot(path: Path) -> tuple[bytes, int] | None:
 def _restore(path: Path, snapshot: tuple[bytes, int] | None) -> None:
     if snapshot is None:
         path.unlink(missing_ok=True)
-        return
-    contents, mode = snapshot
-    _write_atomic(path, contents, mode)
+    else:
+        _write_atomic(path, snapshot[0], snapshot[1])
