@@ -15,6 +15,8 @@ for current status and open product decisions.
 - Candidate anchor: `9d2eea2238c09c995e200d6ec0ad2492d2fada3b`.
 - Real `ort` inventory: 295 unresolved paths (279 content, 9 add/add,
   7 modify/delete) and 773 touched paths before aborting the trial merge.
+- The deterministic merge-tree inventory also identifies 478 non-conflicting
+  paths where a normal merge would silently retain local influence.
 
 The anchor has the upstream snapshot as its first parent, the local baseline as
 its second parent, and a tree identical to the upstream snapshot. Product-owned
