@@ -2,11 +2,13 @@
 
 This helper builds a macOS `Codex Lab.app` launcher bundle. The bundle does not
 contain or modify OpenAI's signed desktop app. Instead, it embeds a Codex Lab
-CLI binary, binds its source commit, version, and SHA-256 digest, sets
-`CODEX_CLI_PATH` to that exact path, and launches through LaunchServices. The
-official app is bound to the persistent engine by setting `CODEX_HOME` and
-`CODEX_LAB_HOME` to the same Lab home and enabling
-`CODEX_APP_SERVER_USE_LOCAL_DAEMON=1`.
+CLI binary and binds its source commit, version, and SHA-256 digest. The official
+app is bound to the persistent engine by setting `CODEX_HOME` and
+`CODEX_LAB_HOME` to the same Lab home, enabling
+`CODEX_APP_SERVER_USE_LOCAL_DAEMON=1`, and explicitly setting
+`CODEX_CLI_PATH` and `CODEX_APP_SERVER_FORCE_CLI` to empty values. Current
+official clients use a non-empty CLI path or `CODEX_APP_SERVER_FORCE_CLI=1` to
+select stdio instead of the local daemon.
 
 The launcher accepts only intact `com.openai.codex` bundles signed by OpenAI
 team `2DC432GLL2`. After an optional build-time override, it checks system and

@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 import sys
 import tempfile
 import unittest
@@ -6,13 +7,42 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_lab_package.live_smoke import matching_app_server_pids
+from codex_lab_package.live_smoke import desktop_transport_proof
+from codex_lab_package.live_smoke import is_serving_app_server_command
 from codex_lab_package.live_smoke import process_has_environment
 from codex_lab_package.live_smoke import process_has_ancestor
 from codex_lab_package.live_smoke import validate_cli_provenance
 from codex_lab_package.live_smoke import validate_matching_build_provenance
+from codex_lab_package.live_smoke import validate_timeout_seconds
 
 
 class LiveSmokeTest(unittest.TestCase):
+    def test_timeout_and_desktop_transport_proof(self) -> None:
+        validate_timeout_seconds(10.0)
+        for timeout_seconds in (9.9, math.inf, math.nan):
+            with self.subTest(timeout_seconds=timeout_seconds):
+                with self.assertRaisesRegex(ValueError, "finite and at least"):
+                    validate_timeout_seconds(timeout_seconds)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_root = Path(temp_dir)
+            log_path = log_root / "codex-desktop-test-42-t0-i1.log"
+            log_path.write_text(
+                "Transport start success connectionId=1 hostId=local transport=websocket\n"
+                "initialize_handshake_result outcome=success transportKind=websocket\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                desktop_transport_proof([42], log_root=log_root),
+                {
+                    "desktopLogPath": str(log_path.resolve()),
+                    "desktopTransport": "websocket",
+                },
+            )
+            log_path.write_text("stdio_transport_spawned pid=43\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "bundled stdio"):
+                desktop_transport_proof([42], log_root=log_root)
+
     def test_provenance_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             cli_path = Path(temp_dir) / "codex-lab"
@@ -74,12 +104,15 @@ class LiveSmokeTest(unittest.TestCase):
             (10, 1, "/Applications/ChatGPT.app/Contents/Resources/codex app-server"),
             (20, 1, "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
             (21, 20, f"{cli_path} -c features.code_mode_host=true app-server"),
+            (22, 20, f"{cli_path} app-server daemon version"),
         ]
         paths = {
             10: Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
             21: cli_path.resolve(),
         }
         self.assertEqual(matching_app_server_pids(rows, cli_path, paths.get), [21])
+        self.assertTrue(is_serving_app_server_command(rows[2][2]))
+        self.assertFalse(is_serving_app_server_command(rows[3][2]))
         self.assertTrue(process_has_ancestor(21, {20}, rows))
         process = (
             "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT "
@@ -100,5 +133,21 @@ class LiveSmokeTest(unittest.TestCase):
                 20,
                 {"CODEX_HOME": "/tmp/other"},
                 lambda _pid: process,
+            )
+        )
+        self.assertTrue(
+            process_has_environment(
+                20,
+                {"CODEX_HOME": "/tmp/lab"},
+                lambda _pid: process,
+                forbidden={"CODEX_CLI_PATH"},
+            )
+        )
+        self.assertFalse(
+            process_has_environment(
+                20,
+                {"CODEX_HOME": "/tmp/lab"},
+                lambda _pid: process + " CODEX_CLI_PATH=/tmp/codex",
+                forbidden={"CODEX_CLI_PATH"},
             )
         )

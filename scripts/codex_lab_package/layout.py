@@ -399,7 +399,7 @@ if [ "$daemon_status" != "running" ]; then
 fi
 expected_daemon_socket="$LAB_HOME/app-server-control/app-server-control.sock"
 if [ "$daemon_backend" != "pid" ] \
-  || [ "$daemon_managed_codex_path" != "$MANAGED_CLI" ] \
+  || [ ! "$daemon_managed_codex_path" -ef "$MANAGED_CLI" ] \
   || [ "$daemon_socket_path" != "$expected_daemon_socket" ] \
   || [ "$daemon_app_server_version" != "$version" ]; then
   echo "Persistent Codex Lab daemon does not match the managed engine under $LAB_HOME." >&2
@@ -410,8 +410,10 @@ trap - EXIT HUP INT TERM
 
 echo "Selected OpenAI coding desktop app: $CODEX_APP" >&2
 echo "Codex Lab CLI provenance: commit=$source_commit dirty=$dirty_state profile=$build_profile channel=$build_channel version=$version" >&2
+unset CODEX_CLI_PATH CODEX_APP_SERVER_FORCE_CLI
 exec "$OPEN" -n \
-  --env "CODEX_CLI_PATH=$LAB_CLI" \
+  --env "CODEX_CLI_PATH=" \
+  --env "CODEX_APP_SERVER_FORCE_CLI=" \
   --env "CODEX_HOME=$LAB_HOME" \
   --env "CODEX_LAB_HOME=$LAB_HOME" \
   --env "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1" \
