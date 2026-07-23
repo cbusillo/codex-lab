@@ -3,14 +3,25 @@
 This helper builds a macOS `Codex Lab.app` launcher bundle. The bundle does not
 contain or modify OpenAI's signed desktop app. Instead, it embeds a Codex Lab
 CLI binary, binds its source commit, version, and SHA-256 digest, sets
-`CODEX_CLI_PATH` to that exact path, and launches through LaunchServices.
+`CODEX_CLI_PATH` to that exact path, and launches through LaunchServices. The
+official app is bound to the persistent engine by setting `CODEX_HOME` and
+`CODEX_LAB_HOME` to the same Lab home and enabling
+`CODEX_APP_SERVER_USE_LOCAL_DAEMON=1`.
 
 The launcher accepts only intact `com.openai.codex` bundles signed by OpenAI
 team `2DC432GLL2`. After an optional build-time override, it checks system and
 user `ChatGPT.app` installs, then legacy `Codex.app` installs. It never patches,
 re-signs, or redistributes the official bundle. If that app is already running,
 the launcher fails closed; quit it before launching `Codex Lab.app` so the new
-process inherits `CODEX_CLI_PATH`.
+process inherits the persistent-daemon environment. The launcher also fails
+closed when the managed daemon is unavailable, preventing silent fallback to a
+bundled stdio app-server. The embedded and managed engines must report the same
+bounded source/build provenance. Start the matching managed daemon first with:
+
+```shell
+export CODEX_LAB_HOME="${CODEX_LAB_HOME:-$HOME/.codex-lab}"
+"$CODEX_LAB_HOME/packages/standalone/current/codex" app-server daemon start
+```
 
 Example:
 
@@ -49,9 +60,9 @@ python3 scripts/codex_lab_package/live_smoke.py \
   "/Applications/Codex Lab.app"
 ```
 
-The check launches a fresh GUI instance and emits bounded JSON only after a new
-descendant `app-server` executable resolves exactly to the embedded CLI. The
-evidence includes its PID, selected app, and fixed source/build provenance.
+The check launches a fresh GUI instance and emits bounded JSON only after the
+GUI is running beside the managed persistent daemon. The embedded and managed
+CLI builds must have matching fixed source/build provenance.
 
 The GitHub workflow uploads `codex-lab-distribution.json` beside the app zip,
 shim zip, and `SHA256SUMS`. The manifest records artifact roles, sizes,

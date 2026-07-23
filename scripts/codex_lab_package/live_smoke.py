@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove that Codex Lab launches an app-server from its embedded CLI."""
+"""Prove that Codex Lab launches against its persistent local daemon."""
 
 import argparse
 import ctypes
@@ -24,6 +24,7 @@ PROVENANCE_FIELDS = (
 )
 SELECTED_APP_PREFIX = "Selected OpenAI coding desktop app: "
 SOURCE_COMMIT_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+MANAGED_CLI_RELATIVE_PATH = Path("packages/standalone/current/codex")
 
 
 def main() -> None:
@@ -53,9 +54,18 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
             raise FileNotFoundError(f"Codex Lab {label} does not exist: {path}")
 
     provenance = read_cli_provenance(cli_path)
+    lab_home = Path(
+        os.environ.get("CODEX_LAB_HOME", Path.home() / ".codex-lab")
+    ).resolve()
+    managed_cli_path = lab_home / MANAGED_CLI_RELATIVE_PATH
+    if not managed_cli_path.is_file():
+        raise FileNotFoundError(
+            f"managed Codex Lab CLI does not exist: {managed_cli_path}"
+        )
+    managed_provenance = read_cli_provenance(managed_cli_path)
+    validate_matching_build_provenance(provenance, managed_provenance)
     before_rows = read_process_rows()
     before_pids = {pid for pid, _ppid, _command in before_rows}
-    existing_servers = set(matching_app_server_pids(before_rows, cli_path))
     launch = subprocess.run([str(launcher)], capture_output=True, text=True, timeout=20)
     if launch.returncode != 0:
         raise RuntimeError(
@@ -65,6 +75,12 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
 
     selected_app = Path(selected_app_from_launcher_output(launch.stderr)).resolve()
     gui_executable = official_app_executable_path(selected_app)
+    expected_environment = {
+        "CODEX_APP_SERVER_USE_LOCAL_DAEMON": "1",
+        "CODEX_CLI_PATH": str(cli_path.resolve()),
+        "CODEX_HOME": str(lab_home),
+        "CODEX_LAB_HOME": str(lab_home),
+    }
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         rows = read_process_rows()
@@ -73,20 +89,38 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
             for pid, _ppid, _command in rows
             if pid not in before_pids and process_executable_path(pid) == gui_executable
         }
-        for pid in matching_app_server_pids(rows, cli_path):
-            if pid not in existing_servers and process_has_ancestor(
-                pid, gui_pids, rows
-            ):
-                return {
-                    "appServerExecutablePath": str(cli_path.resolve()),
-                    "appServerPid": pid,
-                    "guiPids": sorted(gui_pids),
-                    "officialAppPath": str(selected_app),
-                    "provenance": provenance,
-                    "schemaVersion": 1,
-                }
+        matching_gui_pids = sorted(
+            pid
+            for pid in gui_pids
+            if process_has_environment(pid, expected_environment)
+        )
+        new_gui_app_servers = [
+            pid
+            for pid, _ppid, command in rows
+            if pid not in before_pids
+            and "app-server" in command.split()
+            and process_has_ancestor(pid, gui_pids, rows)
+        ]
+        if new_gui_app_servers:
+            raise RuntimeError(
+                "official app launched a bundled stdio app-server instead of the persistent daemon"
+            )
+        managed_servers = sorted(matching_app_server_pids(rows, managed_cli_path))
+        if matching_gui_pids and managed_servers:
+            return {
+                "appServerExecutablePath": str(managed_cli_path.resolve()),
+                "appServerPid": managed_servers[0],
+                "guiPids": matching_gui_pids,
+                "managedProvenance": managed_provenance,
+                "mode": "persistentLocalDaemon",
+                "officialAppPath": str(selected_app),
+                "provenance": provenance,
+                "schemaVersion": 1,
+            }
         time.sleep(0.2)
-    raise TimeoutError(f"timed out waiting for an app-server using {cli_path}")
+    raise TimeoutError(
+        f"timed out waiting for the official app to use {managed_cli_path}"
+    )
 
 
 def read_cli_provenance(cli_path: Path) -> dict[str, Any]:
@@ -133,6 +167,21 @@ def validate_cli_provenance(provenance: Any, cli_path: Path) -> None:
         raise ValueError("Codex Lab CLI provenance does not match the embedded binary")
 
 
+def validate_matching_build_provenance(
+    embedded: dict[str, Any], managed: dict[str, Any]
+) -> None:
+    mismatched = [
+        field
+        for field in PROVENANCE_FIELDS
+        if embedded.get(field) != managed.get(field)
+    ]
+    if mismatched:
+        fields = ", ".join(mismatched)
+        raise ValueError(
+            f"embedded and managed Codex Lab builds do not match: {fields}"
+        )
+
+
 def read_process_rows() -> list[tuple[int, int, str]]:
     output = subprocess.check_output(
         ["/bin/ps", "-axo", "pid=,ppid=,command="], text=True
@@ -175,6 +224,28 @@ def process_executable_path(pid: int) -> Path | None:
     if libproc.proc_pidpath(pid, buffer, len(buffer)) <= 0:
         return None
     return Path(os.fsdecode(buffer.value)).resolve()
+
+
+def process_has_environment(
+    pid: int,
+    expected: dict[str, str],
+    reader: Callable[[int], str] | None = None,
+) -> bool:
+    environment_reader = reader or read_process_environment
+    try:
+        process = environment_reader(pid)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return all(
+        re.search(rf"(?:^|\s){re.escape(name)}={re.escape(value)}(?:\s|$)", process)
+        for name, value in expected.items()
+    )
+
+
+def read_process_environment(pid: int) -> str:
+    return subprocess.check_output(
+        ["/bin/ps", "eww", "-p", str(pid), "-o", "command="], text=True
+    )
 
 
 def official_app_executable_path(app_path: Path) -> Path:
