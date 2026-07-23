@@ -1177,7 +1177,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
             "name": expected_server_name,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
-            "app_server_version": env!("CARGO_PKG_VERSION"),
+            "app_server_version": codex_version::CODE_VERSION,
             "installation_id": TEST_INSTALLATION_ID,
         })
     );

@@ -1,5 +1,6 @@
 mod access_token;
 mod agent_identity;
+mod catalog_storage;
 pub mod default_client;
 pub(crate) mod encrypted_aggregate;
 pub mod error;
