@@ -113,7 +113,7 @@ describe("CodexExec", () => {
 
     try {
       const exec = new CodexExec("codex", {
-        CODEX_HOME: "/tmp/codex-home",
+        CODEX_LAB_HOME: "/tmp/codex-home",
         CUSTOM_ENV: "custom",
       });
 

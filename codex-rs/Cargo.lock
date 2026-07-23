@@ -4024,7 +4024,7 @@ dependencies = [
  "codex-git-utils",
  "codex-protocol",
  "codex-utils-absolute-path",
- "dirs",
+ "codex-utils-home-dir",
  "libsqlite3-sys",
  "log",
  "owo-colors",
