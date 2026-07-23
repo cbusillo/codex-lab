@@ -141,6 +141,7 @@ fn remote_control_handle_with_current_enrollment(
     auth_manager: Arc<AuthManager>,
 ) -> RemoteControlHandle {
     let (enabled_tx, _enabled_rx) = watch::channel(/*init*/ true);
+    let (reconnect_tx, _reconnect_rx) = mpsc::unbounded_channel();
     let (status_tx, _status_rx) = watch::channel(RemoteControlStatusChangedNotification {
         status: RemoteControlConnectionStatus::Connecting,
         server_name: test_server_name(),
@@ -165,6 +166,8 @@ fn remote_control_handle_with_current_enrollment(
     )));
     RemoteControlHandle {
         enabled_tx: Arc::new(enabled_tx),
+        reconnect_tx,
+        next_reconnect_generation: Arc::new(AtomicU64::new(0)),
         status_tx: Arc::new(status_tx),
         state_db_available: true,
         state_db: None,
@@ -174,6 +177,19 @@ fn remote_control_handle_with_current_enrollment(
         pairing_persistence_key_required: false,
         auth_manager,
     }
+}
+
+#[test]
+fn remote_control_reconnect_rejects_unavailable_worker() {
+    let handle = remote_control_handle_with_current_enrollment(
+        "http://127.0.0.1:1/backend-api/",
+        remote_control_auth_manager(),
+    );
+
+    assert_eq!(
+        handle.reconnect(),
+        Err(RemoteControlReconnectUnavailable::WorkerUnavailable)
+    );
 }
 
 fn remote_control_server_token_response(

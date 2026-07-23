@@ -31,6 +31,7 @@ mod unix_socket_tests;
 mod websocket;
 
 pub use remote_control::RemoteControlHandle;
+pub use remote_control::RemoteControlReconnectUnavailable;
 pub use remote_control::RemoteControlStartConfig;
 pub use remote_control::RemoteControlUnavailable;
 pub use remote_control::start_remote_control;

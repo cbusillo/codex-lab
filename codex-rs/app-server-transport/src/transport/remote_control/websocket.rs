@@ -265,6 +265,7 @@ pub(crate) struct RemoteControlWebsocket {
     server_event_rx: Arc<Mutex<mpsc::Receiver<super::QueuedServerEnvelope>>>,
     used_rx: watch::Receiver<usize>,
     enabled_rx: watch::Receiver<bool>,
+    reconnect_rx: mpsc::UnboundedReceiver<u64>,
 }
 
 pub(crate) struct RemoteControlWebsocketConfig {
@@ -291,6 +292,7 @@ enum ConnectionEndReason {
     Shutdown,
     Disabled,
     EnabledWatchClosed,
+    ReconnectRequested,
     ConnectionWorkerStopped,
 }
 
@@ -339,6 +341,44 @@ impl RemoteControlStatusPublisher {
                 "remote control websocket status changed"
             );
         }
+    }
+
+    fn publish_status_if_enabled(
+        &self,
+        enabled_rx: &watch::Receiver<bool>,
+        enabled_status: RemoteControlConnectionStatus,
+    ) -> bool {
+        let mut enabled = false;
+        let mut status_change = None;
+        self.tx.send_if_modified(|status| {
+            enabled = *enabled_rx.borrow();
+            let connection_status = if enabled {
+                enabled_status
+            } else {
+                RemoteControlConnectionStatus::Disabled
+            };
+            let next_status =
+                remote_control_status_with_connection_status(status, connection_status);
+            if *status == next_status {
+                return false;
+            }
+
+            status_change = Some((status.clone(), next_status.clone()));
+            *status = next_status;
+            true
+        });
+        if let Some((previous_status, next_status)) = status_change {
+            info!(
+                previous_status = ?previous_status.status,
+                next_status = ?next_status.status,
+                previous_environment_id = ?previous_status.environment_id,
+                next_environment_id = ?next_status.environment_id,
+                installation_id = %next_status.installation_id,
+                server_name = %next_status.server_name,
+                "remote control websocket status changed"
+            );
+        }
+        enabled
     }
 
     fn publish_environment_id(&self, environment_id: Option<String>) {
@@ -390,6 +430,7 @@ impl RemoteControlWebsocket {
         channels: RemoteControlChannels,
         shutdown_token: CancellationToken,
         enabled_rx: watch::Receiver<bool>,
+        reconnect_rx: mpsc::UnboundedReceiver<u64>,
     ) -> Self {
         let shutdown_token = shutdown_token.child_token();
         let (server_event_tx, server_event_rx) = mpsc::channel(super::CHANNEL_CAPACITY);
@@ -427,7 +468,50 @@ impl RemoteControlWebsocket {
             server_event_rx: Arc::new(Mutex::new(server_event_rx)),
             used_rx,
             enabled_rx,
+            reconnect_rx,
         }
+    }
+
+    fn consume_reconnect_requests(&mut self, first_generation: u64, reason: &'static str) {
+        let mut request_count = 1_u64;
+        let mut latest_generation = first_generation;
+        while let Ok(generation) = self.reconnect_rx.try_recv() {
+            request_count = request_count.saturating_add(1);
+            latest_generation = generation;
+        }
+        if !self
+            .status_publisher
+            .publish_status_if_enabled(&self.enabled_rx, RemoteControlConnectionStatus::Connecting)
+        {
+            info!(
+                first_reconnect_generation = first_generation,
+                latest_reconnect_generation = latest_generation,
+                reconnect_request_count = request_count,
+                reason,
+                "discarded app-server remote control relay reconnect request while disabled"
+            );
+            return;
+        }
+        self.reconnect_attempt = 0;
+        info!(
+            first_reconnect_generation = first_generation,
+            latest_reconnect_generation = latest_generation,
+            reconnect_request_count = request_count,
+            reason,
+            "accepted app-server remote control relay reconnect request"
+        );
+    }
+
+    fn consume_pending_reconnect_requests(&mut self, reason: &'static str) {
+        if let Ok(generation) = self.reconnect_rx.try_recv() {
+            self.consume_reconnect_requests(generation, reason);
+        }
+    }
+
+    fn prepare_connection_attempt(&mut self, reason: &'static str) {
+        self.status_publisher
+            .publish_status_if_enabled(&self.enabled_rx, RemoteControlConnectionStatus::Connecting);
+        self.consume_pending_reconnect_requests(reason);
     }
 
     #[expect(
@@ -477,6 +561,7 @@ impl RemoteControlWebsocket {
                 );
                 break;
             }
+            self.consume_pending_reconnect_requests("upcoming connection cycle");
 
             let status = self.status_publisher.status();
             info!(
@@ -505,6 +590,13 @@ impl RemoteControlWebsocket {
             let connection_end_reason = self
                 .run_connection(websocket_connection, shutdown_token)
                 .await;
+            if matches!(
+                connection_end_reason,
+                ConnectionEndReason::ReconnectRequested
+                    | ConnectionEndReason::ConnectionWorkerStopped
+            ) {
+                self.consume_pending_reconnect_requests("completed connection cycle");
+            }
             let status = self.status_publisher.status();
             info!(
                 remote_control_url = %self.remote_control_url,
@@ -558,33 +650,46 @@ impl RemoteControlWebsocket {
         shutdown_token: &CancellationToken,
         app_server_client_name: Option<&str>,
     ) -> ConnectOutcome {
-        self.status_publisher
-            .publish_status(RemoteControlConnectionStatus::Connecting);
-        let remote_control_target = match self.remote_control_target.as_ref() {
-            Some(remote_control_target) => remote_control_target.clone(),
-            None => match super::protocol::normalize_remote_control_url(&self.remote_control_url) {
-                Ok(remote_control_target) => {
-                    self.remote_control_target = Some(remote_control_target.clone());
-                    remote_control_target
-                }
-                Err(err) => {
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Errored);
-                    warn!("remote control is enabled but the URL is invalid: {err}");
-                    tokio::select! {
-                        _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
-                        changed = self.enabled_rx.wait_for(|enabled| !*enabled) => {
-                            if changed.is_err() {
+        self.prepare_connection_attempt("connection cycle start");
+        let remote_control_target = loop {
+            match self.remote_control_target.as_ref() {
+                Some(remote_control_target) => break remote_control_target.clone(),
+                None => {
+                    match super::protocol::normalize_remote_control_url(&self.remote_control_url) {
+                        Ok(remote_control_target) => {
+                            self.remote_control_target = Some(remote_control_target.clone());
+                            break remote_control_target;
+                        }
+                        Err(err) => {
+                            self.status_publisher
+                                .publish_status(RemoteControlConnectionStatus::Errored);
+                            warn!("remote control is enabled but the URL is invalid: {err}");
+                            let mut enabled_rx = self.enabled_rx.clone();
+                            let reconnect_generation = tokio::select! {
+                                _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
+                                changed = enabled_rx.wait_for(|enabled| !*enabled) => {
+                                    if changed.is_err() {
+                                        return ConnectOutcome::Shutdown;
+                                    }
+                                    return ConnectOutcome::Disabled;
+                                }
+                                reconnect_generation = self.reconnect_rx.recv() => reconnect_generation,
+                            };
+                            let Some(reconnect_generation) = reconnect_generation else {
                                 return ConnectOutcome::Shutdown;
-                            }
-                            return ConnectOutcome::Disabled;
+                            };
+                            self.consume_reconnect_requests(
+                                reconnect_generation,
+                                "invalid remote control URL retry",
+                            );
                         }
                     }
                 }
-            },
+            }
         };
 
         loop {
+            self.prepare_connection_attempt("connection retry attempt");
             let subscribe_cursor = self.state.lock().await.subscribe_cursor.clone();
             let enrollment = self.current_enrollment.snapshot();
             info!(
@@ -689,9 +794,16 @@ impl RemoteControlWebsocket {
                         }
                         reconnect_delay
                     };
-                    tokio::select! {
+                    enum RetryWake {
+                        AuthChanged,
+                        Reconnect(u64),
+                        DelayElapsed,
+                    }
+
+                    let mut enabled_rx = self.enabled_rx.clone();
+                    let retry_wake = tokio::select! {
                         _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
-                        changed = self.enabled_rx.wait_for(|enabled| !*enabled) => {
+                        changed = enabled_rx.wait_for(|enabled| !*enabled) => {
                             if changed.is_err() {
                                 return ConnectOutcome::Shutdown;
                             }
@@ -701,11 +813,31 @@ impl RemoteControlWebsocket {
                             if changed.is_err() {
                                 return ConnectOutcome::Shutdown;
                             }
+                            RetryWake::AuthChanged
+                        }
+                        reconnect_generation = self.reconnect_rx.recv() => {
+                            let Some(reconnect_generation) = reconnect_generation else {
+                                return ConnectOutcome::Shutdown;
+                            };
+                            RetryWake::Reconnect(reconnect_generation)
+                        }
+                        _ = tokio::time::sleep(reconnect_delay) => RetryWake::DelayElapsed,
+                    };
+                    match retry_wake {
+                        RetryWake::AuthChanged => {
                             self.auth_recovery = self.auth_manager.unauthorized_recovery();
                             self.reconnect_attempt = 0;
-                            info!("retrying app-server remote control websocket after auth changed");
+                            info!(
+                                "retrying app-server remote control websocket after auth changed"
+                            );
                         }
-                        _ = tokio::time::sleep(reconnect_delay) => {}
+                        RetryWake::Reconnect(reconnect_generation) => {
+                            self.consume_reconnect_requests(
+                                reconnect_generation,
+                                "connection retry backoff",
+                            );
+                        }
+                        RetryWake::DelayElapsed => {}
                     }
                 }
             }
@@ -713,7 +845,7 @@ impl RemoteControlWebsocket {
     }
 
     async fn run_connection(
-        &self,
+        &mut self,
         websocket_connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
         shutdown_token: CancellationToken,
     ) -> ConnectionEndReason {
@@ -748,12 +880,31 @@ impl RemoteControlWebsocket {
                     ConnectionEndReason::EnabledWatchClosed
                 }
             }
-            _ = join_set.join_next() => ConnectionEndReason::ConnectionWorkerStopped,
+            reconnect_generation = self.reconnect_rx.recv() => {
+                let Some(reconnect_generation) = reconnect_generation else {
+                    return ConnectionEndReason::Shutdown;
+                };
+                self.consume_reconnect_requests(
+                    reconnect_generation,
+                    "active relay connection",
+                );
+                ConnectionEndReason::ReconnectRequested
+            }
+            _ = join_set.join_next() => {
+                self.status_publisher
+                    .publish_status(RemoteControlConnectionStatus::Connecting);
+                ConnectionEndReason::ConnectionWorkerStopped
+            },
         };
         shutdown_token.cancel();
 
         Self::join_connection_workers(&mut join_set, REMOTE_CONTROL_CONNECTION_SHUTDOWN_TIMEOUT)
             .await;
+        if !*self.enabled_rx.borrow() {
+            self.status_publisher
+                .publish_status(RemoteControlConnectionStatus::Disabled);
+            return ConnectionEndReason::Disabled;
+        }
         connection_end_reason
     }
 
@@ -1655,6 +1806,7 @@ mod tests {
     use tokio::time::Duration;
     use tokio::time::timeout;
     use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::connect_async;
 
     // Windows Bazel CI can take longer than a few seconds for the websocket
     // client connection attempt to reach the local test listener.
@@ -1756,6 +1908,138 @@ mod tests {
             environment_id: None,
         });
         (RemoteControlStatusPublisher::new(status_tx), status_rx)
+    }
+
+    fn test_remote_control_websocket(
+        transport_event_tx: mpsc::Sender<TransportEvent>,
+        status_publisher: RemoteControlStatusPublisher,
+        shutdown_token: CancellationToken,
+        enabled_rx: watch::Receiver<bool>,
+        reconnect_rx: mpsc::UnboundedReceiver<u64>,
+    ) -> RemoteControlWebsocket {
+        let remote_control_url = "http://localhost/backend-api/".to_string();
+        let remote_control_target = normalize_remote_control_url(&remote_control_url)
+            .expect("remote control target should normalize");
+        RemoteControlWebsocket::new(
+            RemoteControlWebsocketConfig {
+                remote_control_url,
+                installation_id: TEST_INSTALLATION_ID.to_string(),
+                remote_control_target: Some(remote_control_target),
+                server_name: "test-server".to_string(),
+            },
+            /*state_db*/ None,
+            remote_control_auth_manager(),
+            RemoteControlChannels {
+                transport_event_tx,
+                status_publisher,
+                current_enrollment: test_current_enrollment(/*enrollment*/ None),
+                pairing_persistence_key: watch::channel(None).0,
+            },
+            shutdown_token,
+            enabled_rx,
+            reconnect_rx,
+        )
+    }
+
+    #[test]
+    fn prepare_connection_attempt_drains_pending_reconnect_commands() {
+        let (transport_event_tx, _transport_event_rx) = mpsc::channel(1);
+        let (status_publisher, status_rx) = remote_control_status_channel();
+        status_publisher.publish_status(RemoteControlConnectionStatus::Errored);
+        let shutdown_token = CancellationToken::new();
+        let (_enabled_tx, enabled_rx) = watch::channel(true);
+        let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        reconnect_tx
+            .send(7)
+            .expect("reconnect command should queue");
+        let mut websocket = test_remote_control_websocket(
+            transport_event_tx,
+            status_publisher,
+            shutdown_token,
+            enabled_rx,
+            reconnect_rx,
+        );
+
+        websocket.prepare_connection_attempt("test retry boundary");
+
+        assert_eq!(
+            status_rx.borrow().status,
+            RemoteControlConnectionStatus::Connecting
+        );
+        assert!(websocket.reconnect_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pending_reconnect_drain_preserves_disabled_status() {
+        let (transport_event_tx, _transport_event_rx) = mpsc::channel(1);
+        let (status_publisher, status_rx) = remote_control_status_channel();
+        status_publisher.publish_status(RemoteControlConnectionStatus::Disabled);
+        let shutdown_token = CancellationToken::new();
+        let (_enabled_tx, enabled_rx) = watch::channel(false);
+        let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        reconnect_tx
+            .send(9)
+            .expect("reconnect command should queue");
+        let mut websocket = test_remote_control_websocket(
+            transport_event_tx,
+            status_publisher,
+            shutdown_token,
+            enabled_rx,
+            reconnect_rx,
+        );
+
+        websocket.consume_pending_reconnect_requests("test disabled drain");
+
+        assert_eq!(
+            status_rx.borrow().status,
+            RemoteControlConnectionStatus::Disabled
+        );
+        assert!(websocket.reconnect_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn run_connection_reconciles_disabled_status_after_competing_reconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            accept_async(stream)
+                .await
+                .expect("server websocket should accept")
+        });
+        let (client_websocket, _) = connect_async(format!("ws://{address}"))
+            .await
+            .expect("client websocket should connect");
+        let _server_websocket = server_task.await.expect("server task should join");
+
+        let (transport_event_tx, _transport_event_rx) = mpsc::channel(1);
+        let (status_publisher, status_rx) = remote_control_status_channel();
+        status_publisher.publish_status(RemoteControlConnectionStatus::Connected);
+        let shutdown_token = CancellationToken::new();
+        let (_enabled_tx, enabled_rx) = watch::channel(false);
+        let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        reconnect_tx
+            .send(8)
+            .expect("reconnect command should queue");
+        let mut websocket = test_remote_control_websocket(
+            transport_event_tx,
+            status_publisher,
+            shutdown_token.clone(),
+            enabled_rx,
+            reconnect_rx,
+        );
+
+        let reason = websocket
+            .run_connection(client_websocket, shutdown_token.child_token())
+            .await;
+
+        assert!(matches!(reason, ConnectionEndReason::Disabled));
+        assert_eq!(
+            status_rx.borrow().status,
+            RemoteControlConnectionStatus::Disabled
+        );
     }
 
     #[test]
@@ -2288,6 +2572,7 @@ mod tests {
         let (status_publisher, _status_rx) = remote_control_status_channel();
         let shutdown_token = CancellationToken::new();
         let (_enabled_tx, enabled_rx) = watch::channel(true);
+        let (_reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
         let websocket_task = tokio::spawn({
             let shutdown_token = shutdown_token.clone();
             async move {
@@ -2308,6 +2593,7 @@ mod tests {
                     },
                     shutdown_token,
                     enabled_rx,
+                    reconnect_rx,
                 )
                 .run(/*app_server_client_name_rx*/ None)
                 .await
