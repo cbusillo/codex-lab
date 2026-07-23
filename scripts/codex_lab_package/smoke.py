@@ -71,17 +71,26 @@ def smoke_check(
 
     launcher = launcher_path.read_text(encoding="utf-8")
     _require_contains(
-        launcher, "unset CODEX_CLI_PATH CODEX_APP_SERVER_FORCE_CLI", launcher_path
+        launcher,
+        "unset CODEX_CLI_PATH CODEX_APP_SERVER_FORCE_CLI CODEX_APP_SERVER_USE_LOCAL_DAEMON CODEX_APP_SERVER_WS_URL",
+        launcher_path,
     )
     _require_contains(launcher, '--env "CODEX_CLI_PATH="', launcher_path)
     _require_contains(launcher, '--env "CODEX_APP_SERVER_FORCE_CLI="', launcher_path)
     _require_not_contains(launcher, '--env "CODEX_CLI_PATH=$LAB_CLI"', launcher_path)
     _require_contains(launcher, "CODEX_HOME=$LAB_HOME", launcher_path)
     _require_contains(launcher, "CODEX_LAB_HOME=$LAB_HOME", launcher_path)
-    _require_contains(launcher, "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1", launcher_path)
-    _require_contains(launcher, "app-server daemon version", launcher_path)
-    _require_contains(launcher, "managedCodexPath", launcher_path)
-    _require_contains(launcher, "appServerVersion", launcher_path)
+    _require_contains(launcher, "CODEX_APP_SERVER_USE_LOCAL_DAEMON=", launcher_path)
+    _require_contains(launcher, "CODEX_APP_SERVER_WS_URL=$WEBSOCKET_URL", launcher_path)
+    _require_contains(launcher, "ws://127.0.0.1:4766/rpc", launcher_path)
+    _require_contains(launcher, "dev.everycode.codex-lab.app-server.v1", launcher_path)
+    _require_contains(launcher, "launchctl", launcher_path)
+    _require_contains(launcher, "supervisor/v1/codex-lab-app-server", launcher_path)
+    _require_contains(launcher, "-sTCP:LISTEN", launcher_path)
+    _require_not_contains(
+        launcher, "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1", launcher_path
+    )
+    _require_not_contains(launcher, "app-server daemon version", launcher_path)
     _require_contains(launcher, "packages/standalone/current/codex", launcher_path)
     _require_contains(
         launcher, "Managed Codex Lab engine build does not match", launcher_path

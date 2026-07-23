@@ -225,15 +225,6 @@ if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; t
   printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$executable_path"
   exit 0
 fi
-if [ "${1:-}" = app-server ] && [ "${2:-}" = daemon ] && [ "${3:-}" = version ]; then
-  if [ "${DAEMON_VERSION_FAILURE:-}" = 1 ]; then
-    exit 1
-  fi
-  managed_codex_path=${DAEMON_MANAGED_PATH:-$0}
-  app_server_version=${DAEMON_APP_SERVER_VERSION:-1.2.3}
-  printf '{"status":"running","backend":"pid","managedCodexPath":"%s","managedCodexVersion":"0.0.0","socketPath":"%s/app-server-control/app-server-control.sock","cliVersion":"0.0.0","appServerVersion":"%s"}\\n' "$managed_codex_path" "$CODEX_LAB_HOME" "$app_server_version"
-  exit 0
-fi
 case " $* " in
   *" app-server "*) printf '%s\\n' "$0" > "$CHILD_LOG" ;;
   *) exit 2 ;;
@@ -291,6 +282,46 @@ with open(path, "rb") as handle:
 """,
                 encoding="utf-8",
             )
+            fake_id = root / "id"
+            fake_id.write_text("#!/bin/sh\nprintf '501\\n'\n", encoding="utf-8")
+            fake_launchctl = root / "launchctl"
+            fake_launchctl.write_text(
+                """#!/bin/sh
+[ "${SUPERVISOR_LAUNCHCTL_FAILURE:-}" != 1 ] || exit 1
+cat <<EOF
+gui/501/dev.everycode.codex-lab.app-server.v1 = {
+  state = ${SUPERVISOR_STATE:-running}
+  program = $SUPERVISOR_RUNNER
+  pid = ${SUPERVISOR_PID:-4321}
+}
+EOF
+""",
+                encoding="utf-8",
+            )
+            fake_lsof = root / "lsof"
+            fake_lsof.write_text(
+                """#!/bin/sh
+case " $* " in
+  *" -d txt "*)
+    printf 'p%s\\nftxt\\nn%s\\n' "$SUPERVISOR_PID" "$MANAGED_CLI"
+    ;;
+  *" -sTCP:LISTEN "*)
+    [ "${LISTENER_MISSING:-}" != 1 ] || exit 1
+    printf 'p%s\\nf28\\n' "${LISTENER_PID:-$SUPERVISOR_PID}"
+    ;;
+  *) exit 1 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_ps = root / "ps"
+            fake_ps.write_text(
+                """#!/bin/sh
+[ "${SUPERVISOR_PS_FAILURE:-}" != 1 ] || exit 1
+printf '%s\\n' "${SERVER_COMMAND:-$MANAGED_CLI app-server --remote-control --listen ws://127.0.0.1:4766}"
+""",
+                encoding="utf-8",
+            )
             open_log = root / "open.log"
             fake_open = root / "open"
             fake_open.write_text(
@@ -305,17 +336,21 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\nargs=%s\\n' \\
+printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\nwebsocket=%s\\nargs=%s\\n' \\
   "${CODEX_CLI_PATH:-}" "${CODEX_APP_SERVER_FORCE_CLI:-}" \\
   "$CODEX_HOME" "$CODEX_LAB_HOME" "$CODEX_APP_SERVER_USE_LOCAL_DAEMON" \\
-  "$args" > "$OPEN_LOG"
+  "$CODEX_APP_SERVER_WS_URL" "$args" > "$OPEN_LOG"
 """,
                 encoding="utf-8",
             )
             for executable in (
                 fake_plutil,
                 fake_codesign,
+                fake_id,
+                fake_launchctl,
                 fake_lsappinfo,
+                fake_lsof,
+                fake_ps,
                 fake_shasum,
                 fake_open,
             ):
@@ -331,9 +366,13 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
                     expected_source_commit=source_commit,
                     expected_cli_version="1.2.3",
                     codesign_path=fake_codesign,
+                    id_path=fake_id,
+                    launchctl_path=fake_launchctl,
                     lsappinfo_path=fake_lsappinfo,
+                    lsof_path=fake_lsof,
                     open_path=fake_open,
                     plutil_path=fake_plutil,
+                    ps_path=fake_ps,
                     shasum_path=fake_shasum,
                 ),
                 encoding="utf-8",
@@ -343,8 +382,9 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
                 **os.environ,
                 "CODEX_APP_SERVER_FORCE_CLI": "1",
                 "CODEX_CLI_PATH": "/tmp/force-stdio",
-                "CODEX_LAB_HOME": str(root / "codex-lab-home"),
+                "CODEX_LAB_HOME": str(root / "Codex Lab Home"),
                 "OPEN_LOG": str(open_log),
+                "SUPERVISOR_PID": str(os.getpid()),
             }
             managed_cli = (
                 Path(environment["CODEX_LAB_HOME"])
@@ -353,9 +393,23 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
             managed_cli.parent.mkdir(parents=True)
             managed_cli.write_bytes(embedded_cli.read_bytes())
             os.chmod(managed_cli, 0o755)
-            managed_cli_alias = root / "managed-codex-alias"
-            managed_cli_alias.symlink_to(managed_cli)
-            environment["DAEMON_MANAGED_PATH"] = str(managed_cli_alias)
+            supervisor_runner = (
+                Path(environment["CODEX_LAB_HOME"])
+                / "supervisor/v1/codex-lab-app-server"
+            )
+            supervisor_runner.parent.mkdir(parents=True)
+            supervisor_runner.write_text(
+                """#!/bin/sh
+if [ "${1:-}" = check ] && [ "${SUPERVISOR_CHECK_FAILURE:-}" != 1 ]; then
+  exit 0
+fi
+exit 1
+""",
+                encoding="utf-8",
+            )
+            os.chmod(supervisor_runner, 0o755)
+            environment["MANAGED_CLI"] = str(managed_cli)
+            environment["SUPERVISOR_RUNNER"] = str(supervisor_runner)
 
             completed = subprocess.run(
                 [str(launcher)],
@@ -374,7 +428,8 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
             self.assertIn("force_cli=\n", open_contents)
             self.assertIn(f"codex_home={environment['CODEX_LAB_HOME']}", open_contents)
             self.assertIn(f"lab_home={environment['CODEX_LAB_HOME']}", open_contents)
-            self.assertIn("local_daemon=1", open_contents)
+            self.assertIn("local_daemon=\n", open_contents)
+            self.assertIn("websocket=ws://127.0.0.1:4766/rpc", open_contents)
             self.assertIn("--env CODEX_CLI_PATH=", open_contents)
             self.assertIn("--env CODEX_APP_SERVER_FORCE_CLI=", open_contents)
             self.assertIn(
@@ -384,7 +439,11 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
                 f"--env CODEX_LAB_HOME={environment['CODEX_LAB_HOME']}",
                 open_contents,
             )
-            self.assertIn("--env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1", open_contents)
+            self.assertIn("--env CODEX_APP_SERVER_USE_LOCAL_DAEMON=", open_contents)
+            self.assertIn(
+                "--env CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:4766/rpc",
+                open_contents,
+            )
             self.assertIn(str(official_app), open_contents)
 
             open_log.unlink()
@@ -403,7 +462,7 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
             self.assertFalse(open_log.exists())
 
             environment.pop("PROVENANCE_EXECUTABLE_PATH")
-            environment["DAEMON_VERSION_FAILURE"] = "1"
+            environment["SUPERVISOR_CHECK_FAILURE"] = "1"
             completed = subprocess.run(
                 [str(launcher)],
                 check=False,
@@ -412,13 +471,11 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
                 text=True,
             )
             self.assertEqual(completed.returncode, 1)
-            self.assertIn(
-                "Persistent Codex Lab daemon is unavailable", completed.stderr
-            )
+            self.assertIn("app-server supervisor validation failed", completed.stderr)
             self.assertFalse(open_log.exists())
 
-            environment.pop("DAEMON_VERSION_FAILURE")
-            environment["DAEMON_APP_SERVER_VERSION"] = "9.9.9"
+            environment.pop("SUPERVISOR_CHECK_FAILURE")
+            environment["SUPERVISOR_STATE"] = "waiting"
             completed = subprocess.run(
                 [str(launcher)],
                 check=False,
@@ -427,12 +484,23 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
                 text=True,
             )
             self.assertEqual(completed.returncode, 1)
-            self.assertIn(
-                "Persistent Codex Lab daemon does not match", completed.stderr
-            )
+            self.assertIn("app-server supervisor is not running", completed.stderr)
             self.assertFalse(open_log.exists())
 
-            environment.pop("DAEMON_APP_SERVER_VERSION")
+            environment.pop("SUPERVISOR_STATE")
+            environment["LISTENER_PID"] = "9876"
+            completed = subprocess.run(
+                [str(launcher)],
+                check=False,
+                env=environment,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("does not own ws://127.0.0.1:4766", completed.stderr)
+            self.assertFalse(open_log.exists())
+
+            environment.pop("LISTENER_PID")
             managed_contents = managed_cli.read_text(encoding="utf-8")
             managed_cli.write_text(
                 managed_contents.replace(source_commit, "b" * len(source_commit)),

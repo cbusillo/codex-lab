@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove that Codex Lab launches against its persistent local daemon."""
+"""Prove that Codex Lab launches against its supervised websocket app-server."""
 
 import argparse
 import ctypes
@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import time
@@ -27,8 +28,14 @@ SELECTED_APP_PREFIX = "Selected OpenAI coding desktop app: "
 SOURCE_COMMIT_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 MANAGED_CLI_RELATIVE_PATH = Path("packages/standalone/current/codex")
 STABILITY_WINDOW_SECONDS = 5.0
+STDIO_STABILITY_WINDOW_SECONDS = STABILITY_WINDOW_SECONDS
 MIN_TIMEOUT_SECONDS = 10.0
 MAX_DESKTOP_LOG_BYTES = 512 * 1024
+MAX_PROCESS_ARGUMENT_BYTES = 4 * 1024 * 1024
+APP_SERVER_WEBSOCKET_URL = "ws://127.0.0.1:4766/rpc"
+CTL_KERN = 1
+KERN_ARGMAX = 8
+KERN_PROCARGS2 = 49
 
 
 def main() -> None:
@@ -87,15 +94,19 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
 
     selected_app = Path(selected_app_from_launcher_output(launch.stderr)).resolve()
     gui_executable = official_app_executable_path(selected_app)
+    bundled_cli_path = (selected_app / "Contents/Resources/codex").resolve()
     expected_environment = {
-        "CODEX_APP_SERVER_USE_LOCAL_DAEMON": "1",
         "CODEX_APP_SERVER_FORCE_CLI": "",
+        "CODEX_APP_SERVER_USE_LOCAL_DAEMON": "",
+        "CODEX_APP_SERVER_WS_URL": APP_SERVER_WEBSOCKET_URL,
         "CODEX_CLI_PATH": "",
         "CODEX_HOME": str(lab_home),
         "CODEX_LAB_HOME": str(lab_home),
     }
     stable_since = None
+    stdio_first_seen: dict[int, float] = {}
     while time.monotonic() < deadline:
+        now = time.monotonic()
         rows = read_process_rows()
         gui_pids = {
             pid
@@ -107,29 +118,43 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
             for pid in gui_pids
             if process_has_environment(pid, expected_environment)
         )
-        new_gui_app_servers = [
-            pid
+        new_gui_app_servers = {
+            pid: command
             for pid, _ppid, command in rows
             if pid not in before_pids
             and is_serving_app_server_command(command)
+            and process_executable_path(pid) == bundled_cli_path
             and process_has_ancestor(pid, gui_pids, rows)
-        ]
-        if new_gui_app_servers:
+        }
+        stdio_first_seen = {
+            pid: stdio_first_seen.get(pid, now) for pid in new_gui_app_servers
+        }
+        persistent_stdio_servers = {
+            pid: new_gui_app_servers[pid]
+            for pid, first_seen in stdio_first_seen.items()
+            if now - first_seen >= STDIO_STABILITY_WINDOW_SECONDS
+        }
+        if persistent_stdio_servers:
+            details = "; ".join(
+                f"pid={pid} command={command[:512]}"
+                for pid, command in sorted(persistent_stdio_servers.items())
+            )
             raise RuntimeError(
-                "official app launched a bundled stdio app-server instead of the persistent daemon"
+                "official app launched a persistent bundled stdio app-server "
+                f"instead of the supervised websocket service: {details}"
             )
         managed_servers = sorted(matching_app_server_pids(rows, managed_cli_path))
         transport_proof = desktop_transport_proof(matching_gui_pids)
         if matching_gui_pids and managed_servers and transport_proof is not None:
-            stable_since = stable_since or time.monotonic()
-            if time.monotonic() - stable_since >= STABILITY_WINDOW_SECONDS:
+            stable_since = stable_since or now
+            if now - stable_since >= STABILITY_WINDOW_SECONDS:
                 return {
                     "appServerExecutablePath": str(managed_cli_path.resolve()),
                     "appServerPid": managed_servers[0],
                     **transport_proof,
                     "guiPids": matching_gui_pids,
                     "managedProvenance": managed_provenance,
-                    "mode": "persistentLocalDaemon",
+                    "mode": "supervisedWebsocket",
                     "officialAppPath": str(selected_app),
                     "provenance": provenance,
                     "schemaVersion": 1,
@@ -255,7 +280,7 @@ def validate_matching_build_provenance(
 
 def read_process_rows() -> list[tuple[int, int, str]]:
     output = subprocess.check_output(
-        ["/bin/ps", "-axo", "pid=,ppid=,command="], text=True
+        ["/bin/ps", "-ww", "-axo", "pid=,ppid=,command="], text=True
     )
     rows = []
     for line in output.splitlines():
@@ -309,30 +334,106 @@ def process_executable_path(pid: int) -> Path | None:
 def process_has_environment(
     pid: int,
     expected: dict[str, str],
-    reader: Callable[[int], str] | None = None,
+    reader: Callable[[int], dict[str, str]] | None = None,
     *,
     forbidden: set[str] | None = None,
 ) -> bool:
     environment_reader = reader or read_process_environment
     try:
-        process = environment_reader(pid)
-    except (OSError, subprocess.SubprocessError):
+        environment = environment_reader(pid)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
     has_expected = all(
-        re.search(rf"(?:^|\s){re.escape(name)}={re.escape(value)}(?:\s|$)", process)
+        name in environment and environment[name] == value
         for name, value in expected.items()
     )
     forbidden = forbidden or set()
-    has_forbidden = any(
-        re.search(rf"(?:^|\s){re.escape(name)}=", process) for name in forbidden
-    )
+    has_forbidden = any(name in environment for name in forbidden)
     return has_expected and not has_forbidden
 
 
-def read_process_environment(pid: int) -> str:
-    return subprocess.check_output(
-        ["/bin/ps", "eww", "-p", str(pid), "-o", "command="], text=True
+def read_process_environment(pid: int) -> dict[str, str]:
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or None, use_errno=True)
+    sysctl = libc.sysctl
+    sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    sysctl.restype = ctypes.c_int
+    argmax_mib = (ctypes.c_int * 2)(CTL_KERN, KERN_ARGMAX)
+    argmax = ctypes.c_int()
+    argmax_size = ctypes.c_size_t(ctypes.sizeof(argmax))
+    if (
+        sysctl(
+            argmax_mib,
+            len(argmax_mib),
+            ctypes.byref(argmax),
+            ctypes.byref(argmax_size),
+            None,
+            0,
+        )
+        != 0
+    ):
+        _raise_process_environment_error(pid)
+    if argmax.value <= 0 or argmax.value > MAX_PROCESS_ARGUMENT_BYTES:
+        raise ValueError("kernel process argument limit is invalid")
+
+    mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+    size = ctypes.c_size_t(argmax.value)
+    buffer = ctypes.create_string_buffer(argmax.value)
+    if sysctl(mib, len(mib), buffer, ctypes.byref(size), None, 0) != 0:
+        _raise_process_environment_error(pid)
+    if size.value == 0 or size.value > argmax.value:
+        raise ValueError(f"process {pid} argument data has an invalid size")
+    return _parse_process_environment(buffer.raw[: size.value])
+
+
+def _raise_process_environment_error(pid: int) -> None:
+    error_number = ctypes.get_errno()
+    raise OSError(
+        error_number,
+        f"could not read environment for process {pid}: {os.strerror(error_number)}",
     )
+
+
+def _parse_process_environment(data: bytes) -> dict[str, str]:
+    integer_size = struct.calcsize("=i")
+    if len(data) < integer_size:
+        raise ValueError("process argument data is truncated")
+    argument_count = struct.unpack_from("=i", data)[0]
+    if argument_count < 0:
+        raise ValueError("process argument count is invalid")
+    cursor = integer_size
+    _executable, cursor = _read_process_argument(data, cursor)
+    while cursor < len(data) and data[cursor] == 0:
+        cursor += 1
+    for _ in range(argument_count):
+        _argument, cursor = _read_process_argument(data, cursor)
+    while cursor < len(data) and data[cursor] == 0:
+        cursor += 1
+
+    environment: dict[str, str] = {}
+    while cursor < len(data) and data[cursor] != 0:
+        raw_entry, cursor = _read_process_argument(data, cursor)
+        entry = os.fsdecode(raw_entry)
+        if "=" not in entry:
+            raise ValueError("process environment contains a malformed entry")
+        name, value = entry.split("=", 1)
+        if not name:
+            raise ValueError("process environment contains an invalid variable name")
+        environment.setdefault(name, value)
+    return environment
+
+
+def _read_process_argument(data: bytes, cursor: int) -> tuple[bytes, int]:
+    end = data.find(b"\0", cursor)
+    if end < 0:
+        raise ValueError("process argument data is not null terminated")
+    return data[cursor:end], end + 1
 
 
 def official_app_executable_path(app_path: Path) -> Path:

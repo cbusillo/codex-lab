@@ -4,25 +4,26 @@ This helper builds a macOS `Codex Lab.app` launcher bundle. The bundle does not
 contain or modify OpenAI's signed desktop app. Instead, it embeds a Codex Lab
 CLI binary and binds its source commit, version, and SHA-256 digest. The official
 app is bound to the persistent engine by setting `CODEX_HOME` and
-`CODEX_LAB_HOME` to the same Lab home, enabling
-`CODEX_APP_SERVER_USE_LOCAL_DAEMON=1`, and explicitly setting
-`CODEX_CLI_PATH` and `CODEX_APP_SERVER_FORCE_CLI` to empty values. Current
-official clients use a non-empty CLI path or `CODEX_APP_SERVER_FORCE_CLI=1` to
-select stdio instead of the local daemon.
+`CODEX_LAB_HOME` to the same Lab home, setting
+`CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:4766/rpc`, and explicitly setting
+`CODEX_CLI_PATH`, `CODEX_APP_SERVER_FORCE_CLI`, and
+`CODEX_APP_SERVER_USE_LOCAL_DAEMON` to empty values. Current official clients
+use a non-empty CLI path or `CODEX_APP_SERVER_FORCE_CLI=1` to select stdio.
 
 The launcher accepts only intact `com.openai.codex` bundles signed by OpenAI
 team `2DC432GLL2`. After an optional build-time override, it checks system and
 user `ChatGPT.app` installs, then legacy `Codex.app` installs. It never patches,
 re-signs, or redistributes the official bundle. If that app is already running,
 the launcher fails closed; quit it before launching `Codex Lab.app` so the new
-process inherits the persistent-daemon environment. The launcher also fails
-closed when the managed daemon is unavailable, preventing silent fallback to a
-bundled stdio app-server. The embedded and managed engines must report the same
-bounded source/build provenance. Start the matching managed daemon first with:
+process inherits the websocket environment. The launcher also fails closed
+unless launchd service `dev.everycode.codex-lab.app-server.v1` is running the
+validated supervisor runner, the exact managed engine command, and the pinned
+loopback listener. This prevents silent fallback to a bundled stdio app-server.
+The embedded and managed engines must report the same bounded source/build
+provenance. Inspect the installed service with:
 
 ```shell
-export CODEX_LAB_HOME="${CODEX_LAB_HOME:-$HOME/.codex-lab}"
-"$CODEX_LAB_HOME/packages/standalone/current/codex" app-server daemon start
+launchctl print "gui/$(id -u)/dev.everycode.codex-lab.app-server.v1"
 ```
 
 Example:
@@ -63,8 +64,8 @@ python3 scripts/codex_lab_package/live_smoke.py \
 ```
 
 The check launches a fresh GUI instance and emits bounded JSON only after the
-GUI is running beside the managed persistent daemon. The embedded and managed
-CLI builds must have matching fixed source/build provenance.
+GUI is running beside the launchd-supervised websocket app-server. The embedded
+and managed CLI builds must have matching fixed source/build provenance.
 
 The GitHub workflow uploads `codex-lab-distribution.json` beside the app zip,
 shim zip, and `SHA256SUMS`. The manifest records artifact roles, sizes,
@@ -77,6 +78,12 @@ Packaging workflows bind the static smoke to the expected source commit before
 the interactive GUI smoke is performed.
 
 ## Installing a published release
+
+The current published-release installer installs only the app and optional shim.
+It does not yet provision the individually signed managed engine or its user
+LaunchAgent. Until signed engine provisioning is added to the release path, the
+launcher intentionally fails closed unless that matching supervisor has already
+been installed by the Codex Lab canary workflow.
 
 Use `scripts/install_codex_lab.py` to install or manually update Codex Lab from a
 published release manifest:

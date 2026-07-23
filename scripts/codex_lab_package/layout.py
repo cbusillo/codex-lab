@@ -12,6 +12,12 @@ from .icon import write_codex_lab_icon
 
 
 DEFAULT_BUNDLE_IDENTIFIER = "dev.everycode.codex-lab"
+APP_SERVER_LABEL = "dev.everycode.codex-lab.app-server.v1"
+APP_SERVER_LISTEN_HOST = "127.0.0.1"
+APP_SERVER_LISTEN_PORT = 4766
+APP_SERVER_LISTEN_URL = f"ws://{APP_SERVER_LISTEN_HOST}:{APP_SERVER_LISTEN_PORT}"
+APP_SERVER_WEBSOCKET_URL = f"{APP_SERVER_LISTEN_URL}/rpc"
+APP_SERVER_RUNNER_RELATIVE_PATH = Path("supervisor/v1/codex-lab-app-server")
 MAX_PROVENANCE_BYTES = 4096
 OFFICIAL_APP_BUNDLE_IDENTIFIER = "com.openai.codex"
 OFFICIAL_APP_TEAM_IDENTIFIER = "2DC432GLL2"
@@ -143,9 +149,13 @@ def _launcher_script(
     expected_source_commit: str | None,
     expected_cli_version: str,
     codesign_path: Path = Path("/usr/bin/codesign"),
+    id_path: Path = Path("/usr/bin/id"),
+    launchctl_path: Path = Path("/bin/launchctl"),
     lsappinfo_path: Path = Path("/usr/bin/lsappinfo"),
+    lsof_path: Path = Path("/usr/sbin/lsof"),
     open_path: Path = Path("/usr/bin/open"),
     plutil_path: Path = Path("/usr/bin/plutil"),
+    ps_path: Path = Path("/bin/ps"),
     shasum_path: Path = Path("/usr/bin/shasum"),
 ) -> str:
     embedded_cli_name = embedded_cli_path.name
@@ -160,17 +170,27 @@ EXPECTED_SOURCE_COMMIT={_shell_quote(expected_source_commit or "")}
 EXPECTED_CLI_VERSION={_shell_quote(expected_cli_version)}
 OFFICIAL_BUNDLE_IDENTIFIER={_shell_quote(OFFICIAL_APP_BUNDLE_IDENTIFIER)}
 OFFICIAL_TEAM_IDENTIFIER={_shell_quote(OFFICIAL_APP_TEAM_IDENTIFIER)}
+SUPERVISOR_LABEL={_shell_quote(APP_SERVER_LABEL)}
+SUPERVISOR_RUNNER_RELATIVE_PATH={_shell_quote(str(APP_SERVER_RUNNER_RELATIVE_PATH))}
+LISTEN_HOST={_shell_quote(APP_SERVER_LISTEN_HOST)}
+LISTEN_PORT={APP_SERVER_LISTEN_PORT}
+LISTEN_URL={_shell_quote(APP_SERVER_LISTEN_URL)}
+WEBSOCKET_URL={_shell_quote(APP_SERVER_WEBSOCKET_URL)}
 CODESIGN={_shell_quote(str(codesign_path))}
+ID={_shell_quote(str(id_path))}
+LAUNCHCTL={_shell_quote(str(launchctl_path))}
 LSAPPINFO={_shell_quote(str(lsappinfo_path))}
+LSOF={_shell_quote(str(lsof_path))}
 OPEN={_shell_quote(str(open_path))}
 PLUTIL={_shell_quote(str(plutil_path))}
+PS={_shell_quote(str(ps_path))}
 SHASUM={_shell_quote(str(shasum_path))}
 if [ -n "${{CODEX_LAB_HOME:-}}" ]; then
   LAB_HOME="$CODEX_LAB_HOME"
 elif [ -n "${{HOME:-}}" ]; then
   LAB_HOME="$HOME/.codex-lab"
 else
-  echo "HOME is unavailable; refusing to resolve the Codex Lab daemon." >&2
+  echo "HOME is unavailable; refusing to resolve the Codex Lab app-server." >&2
   exit 1
 fi
 home_chatgpt_app=
@@ -255,7 +275,7 @@ if ! RUNNING_APP_INFO=$("$LSAPPINFO" find bundleid="$OFFICIAL_BUNDLE_IDENTIFIER"
 fi
 if [ -n "$RUNNING_APP_INFO" ]; then
   echo "OpenAI coding desktop app is already running: $OFFICIAL_BUNDLE_IDENTIFIER" >&2
-  echo "Quit it before launching Codex Lab so the persistent-daemon environment applies." >&2
+  echo "Quit it before launching Codex Lab so the websocket environment applies." >&2
   exit 1
 fi
 
@@ -381,42 +401,80 @@ fi
 /bin/rm -f "$MANAGED_PROVENANCE_FILE"
 trap - EXIT HUP INT TERM
 
-DAEMON_STATUS_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-daemon.XXXXXX")
-trap '/bin/rm -f "$DAEMON_STATUS_FILE"' EXIT HUP INT TERM
-if ! CODEX_LAB_HOME="$LAB_HOME" "$MANAGED_CLI" app-server daemon version >"$DAEMON_STATUS_FILE" 2>/dev/null; then
-  echo "Persistent Codex Lab daemon is unavailable under $LAB_HOME." >&2
-  echo "Start the managed daemon before launching Codex Lab." >&2
+SUPERVISOR_RUNNER="$LAB_HOME/$SUPERVISOR_RUNNER_RELATIVE_PATH"
+if [ ! -x "$SUPERVISOR_RUNNER" ]; then
+  echo "Codex Lab app-server supervisor is not executable: $SUPERVISOR_RUNNER" >&2
   exit 1
 fi
-daemon_status=$("$PLUTIL" -extract status raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
-daemon_backend=$("$PLUTIL" -extract backend raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
-daemon_managed_codex_path=$("$PLUTIL" -extract managedCodexPath raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
-daemon_socket_path=$("$PLUTIL" -extract socketPath raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
-daemon_app_server_version=$("$PLUTIL" -extract appServerVersion raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
-if [ "$daemon_status" != "running" ]; then
-  echo "Persistent Codex Lab daemon is not running under $LAB_HOME." >&2
+if ! "$SUPERVISOR_RUNNER" check >/dev/null 2>&1; then
+  echo "Codex Lab app-server supervisor validation failed under $LAB_HOME." >&2
   exit 1
 fi
-expected_daemon_socket="$LAB_HOME/app-server-control/app-server-control.sock"
-if [ "$daemon_backend" != "pid" ] \
-  || [ ! "$daemon_managed_codex_path" -ef "$MANAGED_CLI" ] \
-  || [ "$daemon_socket_path" != "$expected_daemon_socket" ] \
-  || [ "$daemon_app_server_version" != "$version" ]; then
-  echo "Persistent Codex Lab daemon does not match the managed engine under $LAB_HOME." >&2
+
+if ! user_id=$("$ID" -u); then
+  echo "Could not resolve the current user for the Codex Lab app-server." >&2
   exit 1
 fi
-/bin/rm -f "$DAEMON_STATUS_FILE"
-trap - EXIT HUP INT TERM
+case "$user_id" in ''|*[!0-9]*)
+  echo "Current user id is malformed; refusing to inspect the Codex Lab app-server." >&2
+  exit 1
+;; esac
+supervisor_domain="gui/$user_id/$SUPERVISOR_LABEL"
+if ! supervisor_state=$("$LAUNCHCTL" print "$supervisor_domain" 2>/dev/null); then
+  echo "Codex Lab app-server supervisor is not loaded: $supervisor_domain" >&2
+  exit 1
+fi
+launchd_state=$(printf '%s\n' "$supervisor_state" | /usr/bin/awk '$1 == "state" && $2 == "=" {{ print $3; exit }}')
+supervisor_program=$(printf '%s\n' "$supervisor_state" | /usr/bin/awk '$1 == "program" && $2 == "=" {{ sub(/^[^=]*=[[:space:]]*/, ""); print; exit }}')
+server_pid=$(printf '%s\n' "$supervisor_state" | /usr/bin/awk '$1 == "pid" && $2 == "=" {{ gsub(/;$/, "", $3); print $3; exit }}')
+if [ "$launchd_state" != "running" ]; then
+  echo "Codex Lab app-server supervisor is not running: $supervisor_domain" >&2
+  exit 1
+fi
+if [ -z "$supervisor_program" ] || [ ! "$supervisor_program" -ef "$SUPERVISOR_RUNNER" ]; then
+  echo "Codex Lab launchd service does not use the managed supervisor runner." >&2
+  exit 1
+fi
+case "$server_pid" in ''|*[!0-9]*)
+  echo "Codex Lab launchd service did not report a valid app-server pid." >&2
+  exit 1
+;; esac
+if [ "$server_pid" -le 0 ] || ! /bin/kill -0 "$server_pid" 2>/dev/null; then
+  echo "Codex Lab launchd app-server pid is not alive: $server_pid" >&2
+  exit 1
+fi
+server_executable=$("$LSOF" -a -p "$server_pid" -d txt -Fn 2>/dev/null \
+  | /usr/bin/awk 'substr($0, 1, 1) == "n" {{ print substr($0, 2); exit }}')
+if [ -z "$server_executable" ] || [ ! "$server_executable" -ef "$MANAGED_CLI" ]; then
+  echo "Codex Lab launchd app-server does not execute the managed engine." >&2
+  exit 1
+fi
+if ! server_command=$("$PS" -ww -p "$server_pid" -o command= 2>/dev/null); then
+  echo "Could not inspect the Codex Lab launchd app-server command." >&2
+  exit 1
+fi
+expected_server_command="$MANAGED_CLI app-server --remote-control --listen $LISTEN_URL"
+if [ "$server_command" != "$expected_server_command" ]; then
+  echo "Codex Lab launchd app-server command does not match the pinned websocket service." >&2
+  exit 1
+fi
+if ! "$LSOF" -nP -a -p "$server_pid" \
+  -iTCP@"$LISTEN_HOST":"$LISTEN_PORT" -sTCP:LISTEN -Fp 2>/dev/null \
+  | /usr/bin/grep -qx "p$server_pid"; then
+  echo "Codex Lab launchd app-server does not own $LISTEN_URL." >&2
+  exit 1
+fi
 
 echo "Selected OpenAI coding desktop app: $CODEX_APP" >&2
 echo "Codex Lab CLI provenance: commit=$source_commit dirty=$dirty_state profile=$build_profile channel=$build_channel version=$version" >&2
-unset CODEX_CLI_PATH CODEX_APP_SERVER_FORCE_CLI
+unset CODEX_CLI_PATH CODEX_APP_SERVER_FORCE_CLI CODEX_APP_SERVER_USE_LOCAL_DAEMON CODEX_APP_SERVER_WS_URL
 exec "$OPEN" -n \
   --env "CODEX_CLI_PATH=" \
   --env "CODEX_APP_SERVER_FORCE_CLI=" \
   --env "CODEX_HOME=$LAB_HOME" \
   --env "CODEX_LAB_HOME=$LAB_HOME" \
-  --env "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1" \
+  --env "CODEX_APP_SERVER_USE_LOCAL_DAEMON=" \
+  --env "CODEX_APP_SERVER_WS_URL=$WEBSOCKET_URL" \
   "$CODEX_APP"
 """
 

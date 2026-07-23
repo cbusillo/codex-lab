@@ -17,15 +17,19 @@ import tempfile
 import time
 from typing import Any
 
+from .layout import APP_SERVER_LABEL
+from .layout import APP_SERVER_LISTEN_HOST
+from .layout import APP_SERVER_LISTEN_PORT
+from .layout import APP_SERVER_RUNNER_RELATIVE_PATH
 from .layout import MAX_PROVENANCE_BYTES
 from .live_smoke import process_executable_path
 from .live_smoke import read_cli_provenance
 
 
-DEFAULT_LABEL = "dev.everycode.codex-lab.app-server.v1"
+DEFAULT_LABEL = APP_SERVER_LABEL
 LEGACY_LABEL = "dev.everycode.codex-lab.daemon-supervisor"
-DEFAULT_LISTEN_HOST = "127.0.0.1"
-DEFAULT_LISTEN_PORT = 4766
+DEFAULT_LISTEN_HOST = APP_SERVER_LISTEN_HOST
+DEFAULT_LISTEN_PORT = APP_SERVER_LISTEN_PORT
 MANAGED_CLI_RELATIVE_PATH = Path("packages/standalone/current/codex")
 
 
@@ -61,11 +65,11 @@ class SupervisorPaths:
 
     @property
     def supervisor_dir(self) -> Path:
-        return self.lab_home / "supervisor/v1"
+        return self.lab_home / APP_SERVER_RUNNER_RELATIVE_PATH.parent
 
     @property
     def runner(self) -> Path:
-        return self.supervisor_dir / "codex-lab-app-server"
+        return self.lab_home / APP_SERVER_RUNNER_RELATIVE_PATH
 
     @property
     def plist(self) -> Path:
