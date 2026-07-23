@@ -1394,9 +1394,10 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> Option<PreviousTurnSettings> {
-        let reconstructed_rollout = self
+        let mut reconstructed_rollout = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
+        apps_context::migrate_legacy_apps_instructions(&mut reconstructed_rollout.history);
         let previous_turn_settings = reconstructed_rollout.previous_turn_settings.clone();
         self.replace_history(
             reconstructed_rollout.history,
@@ -2796,6 +2797,7 @@ impl Session {
         items: Vec<ResponseItem>,
         reference_context_item: Option<TurnContextItem>,
     ) {
+        apps_context::update_apps_context_from_history(&self.apps_context, &items);
         let mut state = self.state.lock().await;
         state.replace_history(items, reference_context_item);
     }
@@ -2812,6 +2814,7 @@ impl Session {
             replacement_history: Some(items.clone()),
             ..compacted_item
         };
+        apps_context::update_apps_context_from_history(&self.apps_context, &items);
         {
             let mut state = self.state.lock().await;
             state.replace_history(items, reference_context_item.clone());
@@ -3139,6 +3142,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
     ) {
+        let apps_context_item = self.refresh_apps_context_item(turn_context).await;
         let reference_context_item = {
             let state = self.state.lock().await;
             state.reference_context_item()
@@ -3154,6 +3158,10 @@ impl Session {
         let turn_context_item = turn_context.to_turn_context_item();
         if !context_items.is_empty() {
             self.record_conversation_items(turn_context, &context_items)
+                .await;
+        }
+        if let Some(apps_context_item) = apps_context_item {
+            self.record_conversation_items(turn_context, std::slice::from_ref(&apps_context_item))
                 .await;
         }
         // Persist one `TurnContextItem` per real user turn so resume/lazy replay can recover the

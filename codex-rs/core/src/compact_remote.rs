@@ -188,7 +188,9 @@ async fn run_remote_compact_task_inner_impl(
     let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
     sess.emit_turn_item_started(turn_context, &compaction_item)
         .await;
-    let mut history = sess.clone_history().await;
+    let mut history = sess
+        .prepare_model_visible_history(turn_context.as_ref())
+        .await;
     let base_instructions = sess.get_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
@@ -314,7 +316,7 @@ pub(crate) async fn process_compacted_history(
         initial_context_injection,
         InitialContextInjection::BeforeLastUserMessage
     ) {
-        sess.build_initial_context(turn_context).await
+        sess.build_compaction_initial_context(turn_context).await
     } else {
         Vec::new()
     };
