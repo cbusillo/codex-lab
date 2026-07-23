@@ -174,6 +174,7 @@ impl TestAppServer {
     pub fn builder() -> TestAppServerBuilder {
         TestAppServerBuilder {
             codex_home: None,
+            cwd: None,
             environment: TestAppServerEnvironment::Auto,
             program: None,
             env_overrides: Vec::new(),
@@ -224,6 +225,7 @@ impl TestAppServer {
 
     async fn new_with_program_env_and_args(
         codex_home: &Path,
+        cwd: &Path,
         program: &Path,
         env_overrides: &[(&str, Option<&str>)],
         args: &[&str],
@@ -233,7 +235,7 @@ impl TestAppServer {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        cmd.current_dir(codex_home);
+        cmd.current_dir(cwd);
         cmd.env("CODEX_LAB_HOME", codex_home);
         cmd.env("RUST_LOG", "warn");
         // Keep integration tests isolated from host managed configuration.
@@ -1768,6 +1770,7 @@ impl TestAppServer {
 /// Builder for TestAppServer.
 pub struct TestAppServerBuilder {
     codex_home: Option<PathBuf>,
+    cwd: Option<PathBuf>,
     environment: TestAppServerEnvironment,
     program: Option<PathBuf>,
     env_overrides: Vec<(String, Option<String>)>,
@@ -1784,6 +1787,12 @@ impl TestAppServerBuilder {
     /// Uses this existing CODEX_HOME instead of a temporary one.
     pub fn with_codex_home(mut self, codex_home: &Path) -> Self {
         self.codex_home = Some(codex_home.to_path_buf());
+        self
+    }
+
+    /// Uses this working directory for the app-server child process.
+    pub fn with_cwd(mut self, cwd: &Path) -> Self {
+        self.cwd = Some(cwd.to_path_buf());
         self
     }
 
@@ -1870,6 +1879,7 @@ impl TestAppServerBuilder {
     pub async fn build(self) -> anyhow::Result<TestAppServer> {
         let Self {
             codex_home,
+            cwd,
             environment,
             program,
             mut env_overrides,
@@ -2013,6 +2023,7 @@ impl TestAppServerBuilder {
         let args = args.iter().map(String::as_str).collect::<Vec<_>>();
         let mut app_server = TestAppServer::new_with_program_env_and_args(
             &codex_home,
+            cwd.as_deref().unwrap_or(&codex_home),
             &program,
             &env_overrides,
             &args,

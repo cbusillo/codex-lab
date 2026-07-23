@@ -37,6 +37,8 @@ codex-analytics = { workspace = true }
 codex-agent-extension = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-cloud-config = { workspace = true }
+codex-code-bridge-client = { workspace = true }
+codex-code-bridge-protocol = { workspace = true }
 codex-config = { workspace = true }
 codex-connectors = { workspace = true }
 codex-core = { workspace = true }
@@ -102,9 +104,11 @@ tokio = { workspace = true, features = [
     "rt-multi-thread",
     "signal",
 ] }
+tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
+url = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v7"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -118,6 +122,7 @@ axum = { workspace = true, default-features = false, features = [
     "tokio",
 ] }
 base64 = { workspace = true }
+codex-code-bridge-service = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 core_test_support = { workspace = true }
