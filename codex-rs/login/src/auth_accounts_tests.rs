@@ -476,6 +476,44 @@ fn activate_api_key_account_writes_auth_and_marks_active() {
 }
 
 #[test]
+fn commit_active_account_writes_stored_auth_and_marks_active() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = upsert_api_key_account(
+        temp.path(),
+        "sk-test".to_string(),
+        Some("Work".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("upsert api key");
+
+    let activated =
+        commit_active_account(temp.path(), &stored.id, TEST_AUTH_CREDENTIALS_STORE_MODE)
+            .expect("commit active account");
+
+    assert_eq!(stored.id, activated.id);
+    assert!(activated.last_used_at.is_some());
+    assert_eq!(
+        Some(stored.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+    assert_eq!(
+        crate::AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: Some("sk-test".to_string()),
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+        },
+        crate::load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
+            .expect("read auth json")
+            .expect("auth json should exist")
+    );
+}
+
+#[test]
 fn auth_for_account_returns_auth_without_persisting_activation() {
     let temp = TempDir::new().expect("tempdir");
     let stored = upsert_api_key_account(
@@ -511,7 +549,7 @@ fn auth_for_account_returns_auth_without_persisting_activation() {
 }
 
 #[test]
-fn commit_active_account_rolls_back_auth_and_active_id_when_account_is_missing() {
+fn commit_active_account_leaves_existing_state_unchanged_when_account_is_missing() {
     let temp = TempDir::new().expect("tempdir");
     let stored = upsert_api_key_account(
         temp.path(),
@@ -530,22 +568,8 @@ fn commit_active_account_rolls_back_auth_and_active_id_when_account_is_missing()
     };
     crate::save_auth(temp.path(), &previous_auth, AuthCredentialsStoreMode::File)
         .expect("save previous auth");
-    let new_auth = crate::AuthDotJson {
-        auth_mode: Some(AuthMode::ApiKey),
-        openai_api_key: Some("sk-new".to_string()),
-        tokens: None,
-        last_refresh: None,
-        agent_identity: None,
-        personal_access_token: None,
-    };
-
-    let err = commit_active_account(
-        temp.path(),
-        "missing",
-        &new_auth,
-        AuthCredentialsStoreMode::File,
-    )
-    .expect_err("missing account should fail");
+    let err = commit_active_account(temp.path(), "missing", AuthCredentialsStoreMode::File)
+        .expect_err("missing account should fail");
 
     assert_eq!(io::ErrorKind::Other, err.kind());
     assert_eq!(
@@ -563,7 +587,7 @@ fn commit_active_account_rolls_back_auth_and_active_id_when_account_is_missing()
 }
 
 #[test]
-fn commit_active_account_rollback_without_previous_auth_preserves_stored_accounts() {
+fn commit_active_account_preserves_stored_accounts_without_existing_auth() {
     let temp = TempDir::new().expect("tempdir");
     let stored = upsert_api_key_account(
         temp.path(),
@@ -572,22 +596,8 @@ fn commit_active_account_rollback_without_previous_auth_preserves_stored_account
         /*make_active*/ false,
     )
     .expect("upsert api key");
-    let auth = crate::AuthDotJson {
-        auth_mode: Some(AuthMode::ApiKey),
-        openai_api_key: Some("sk-new".to_string()),
-        tokens: None,
-        last_refresh: None,
-        agent_identity: None,
-        personal_access_token: None,
-    };
-
-    let err = commit_active_account(
-        temp.path(),
-        "missing",
-        &auth,
-        AuthCredentialsStoreMode::File,
-    )
-    .expect_err("missing account should fail");
+    let err = commit_active_account(temp.path(), "missing", AuthCredentialsStoreMode::File)
+        .expect_err("missing account should fail");
 
     assert_eq!(io::ErrorKind::Other, err.kind());
     assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
@@ -599,6 +609,73 @@ fn commit_active_account_rollback_without_previous_auth_preserves_stored_account
     assert_eq!(
         vec![stored],
         list_accounts(temp.path()).expect("list accounts")
+    );
+}
+
+#[test]
+fn commit_active_account_restores_auth_when_accounts_write_fails() {
+    let temp = TempDir::new().expect("tempdir");
+    let previous = upsert_api_key_account(
+        temp.path(),
+        "sk-previous".to_string(),
+        Some("Previous".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("upsert previous account");
+    let target = upsert_api_key_account(
+        temp.path(),
+        "sk-target".to_string(),
+        Some("Target".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("upsert target account");
+    let previous_auth = crate::AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-previous".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    crate::save_auth(
+        temp.path(),
+        &previous_auth,
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+    )
+    .expect("save previous auth");
+    let accounts_before = list_accounts(temp.path()).expect("list accounts before failure");
+
+    for attempt in 0..100 {
+        fs::write(
+            temp.path().join(format!(
+                ".{ACCOUNTS_FILE_NAME}.{}.{}.tmp",
+                std::process::id(),
+                attempt
+            )),
+            "occupied",
+        )
+        .expect("occupy accounts temp path");
+    }
+
+    let err = commit_active_account(temp.path(), &target.id, TEST_AUTH_CREDENTIALS_STORE_MODE)
+        .expect_err("accounts write should fail");
+
+    assert_eq!(io::ErrorKind::Other, err.kind());
+    assert_eq!(
+        accounts_before,
+        list_accounts(temp.path()).expect("list accounts")
+    );
+    assert_eq!(
+        Some(previous.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+    assert_eq!(
+        previous_auth,
+        crate::load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
+            .expect("read auth json")
+            .expect("auth json should exist")
     );
 }
 
@@ -890,6 +967,53 @@ fn update_account_last_refresh_updates_only_target_account() {
 }
 
 #[test]
+fn compare_and_swap_catalog_account_auth_syncs_active_auth() {
+    let temp = TempDir::new().expect("tempdir");
+    let initial_tokens = make_chatgpt_tokens(Some("acct-active"), Some("user@example.com"));
+    let account = upsert_chatgpt_account(
+        temp.path(),
+        initial_tokens,
+        Utc::now() - chrono::Duration::days(1),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("store active account");
+    let (_stored, expected) =
+        auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &account.id)
+            .expect("load stored auth");
+    crate::save_auth(temp.path(), &expected, TEST_AUTH_CREDENTIALS_STORE_MODE)
+        .expect("save active auth");
+    let mut replacement = expected.clone();
+    let replacement_tokens = replacement.tokens.as_mut().expect("replacement tokens");
+    replacement_tokens.access_token = "updated-access".to_string();
+    replacement_tokens.refresh_token = "updated-refresh".to_string();
+    replacement.last_refresh = Some(Utc::now());
+
+    assert!(
+        compare_and_swap_catalog_account_auth(
+            temp.path(),
+            TEST_AUTH_CREDENTIALS_STORE_MODE,
+            &account.id,
+            &expected,
+            &replacement,
+        )
+        .expect("compare and swap auth")
+    );
+    assert_eq!(
+        replacement,
+        crate::load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
+            .expect("load active auth")
+            .expect("active auth should exist")
+    );
+    assert_eq!(
+        replacement,
+        auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &account.id,)
+            .expect("load catalog auth")
+            .1
+    );
+}
+
+#[test]
 fn account_store_ignores_existing_auth_profiles_until_import_exists() {
     let temp = TempDir::new().expect("tempdir");
     record_auth_profile_login(
@@ -1061,6 +1185,100 @@ fn inactive_profile_sync_does_not_replace_active_account_credentials() {
             .expect("find active account")
             .and_then(|account| account.tokens),
         Some(initial_tokens)
+    );
+}
+
+#[test]
+fn inactive_chatgpt_sync_inserts_a_nonactive_account() {
+    let temp = TempDir::new().expect("tempdir");
+    let active = upsert_api_key_account(
+        temp.path(),
+        "sk-active".to_string(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("store active account");
+    let tokens = make_chatgpt_tokens(Some("acct-inactive"), Some("user@example.com"));
+    let last_refresh = Utc::now();
+
+    let inserted = super::upsert_inactive_chatgpt_account(
+        temp.path(),
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        tokens.clone(),
+        last_refresh,
+        Some("Profile".to_string()),
+    )
+    .expect("sync inactive account")
+    .expect("insert inactive account");
+    let inserted_id = inserted.id.clone();
+
+    assert_eq!(AuthMode::Chatgpt, inserted.mode);
+    assert_eq!(Some(tokens), inserted.tokens);
+    assert_eq!(Some(last_refresh), inserted.last_refresh);
+    assert_eq!(Some("Profile".to_string()), inserted.label);
+    assert_eq!(None, inserted.last_used_at);
+    assert_eq!(
+        Some(active.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+    assert_eq!(
+        Some(inserted),
+        find_account(temp.path(), &inserted_id).expect("find inactive account")
+    );
+}
+
+#[test]
+fn inactive_chatgpt_sync_updates_a_matching_inactive_account() {
+    let temp = TempDir::new().expect("tempdir");
+    let active = upsert_api_key_account(
+        temp.path(),
+        "sk-active".to_string(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("store active account");
+    let initial_tokens = make_chatgpt_tokens(Some("acct-inactive"), Some("user@example.com"));
+    let initial = upsert_chatgpt_account(
+        temp.path(),
+        initial_tokens,
+        Utc::now() - chrono::Duration::days(1),
+        Some("Original".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("store inactive account");
+    let mut replacement_tokens =
+        make_chatgpt_tokens(Some("acct-inactive"), Some("user@example.com"));
+    replacement_tokens.access_token = "updated-access".to_string();
+    replacement_tokens.refresh_token = "updated-refresh".to_string();
+    let last_refresh = Utc::now();
+
+    let updated = super::upsert_inactive_chatgpt_account(
+        temp.path(),
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        replacement_tokens.clone(),
+        last_refresh,
+        Some("Updated".to_string()),
+    )
+    .expect("sync inactive account")
+    .expect("update inactive account");
+
+    assert_eq!(initial.id, updated.id);
+    assert_eq!(Some(replacement_tokens), updated.tokens);
+    assert_eq!(Some(last_refresh), updated.last_refresh);
+    assert_eq!(Some("Updated".to_string()), updated.label);
+    assert_eq!(initial.created_at, updated.created_at);
+    assert_eq!(initial.last_used_at, updated.last_used_at);
+    assert_eq!(
+        Some(active.id.as_str()),
+        get_active_account_id(temp.path())
+            .expect("active id")
+            .as_deref()
+    );
+    assert_eq!(
+        Some(updated),
+        find_account(temp.path(), &initial.id).expect("find inactive account")
     );
 }
 
