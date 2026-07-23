@@ -5482,11 +5482,19 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
+    let execution_account = resolve_execution_account_for_session(
+        config.as_ref(),
+        Arc::clone(&auth_manager),
+        &InitialHistory::New,
+        /*forked_from_thread_id*/ None,
+    )
+    .await;
     let result = Session::new(
         session_configuration,
         Arc::clone(&config),
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
+        execution_account,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -5852,12 +5860,20 @@ async fn make_session_with_config_and_rx(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
+    let execution_account = resolve_execution_account_for_session(
+        config.as_ref(),
+        Arc::clone(&auth_manager),
+        &InitialHistory::New,
+        /*forked_from_thread_id*/ None,
+    )
+    .await;
 
     let session = Session::new(
         session_configuration,
         Arc::clone(&config),
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
+        execution_account,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -5960,12 +5976,20 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
+    let execution_account = resolve_execution_account_for_session(
+        config.as_ref(),
+        Arc::clone(&auth_manager),
+        &initial_history,
+        /*forked_from_thread_id*/ None,
+    )
+    .await;
 
     let session = Session::new(
         session_configuration,
         Arc::clone(&config),
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
+        execution_account,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,

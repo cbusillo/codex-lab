@@ -32,8 +32,13 @@ use crate::context::PersonalitySpecInstructions;
 use crate::default_skill_metadata_budget;
 use crate::environment_selection::ResolvedTurnEnvironments;
 use crate::exec_policy::ExecPolicyManager;
+use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountOptions;
+use crate::execution_account::ExecutionAccountPooling;
+use crate::execution_account::ExecutionAccountStart;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
+use crate::session_models_manager::models_manager_for_execution_account;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::skills::SkillRenderSideEffects;
 use crate::skills_load_input_from_config;
@@ -405,7 +410,6 @@ pub(crate) struct CodexSpawnArgs {
     pub(crate) config: Config,
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
-    pub(crate) models_manager: SharedModelsManager,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) project_validation_coordinator: Arc<ProjectValidationCoordinator>,
     pub(crate) skills_manager: Arc<SkillsManager>,
@@ -455,6 +459,54 @@ pub(crate) fn resolve_multi_agent_version(
         })
 }
 
+fn thread_id_for_initial_history(initial_history: &InitialHistory) -> ThreadId {
+    match initial_history {
+        InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+            ThreadId::default()
+        }
+        InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
+    }
+}
+
+async fn resolve_execution_account_for_session(
+    config: &Config,
+    auth_manager: Arc<AuthManager>,
+    initial_history: &InitialHistory,
+    forked_from_thread_id: Option<ThreadId>,
+) -> ExecutionAccountLease {
+    let thread_id = thread_id_for_initial_history(initial_history);
+    let start = match initial_history {
+        InitialHistory::New => ExecutionAccountStart::New,
+        InitialHistory::Cleared => ExecutionAccountStart::Cleared,
+        InitialHistory::Resumed(_) => ExecutionAccountStart::Resumed,
+        InitialHistory::Forked(_) => ExecutionAccountStart::Forked {
+            source_thread_id: forked_from_thread_id.or_else(|| initial_history.forked_from_id()),
+        },
+    };
+    let pooling = if config.auto_switch_accounts_on_rate_limit
+        && codex_login::auth::read_codex_api_key_from_env().is_none()
+        && config.model_provider.requires_openai_auth
+    {
+        ExecutionAccountPooling::Enabled
+    } else {
+        ExecutionAccountPooling::Disabled
+    };
+    ExecutionAccountLease::resolve(
+        thread_id,
+        auth_manager,
+        ExecutionAccountOptions {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_home: config.auth_home.to_path_buf(),
+            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+            chatgpt_base_url: config.chatgpt_base_url.clone(),
+            allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
+            pooling,
+            start,
+        },
+    )
+    .await
+}
+
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
@@ -491,7 +543,6 @@ impl Codex {
             mut config,
             installation_id,
             auth_manager,
-            models_manager,
             environment_manager,
             project_validation_coordinator,
             skills_manager,
@@ -548,19 +599,29 @@ impl Codex {
         };
 
         let config = Arc::new(config);
+        let thread_id = thread_id_for_initial_history(&conversation_history);
+        let execution_account = resolve_execution_account_for_session(
+            config.as_ref(),
+            Arc::clone(&auth_manager),
+            &conversation_history,
+            forked_from_thread_id,
+        )
+        .await;
+        let execution_identity = execution_account.identity();
+        info!(
+            thread_id = %thread_id,
+            execution_account_id = execution_identity.stored_account_id.as_deref(),
+            execution_auth_mode = ?execution_identity.mode,
+            "resolved execution account lease"
+        );
+        let models_manager =
+            models_manager_for_execution_account(config.as_ref(), execution_account.clone());
         let refresh_strategy = if session_source.is_non_root_agent() {
             codex_models_manager::manager::RefreshStrategy::Offline
         } else {
             codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
         };
-        if config.model.is_none()
-            || !matches!(
-                refresh_strategy,
-                codex_models_manager::manager::RefreshStrategy::Offline
-            )
-        {
-            let _ = models_manager.list_models(refresh_strategy).await;
-        }
+        let _ = models_manager.list_models(refresh_strategy).await;
         let model = models_manager
             .get_default_model(&config.model, refresh_strategy)
             .await;
@@ -647,6 +708,7 @@ impl Codex {
             config.clone(),
             installation_id,
             auth_manager.clone(),
+            execution_account,
             models_manager.clone(),
             exec_policy,
             tx_event.clone(),
@@ -3241,7 +3303,7 @@ impl Session {
         else {
             return;
         };
-        let plan_type = snapshot.plan_type.clone().or(fallback_plan);
+        let plan_type = snapshot.plan_type.or(fallback_plan);
         if let Err(err) = account_usage::record_rate_limit_snapshot_with_plan(
             codex_home.as_path(),
             &account_id,

@@ -1515,7 +1515,6 @@ impl ThreadManagerState {
             config,
             installation_id: self.installation_id.clone(),
             auth_manager,
-            models_manager: Arc::clone(&self.models_manager),
             environment_manager: Arc::clone(&self.environment_manager),
             project_validation_coordinator: Arc::clone(&self.project_validation_coordinator),
             skills_manager: Arc::clone(&self.skills_manager),

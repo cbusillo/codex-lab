@@ -115,6 +115,88 @@ enum TurnMultiAgentRuntime {
 }
 
 impl TurnContext {
+    pub(crate) fn with_refreshed_model_info(
+        &self,
+        model_info: ModelInfo,
+        models_manager: &SharedModelsManager,
+    ) -> Self {
+        let mut config = self.config.as_ref().clone();
+        let tool_mode = model_info.tool_mode.unwrap_or_else(|| {
+            if config.features.enabled(Feature::CodeModeOnly) {
+                ToolMode::CodeModeOnly
+            } else if config.features.enabled(Feature::CodeMode) {
+                ToolMode::CodeMode
+            } else {
+                ToolMode::Direct
+            }
+        });
+        config.service_tier = get_service_tier(
+            config.service_tier,
+            config.features.enabled(Feature::FastMode),
+            &model_info,
+        );
+        let reasoning_summary = config
+            .model_reasoning_summary
+            .unwrap_or(model_info.default_reasoning_summary);
+        let session_telemetry = self
+            .session_telemetry
+            .clone()
+            .with_model(self.collaboration_mode.model(), model_info.slug.as_str());
+        Self {
+            sub_id: self.sub_id.clone(),
+            trace_id: self.trace_id.clone(),
+            realtime_active: self.realtime_active,
+            config: Arc::new(config),
+            auth_manager: self.auth_manager.clone(),
+            model_info: model_info.clone(),
+            tool_mode,
+            session_telemetry,
+            provider: Arc::clone(&self.provider),
+            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_summary,
+            session_source: self.session_source.clone(),
+            parent_thread_id: self.parent_thread_id,
+            thread_source: self.thread_source,
+            environments: self.environments.clone(),
+            #[allow(deprecated)]
+            cwd: self.cwd.clone(),
+            current_date: self.current_date.clone(),
+            timezone: self.timezone.clone(),
+            app_server_client_name: self.app_server_client_name.clone(),
+            developer_instructions: self.developer_instructions.clone(),
+            compact_prompt: self.compact_prompt.clone(),
+            user_instructions: self.user_instructions.clone(),
+            collaboration_mode: self.collaboration_mode.clone(),
+            multi_agent_version: self.multi_agent_version,
+            personality: self.personality,
+            approval_policy: self.approval_policy.clone(),
+            permission_profile: self.permission_profile.clone(),
+            network: self.network.clone(),
+            windows_sandbox_level: self.windows_sandbox_level,
+            shell_environment_policy: self.shell_environment_policy.clone(),
+            available_models: models_manager.try_list_models().unwrap_or_default(),
+            unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
+            features: self.features.clone(),
+            ghost_snapshot: self.ghost_snapshot.clone(),
+            final_output_json_schema: self.final_output_json_schema.clone(),
+            codex_self_exe: self.codex_self_exe.clone(),
+            codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
+            truncation_policy: model_info.truncation_policy.into(),
+            dynamic_tools: self.dynamic_tools.clone(),
+            turn_metadata_state: Arc::clone(&self.turn_metadata_state),
+            extension_data: Arc::clone(&self.extension_data),
+            turn_skills: self.turn_skills.clone(),
+            turn_timing_state: Arc::clone(&self.turn_timing_state),
+            terminal_error: Arc::clone(&self.terminal_error),
+            server_model_warning_emitted: AtomicBool::new(
+                self.server_model_warning_emitted.load(Ordering::Relaxed),
+            ),
+            model_verification_emitted: AtomicBool::new(
+                self.model_verification_emitted.load(Ordering::Relaxed),
+            ),
+        }
+    }
+
     pub(crate) fn permission_profile(&self) -> PermissionProfile {
         self.permission_profile.clone()
     }
@@ -849,6 +931,35 @@ impl Session {
             turn_context.turn_metadata_state.spawn_git_enrichment_task();
         }
         turn_context
+    }
+
+    pub(crate) async fn refresh_turn_context_for_execution_account(
+        &self,
+        turn_context: &Arc<TurnContext>,
+    ) -> Arc<TurnContext> {
+        let _ = self
+            .services
+            .models_manager
+            .list_models(RefreshStrategy::OnlineIfUncached)
+            .await;
+        let model_slug = turn_context.model_info.slug.clone();
+        let model_info = self
+            .services
+            .models_manager
+            .get_model_info(&model_slug, &turn_context.config.to_models_manager_config())
+            .await;
+        let refreshed = Arc::new(
+            turn_context.with_refreshed_model_info(model_info, &self.services.models_manager),
+        );
+        let mut active_turn = self.active_turn.lock().await;
+        if let Some(running_task) = active_turn
+            .as_mut()
+            .and_then(|active_turn| active_turn.task.as_mut())
+            && Arc::ptr_eq(&running_task.turn_context, turn_context)
+        {
+            running_task.turn_context = Arc::clone(&refreshed);
+        }
+        refreshed
     }
 
     pub(crate) async fn maybe_emit_unknown_model_warning_for_turn(&self, tc: &TurnContext) {

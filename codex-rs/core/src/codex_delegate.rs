@@ -51,7 +51,6 @@ use crate::session::emit_subagent_session_started;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use codex_login::AuthManager;
-use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -68,7 +67,6 @@ use crate::session::completed_session_loop_termination;
 pub(crate) async fn run_codex_thread_interactive(
     config: Config,
     auth_manager: Arc<AuthManager>,
-    models_manager: SharedModelsManager,
     parent_session: Arc<Session>,
     parent_ctx: Arc<TurnContext>,
     cancel_token: CancellationToken,
@@ -83,7 +81,6 @@ pub(crate) async fn run_codex_thread_interactive(
         config,
         installation_id: parent_session.installation_id.clone(),
         auth_manager,
-        models_manager,
         environment_manager: Arc::clone(&parent_session.services.environment_manager),
         project_validation_coordinator: Arc::clone(
             &parent_session.services.project_validation_coordinator,
@@ -174,7 +171,6 @@ pub(crate) async fn run_codex_thread_interactive(
 pub(crate) async fn run_codex_thread_one_shot(
     config: Config,
     auth_manager: Arc<AuthManager>,
-    models_manager: SharedModelsManager,
     input: Vec<UserInput>,
     parent_session: Arc<Session>,
     parent_ctx: Arc<TurnContext>,
@@ -189,7 +185,6 @@ pub(crate) async fn run_codex_thread_one_shot(
     let io = Box::pin(run_codex_thread_interactive(
         config,
         auth_manager,
-        models_manager,
         parent_session,
         parent_ctx,
         child_cancel.clone(),

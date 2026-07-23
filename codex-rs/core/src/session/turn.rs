@@ -176,7 +176,7 @@ impl RunTurnState {
 
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    mut turn_context: Arc<TurnContext>,
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
     input: Vec<TurnInput>,
     run_state: &RunTurnState,
@@ -275,7 +275,7 @@ pub(crate) async fn run_turn(
             .current_header_value_for_model_request(&window_id);
         match run_sampling_request(
             Arc::clone(&sess),
-            Arc::clone(&turn_context),
+            &mut turn_context,
             Arc::clone(&turn_extension_data),
             Arc::clone(&run_state.turn_diff_tracker),
             &mut client_session,
@@ -1056,7 +1056,7 @@ pub(crate) fn build_prompt(
 )]
 async fn run_sampling_request(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    turn_context: &mut Arc<TurnContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
@@ -1066,19 +1066,19 @@ async fn run_sampling_request(
     rate_limit_switch_state: &mut RateLimitSwitchState,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
-    let router = built_tools(sess.as_ref(), turn_context.as_ref(), &cancellation_token).await?;
+    let mut router = built_tools(sess.as_ref(), turn_context.as_ref(), &cancellation_token).await?;
 
     let base_instructions = sess.get_base_instructions().await;
 
-    let tool_runtime = ToolCallRuntime::new(
+    let mut tool_runtime = ToolCallRuntime::new(
         Arc::clone(&router),
         Arc::clone(&sess),
-        Arc::clone(&turn_context),
+        Arc::clone(turn_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
+    let mut _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
         &sess,
-        &turn_context,
+        turn_context,
         Arc::clone(&router),
         Arc::clone(&turn_diff_tracker),
     );
@@ -1107,7 +1107,7 @@ async fn run_sampling_request(
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
-            Arc::clone(&turn_context),
+            Arc::clone(turn_context),
             Arc::clone(&turn_store),
             client_session,
             turn_metadata_header,
@@ -1121,29 +1121,46 @@ async fn run_sampling_request(
                 return Ok(output);
             }
             Err(CodexErr::ContextWindowExceeded) => {
-                sess.set_total_tokens_full(&turn_context).await;
+                sess.set_total_tokens_full(turn_context.as_ref()).await;
                 return Err(CodexErr::ContextWindowExceeded);
             }
             Err(CodexErr::UsageLimitReached(e)) => {
                 sess.record_usage_limit_hint_for_active_account(
                     e.plan_type.clone().map(Into::into),
-                    e.resets_at.clone(),
+                    e.resets_at,
                     e.rate_limit_reached_type,
                 )
                 .await;
                 let rate_limits = e.rate_limits.clone();
                 if let Some(rate_limits) = rate_limits {
-                    sess.update_rate_limits(&turn_context, *rate_limits).await;
+                    sess.update_rate_limits(turn_context.as_ref(), *rate_limits)
+                        .await;
                 }
-                if Box::pin(maybe_switch_account_after_usage_limit(
-                    &sess,
-                    turn_context.as_ref(),
-                    client_session,
-                    rate_limit_switch_state,
-                    &e,
-                ))
-                .await
+                if let Some(refreshed_turn_context) =
+                    Box::pin(maybe_switch_account_after_usage_limit(
+                        &sess,
+                        turn_context,
+                        client_session,
+                        rate_limit_switch_state,
+                        &e,
+                    ))
+                    .await
                 {
+                    *turn_context = refreshed_turn_context;
+                    router = built_tools(sess.as_ref(), turn_context.as_ref(), &cancellation_token)
+                        .await?;
+                    tool_runtime = ToolCallRuntime::new(
+                        Arc::clone(&router),
+                        Arc::clone(&sess),
+                        Arc::clone(turn_context),
+                        Arc::clone(&turn_diff_tracker),
+                    );
+                    _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
+                        &sess,
+                        turn_context,
+                        Arc::clone(&router),
+                        Arc::clone(&turn_diff_tracker),
+                    );
                     turn_context.turn_timing_state.record_sampling_retry();
                     continue;
                 }
@@ -1162,7 +1179,7 @@ async fn run_sampling_request(
             err,
             client_session,
             &sess,
-            &turn_context,
+            turn_context.as_ref(),
             ResponsesStreamRequest::Sampling,
         )
         .await?;
@@ -1172,20 +1189,20 @@ async fn run_sampling_request(
 
 async fn maybe_switch_account_after_usage_limit(
     sess: &Arc<Session>,
-    turn_context: &TurnContext,
+    turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
     rate_limit_switch_state: &mut RateLimitSwitchState,
     limit_err: &UsageLimitReachedError,
-) -> bool {
+) -> Option<Arc<TurnContext>> {
     if !sess.auto_switch_accounts_on_rate_limit().await {
-        return false;
+        return None;
     }
     if codex_login::auth::read_codex_api_key_from_env().is_some() {
-        return false;
+        return None;
     }
     let current_identity = sess.services.execution_account.identity();
     let Some(current_account_id) = current_identity.stored_account_id.as_deref() else {
-        return false;
+        return None;
     };
     let failover = Box::pin(
         sess.services
@@ -1202,6 +1219,9 @@ async fn maybe_switch_account_after_usage_limit(
                 "usage limit hit; switching thread execution account"
             );
             *client_session = sess.services.model_client.new_session();
+            let refreshed_turn_context = sess
+                .refresh_turn_context_for_execution_account(turn_context)
+                .await;
             let next_label = account
                 .label
                 .as_deref()
@@ -1210,7 +1230,7 @@ async fn maybe_switch_account_after_usage_limit(
                 .or(account.stored_account_id.as_deref())
                 .unwrap_or("another account");
             sess.send_event(
-                turn_context,
+                refreshed_turn_context.as_ref(),
                 EventMsg::Warning(WarningEvent {
                     message: format!(
                         "Execution switched to {next_label} due to a usage limit; your signed-in account is unchanged."
@@ -1218,16 +1238,24 @@ async fn maybe_switch_account_after_usage_limit(
                 }),
             )
             .await;
-            true
+            if refreshed_turn_context
+                .model_info
+                .used_fallback_model_metadata
+                && !turn_context.model_info.used_fallback_model_metadata
+            {
+                sess.maybe_emit_unknown_model_warning_for_turn(refreshed_turn_context.as_ref())
+                    .await;
+            }
+            Some(refreshed_turn_context)
         }
-        Ok(None) => false,
+        Ok(None) => None,
         Err(err) => {
             warn!(
                 from_account_id = %current_account_id,
                 error = %err,
                 "failed to auto-switch account after usage limit"
             );
-            false
+            None
         }
     }
 }

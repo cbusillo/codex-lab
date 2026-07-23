@@ -35,7 +35,6 @@ use crate::state::TaskKind;
 use codex_analytics::TurnProfileFact;
 use codex_analytics::TurnTokenUsageFact;
 use codex_login::AuthManager;
-use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_otel::TURN_E2E_DURATION_METRIC;
 use codex_otel::TURN_MEMORY_METRIC;
@@ -193,10 +192,6 @@ impl SessionTaskContext {
 
     pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
         Arc::clone(&self.session.services.auth_manager)
-    }
-
-    pub(crate) fn models_manager(&self) -> SharedModelsManager {
-        Arc::clone(&self.session.services.models_manager)
     }
 }
 
@@ -584,14 +579,17 @@ impl Session {
             active.as_mut().and_then(|active_turn| {
                 let task = active_turn.task.take()?;
                 let background_review_trigger_eligible = task.background_review_trigger_eligible;
+                let turn_context = Arc::clone(&task.turn_context);
                 task.handle.detach();
                 Some((
                     Arc::clone(&active_turn.turn_state),
                     background_review_trigger_eligible,
+                    turn_context,
                 ))
             })
         };
-        let Some((turn_state, background_review_trigger_eligible)) = turn_state else {
+        let Some((turn_state, background_review_trigger_eligible, turn_context)) = turn_state
+        else {
             return;
         };
         let pending_input = self

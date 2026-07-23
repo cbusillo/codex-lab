@@ -88,6 +88,13 @@ pub(crate) struct ExecutionAccountIdentity {
     pub(crate) mode: AuthMode,
 }
 
+#[derive(Clone)]
+pub(crate) struct ExecutionAccountModelsContext {
+    pub(crate) generation: u64,
+    pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) cache_key: String,
+}
+
 #[derive(Default)]
 struct ExecutionAccountRevision {
     generation: u64,
@@ -325,8 +332,21 @@ impl ExecutionAccountLease {
         self.inner.current.load().identity()
     }
 
+    pub(crate) fn thread_id(&self) -> ThreadId {
+        self.inner.thread_id
+    }
+
     pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
         Arc::clone(&self.inner.current.load().auth_manager)
+    }
+
+    pub(crate) fn models_context(&self) -> ExecutionAccountModelsContext {
+        let account = self.inner.current.load_full();
+        ExecutionAccountModelsContext {
+            generation: account.generation,
+            auth_manager: Arc::clone(&account.auth_manager),
+            cache_key: account.models_cache_key(),
+        }
     }
 
     pub(crate) async fn auth_with_revision(&self) -> (Option<CodexAuth>, u64) {
@@ -615,6 +635,31 @@ impl ExecutionAccount {
             label: self.label.clone(),
             mode: self.mode,
         }
+    }
+
+    fn models_cache_key(&self) -> String {
+        let auth = self.auth_manager.auth_cached();
+        let discriminator = self
+            .stored_account_id
+            .as_ref()
+            .map(|account_id| format!("stored:{account_id}"))
+            .or_else(|| {
+                auth.as_ref()
+                    .and_then(CodexAuth::get_account_id)
+                    .map(|account_id| format!("account:{account_id}"))
+            })
+            .or_else(|| {
+                auth.as_ref()
+                    .and_then(CodexAuth::api_key)
+                    .map(|api_key| format!("api-key:{api_key}"))
+            })
+            .unwrap_or_else(|| format!("auth-mode:{}", self.mode));
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("codex-model-cache-account:{discriminator}").as_bytes(),
+        )
+        .simple()
+        .to_string()
     }
 }
 

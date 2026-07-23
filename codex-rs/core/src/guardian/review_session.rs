@@ -600,7 +600,6 @@ async fn spawn_guardian_review_session(
     let codex = Box::pin(run_codex_thread_interactive(
         spawn_config,
         params.parent_session.services.auth_manager.clone(),
-        params.parent_session.services.models_manager.clone(),
         Arc::clone(&params.parent_session),
         Arc::clone(&params.parent_turn),
         cancel_token.clone(),
