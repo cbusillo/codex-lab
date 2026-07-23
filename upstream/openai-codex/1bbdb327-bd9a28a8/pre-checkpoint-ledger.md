@@ -11,17 +11,20 @@
 | Measure | Commits |
 |---|---:|
 | Audit | 1017 |
-| Classified | 3 |
-| Missing | 1014 |
-| Blocking | 2 |
+| Classified | 6 |
+| Missing | 1011 |
+| Blocking | 4 |
 
 ## Classifications
 
 | Subject | Area | Mechanical / Path | Disposition | Implementation | Summary | Evidence |
 |---|---|---|---|---|---|---|
+| `8f1aad58dc3a684afecdd9efd31d074762da3c24` | `other_codex_rs` | `8f1aad58dc3a:missing_patch/other_codex_rs` | `adopted` | `implemented` | Ignore RUSTSEC-2026-0173 for proc-macro-error2 in both cargo-audit and cargo-deny through local commit 83c14c3676, matching upstream's temporary suppression intent. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#26974, git_commit:openai/codex@8f1aad58dc3a684afecdd9efd31d074762da3c24, git_commit:cbusillo/codex-lab@83c14c3676b6ecae9d717b3a869e806087685b93 |
 | `9e0d7f02c9416c46dde6e571068a0fb03a4facdf` | `app_server` | `9e0d7f02c941:patch_equivalent/app_server` | `adopted` | `implemented` | Adopted through patch-equivalent local commit 15f0bf854b, preserving canonical auto_review serialization, legacy guardian_subagent input, and delegated reviewer propagation. | github_issue:cbusillo/codex-lab#407, github_pull_request:openai/codex#26230, git_commit:openai/codex@9e0d7f02c9416c46dde6e571068a0fb03a4facdf, git_commit:cbusillo/codex-lab@15f0bf854bf82de2eaf3524f089dc8efaa88a307 |
+| `ee6c91d5cfd0e63239c75b41f4a2dc14130d5688` | `other_codex_rs` | `ee6c91d5cfd0:missing_patch/other_codex_rs` | `missing` | `missing` | Stop emitting the free-form codex_error_subreason analytics field copied from InvalidRequest text; the bounded 512-byte fork copy still carries provider or user-derived content. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#27060, git_commit:openai/codex@ee6c91d5cfd0e63239c75b41f4a2dc14130d5688, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `daf76a57d2564be85b6e34c25a29380b3d4315b4` | `other_codex_rs` | `daf76a57d256:missing_patch/other_codex_rs` | `missing` | `missing` | Prune stale curated plugin cache entries when their names disappear from the raw marketplace while preserving user configuration. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#26934, git_commit:openai/codex@daf76a57d2564be85b6e34c25a29380b3d4315b4, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 | `381f0de531e0bc7759863295fc333dd0087b4faf` | `other_codex_rs` | `381f0de531e0:missing_patch/other_codex_rs` | `missing` | `missing` | Serve plugin/list from the cached global remote catalog when present and refresh it asynchronously without duplicating cache-miss fetches. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#26932, git_commit:openai/codex@381f0de531e0bc7759863295fc333dd0087b4faf, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
+| `51b3cd51f6f94488c0e05564cbcad9512f73e3db` | `other_codex_rs` | `51b3cd51f6f9:missing_patch/other_codex_rs` | `missing` | `missing` | Restrict list_available_server_infos to codex-mcp and make new_uninitialized test-only without importing method-order churn or hiding the production cross-crate permission-profile constructor. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#27257, git_commit:openai/codex@51b3cd51f6f94488c0e05564cbcad9512f73e3db, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 
 ## Missing Commits
 
@@ -32,7 +35,6 @@
 - `5a440c03f2f3393169c5df517d1fd8eee969e45e`
 - `ed6e5cf919fdb8b388eb5643669dc175f26188cb`
 - `4e803a017c958dd37eb251372ba810232d3e84ba`
-- `8f1aad58dc3a684afecdd9efd31d074762da3c24`
 - `743f5aad38accd52da34bf4dcbdd1215a8c3ab9a`
 - `8d415050fce4b4ebc6da1ba247379844235fa453`
 - `0526cb56ac3501a02968010d03873993c319e290`
@@ -50,7 +52,6 @@
 - `e0ee491df351ad85d35f879d2e2b8b30c866814f`
 - `85fd52f7e4aebfc39229b50e6f0c092dd00ca343`
 - `123cf62a485de23a8960260f5bb00b86af6778c5`
-- `ee6c91d5cfd0e63239c75b41f4a2dc14130d5688`
 - `56554904babcaacf4444a2cc90716880837dff7c`
 - `b89d91f6ffee5474f23a97b23b401644c4e087d5`
 - `feca160da47b678b73b33dd8a08e010e86b81786`
@@ -89,7 +90,6 @@
 - `cc8325f181401c481f4da8ca16c073867e78d46e`
 - `9316acf9b238da7559d7fba67c612712acc3b419`
 - `490340ffcf593518bcd843ee903d1ea2160d5363`
-- `51b3cd51f6f94488c0e05564cbcad9512f73e3db`
 - `fb8f1ea0d55bb0a6202961518440b40db37b3802`
 - `51fc4b0559c08d12caec6f4d7d2b6a35e84c7339`
 - `5ac640ac49ae5c8b781d51bbaf0467c98cda2643`
@@ -125,10 +125,15 @@
 - `1deae7bd4a1212f94ec5b877fc4c9d7edea644f1`
 - `b4445f275838981bfd22429c5c41f2c5be0bde7a`
 - `7011044c1c0f51185eee007b45f0f42140fa794c`
+- `980f60b6641c5907c16db3c39f36ac113e15c93d`
+- `387adc6c4bc484aefb658a6006ad0a26fc45c79b`
+- `22dd6ebc7d3abe50d8aa40be3025eccd9c166418`
 
-_914 additional commits omitted; run `validate` for the complete machine-readable list._
+_911 additional commits omitted; run `validate` for the complete machine-readable list._
 
 ## Blocking Commits
 
+- `ee6c91d5cfd0e63239c75b41f4a2dc14130d5688`
 - `daf76a57d2564be85b6e34c25a29380b3d4315b4`
 - `381f0de531e0bc7759863295fc333dd0087b4faf`
+- `51b3cd51f6f94488c0e05564cbcad9512f73e3db`
