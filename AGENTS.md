@@ -1,3 +1,25 @@
+# Codex Lab
+
+## Planning
+
+- Treat [cbusillo/codex-lab#28](https://github.com/cbusillo/codex-lab/issues/28)
+  as the durable recovery point for Codex Lab MVP planning.
+- Use GitHub issues labeled `plan` and `plan:active` for active cross-session
+  work. Do not rely on local handoff files or local plan drafts as the source of
+  truth for GitHub-backed work.
+- New implementation work belongs in this repo unless the user explicitly says
+  otherwise.
+- When sibling restored sources are present, use
+  `../code-prealign-new-skills/code-rs` as the first reference for Every Code
+  product behavior and UX. In particular, account/login/settings flows live in
+  that tree, including the TUI bottom-pane account views and core account
+  switching/auth-account code.
+- Treat `../code/code-rs` and `../code/codex-rs` as restored history and shared
+  lineage/reference material, not authoritative Every Code UX sources. Use them
+  only when cross-checking lower-level behavior that is not product-flow
+  specific.
+- Treat `../code/every-code-webui` as Every Code web UI reference material only.
+
 # Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:
