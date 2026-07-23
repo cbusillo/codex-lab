@@ -63,6 +63,35 @@ async fn file_storage_save_persists_auth_dot_json() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn file_storage_save_repairs_private_auth_file_permissions() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let codex_home = tempdir()?;
+    let storage = FileAuthStorage::new(codex_home.path().to_path_buf());
+    let auth_file = get_auth_file(codex_home.path());
+    std::fs::write(&auth_file, "{}")?;
+    let mut permissions = std::fs::metadata(&auth_file)?.permissions();
+    permissions.set_mode(0o666);
+    std::fs::set_permissions(&auth_file, permissions)?;
+    let auth_dot_json = AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("test-key".to_string()),
+        tokens: None,
+        last_refresh: Some(Utc::now()),
+        agent_identity: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
+    };
+
+    storage.save(&auth_dot_json)?;
+
+    let mode = std::fs::metadata(auth_file)?.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    Ok(())
+}
+
 #[tokio::test]
 async fn file_storage_round_trips_agent_identity_auth() -> anyhow::Result<()> {
     let codex_home = tempdir()?;

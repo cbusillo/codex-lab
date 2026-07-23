@@ -12,6 +12,8 @@ use std::io::Read;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -207,12 +209,19 @@ impl AuthStorageBackend for FileAuthStorage {
         }
         let json_data = serde_json::to_string_pretty(auth_dot_json)?;
         let mut options = OpenOptions::new();
-        options.truncate(true).write(true).create(true);
+        options.truncate(false).write(true).create(true);
         #[cfg(unix)]
         {
             options.mode(0o600);
         }
         let mut file = options.open(auth_file)?;
+        #[cfg(unix)]
+        {
+            let mut permissions = file.metadata()?.permissions();
+            permissions.set_mode(0o600);
+            file.set_permissions(permissions)?;
+        }
+        file.set_len(0)?;
         file.write_all(json_data.as_bytes())?;
         file.flush()?;
         Ok(())
