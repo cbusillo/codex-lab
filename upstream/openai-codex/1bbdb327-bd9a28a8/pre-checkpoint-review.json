@@ -4,7 +4,7 @@
   "kind": "codex_lab_upstream_semantic_review",
   "range": {"after":"b89ce9a2bcedcfddf3a48f387b7912d602d6d87c","implementationBaseline":"7fde0b24d31cdf5d1270d288e37c7130cae8efc2","through":"1bbdb32789e1f79932df44941236ea3658f6e965","window":"pre_checkpoint"},
   "reviewerNotes": [
-    {"note":"This incremental ledger starts with the audit's only patch-equivalent commit; the remaining 1,016 commits stay intentionally unclassified until bounded subsystem review supplies semantic evidence.","sourceReview":"baseline"},
+    {"note":"This incremental ledger starts with the audit's only patch-equivalent commit; remaining commits stay intentionally unclassified until bounded subsystem review supplies semantic evidence.","sourceReview":"baseline"},
     {"note":"Stable patch-id 1a064aa40b799932dfce02b52ee3b25d0510ee3e maps upstream 9e0d7f02c9416c46dde6e571068a0fb03a4facdf to local 15f0bf854bf82de2eaf3524f089dc8efaa88a307.","sourceReview":"app_server"},
     {"note":"The first #418 batch reviews two adjacent plugin-cache changes together, but they remain separate rows because local curated cache pruning and remote global catalog listing have no shared symbols or semantic dependency.","sourceReview":"plugins"}
   ],
