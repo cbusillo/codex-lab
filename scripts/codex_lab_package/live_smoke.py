@@ -23,7 +23,7 @@ PROVENANCE_FIELDS = (
     "build_channel",
 )
 SELECTED_APP_PREFIX = "Selected OpenAI coding desktop app: "
-SOURCE_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+SOURCE_COMMIT_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 def main() -> None:

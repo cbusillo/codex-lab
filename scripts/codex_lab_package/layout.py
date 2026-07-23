@@ -7,6 +7,9 @@ import plistlib
 import shutil
 import stat
 
+from .icon import ICON_FILE_NAME
+from .icon import write_codex_lab_icon
+
 
 DEFAULT_BUNDLE_IDENTIFIER = "dev.everycode.codex-lab"
 MAX_PROVENANCE_BYTES = 4096
@@ -49,12 +52,14 @@ class CodexLabAppResult:
 
 def build_codex_lab_app(options: CodexLabAppOptions) -> CodexLabAppResult:
     if options.source_commit is not None and (
-        len(options.source_commit) != 40
+        len(options.source_commit) not in (40, 64)
         or any(
             character not in "0123456789abcdef" for character in options.source_commit
         )
     ):
-        raise ValueError("source commit must be a lowercase 40-character hex SHA")
+        raise ValueError(
+            "source commit must be a lowercase 40- or 64-character hex SHA"
+        )
     codex_bin = options.codex_bin.resolve()
     if not codex_bin.is_file():
         raise FileNotFoundError(f"Codex Lab CLI executable does not exist: {codex_bin}")
@@ -72,6 +77,7 @@ def build_codex_lab_app(options: CodexLabAppOptions) -> CodexLabAppResult:
     shutil.copy(codex_bin, embedded_cli_path)
     _make_executable(embedded_cli_path)
     embedded_cli_sha256 = _sha256_file(embedded_cli_path)
+    write_codex_lab_icon(resources_dir / ICON_FILE_NAME)
 
     launcher_path = macos_dir / LAUNCHER_NAME
     with launcher_path.open("w", encoding="utf-8") as handle:
@@ -278,10 +284,17 @@ case "$source_commit" in
     exit 1
     ;;
 esac
-if [ "$schema_version" != "1" ] || [ "${{#source_commit}}" -ne 40 ]; then
+if [ "$schema_version" != "1" ]; then
   echo "Codex Lab CLI provenance schema or source commit is invalid." >&2
   exit 1
 fi
+case "${{#source_commit}}" in
+  40|64) ;;
+  *)
+    echo "Codex Lab CLI provenance schema or source commit is invalid." >&2
+    exit 1
+    ;;
+esac
 if [ -n "$EXPECTED_SOURCE_COMMIT" ] && [ "$source_commit" != "$EXPECTED_SOURCE_COMMIT" ]; then
   echo "Codex Lab CLI source commit does not match the packaged candidate." >&2
   exit 1
@@ -321,6 +334,7 @@ def _write_info_plist(path: Path, options: CodexLabAppOptions) -> None:
     info = {
         "CFBundleDisplayName": options.display_name,
         "CFBundleExecutable": LAUNCHER_NAME,
+        "CFBundleIconFile": ICON_FILE_NAME,
         "CFBundleIdentifier": options.bundle_identifier,
         "CFBundleName": options.display_name,
         "CFBundlePackageType": "APPL",

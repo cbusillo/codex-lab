@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+import binascii
 import hashlib
 import os
 import plistlib
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -18,6 +21,71 @@ from codex_lab_package.smoke import smoke_check
 
 
 class BuildCodexLabAppTest(unittest.TestCase):
+    def _assert_valid_icns(self, contents: bytes) -> None:
+        expected_chunks = (
+            (b"ic10", 1024),
+            (b"ic09", 512),
+            (b"ic08", 256),
+            (b"ic07", 128),
+            (b"icp6", 64),
+            (b"icp5", 32),
+            (b"icp4", 16),
+        )
+
+        self.assertGreaterEqual(len(contents), 8)
+        self.assertEqual(contents[:4], b"icns")
+        self.assertEqual(struct.unpack_from(">I", contents, 4)[0], len(contents))
+
+        offset = 8
+        for expected_type, expected_size in expected_chunks:
+            self.assertLessEqual(offset + 8, len(contents))
+            self.assertEqual(contents[offset : offset + 4], expected_type)
+            chunk_length = struct.unpack_from(">I", contents, offset + 4)[0]
+            self.assertGreaterEqual(chunk_length, 8)
+            chunk_end = offset + chunk_length
+            self.assertLessEqual(chunk_end, len(contents))
+            self._assert_valid_png(contents[offset + 8 : chunk_end], expected_size)
+            offset = chunk_end
+
+        self.assertEqual(offset, len(contents))
+
+    def _assert_valid_png(self, png: bytes, size: int) -> None:
+        self.assertGreaterEqual(len(png), 8)
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+
+        chunks = []
+        offset = 8
+        while offset < len(png):
+            self.assertLessEqual(offset + 12, len(png))
+            payload_length = struct.unpack_from(">I", png, offset)[0]
+            chunk_type = png[offset + 4 : offset + 8]
+            chunk_end = offset + 12 + payload_length
+            self.assertLessEqual(chunk_end, len(png))
+            payload = png[offset + 8 : chunk_end - 4]
+            expected_checksum = struct.unpack_from(">I", png, chunk_end - 4)[0]
+            checksum = binascii.crc32(chunk_type)
+            checksum = binascii.crc32(payload, checksum) & 0xFFFFFFFF
+            self.assertEqual(checksum, expected_checksum)
+            chunks.append((chunk_type, payload))
+            offset = chunk_end
+
+        self.assertEqual(offset, len(png))
+        self.assertEqual(
+            [chunk_type for chunk_type, _payload in chunks], [b"IHDR", b"IDAT", b"IEND"]
+        )
+        header = chunks[0][1]
+        self.assertEqual(len(header), 13)
+        self.assertEqual(
+            struct.unpack(">IIBBBBB", header),
+            (size, size, 8, 6, 0, 0, 0),
+        )
+        self.assertEqual(chunks[-1][1], b"")
+
+        raw = zlib.decompress(chunks[1][1])
+        row_length = 1 + 4 * size
+        self.assertEqual(len(raw), size * row_length)
+        self.assertTrue(all(raw[row * row_length] == 0 for row in range(size)))
+
     def test_builds_launcher_bundle_with_embedded_cli_and_shim(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -60,6 +128,7 @@ class BuildCodexLabAppTest(unittest.TestCase):
                 {
                     "CFBundleDisplayName": "Codex Lab",
                     "CFBundleExecutable": "Codex Lab Launcher",
+                    "CFBundleIconFile": "CodexLab.icns",
                     "CFBundleIdentifier": "dev.example.codex-lab-test",
                     "CFBundleName": "Codex Lab",
                     "CFBundlePackageType": "APPL",
@@ -71,6 +140,8 @@ class BuildCodexLabAppTest(unittest.TestCase):
             )
 
             launcher = result.launcher_path.read_text(encoding="utf-8")
+            icon = root / "Codex Lab.app/Contents/Resources/CodexLab.icns"
+            self._assert_valid_icns(icon.read_bytes())
             for expected in (
                 "EXPECTED_SOURCE_COMMIT='" + "a" * 40 + "'",
                 "com.openai.codex",
@@ -143,19 +214,20 @@ class BuildCodexLabAppTest(unittest.TestCase):
             official_info.touch()
             embedded_cli.parent.mkdir(parents=True)
             launcher.parent.mkdir(parents=True)
+            source_commit = "a" * 64
 
             embedded_cli.write_text(
                 """#!/bin/sh
 set -eu
 if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; then
-  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$0"
+  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
   exit 0
 fi
 case " $* " in
   *" app-server "*) printf '%s\\n' "$0" > "$CHILD_LOG" ;;
   *) exit 2 ;;
 esac
-""",
+""".replace("__SOURCE_COMMIT__", source_commit),
                 encoding="utf-8",
             )
             os.chmod(embedded_cli, 0o755)
@@ -235,7 +307,7 @@ printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
                     expected_cli_sha256=hashlib.sha256(
                         embedded_cli.read_bytes()
                     ).hexdigest(),
-                    expected_source_commit="a" * 40,
+                    expected_source_commit=source_commit,
                     expected_version="1.2.3",
                     codesign_path=fake_codesign,
                     lsappinfo_path=fake_lsappinfo,
@@ -262,7 +334,7 @@ printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
             self.assertIn(
                 f"Selected OpenAI coding desktop app: {official_app}", completed.stderr
             )
-            self.assertIn("commit=" + "a" * 40, completed.stderr)
+            self.assertIn("commit=" + source_commit, completed.stderr)
             self.assertNotIn("executable_path", completed.stderr)
             self.assertEqual(
                 child_log.read_text(encoding="utf-8").strip(), str(embedded_cli)
@@ -312,6 +384,90 @@ printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
             )
             self.assertEqual(completed.stdout, "built-app-ok")
 
+    def test_build_script_infers_version_and_source_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_bin = root / "fake-codex"
+            source_commit = "a" * 64
+            codex_bin.write_text(
+                """#!/bin/sh
+if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; then
+  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
+  exit 0
+fi
+exit 2
+""".replace("__SOURCE_COMMIT__", source_commit),
+                encoding="utf-8",
+            )
+            os.chmod(codex_bin, 0o755)
+            app_dir = root / "Codex Lab.app"
+            script = Path(__file__).resolve().parents[1] / "build_codex_lab_app.py"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--codex-bin",
+                    str(codex_bin),
+                    "--app-dir",
+                    str(app_dir),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            with (app_dir / "Contents/Info.plist").open("rb") as handle:
+                info = plistlib.load(handle)
+            self.assertEqual(info["CFBundleShortVersionString"], "1.2.3")
+            launcher = (app_dir / "Contents/MacOS/Codex Lab Launcher").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("EXPECTED_VERSION='1.2.3'", launcher)
+            self.assertIn("EXPECTED_SOURCE_COMMIT='" + source_commit + "'", launcher)
+            self.assertIn("Built Codex Lab app bundle", completed.stdout)
+
+    def test_build_script_rejects_metadata_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_bin = root / "fake-codex"
+            source_commit = "a" * 64
+            codex_bin.write_text(
+                """#!/bin/sh
+printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
+""".replace("__SOURCE_COMMIT__", source_commit),
+                encoding="utf-8",
+            )
+            os.chmod(codex_bin, 0o755)
+            script = Path(__file__).resolve().parents[1] / "build_codex_lab_app.py"
+
+            for option, value, message in (
+                ("--short-version", "9.9.9", "Requested short version"),
+                ("--source-commit", "b" * 64, "Requested source commit"),
+            ):
+                with self.subTest(option=option):
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(script),
+                            "--codex-bin",
+                            str(codex_bin),
+                            "--app-dir",
+                            str(root / "Codex Lab.app"),
+                            option,
+                            value,
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertIn(message, completed.stderr)
+                    self.assertIn(
+                        "does not match the embedded CLI provenance", completed.stderr
+                    )
+
     def test_refuses_to_replace_existing_app_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -325,7 +481,7 @@ printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
 
     def test_rejects_malformed_source_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            with self.assertRaisesRegex(ValueError, "40-character hex SHA"):
+            with self.assertRaisesRegex(ValueError, "40- or 64-character hex SHA"):
                 build_codex_lab_app(
                     CodexLabAppOptions(
                         app_dir=Path(temp_dir) / "Codex Lab.app",
