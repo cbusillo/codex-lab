@@ -964,7 +964,7 @@ fn recovers_from_trailing_json_documents_by_keeping_latest_accounts_file() {
 
 #[cfg(unix)]
 #[test]
-fn saved_accounts_file_is_private() {
+fn saved_accounts_file_is_private_after_rewrite() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = TempDir::new().expect("tempdir");
@@ -976,11 +976,19 @@ fn saved_accounts_file_is_private() {
         /*make_active*/ true,
     )
     .expect("upsert api account");
+    let path = accounts_file_path(temp.path());
+    let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+    permissions.set_mode(0o666);
+    fs::set_permissions(&path, permissions).expect("make accounts file permissive");
 
-    let mode = fs::metadata(accounts_file_path(temp.path()))
-        .expect("metadata")
-        .permissions()
-        .mode()
-        & 0o777;
+    upsert_api_key_account(
+        temp.path(),
+        "sk-other".to_string(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("rewrite accounts file");
+
+    let mode = fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
     assert_eq!(0o600, mode);
 }

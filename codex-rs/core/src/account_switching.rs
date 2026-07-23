@@ -641,6 +641,72 @@ mod tests {
     }
 
     #[test]
+    fn current_account_override_takes_precedence_over_stored_active_account() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        let stored_active = upsert_chatgpt(temp.path(), "stored-active");
+        let current_session = upsert_chatgpt(temp.path(), "current-session");
+        codex_login::set_active_account_id(
+            temp.path(),
+            AuthCredentialsStoreMode::File,
+            Some(stored_active.clone()),
+        )
+        .expect("set stored active account");
+        let mut state = RateLimitSwitchState::default();
+        state.mark_limited(
+            &current_session,
+            AuthMode::Chatgpt,
+            /*blocked_until*/ None,
+        );
+
+        let selected = select_next_account_id(
+            temp.path(),
+            temp.path(),
+            &state,
+            /*allow_api_key_fallback*/ false,
+            now,
+            Some(&current_session),
+        )
+        .expect("select next account");
+
+        assert_eq!(selected, Some(stored_active));
+    }
+
+    #[test]
+    fn current_account_override_is_not_reselected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        let stored_active = upsert_chatgpt(temp.path(), "stored-active");
+        let current_session = upsert_chatgpt(temp.path(), "current-session");
+        account_usage::record_rate_limit_snapshot(
+            temp.path(),
+            &stored_active,
+            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, 80.0),
+            now,
+        )
+        .expect("record stored active snapshot");
+        account_usage::record_rate_limit_snapshot(
+            temp.path(),
+            &current_session,
+            rate_limit_snapshot(now.timestamp() + 60 * 60, 10.0),
+            now,
+        )
+        .expect("record current session snapshot");
+
+        let selected = select_next_account_id(
+            temp.path(),
+            temp.path(),
+            &RateLimitSwitchState::default(),
+            /*allow_api_key_fallback*/ false,
+            now,
+            Some(&current_session),
+        )
+        .expect("select next account");
+
+        assert_eq!(selected, Some(stored_active));
+    }
+
+    #[test]
     fn does_not_fallback_to_api_key_while_chatgpt_candidate_remains() {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
