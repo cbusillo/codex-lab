@@ -473,7 +473,33 @@ impl ThreadManager {
     }
 
     pub async fn reload_auth_for_loaded_threads(&self) {
+        let threads = self
+            .state
+            .threads
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for thread in &threads {
+            thread
+                .codex
+                .session
+                .services
+                .execution_account
+                .prepare_for_control_auth_reload()
+                .await;
+        }
         self.state.auth_manager.reload().await;
+        for thread in threads {
+            thread
+                .codex
+                .session
+                .services
+                .execution_account
+                .reconcile_after_control_auth_reload()
+                .await;
+        }
     }
 
     pub fn skills_manager(&self) -> Arc<SkillsManager> {
