@@ -18,8 +18,9 @@ pub(super) async fn load_remote_control_auth(
     auth_manager: &Arc<AuthManager>,
 ) -> io::Result<RemoteControlConnectionAuth> {
     let mut reloaded = false;
-    let auth = loop {
-        let Some(auth) = auth_manager.auth().await else {
+    let (auth, revision) = loop {
+        let (auth_opt, revision) = auth_manager.auth_with_revision().await;
+        let Some(auth) = auth_opt else {
             if reloaded {
                 return Err(io::Error::new(
                     ErrorKind::PermissionDenied,
@@ -31,14 +32,14 @@ pub(super) async fn load_remote_control_auth(
             continue;
         };
         if !auth.uses_codex_backend() {
-            break auth;
+            break (auth, revision);
         }
         if auth.get_account_id().is_none() && !reloaded {
             auth_manager.reload().await;
             reloaded = true;
             continue;
         }
-        break auth;
+        break (auth, revision);
     };
 
     if !auth.uses_codex_backend() {
@@ -58,7 +59,7 @@ pub(super) async fn load_remote_control_auth(
     Ok(RemoteControlConnectionAuth {
         auth_provider: codex_model_provider::auth_provider_from_auth(&auth),
         account_id,
-        revision: auth_manager.auth_revision(),
+        revision,
     })
 }
 

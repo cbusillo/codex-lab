@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 
-async fn auth_manager_for_account(
+pub(super) async fn auth_manager_for_account(
     codex_home: &TempDir,
     account_id: &str,
     access_token: &str,
@@ -124,7 +124,7 @@ async fn accept_http_request_with_headers(
     )
 }
 
-async fn respond_with_remote_control_enrollment(
+pub(super) async fn respond_with_remote_control_enrollment(
     mut stream: TcpStream,
     server_id: &str,
     environment_id: &str,

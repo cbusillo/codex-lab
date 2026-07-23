@@ -139,6 +139,14 @@ impl BoundedOutboundBuffer {
             .values()
             .flat_map(|buffer| buffer.iter())
     }
+
+    fn clear(&mut self) {
+        let was_used = *self.used_tx.borrow() > 0;
+        self.buffer_by_stream.clear();
+        if was_used {
+            self.used_tx.send_modify(|used| *used = 0);
+        }
+    }
 }
 
 struct WebsocketState {
@@ -228,6 +236,14 @@ impl WebsocketState {
     fn invalidate_client_message_client(&mut self, client_id: &ClientId) {
         self.last_completed_client_chunk_seq_id_by_stream
             .retain(|(cursor_client_id, _), _| cursor_client_id != client_id);
+    }
+
+    fn reset_for_account_change(&mut self) {
+        self.outbound_buffer.clear();
+        self.subscribe_cursor = None;
+        self.next_seq_id_by_stream.clear();
+        self.last_completed_client_chunk_seq_id_by_stream.clear();
+        self.client_segment_reassembler = ClientSegmentReassembler::default();
     }
 
     fn client_message_key(
@@ -604,6 +620,18 @@ impl RemoteControlWebsocket {
             let connection_end_reason = self
                 .run_connection(websocket_connection, shutdown_token, active_control_auth)
                 .await;
+            if matches!(
+                connection_end_reason,
+                ConnectionEndReason::ControlAuthChanged
+            ) {
+                info!("resetting account-scoped relay state after control account identity change");
+                self.state.lock().await.reset_for_account_change();
+                self.client_tracker
+                    .lock()
+                    .await
+                    .close_all_for_account_change()
+                    .await;
+            }
             if matches!(
                 connection_end_reason,
                 ConnectionEndReason::ReconnectRequested
@@ -1895,6 +1923,9 @@ mod tests {
 
     #[path = "auth_change_tests.rs"]
     mod auth_change_tests;
+
+    #[path = "outer_loop_tests.rs"]
+    mod outer_loop_tests;
 
     // Windows Bazel CI can take longer than a few seconds for the websocket
     // client connection attempt to reach the local test listener.

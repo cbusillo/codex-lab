@@ -59,6 +59,7 @@ pub(super) enum ClientCloseReason {
     Explicit,
     IdleTimeout,
     OutboundStopped,
+    AccountChanged,
     #[cfg(test)]
     Requested,
 }
@@ -341,6 +342,14 @@ impl ClientTracker {
                 .await?;
         }
         Ok(expired_client_ids)
+    }
+
+    pub(super) async fn close_all_for_account_change(&mut self) {
+        while let Some(client_key) = self.clients.keys().next().cloned() {
+            let _ = self
+                .close_client_with_reason(&client_key, ClientCloseReason::AccountChanged)
+                .await;
+        }
     }
 
     #[cfg(test)]
