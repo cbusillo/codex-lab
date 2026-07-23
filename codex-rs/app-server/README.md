@@ -294,6 +294,7 @@ Example with notification opt-out:
 - `app/list` — list available apps.
 - `remoteControl/enable` — experimental; enable remote control for the current app-server process and return the current remote-control status snapshot. The caller is responsible for persisting the desired setting outside app-server.
 - `remoteControl/disable` — experimental; disable remote control for the current app-server process and return the current remote-control status snapshot. This does not revoke already enrolled controller devices.
+- `remoteControl/reconnect` — experimental; reconnect only the remote-control relay for the current app-server process. The daemon, enrollment, environment id, pairing authorization, virtual clients, threads, and account state remain intact. Concurrent requests coalesce while a connection attempt is already in progress. Returns the connecting status snapshot and rejects requests while remote control is disabled.
 - `remoteControl/status/read` — experimental; read the current remote-control status snapshot. `status` is one of `disabled`, `connecting`, `connected`, or `errored`; `serverName` is the local machine name used by this app-server process; `environmentId` is a string when the app-server has a current enrollment and `null` when that enrollment is cleared, invalidated, or remote control is disabled.
 - `codeBridge/status/read` — experimental; read whether a local Code Bridge
   service is discoverable and responsive. This method first reads the Codex

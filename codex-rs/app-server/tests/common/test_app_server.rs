@@ -681,6 +681,12 @@ impl TestAppServer {
             .await
     }
 
+    /// Send a `remoteControl/reconnect` JSON-RPC request.
+    pub async fn send_remote_control_reconnect_request(&mut self) -> anyhow::Result<i64> {
+        self.send_request("remoteControl/reconnect", /*params*/ None)
+            .await
+    }
+
     /// Send a `remoteControl/status/read` JSON-RPC request.
     pub async fn send_remote_control_status_read_request(&mut self) -> anyhow::Result<i64> {
         self.send_request("remoteControl/status/read", /*params*/ None)

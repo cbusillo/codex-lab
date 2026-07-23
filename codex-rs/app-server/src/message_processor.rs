@@ -929,6 +929,10 @@ impl MessageProcessor {
                 .remote_control_processor
                 .disable()
                 .map(|response| Some(response.into())),
+            ClientRequest::RemoteControlReconnect { .. } => self
+                .remote_control_processor
+                .reconnect()
+                .map(|response| Some(response.into())),
             ClientRequest::RemoteControlStatusRead { .. } => self
                 .remote_control_processor
                 .status_read()

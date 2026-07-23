@@ -19,6 +19,7 @@ pub(crate) use codex_app_server_transport::ConnectionOrigin;
 pub(crate) use codex_app_server_transport::OutgoingMessage;
 pub(crate) use codex_app_server_transport::QueuedOutgoingMessage;
 pub(crate) use codex_app_server_transport::RemoteControlHandle;
+pub(crate) use codex_app_server_transport::RemoteControlReconnectUnavailable;
 pub(crate) use codex_app_server_transport::RemoteControlStartConfig;
 pub(crate) use codex_app_server_transport::RemoteControlUnavailable;
 pub(crate) use codex_app_server_transport::TransportEvent;
