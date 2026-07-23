@@ -175,6 +175,19 @@ fn add_account_choose_esc_returns_to_accounts() {
 }
 
 #[test]
+fn add_account_chatgpt_enter_starts_login() {
+    let (tx, mut rx) = app_event_sender_with_rx();
+    let mut view = LoginAddAccountView::new(tx);
+
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(!view.is_complete());
+    assert_matches!(view.state, LoginAddAccountState::Starting);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::LoginStartChatGpt));
+    assert_matches!(rx.try_recv(), Err(_));
+}
+
+#[test]
 fn add_account_api_key_esc_returns_to_accounts() {
     let (tx, mut rx) = app_event_sender_with_rx();
     let mut view = LoginAddAccountView::new(tx);
