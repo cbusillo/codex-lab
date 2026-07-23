@@ -6,8 +6,10 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_lab_package.live_smoke import matching_app_server_pids
+from codex_lab_package.live_smoke import process_has_environment
 from codex_lab_package.live_smoke import process_has_ancestor
 from codex_lab_package.live_smoke import validate_cli_provenance
+from codex_lab_package.live_smoke import validate_matching_build_provenance
 
 
 class LiveSmokeTest(unittest.TestCase):
@@ -46,6 +48,26 @@ class LiveSmokeTest(unittest.TestCase):
                 ):
                     validate_cli_provenance({**provenance, field: value}, cli_path)
 
+            build_provenance = {
+                field: provenance[field]
+                for field in (
+                    "schema_version",
+                    "version",
+                    "source_commit",
+                    "dirty_state",
+                    "build_profile",
+                    "build_channel",
+                )
+            }
+            validate_matching_build_provenance(
+                build_provenance, build_provenance.copy()
+            )
+            with self.assertRaisesRegex(ValueError, "source_commit"):
+                validate_matching_build_provenance(
+                    build_provenance,
+                    {**build_provenance, "source_commit": "b" * 40},
+                )
+
     def test_process_and_launcher_proof_helpers(self) -> None:
         cli_path = Path("/tmp/Codex Lab.app/Contents/Resources/codex-lab")
         rows = [
@@ -59,3 +81,24 @@ class LiveSmokeTest(unittest.TestCase):
         }
         self.assertEqual(matching_app_server_pids(rows, cli_path, paths.get), [21])
         self.assertTrue(process_has_ancestor(21, {20}, rows))
+        process = (
+            "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT "
+            "CODEX_HOME=/tmp/lab CODEX_APP_SERVER_USE_LOCAL_DAEMON=1"
+        )
+        self.assertTrue(
+            process_has_environment(
+                20,
+                {
+                    "CODEX_APP_SERVER_USE_LOCAL_DAEMON": "1",
+                    "CODEX_HOME": "/tmp/lab",
+                },
+                lambda _pid: process,
+            )
+        )
+        self.assertFalse(
+            process_has_environment(
+                20,
+                {"CODEX_HOME": "/tmp/other"},
+                lambda _pid: process,
+            )
+        )

@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_lab_package.icon import ICON_FILE_NAME
+from codex_lab_package.layout import MAX_PROVENANCE_BYTES
 from codex_lab_package.live_smoke import read_cli_provenance
 
 
@@ -70,6 +71,16 @@ def smoke_check(
 
     launcher = launcher_path.read_text(encoding="utf-8")
     _require_contains(launcher, "CODEX_CLI_PATH", launcher_path)
+    _require_contains(launcher, "CODEX_HOME=$LAB_HOME", launcher_path)
+    _require_contains(launcher, "CODEX_LAB_HOME=$LAB_HOME", launcher_path)
+    _require_contains(launcher, "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1", launcher_path)
+    _require_contains(launcher, "app-server daemon version", launcher_path)
+    _require_contains(launcher, "managedCodexPath", launcher_path)
+    _require_contains(launcher, "appServerVersion", launcher_path)
+    _require_contains(launcher, "packages/standalone/current/codex", launcher_path)
+    _require_contains(
+        launcher, "Managed Codex Lab engine build does not match", launcher_path
+    )
     _require_contains(launcher, "Resources/codex-lab", launcher_path)
     _require_contains(launcher, "EXPECTED_CLI_SHA256=", launcher_path)
     _require_contains(launcher, "EXPECTED_CLI_VERSION=", launcher_path)
@@ -82,7 +93,7 @@ def smoke_check(
     _require_contains(launcher, "codesign", launcher_path)
     _require_contains(launcher, "lsappinfo", launcher_path)
     _require_contains(launcher, "debug provenance --json", launcher_path)
-    _require_contains(launcher, "4096-byte limit", launcher_path)
+    _require_contains(launcher, f"{MAX_PROVENANCE_BYTES}-byte limit", launcher_path)
     _require_contains(launcher, "Quit it before launching Codex Lab", launcher_path)
     _require_contains(launcher, "--env", launcher_path)
 

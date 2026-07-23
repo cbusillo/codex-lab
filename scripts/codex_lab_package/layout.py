@@ -165,6 +165,14 @@ LSAPPINFO={_shell_quote(str(lsappinfo_path))}
 OPEN={_shell_quote(str(open_path))}
 PLUTIL={_shell_quote(str(plutil_path))}
 SHASUM={_shell_quote(str(shasum_path))}
+if [ -n "${{CODEX_LAB_HOME:-}}" ]; then
+  LAB_HOME="$CODEX_LAB_HOME"
+elif [ -n "${{HOME:-}}" ]; then
+  LAB_HOME="$HOME/.codex-lab"
+else
+  echo "HOME is unavailable; refusing to resolve the Codex Lab daemon." >&2
+  exit 1
+fi
 home_chatgpt_app=
 home_codex_app=
 if [ -n "${{HOME:-}}" ]; then
@@ -247,7 +255,7 @@ if ! RUNNING_APP_INFO=$("$LSAPPINFO" find bundleid="$OFFICIAL_BUNDLE_IDENTIFIER"
 fi
 if [ -n "$RUNNING_APP_INFO" ]; then
   echo "OpenAI coding desktop app is already running: $OFFICIAL_BUNDLE_IDENTIFIER" >&2
-  echo "Quit it before launching Codex Lab so CODEX_CLI_PATH applies to the new app-server." >&2
+  echo "Quit it before launching Codex Lab so the persistent-daemon environment applies." >&2
   exit 1
 fi
 
@@ -315,16 +323,99 @@ if [ -z "$version" ] || [ "${{#version}}" -gt 128 ] \
   echo "Codex Lab CLI build metadata is unavailable or unbounded." >&2
   exit 1
 fi
-if [ "$executable_path" != "$LAB_CLI" ]; then
+if [ ! "$executable_path" -ef "$LAB_CLI" ]; then
   echo "Codex Lab CLI provenance does not match the embedded executable." >&2
   exit 1
 fi
 /bin/rm -f "$PROVENANCE_FILE"
 trap - EXIT HUP INT TERM
 
+MANAGED_CLI="$LAB_HOME/packages/standalone/current/codex"
+if [ ! -x "$MANAGED_CLI" ]; then
+  echo "Managed Codex Lab engine is not executable: $MANAGED_CLI" >&2
+  exit 1
+fi
+
+MANAGED_PROVENANCE_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-managed.XXXXXX")
+trap '/bin/rm -f "$MANAGED_PROVENANCE_FILE"' EXIT HUP INT TERM
+if ! "$MANAGED_CLI" debug provenance --json >"$MANAGED_PROVENANCE_FILE"; then
+  echo "Managed Codex Lab engine did not report build provenance: $MANAGED_CLI" >&2
+  exit 1
+fi
+managed_provenance_bytes=$(/usr/bin/wc -c <"$MANAGED_PROVENANCE_FILE" | /usr/bin/tr -d '[:space:]')
+case "$managed_provenance_bytes" in
+  ''|*[!0-9]*)
+    echo "Managed Codex Lab engine provenance size could not be read: $MANAGED_CLI" >&2
+    exit 1
+    ;;
+esac
+if [ "$managed_provenance_bytes" -eq 0 ] || [ "$managed_provenance_bytes" -gt {MAX_PROVENANCE_BYTES} ]; then
+  echo "Managed Codex Lab engine provenance exceeded the {MAX_PROVENANCE_BYTES}-byte limit: $MANAGED_CLI" >&2
+  exit 1
+fi
+
+managed_provenance_field() {{
+  "$PLUTIL" -extract "$1" raw -o - "$MANAGED_PROVENANCE_FILE" 2>/dev/null || true
+}}
+managed_schema_version=$(managed_provenance_field schema_version)
+managed_version=$(managed_provenance_field version)
+managed_source_commit=$(managed_provenance_field source_commit)
+managed_dirty_state=$(managed_provenance_field dirty_state)
+managed_build_profile=$(managed_provenance_field build_profile)
+managed_build_channel=$(managed_provenance_field build_channel)
+managed_executable_path=$(managed_provenance_field executable_path)
+
+if [ "$managed_schema_version" != "$schema_version" ] \
+  || [ "$managed_version" != "$version" ] \
+  || [ "$managed_source_commit" != "$source_commit" ] \
+  || [ "$managed_dirty_state" != "$dirty_state" ] \
+  || [ "$managed_build_profile" != "$build_profile" ] \
+  || [ "$managed_build_channel" != "$build_channel" ]; then
+  echo "Managed Codex Lab engine build does not match the packaged launcher." >&2
+  exit 1
+fi
+if [ ! "$managed_executable_path" -ef "$MANAGED_CLI" ]; then
+  echo "Managed Codex Lab engine provenance does not match its executable." >&2
+  exit 1
+fi
+/bin/rm -f "$MANAGED_PROVENANCE_FILE"
+trap - EXIT HUP INT TERM
+
+DAEMON_STATUS_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-daemon.XXXXXX")
+trap '/bin/rm -f "$DAEMON_STATUS_FILE"' EXIT HUP INT TERM
+if ! CODEX_LAB_HOME="$LAB_HOME" "$MANAGED_CLI" app-server daemon version >"$DAEMON_STATUS_FILE" 2>/dev/null; then
+  echo "Persistent Codex Lab daemon is unavailable under $LAB_HOME." >&2
+  echo "Start the managed daemon before launching Codex Lab." >&2
+  exit 1
+fi
+daemon_status=$("$PLUTIL" -extract status raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
+daemon_backend=$("$PLUTIL" -extract backend raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
+daemon_managed_codex_path=$("$PLUTIL" -extract managedCodexPath raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
+daemon_socket_path=$("$PLUTIL" -extract socketPath raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
+daemon_app_server_version=$("$PLUTIL" -extract appServerVersion raw -o - "$DAEMON_STATUS_FILE" 2>/dev/null || true)
+if [ "$daemon_status" != "running" ]; then
+  echo "Persistent Codex Lab daemon is not running under $LAB_HOME." >&2
+  exit 1
+fi
+expected_daemon_socket="$LAB_HOME/app-server-control/app-server-control.sock"
+if [ "$daemon_backend" != "pid" ] \
+  || [ "$daemon_managed_codex_path" != "$MANAGED_CLI" ] \
+  || [ "$daemon_socket_path" != "$expected_daemon_socket" ] \
+  || [ "$daemon_app_server_version" != "$version" ]; then
+  echo "Persistent Codex Lab daemon does not match the managed engine under $LAB_HOME." >&2
+  exit 1
+fi
+/bin/rm -f "$DAEMON_STATUS_FILE"
+trap - EXIT HUP INT TERM
+
 echo "Selected OpenAI coding desktop app: $CODEX_APP" >&2
 echo "Codex Lab CLI provenance: commit=$source_commit dirty=$dirty_state profile=$build_profile channel=$build_channel version=$version" >&2
-exec "$OPEN" -n --env "CODEX_CLI_PATH=$LAB_CLI" "$CODEX_APP"
+exec "$OPEN" -n \
+  --env "CODEX_CLI_PATH=$LAB_CLI" \
+  --env "CODEX_HOME=$LAB_HOME" \
+  --env "CODEX_LAB_HOME=$LAB_HOME" \
+  --env "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1" \
+  "$CODEX_APP"
 """
 
 

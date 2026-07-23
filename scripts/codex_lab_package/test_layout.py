@@ -221,7 +221,17 @@ class BuildCodexLabAppTest(unittest.TestCase):
                 """#!/bin/sh
 set -eu
 if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; then
-  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
+  executable_path=${PROVENANCE_EXECUTABLE_PATH:-$0}
+  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$executable_path"
+  exit 0
+fi
+if [ "${1:-}" = app-server ] && [ "${2:-}" = daemon ] && [ "${3:-}" = version ]; then
+  if [ "${DAEMON_VERSION_FAILURE:-}" = 1 ]; then
+    exit 1
+  fi
+  managed_codex_path=${DAEMON_MANAGED_PATH:-$0}
+  app_server_version=${DAEMON_APP_SERVER_VERSION:-1.2.3}
+  printf '{"status":"running","backend":"pid","managedCodexPath":"%s","managedCodexVersion":"0.0.0","socketPath":"%s/app-server-control/app-server-control.sock","cliVersion":"0.0.0","appServerVersion":"%s"}\\n' "$managed_codex_path" "$CODEX_LAB_HOME" "$app_server_version"
   exit 0
 fi
 case " $* " in
@@ -286,8 +296,19 @@ with open(path, "rb") as handle:
             fake_open = root / "open"
             fake_open.write_text(
                 """#!/bin/sh
-export CODEX_CLI_PATH="${3#CODEX_CLI_PATH=}"
-printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
+args="$*"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --env)
+      export "$2"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+printf 'cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\nargs=%s\\n' \\
+  "$CODEX_CLI_PATH" "$CODEX_HOME" "$CODEX_LAB_HOME" \\
+  "$CODEX_APP_SERVER_USE_LOCAL_DAEMON" "$args" > "$OPEN_LOG"
 "$CODEX_CLI_PATH" -c features.code_mode_host=true app-server
 """,
                 encoding="utf-8",
@@ -322,8 +343,16 @@ printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
             environment = {
                 **os.environ,
                 "CHILD_LOG": str(child_log),
+                "CODEX_LAB_HOME": str(root / "codex-lab-home"),
                 "OPEN_LOG": str(open_log),
             }
+            managed_cli = (
+                Path(environment["CODEX_LAB_HOME"])
+                / "packages/standalone/current/codex"
+            )
+            managed_cli.parent.mkdir(parents=True)
+            managed_cli.write_bytes(embedded_cli.read_bytes())
+            os.chmod(managed_cli, 0o755)
 
             completed = subprocess.run(
                 [str(launcher)],
@@ -342,10 +371,86 @@ printf 'cli=%s\\nargs=%s\\n' "$CODEX_CLI_PATH" "$*" > "$OPEN_LOG"
             )
             open_contents = open_log.read_text(encoding="utf-8")
             self.assertIn(f"cli={embedded_cli}", open_contents)
+            self.assertIn(f"codex_home={environment['CODEX_LAB_HOME']}", open_contents)
+            self.assertIn(f"lab_home={environment['CODEX_LAB_HOME']}", open_contents)
+            self.assertIn("local_daemon=1", open_contents)
             self.assertIn(f"--env CODEX_CLI_PATH={embedded_cli}", open_contents)
+            self.assertIn(
+                f"--env CODEX_HOME={environment['CODEX_LAB_HOME']}", open_contents
+            )
+            self.assertIn(
+                f"--env CODEX_LAB_HOME={environment['CODEX_LAB_HOME']}",
+                open_contents,
+            )
+            self.assertIn("--env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1", open_contents)
             self.assertIn(str(official_app), open_contents)
 
             open_log.unlink()
+            child_log.unlink()
+            environment["PROVENANCE_EXECUTABLE_PATH"] = str(root / "wrong-codex")
+            completed = subprocess.run(
+                [str(launcher)],
+                check=False,
+                env=environment,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn(
+                "provenance does not match the embedded executable", completed.stderr
+            )
+            self.assertFalse(open_log.exists())
+
+            environment.pop("PROVENANCE_EXECUTABLE_PATH")
+            environment["DAEMON_VERSION_FAILURE"] = "1"
+            completed = subprocess.run(
+                [str(launcher)],
+                check=False,
+                env=environment,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn(
+                "Persistent Codex Lab daemon is unavailable", completed.stderr
+            )
+            self.assertFalse(open_log.exists())
+
+            environment.pop("DAEMON_VERSION_FAILURE")
+            environment["DAEMON_APP_SERVER_VERSION"] = "9.9.9"
+            completed = subprocess.run(
+                [str(launcher)],
+                check=False,
+                env=environment,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn(
+                "Persistent Codex Lab daemon does not match", completed.stderr
+            )
+            self.assertFalse(open_log.exists())
+
+            environment.pop("DAEMON_APP_SERVER_VERSION")
+            managed_contents = managed_cli.read_text(encoding="utf-8")
+            managed_cli.write_text(
+                managed_contents.replace(source_commit, "b" * len(source_commit)),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [str(launcher)],
+                check=False,
+                env=environment,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn(
+                "Managed Codex Lab engine build does not match", completed.stderr
+            )
+            self.assertFalse(open_log.exists())
+            managed_cli.write_text(managed_contents, encoding="utf-8")
+
             environment["RUNNING_APP_PATH"] = str(
                 official_app / "Contents/MacOS/ChatGPT"
             )
