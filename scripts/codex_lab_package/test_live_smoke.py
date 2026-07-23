@@ -23,10 +23,16 @@ class LiveSmokeTest(unittest.TestCase):
                 "build_channel": "lab",
                 "executable_path": str(cli_path),
             }
-            validate_cli_provenance(provenance, cli_path)
+            for source_commit in ("a" * 40, "b" * 64):
+                with self.subTest(source_commit_length=len(source_commit)):
+                    validate_cli_provenance(
+                        {**provenance, "source_commit": source_commit}, cli_path
+                    )
             for field, value, message in (
                 ("schema_version", 2, "schema"),
                 ("source_commit", "bad", "malformed"),
+                ("source_commit", "a" * 39, "malformed"),
+                ("source_commit", "a" * 65, "malformed"),
                 ("dirty_state", "dirty", "clean tracked source"),
                 (
                     "executable_path",
