@@ -81,6 +81,7 @@ pub(crate) mod mentions {
 }
 mod sandbox_tags;
 pub mod sandboxing;
+mod session_models_manager;
 mod session_prefix;
 mod session_startup_prewarm;
 pub mod skills;

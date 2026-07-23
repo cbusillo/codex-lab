@@ -687,11 +687,6 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
     );
 
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
-    let models_manager = models_manager_with_provider(
-        config.codex_home.to_path_buf(),
-        auth_manager.clone(),
-        config.model_provider.clone(),
-    );
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let skills_manager = Arc::new(SkillsManager::new(
         config.codex_home.clone(),
@@ -707,7 +702,6 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         config,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
-        models_manager,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         project_validation_coordinator: Arc::new(ProjectValidationCoordinator::default()),
         skills_manager,
