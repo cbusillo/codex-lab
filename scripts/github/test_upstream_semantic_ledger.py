@@ -416,18 +416,20 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
                 json.loads(audit_path.read_text(encoding="utf-8"))
             )
             artifact_sets = (
-                ("ledger.json", "review.json", "ledger.md"),
+                ("ledger.json", "review.json", "ledger.md", True),
                 (
                     "pre-checkpoint-ledger.json",
                     "pre-checkpoint-review.json",
                     "pre-checkpoint-ledger.md",
+                    False,
                 ),
             )
-            for ledger_name, review_name, markdown_name in artifact_sets:
+            for ledger_name, review_name, markdown_name, required in artifact_sets:
                 ledger_path = wave / ledger_name
                 review_path = wave / review_name
                 markdown_path = wave / markdown_name
                 if not ledger_path.exists():
+                    self.assertFalse(required, f"missing required {ledger_name}")
                     self.assertFalse(review_path.exists() or markdown_path.exists())
                     continue
                 with self.subTest(wave=wave.name, ledger=ledger_name):
