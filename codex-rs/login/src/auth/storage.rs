@@ -31,6 +31,7 @@ use once_cell::sync::Lazy;
 
 use super::encrypted_aggregate::PreparedMigration;
 use super::encrypted_aggregate::activate_encrypted_aggregate;
+use super::encrypted_aggregate::with_conditionally_invalidated_encrypted_aggregate;
 use super::encrypted_aggregate::with_invalidated_encrypted_aggregate;
 
 const AUTH_STORAGE_LOCK_FILE_NAME: &str = ".auth-storage.lock";
@@ -109,6 +110,18 @@ pub(super) trait AuthStorageBackend: Debug + Send + Sync {
     fn load(&self) -> std::io::Result<Option<AuthDotJson>>;
     fn save(&self, auth: &AuthDotJson) -> std::io::Result<()>;
     fn delete(&self) -> std::io::Result<bool>;
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        if self.load()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save(replacement)?;
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +157,19 @@ impl AuthStorageBackend for AggregateAwareAuthStorage {
             self.mode,
             self.keyring_store.clone(),
             || self.legacy.delete(),
+        )
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        with_conditionally_invalidated_encrypted_aggregate(
+            &self.codex_home,
+            self.mode,
+            self.keyring_store.clone(),
+            || self.legacy.compare_and_swap(expected, replacement),
         )
     }
 }
@@ -243,6 +269,19 @@ impl AuthStorageBackend for FileAuthStorage {
     fn delete(&self) -> std::io::Result<bool> {
         let _guard = self.acquire_write_guard()?;
         delete_file_if_exists(&self.codex_home)
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        let _guard = self.acquire_write_guard()?;
+        if self.load_unlocked()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save_unlocked(replacement)?;
+        Ok(true)
     }
 }
 
@@ -419,6 +458,20 @@ impl AuthStorageBackend for EphemeralAuthStorage {
 
     fn delete(&self) -> std::io::Result<bool> {
         self.with_store(|store, key| Ok(store.remove(&key).is_some()))
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        self.with_store(|store, key| {
+            if store.get(&key) != Some(expected) {
+                return Ok(false);
+            }
+            store.insert(key, replacement.clone());
+            Ok(true)
+        })
     }
 }
 

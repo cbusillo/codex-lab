@@ -638,6 +638,48 @@ pub(crate) fn update_catalog_account_from_auth(
     write_accounts_file(codex_home, auth_credentials_store_mode, &data)
 }
 
+pub(crate) fn compare_and_swap_catalog_account_auth(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    catalog_id: &str,
+    expected: &AuthDotJson,
+    replacement: &AuthDotJson,
+) -> io::Result<bool> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
+    let account_index = data
+        .accounts
+        .iter()
+        .position(|account| account.id == catalog_id)
+        .ok_or_else(|| io::Error::other(format!("catalog account {catalog_id} was not found")))?;
+    if auth_from_stored_account(&data.accounts[account_index])? != *expected {
+        return Ok(false);
+    }
+    let sync_active_auth = data.active_account_id.as_deref() == Some(catalog_id);
+    let previous_active_auth = if sync_active_auth {
+        crate::load_auth_dot_json(codex_home, auth_credentials_store_mode)?
+    } else {
+        None
+    };
+    if sync_active_auth {
+        save_auth(codex_home, replacement, auth_credentials_store_mode)?;
+    }
+    update_stored_account_from_auth(&mut data.accounts[account_index], replacement)?;
+    if let Err(err) = write_accounts_file(codex_home, auth_credentials_store_mode, &data) {
+        if sync_active_auth
+            && let Err(rollback_err) = restore_previous_auth(
+                codex_home,
+                previous_active_auth,
+                auth_credentials_store_mode,
+            )
+        {
+            tracing::warn!("failed to roll back active auth refresh: {rollback_err}");
+        }
+        return Err(err);
+    }
+    Ok(true)
+}
+
 pub fn update_account_last_refresh(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -685,8 +727,7 @@ pub fn activate_account(
     account_id: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<StoredAccount> {
-    let (_account, auth) = auth_for_account(codex_home, auth_credentials_store_mode, account_id)?;
-    commit_active_account(codex_home, account_id, &auth, auth_credentials_store_mode)
+    commit_active_account(codex_home, account_id, auth_credentials_store_mode)
 }
 
 fn restore_previous_auth(
@@ -704,7 +745,6 @@ fn restore_previous_auth(
 pub fn commit_active_account(
     codex_home: &Path,
     account_id: &str,
-    _auth: &AuthDotJson,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<StoredAccount> {
     let _catalog_guard = acquire_catalog_write_guard(codex_home)?;

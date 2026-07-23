@@ -7,9 +7,14 @@ use serde::Serialize;
 use serial_test::serial;
 use std::env;
 use std::fmt::Debug;
+use std::fs::File;
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -105,10 +110,52 @@ const REFRESH_TOKEN_UNKNOWN_MESSAGE: &str =
 const REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE: &str = "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.";
 const DEFAULT_CHATGPT_BACKEND_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const AUTH_REFRESH_LOCK_FILE_NAME: &str = ".auth-refresh.lock";
 pub(super) const REVOKE_TOKEN_URL: &str = "https://auth.openai.com/oauth/revoke";
 pub const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 pub const REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REVOKE_TOKEN_URL_OVERRIDE";
 static NEXT_DUMMY_AUTH_ID: AtomicU64 = AtomicU64::new(1);
+static MANAGED_AUTH_REFRESH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+pub(crate) struct AuthRefreshFileGuard {
+    lock_file: File,
+}
+
+impl Drop for AuthRefreshFileGuard {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.lock_file);
+    }
+}
+
+pub(crate) fn acquire_auth_refresh_file_guard(
+    codex_home: &Path,
+) -> std::io::Result<AuthRefreshFileGuard> {
+    std::fs::create_dir_all(codex_home)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let lock_file = options.open(codex_home.join(AUTH_REFRESH_LOCK_FILE_NAME))?;
+    fs2::FileExt::lock_exclusive(&lock_file)?;
+    Ok(AuthRefreshFileGuard { lock_file })
+}
+
+async fn acquire_managed_auth_refresh_file_guard(
+    codex_home: &Path,
+) -> Result<AuthRefreshFileGuard, RefreshTokenError> {
+    let codex_home = codex_home.to_path_buf();
+    tokio::task::spawn_blocking(move || acquire_auth_refresh_file_guard(&codex_home))
+        .await
+        .map_err(|error| {
+            RefreshTokenError::Transient(std::io::Error::other(format!(
+                "failed to acquire auth refresh lock: {error}"
+            )))
+        })?
+        .map_err(RefreshTokenError::Transient)
+}
 
 #[derive(Debug, Error)]
 pub enum RefreshTokenError {
@@ -522,10 +569,6 @@ impl ChatgptAuth {
         self.state.auth_dot_json.lock().unwrap().clone()
     }
 
-    fn current_token_data(&self) -> Option<TokenData> {
-        self.current_auth_json().and_then(|auth| auth.tokens)
-    }
-
     fn storage(&self) -> &Arc<dyn AuthStorageBackend> {
         &self.storage
     }
@@ -717,10 +760,11 @@ pub fn save_auth(
     storage.save(auth)
 }
 
-pub(crate) fn upsert_login_account(
+fn upsert_login_account_with_activation(
     codex_home: &Path,
     auth: &AuthDotJson,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    make_active: bool,
 ) -> std::io::Result<()> {
     // Only mirror file-backed logins in this slice. Keyring and Auto need a
     // keyring-aware account-store policy before auth_accounts can safely hold
@@ -737,7 +781,7 @@ pub(crate) fn upsert_login_account(
                     auth_credentials_store_mode,
                     api_key.clone(),
                     /*label*/ None,
-                    /*make_active*/ true,
+                    make_active,
                 )?;
             }
         }
@@ -750,7 +794,7 @@ pub(crate) fn upsert_login_account(
                     tokens.clone(),
                     last_refresh,
                     tokens.id_token.email.clone(),
-                    /*make_active*/ true,
+                    make_active,
                 )?;
             }
         }
@@ -760,6 +804,19 @@ pub(crate) fn upsert_login_account(
     Ok(())
 }
 
+pub(crate) fn upsert_login_account(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<()> {
+    upsert_login_account_with_activation(
+        codex_home,
+        auth,
+        auth_credentials_store_mode,
+        /*make_active*/ true,
+    )
+}
+
 pub(crate) fn upsert_login_account_best_effort(
     codex_home: &Path,
     auth: &AuthDotJson,
@@ -767,6 +824,21 @@ pub(crate) fn upsert_login_account_best_effort(
 ) {
     if let Err(err) = upsert_login_account(codex_home, auth, auth_credentials_store_mode) {
         tracing::warn!("failed to upsert login account record after saving auth: {err}");
+    }
+}
+
+fn update_login_account_best_effort(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) {
+    if let Err(err) = upsert_login_account_with_activation(
+        codex_home,
+        auth,
+        auth_credentials_store_mode,
+        /*make_active*/ false,
+    ) {
+        tracing::warn!("failed to update stored login account after token refresh: {err}");
     }
 }
 
@@ -1054,16 +1126,28 @@ async fn load_auth(
 }
 
 // Persist refreshed tokens into auth storage and update last_refresh.
+#[cfg(test)]
 fn persist_tokens(
     storage: &Arc<dyn AuthStorageBackend>,
     id_token: Option<String>,
     access_token: Option<String>,
     refresh_token: Option<String>,
 ) -> std::io::Result<AuthDotJson> {
-    let mut auth_dot_json = storage
+    let auth_dot_json = storage
         .load()?
         .ok_or(std::io::Error::other("Token data is not available."))?;
+    let auth_dot_json =
+        apply_refreshed_tokens(auth_dot_json, id_token, access_token, refresh_token)?;
+    storage.save(&auth_dot_json)?;
+    Ok(auth_dot_json)
+}
 
+fn apply_refreshed_tokens(
+    mut auth_dot_json: AuthDotJson,
+    id_token: Option<String>,
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+) -> std::io::Result<AuthDotJson> {
     let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
     if let Some(id_token) = id_token {
         tokens.id_token = parse_chatgpt_jwt_claims(&id_token).map_err(std::io::Error::other)?;
@@ -1075,8 +1159,21 @@ fn persist_tokens(
         tokens.refresh_token = refresh_token;
     }
     auth_dot_json.last_refresh = Some(Utc::now());
-    storage.save(&auth_dot_json)?;
     Ok(auth_dot_json)
+}
+
+fn persist_refreshed_tokens_if_unchanged(
+    storage: &Arc<dyn AuthStorageBackend>,
+    expected: &AuthDotJson,
+    id_token: Option<String>,
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+) -> std::io::Result<Option<AuthDotJson>> {
+    let replacement =
+        apply_refreshed_tokens(expected.clone(), id_token, access_token, refresh_token)?;
+    storage
+        .compare_and_swap(expected, &replacement)
+        .map(|updated| updated.then_some(replacement))
 }
 
 // Requests refreshed ChatGPT OAuth tokens from the auth service using a refresh token.
@@ -2103,10 +2200,27 @@ impl AuthManager {
             .as_ref()
             .and_then(CodexAuth::get_account_id);
 
-        match self
-            .reload_if_account_id_matches(expected_account_id.as_deref())
+        if matches!(
+            auth_before_reload.as_ref(),
+            Some(CodexAuth::Chatgpt(_)) | Some(CodexAuth::ChatgptAuthTokens(_))
+        ) {
+            let _managed_refresh_guard = MANAGED_AUTH_REFRESH_LOCK.lock().await;
+            let _managed_refresh_file_guard =
+                acquire_managed_auth_refresh_file_guard(&self.codex_home).await?;
+            return self
+                .refresh_token_after_guarded_reload(expected_account_id.as_deref())
+                .await;
+        }
+
+        self.refresh_token_after_guarded_reload(expected_account_id.as_deref())
             .await
-        {
+    }
+
+    async fn refresh_token_after_guarded_reload(
+        &self,
+        expected_account_id: Option<&str>,
+    ) -> Result<(), RefreshTokenError> {
+        match self.reload_if_account_id_matches(expected_account_id).await {
             ReloadOutcome::ReloadedChanged => {
                 tracing::info!("Skipping token refresh because auth changed after guarded reload.");
                 Ok(())
@@ -2132,6 +2246,19 @@ impl AuthManager {
                 REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
             ))
         })?;
+        let auth = self.auth_cached();
+        if matches!(
+            auth.as_ref(),
+            Some(CodexAuth::Chatgpt(_)) | Some(CodexAuth::ChatgptAuthTokens(_))
+        ) {
+            let expected_account_id = auth.as_ref().and_then(CodexAuth::get_account_id);
+            let _managed_refresh_guard = MANAGED_AUTH_REFRESH_LOCK.lock().await;
+            let _managed_refresh_file_guard =
+                acquire_managed_auth_refresh_file_guard(&self.codex_home).await?;
+            return self
+                .refresh_token_after_guarded_reload(expected_account_id.as_deref())
+                .await;
+        }
         self.refresh_token_from_authority_impl().await
     }
 
@@ -2153,12 +2280,12 @@ impl AuthManager {
                     .await
             }
             CodexAuth::Chatgpt(chatgpt_auth) => {
-                let token_data = chatgpt_auth.current_token_data().ok_or_else(|| {
+                let auth_dot_json = chatgpt_auth.current_auth_json().ok_or_else(|| {
                     RefreshTokenError::Transient(std::io::Error::other(
                         "Token data is not available.",
                     ))
                 })?;
-                self.refresh_and_persist_chatgpt_token(&chatgpt_auth, token_data.refresh_token)
+                self.refresh_and_persist_chatgpt_token(&chatgpt_auth, auth_dot_json)
                     .await
             }
             CodexAuth::ApiKey(_)
@@ -2304,19 +2431,34 @@ impl AuthManager {
     async fn refresh_and_persist_chatgpt_token(
         &self,
         auth: &ChatgptAuth,
-        refresh_token: String,
+        expected_auth: AuthDotJson,
     ) -> Result<(), RefreshTokenError> {
+        let refresh_token = expected_auth
+            .tokens
+            .as_ref()
+            .map(|tokens| tokens.refresh_token.clone())
+            .ok_or_else(|| {
+                RefreshTokenError::Transient(std::io::Error::other("Token data is not available."))
+            })?;
         let refresh_response = request_chatgpt_token_refresh(refresh_token, auth.client()).await?;
 
-        let auth_dot_json = persist_tokens(
+        let Some(auth_dot_json) = persist_refreshed_tokens_if_unchanged(
             auth.storage(),
+            &expected_auth,
             refresh_response.id_token,
             refresh_response.access_token,
             refresh_response.refresh_token,
         )
-        .map_err(RefreshTokenError::from)?;
+        .map_err(RefreshTokenError::from)?
+        else {
+            tracing::info!(
+                "Skipping refreshed token persistence because stored auth changed during refresh."
+            );
+            self.reload().await;
+            return Ok(());
+        };
         if self.catalog_account_id.is_none() {
-            upsert_login_account_best_effort(
+            update_login_account_best_effort(
                 &self.codex_home,
                 &auth_dot_json,
                 self.auth_credentials_store_mode,
