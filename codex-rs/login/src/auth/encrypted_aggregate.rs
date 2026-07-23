@@ -186,6 +186,40 @@ pub(crate) fn with_invalidated_encrypted_aggregate<T>(
     result.ok_or_else(|| io::Error::other("legacy login mutation did not run"))
 }
 
+pub(crate) fn with_conditionally_invalidated_encrypted_aggregate(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+    mutation: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<bool> {
+    if mode == AuthCredentialsStoreMode::Ephemeral {
+        return mutation();
+    }
+
+    let manager = secrets_manager(codex_home, keyring_store);
+    let name = aggregate_secret_name()?;
+    let mut mutation = Some(mutation);
+    let mut changed = None;
+    manager
+        .mutate(&SecretScope::Global, &name, |current| {
+            if let Some(current) = current {
+                parse_document(current)?;
+            }
+            let mutation = mutation
+                .take()
+                .ok_or_else(|| io::Error::other("legacy login mutation ran more than once"))?;
+            let mutation_changed = mutation()?;
+            changed = Some(mutation_changed);
+            Ok(if mutation_changed && current.is_some() {
+                SecretMutation::Delete
+            } else {
+                SecretMutation::Keep
+            })
+        })
+        .map_err(secret_err)?;
+    changed.ok_or_else(|| io::Error::other("legacy login mutation did not run"))
+}
+
 fn read_legacy_document(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
