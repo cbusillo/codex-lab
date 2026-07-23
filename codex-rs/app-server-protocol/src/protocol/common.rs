@@ -930,6 +930,30 @@ client_request_definitions! {
         serialization: global_shared_read("remote-control"),
         response: v2::RemoteControlStatusReadResponse,
     },
+    #[experimental("codeBridge/status/read")]
+    CodeBridgeStatusRead => "codeBridge/status/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: global_shared_read("code-bridge-status"),
+        response: v2::CodeBridgeStatusReadResponse,
+    },
+    #[experimental("codeBridge/subscribe")]
+    CodeBridgeSubscribe => "codeBridge/subscribe" {
+        params: v2::CodeBridgeSubscribeParams,
+        serialization: global("code-bridge"),
+        response: v2::CodeBridgeSubscribeResponse,
+    },
+    #[experimental("codeBridge/screenshot")]
+    CodeBridgeScreenshot => "codeBridge/screenshot" {
+        params: v2::CodeBridgeScreenshotParams,
+        serialization: global("code-bridge"),
+        response: v2::CodeBridgeScreenshotResponse,
+    },
+    #[experimental("codeBridge/javascript")]
+    CodeBridgeJavascript => "codeBridge/javascript" {
+        params: v2::CodeBridgeJavascriptParams,
+        serialization: global("code-bridge"),
+        response: v2::CodeBridgeJavascriptResponse,
+    },
     #[experimental("remoteControl/pairing/start")]
     RemoteControlPairingStart => "remoteControl/pairing/start" {
         params: v2::RemoteControlPairingStartParams,
@@ -2283,6 +2307,49 @@ mod tests {
             Some(ClientRequestSerializationScope::GlobalSharedRead(
                 "remote-control-pairing"
             ))
+        );
+        let code_bridge_status_read = ClientRequest::CodeBridgeStatusRead {
+            request_id: request_id(),
+            params: None,
+        };
+        assert_eq!(
+            code_bridge_status_read.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead(
+                "code-bridge-status"
+            ))
+        );
+        let code_bridge_subscribe = ClientRequest::CodeBridgeSubscribe {
+            request_id: request_id(),
+            params: v2::CodeBridgeSubscribeParams {
+                filter: v2::CodeBridgeSubscriptionFilter::default(),
+            },
+        };
+        assert_eq!(
+            code_bridge_subscribe.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("code-bridge"))
+        );
+        let code_bridge_screenshot = ClientRequest::CodeBridgeScreenshot {
+            request_id: request_id(),
+            params: v2::CodeBridgeScreenshotParams {
+                target_client_id: "browser-1".to_string(),
+                timeout_ms: None,
+            },
+        };
+        assert_eq!(
+            code_bridge_screenshot.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("code-bridge"))
+        );
+        let code_bridge_javascript = ClientRequest::CodeBridgeJavascript {
+            request_id: request_id(),
+            params: v2::CodeBridgeJavascriptParams {
+                target_client_id: "browser-1".to_string(),
+                code: "window.location.href".to_string(),
+                timeout_ms: None,
+            },
+        };
+        assert_eq!(
+            code_bridge_javascript.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("code-bridge"))
         );
         let remote_control_clients_list = ClientRequest::RemoteControlClientsList {
             request_id: request_id(),
@@ -3804,6 +3871,54 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("mock/experimentalMethod"));
+    }
+
+    #[test]
+    fn code_bridge_status_read_is_marked_experimental() {
+        let request = ClientRequest::CodeBridgeStatusRead {
+            request_id: RequestId::Integer(1),
+            params: None,
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("codeBridge/status/read"));
+    }
+
+    #[test]
+    fn code_bridge_control_methods_are_marked_experimental() {
+        let subscribe = ClientRequest::CodeBridgeSubscribe {
+            request_id: RequestId::Integer(1),
+            params: v2::CodeBridgeSubscribeParams {
+                filter: v2::CodeBridgeSubscriptionFilter::default(),
+            },
+        };
+        let screenshot = ClientRequest::CodeBridgeScreenshot {
+            request_id: RequestId::Integer(1),
+            params: v2::CodeBridgeScreenshotParams {
+                target_client_id: "browser-1".to_string(),
+                timeout_ms: None,
+            },
+        };
+        let javascript = ClientRequest::CodeBridgeJavascript {
+            request_id: RequestId::Integer(1),
+            params: v2::CodeBridgeJavascriptParams {
+                target_client_id: "browser-1".to_string(),
+                code: "window.location.href".to_string(),
+                timeout_ms: None,
+            },
+        };
+
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&subscribe),
+            Some("codeBridge/subscribe")
+        );
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&screenshot),
+            Some("codeBridge/screenshot")
+        );
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&javascript),
+            Some("codeBridge/javascript")
+        );
     }
 
     #[test]

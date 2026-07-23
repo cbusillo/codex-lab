@@ -7301,6 +7301,183 @@
           }
         ]
       },
+      "CodeBridgeAvailability": {
+        "enum": [
+          "available",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "CodeBridgeConsoleLevel": {
+        "enum": [
+          "trace",
+          "info",
+          "warn",
+          "error"
+        ],
+        "type": "string"
+      },
+      "CodeBridgeControlStatus": {
+        "enum": [
+          "ok",
+          "failed",
+          "timedOut",
+          "denied"
+        ],
+        "type": "string"
+      },
+      "CodeBridgeError": {
+        "properties": {
+          "code": {
+            "$ref": "#/definitions/v2/CodeBridgeErrorCode"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "CodeBridgeErrorCode": {
+        "enum": [
+          "authRequired",
+          "authRejected",
+          "capabilityDenied",
+          "invalidPayload",
+          "payloadTooLarge",
+          "timeout",
+          "unsupportedProtocolVersion"
+        ],
+        "type": "string"
+      },
+      "CodeBridgeEventKind": {
+        "enum": [
+          "console",
+          "error",
+          "pageview",
+          "screenshot",
+          "controlResult"
+        ],
+        "type": "string"
+      },
+      "CodeBridgeRequestStatus": {
+        "enum": [
+          "accepted"
+        ],
+        "type": "string"
+      },
+      "CodeBridgeScreenshotMediaType": {
+        "enum": [
+          "png",
+          "jpeg"
+        ],
+        "type": "string"
+      },
+      "CodeBridgeScreenshotPayload": {
+        "properties": {
+          "dataBase64": {
+            "type": "string"
+          },
+          "height": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "mediaType": {
+            "$ref": "#/definitions/v2/CodeBridgeScreenshotMediaType"
+          },
+          "width": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dataBase64",
+          "height",
+          "mediaType",
+          "width"
+        ],
+        "type": "object"
+      },
+      "CodeBridgeServiceStatus": {
+        "properties": {
+          "connectedProducerCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "connectedSubscriberCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "lastEventTimeUnixMs": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "protocolVersion": {
+            "type": "string"
+          },
+          "uptimeMs": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connectedProducerCount",
+          "connectedSubscriberCount",
+          "protocolVersion",
+          "uptimeMs"
+        ],
+        "type": "object"
+      },
+      "CodeBridgeSubscriptionFilter": {
+        "properties": {
+          "clientIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "eventKinds": {
+            "items": {
+              "$ref": "#/definitions/v2/CodeBridgeEventKind"
+            },
+            "type": "array"
+          },
+          "levels": {
+            "items": {
+              "$ref": "#/definitions/v2/CodeBridgeConsoleLevel"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "clientIds",
+          "eventKinds",
+          "levels"
+        ],
+        "type": "object"
+      },
+      "CodeBridgeUnavailableReason": {
+        "enum": [
+          "descriptorMissing",
+          "descriptorInvalid",
+          "unsupportedEndpoint",
+          "serviceUnreachable",
+          "statusInvalid"
+        ],
+        "type": "string"
+      },
       "CodexErrorInfo": {
         "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
         "oneOf": [

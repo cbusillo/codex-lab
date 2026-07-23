@@ -288,6 +288,53 @@
       ],
       "type": "object"
     },
+    "CodeBridgeConsoleLevel": {
+      "enum": [
+        "trace",
+        "info",
+        "warn",
+        "error"
+      ],
+      "type": "string"
+    },
+    "CodeBridgeEventKind": {
+      "enum": [
+        "console",
+        "error",
+        "pageview",
+        "screenshot",
+        "controlResult"
+      ],
+      "type": "string"
+    },
+    "CodeBridgeSubscriptionFilter": {
+      "properties": {
+        "clientIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "eventKinds": {
+          "items": {
+            "$ref": "#/definitions/CodeBridgeEventKind"
+          },
+          "type": "array"
+        },
+        "levels": {
+          "items": {
+            "$ref": "#/definitions/CodeBridgeConsoleLevel"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "clientIds",
+        "eventKinds",
+        "levels"
+      ],
+      "type": "object"
+    },
     "CodexResponseHandoffMode": {
       "enum": [
         "thinking",
