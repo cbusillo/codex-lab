@@ -32,6 +32,7 @@ use codex_extension_api::UserInstructionsProvider;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_home::CodexHomeUserInstructionsProvider;
+use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
@@ -304,6 +305,7 @@ pub struct TestCodexBuilder {
     external_time_provider: Option<Arc<dyn TimeProvider>>,
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
+    home_backed_auth_manager: bool,
 }
 
 impl TestCodexBuilder {
@@ -318,6 +320,22 @@ impl TestCodexBuilder {
     pub fn with_auth(mut self, auth: CodexAuth) -> Self {
         self.auth = auth;
         self
+    }
+
+    pub fn with_home_backed_auth_manager(mut self) -> Self {
+        self.home_backed_auth_manager = true;
+        self
+    }
+
+    fn auth_manager_for_config(&self, auth: CodexAuth, config: &Config) -> Arc<AuthManager> {
+        if self.home_backed_auth_manager {
+            codex_core::test_support::auth_manager_from_auth_with_home(
+                auth,
+                config.auth_home.to_path_buf(),
+            )
+        } else {
+            codex_core::test_support::auth_manager_from_auth(auth)
+        }
     }
 
     pub fn with_model(self, model: &str) -> Self {
@@ -623,7 +641,7 @@ impl TestCodexBuilder {
                     config.codex_home.clone(),
                 ))
             });
-        let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
+        let auth_manager = self.auth_manager_for_config(auth.clone(), &config);
         let thread_manager = ThreadManager::new(
             &config,
             auth_manager.clone(),
@@ -659,7 +677,7 @@ impl TestCodexBuilder {
 
         let new_conversation = match (resume_from, user_shell_override) {
             (Some(path), Some(user_shell_override)) => {
-                let auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
+                let auth_manager = self.auth_manager_for_config(auth, &config);
                 Box::pin(
                     codex_core::test_support::resume_thread_from_rollout_with_user_shell_override(
                         thread_manager.as_ref(),
@@ -673,7 +691,7 @@ impl TestCodexBuilder {
                 .await?
             }
             (Some(path), None) => {
-                let auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
+                let auth_manager = self.auth_manager_for_config(auth, &config);
                 Box::pin(thread_manager.resume_thread_from_rollout(
                     config.clone(),
                     path,
@@ -1236,6 +1254,7 @@ pub fn test_codex() -> TestCodexBuilder {
         external_time_provider: None,
         code_mode_host_program: None,
         history_mode: None,
+        home_backed_auth_manager: false,
     }
 }
 

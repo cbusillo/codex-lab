@@ -13,6 +13,7 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 
+mod atomic_file;
 mod local;
 mod sanitizer;
 
@@ -80,6 +81,13 @@ pub struct SecretListEntry {
     pub name: SecretName,
 }
 
+#[non_exhaustive]
+pub enum SecretMutation {
+    Keep,
+    Set(String),
+    Delete,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SecretsBackendKind {
@@ -92,6 +100,22 @@ pub trait SecretsBackend: Send + Sync {
     fn get(&self, scope: &SecretScope, name: &SecretName) -> Result<Option<String>>;
     fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool>;
     fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>>;
+
+    /// Mutates one secret while the backend holds its write lock.
+    ///
+    /// Implementations must call `mutator` at most once and must not persist a
+    /// partial result when loading, mutation, or writing fails. The callback
+    /// must not access the same backend namespace, including from another
+    /// thread that it waits for, because the write lock remains held while the
+    /// callback runs.
+    fn mutate(
+        &self,
+        _scope: &SecretScope,
+        _name: &SecretName,
+        _mutator: &mut dyn FnMut(Option<&str>) -> Result<SecretMutation>,
+    ) -> Result<bool> {
+        anyhow::bail!("secret backend does not support atomic mutation")
+    }
 }
 
 #[derive(Clone)]
@@ -154,6 +178,18 @@ impl SecretsManager {
     pub fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
         self.backend.list(scope_filter)
     }
+
+    /// Atomically mutates one secret.
+    ///
+    /// The callback must not call another method on this manager's backend
+    /// namespace, including from another thread that it waits for.
+    pub fn mutate<F>(&self, scope: &SecretScope, name: &SecretName, mutator: F) -> Result<bool>
+    where
+        F: FnMut(Option<&str>) -> Result<SecretMutation>,
+    {
+        let mut mutator = mutator;
+        self.backend.mutate(scope, name, &mut mutator)
+    }
 }
 
 pub fn environment_id_from_cwd(cwd: &Path) -> String {
@@ -179,8 +215,15 @@ pub fn environment_id_from_cwd(cwd: &Path) -> String {
     format!("cwd-{short}")
 }
 
-/// Computes the OS keyring account name used to store the local secrets passphrase.
+/// Computes the OS keyring account name used for the managed secrets namespace.
 pub fn compute_keyring_account(codex_home: &Path) -> String {
+    compute_keyring_account_for_namespace(codex_home, LocalSecretsNamespace::ManagedSecrets)
+}
+
+pub(crate) fn compute_keyring_account_for_namespace(
+    codex_home: &Path,
+    namespace: LocalSecretsNamespace,
+) -> String {
     let canonical = codex_home
         .canonicalize()
         .unwrap_or_else(|_| codex_home.to_path_buf())
@@ -191,7 +234,14 @@ pub fn compute_keyring_account(codex_home: &Path) -> String {
     let digest = hasher.finalize();
     let hex = format!("{digest:x}");
     let short = hex.get(..16).unwrap_or(hex.as_str());
-    format!("secrets|{short}")
+    match namespace {
+        LocalSecretsNamespace::ManagedSecrets => format!("secrets|{short}"),
+        LocalSecretsNamespace::CodexAuth => format!("secrets|codex-auth|{short}"),
+        LocalSecretsNamespace::LoginAggregate => {
+            format!("secrets|login-aggregate|{short}")
+        }
+        LocalSecretsNamespace::McpOAuth => format!("secrets|mcp-oauth|{short}"),
+    }
 }
 
 pub(crate) fn keyring_service() -> &'static str {

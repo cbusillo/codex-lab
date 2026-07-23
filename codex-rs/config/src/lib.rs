@@ -1,3 +1,4 @@
+pub mod agent_defaults;
 mod cloud_config_bundle;
 mod cloud_config_layers;
 mod config_layer_source;

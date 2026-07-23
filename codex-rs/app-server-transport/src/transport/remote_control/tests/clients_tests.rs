@@ -15,6 +15,7 @@ fn client_management_handle(
     auth_manager: Arc<AuthManager>,
 ) -> RemoteControlHandle {
     let desired_state_tx = watch::channel(RemoteControlDesiredState::Disabled).0;
+    let (reconnect_tx, _reconnect_rx) = mpsc::unbounded_channel();
     let (status_tx, _status_rx) = watch::channel(RemoteControlStatusChangedNotification {
         status: RemoteControlConnectionStatus::Disabled,
         server_name: test_server_name(),
@@ -26,6 +27,8 @@ fn client_management_handle(
         desired_state_tx: Arc::new(desired_state_tx),
         desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
         desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
+        reconnect_tx,
+        next_reconnect_generation: Arc::new(AtomicU64::new(0)),
         status_tx: Arc::new(status_tx),
         state_db: None,
         remote_control_url,

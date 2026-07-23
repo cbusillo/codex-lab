@@ -1446,7 +1446,7 @@ async fn host_owned_codex_apps_manager(
     session: &Session,
     turn_context: &TurnContext,
 ) -> Arc<codex_mcp::McpConnectionSet> {
-    let auth = session.services.auth_manager.auth().await;
+    let auth = turn_context.auth().await;
     let startup_cancellation_token = CancellationToken::new();
     startup_cancellation_token.cancel();
     let mcp_servers = HashMap::from([(

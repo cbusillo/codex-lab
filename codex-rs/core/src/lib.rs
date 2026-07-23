@@ -5,11 +5,14 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod account_switching;
+pub mod account_usage;
 mod apply_patch;
 mod apps;
 mod audio_preparation;
 mod client;
 mod client_common;
+mod execution_account;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;
@@ -83,6 +86,7 @@ pub(crate) mod mentions {
 }
 mod sandbox_tags;
 pub mod sandboxing;
+mod session_models_manager;
 mod session_prefix;
 mod session_startup_prewarm;
 pub mod skills;

@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::account_usage;
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
 use crate::agent::agent_status_from_event;
@@ -36,11 +37,17 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
 use crate::exec_policy::ExecPolicyManager;
 use crate::exec_policy::default_policy_path;
+use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountLeasePersistence;
+use crate::execution_account::ExecutionAccountOptions;
+use crate::execution_account::ExecutionAccountPooling;
+use crate::execution_account::ExecutionAccountStart;
 use crate::image_preparation::prepare_response_items as prepare_image_response_items;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnEnvironment;
+use crate::session_models_manager::models_manager_for_execution_account;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::skills::SkillRenderSideEffects;
 use crate::skills_load_input_from_config;
@@ -121,6 +128,7 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::RateLimitReachedType;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
@@ -202,6 +210,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod apps_context;
 mod code_mode_warning;
 mod config_lock;
 pub(crate) mod context_window;
@@ -222,6 +231,7 @@ mod token_budget;
 pub(crate) mod turn;
 pub(crate) mod turn_context;
 mod world_state;
+use self::apps_context::AppsContext;
 use self::code_mode_warning::unsupported_code_mode_warning;
 use self::config_lock::export_config_lock_if_configured;
 use self::config_lock::validate_config_lock_if_configured;
@@ -417,7 +427,6 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) user_instructions: LoadedUserInstructions,
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
-    pub(crate) models_manager: SharedModelsManager,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) skills_service: Arc<SkillsService>,
     pub(crate) plugins_manager: Arc<PluginsManager>,
@@ -472,6 +481,65 @@ pub(crate) fn resolve_multi_agent_version(
         })
 }
 
+fn thread_id_for_initial_history(initial_history: &InitialHistory) -> ThreadId {
+    match initial_history {
+        InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+            ThreadId::default()
+        }
+        InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
+    }
+}
+
+async fn resolve_execution_account_for_session(
+    config: &Config,
+    auth_manager: Arc<AuthManager>,
+    initial_history: &InitialHistory,
+    forked_from_thread_id: Option<ThreadId>,
+) -> ExecutionAccountLease {
+    let thread_id = thread_id_for_initial_history(initial_history);
+    let start = match initial_history {
+        InitialHistory::New => ExecutionAccountStart::New,
+        InitialHistory::Cleared => ExecutionAccountStart::Cleared,
+        InitialHistory::Resumed(_) => ExecutionAccountStart::Resumed,
+        InitialHistory::Forked(_) => ExecutionAccountStart::Forked {
+            source_thread_id: forked_from_thread_id.or_else(|| initial_history.forked_from_id()),
+        },
+    };
+    let pooling = if config.auto_switch_accounts_on_rate_limit
+        && codex_login::auth::read_codex_api_key_from_env().is_none()
+        && config.model_provider.requires_openai_auth
+    {
+        ExecutionAccountPooling::Enabled
+    } else {
+        ExecutionAccountPooling::Disabled
+    };
+    // Ephemeral threads (sub-agents and forks of them) may reuse a durable
+    // source lease but must never write a destination lease of their own.
+    let persistence = if config.ephemeral {
+        ExecutionAccountLeasePersistence::Ephemeral
+    } else {
+        ExecutionAccountLeasePersistence::Durable
+    };
+    ExecutionAccountLease::resolve(
+        thread_id,
+        auth_manager,
+        ExecutionAccountOptions {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_home: config.auth_home.to_path_buf(),
+            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+            keyring_backend_kind: config.auth_keyring_backend_kind(),
+            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+            auth_route_config: config.auth_route_config(),
+            chatgpt_base_url: config.chatgpt_base_url.clone(),
+            allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
+            pooling,
+            persistence,
+            start,
+        },
+    )
+    .await
+}
+
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
@@ -510,7 +578,6 @@ impl Session {
             user_instructions,
             installation_id,
             auth_manager,
-            models_manager,
             environment_manager,
             skills_service,
             plugins_manager,
@@ -585,6 +652,23 @@ impl Session {
         };
 
         let config = Arc::new(config);
+        let thread_id = thread_id_for_initial_history(&conversation_history);
+        let execution_account = resolve_execution_account_for_session(
+            config.as_ref(),
+            Arc::clone(&auth_manager),
+            &conversation_history,
+            forked_from_thread_id,
+        )
+        .await;
+        let execution_identity = execution_account.identity();
+        info!(
+            thread_id = %thread_id,
+            execution_account_id = execution_identity.stored_account_id.as_deref(),
+            execution_auth_mode = ?execution_identity.mode,
+            "resolved execution account lease"
+        );
+        let models_manager =
+            models_manager_for_execution_account(config.as_ref(), execution_account.clone());
         let refresh_strategy = if session_source.is_non_root_agent() {
             codex_models_manager::manager::RefreshStrategy::Offline
         } else {
@@ -706,6 +790,7 @@ impl Session {
             user_instructions,
             installation_id,
             auth_manager.clone(),
+            execution_account,
             models_manager.clone(),
             exec_policy,
             tx_event.clone(),
@@ -1104,7 +1189,6 @@ impl Session {
         }
     }
 
-    #[cfg(test)]
     pub(crate) async fn codex_home(&self) -> AbsolutePathBuf {
         let state = self.state.lock().await;
         state.session_configuration.codex_home().clone()
@@ -1393,12 +1477,14 @@ impl Session {
         } = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
+        apps_context::migrate_legacy_apps_instructions(&mut history);
         // Keep the recorded rollout unchanged. Prepare its reconstructed history before
         // installing it, so legacy media is processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
         // This meets media preparation requirements without modifying persisted rollouts.
         prepare_image_response_items(&mut history);
         prepare_audio_response_items(&mut history);
+        apps_context::update_apps_context_from_history(&self.apps_context, &history);
         {
             let mut state = self.state.lock().await;
             state.replace_history(history, reference_context_item);
@@ -1586,6 +1672,14 @@ impl Session {
 
     pub(crate) async fn user_instructions(&self) -> Option<codex_extension_api::UserInstructions> {
         self.services.agents_md_manager.user_instructions()
+    }
+
+    pub(crate) async fn auto_switch_accounts_on_rate_limit(&self) -> bool {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .auto_switch_accounts_on_rate_limit
     }
 
     pub(crate) async fn provider(&self) -> ModelProviderInfo {
@@ -3065,6 +3159,7 @@ impl Session {
         items: Vec<ResponseItem>,
         reference_context_item: Option<TurnContextItem>,
     ) {
+        apps_context::update_apps_context_from_history(&self.apps_context, &items);
         let mut state = self.state.lock().await;
         state.replace_history(items, reference_context_item);
     }
@@ -3088,6 +3183,7 @@ impl Session {
                 .map(|id| id.to_string()),
             window_id: Some(metadata.window_ids.window_id.to_string()),
         };
+        apps_context::update_apps_context_from_history(&self.apps_context, &items);
         // Compaction starts a new history window, so its WorldState baseline must be full.
         let mut world_state_item = None;
         {
@@ -3330,7 +3426,7 @@ impl Session {
             .await;
         let recommended_plugin_candidates =
             if crate::tools::spec_plan::tool_suggest_enabled(turn_context) {
-                let auth = self.services.auth_manager.auth().await;
+                let auth = turn_context.auth().await;
                 let plugins_config = turn_context.config.plugins_config_input();
                 self.services
                     .plugins_manager
@@ -3654,6 +3750,7 @@ impl Session {
         if !context_items.is_empty() {
             self.record_conversation_items(turn_context, &context_items)
                 .await;
+            apps_context::update_apps_context_from_history(&self.apps_context, &context_items);
         }
         // Persist state only after any model-visible context generated from it.
         if let Some(world_state_item) = world_state_item {
@@ -3773,10 +3870,64 @@ impl Session {
     }
 
     pub(crate) async fn record_rate_limits_info(&self, new_rate_limits: RateLimitSnapshot) {
+        let usage_snapshot = new_rate_limits.clone();
         {
             let mut state = self.state.lock().await;
             state.set_rate_limits(new_rate_limits);
         }
+        self.record_rate_limit_snapshot_for_active_account(usage_snapshot)
+            .await;
+    }
+
+    pub(crate) async fn record_usage_limit_hint_for_active_account(
+        &self,
+        plan_type: Option<codex_protocol::account::PlanType>,
+        resets_at: Option<chrono::DateTime<Utc>>,
+        reached_type: Option<RateLimitReachedType>,
+    ) {
+        let Some((codex_home, account_id, fallback_plan)) = self.account_usage_context().await
+        else {
+            return;
+        };
+        let plan_type = plan_type.or(fallback_plan);
+        if let Err(err) = account_usage::record_usage_limit_hint(
+            codex_home.as_path(),
+            &account_id,
+            plan_type,
+            resets_at,
+            Utc::now(),
+            reached_type,
+        ) {
+            warn!(?err, "failed to record account usage limit hint");
+        }
+    }
+
+    async fn record_rate_limit_snapshot_for_active_account(&self, snapshot: RateLimitSnapshot) {
+        let Some((codex_home, account_id, fallback_plan)) = self.account_usage_context().await
+        else {
+            return;
+        };
+        let plan_type = snapshot.plan_type.or(fallback_plan);
+        if let Err(err) = account_usage::record_rate_limit_snapshot_with_plan(
+            codex_home.as_path(),
+            &account_id,
+            plan_type,
+            snapshot,
+            Utc::now(),
+        ) {
+            warn!(?err, "failed to record account rate limit snapshot");
+        }
+    }
+
+    async fn account_usage_context(
+        &self,
+    ) -> Option<(
+        AbsolutePathBuf,
+        String,
+        Option<codex_protocol::account::PlanType>,
+    )> {
+        let (account_id, plan_type) = self.services.execution_account.usage_context()?;
+        Some((self.codex_home().await, account_id, plan_type))
     }
 
     pub(crate) async fn mcp_dependency_prompted(&self) -> HashSet<String> {

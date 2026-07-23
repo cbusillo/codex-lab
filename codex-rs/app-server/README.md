@@ -82,7 +82,15 @@ Use the thread APIs to create, list, or archive conversations. Drive a conversat
 
 ## Initialization
 
-Clients must send a single `initialize` request per transport connection before invoking any other method on that connection, then acknowledge with an `initialized` notification. The server returns the user agent string it will present to upstream services, `codexHome` for the server's Codex home directory, and `platformFamily` and `platformOs` strings describing the app-server runtime target; subsequent requests issued before initialization receive a `"Not initialized"` error, and repeated `initialize` calls on the same connection receive an `"Already initialized"` error.
+Clients must send a single `initialize` request per transport connection before invoking any other
+method on that connection, then acknowledge with an `initialized` notification. The server returns
+the existing `userAgent` string for compatibility, `serverBuild` for the compiled app-server build
+identity, `codexHome` for the server's Codex home directory, and `platformFamily` and `platformOs`
+strings describing the app-server runtime target; subsequent requests issued before initialization
+receive a `"Not initialized"` error, and repeated `initialize` calls on the same connection receive
+an `"Already initialized"` error. Do not parse `userAgent` to determine the app-server version;
+use `serverBuild.version`. Outbound API requests may use a compatibility-adjusted version in their
+user agent independently of this build identity.
 
 `initialize.params.capabilities` also supports per-connection notification opt-out via `optOutNotificationMethods`, which is a list of exact method names to suppress for that connection. Matching is exact (no wildcards/prefixes). Unknown method names are accepted and ignored.
 
@@ -112,6 +120,25 @@ Example (from OpenAI's official VSCode extension):
       "version": "0.1.0"
     }
   }
+}
+```
+
+Initialize response excerpt:
+
+```json
+{
+  "userAgent": "codex_vscode/0.1.0 (Mac OS 27.0.0; arm64) codex_cli_rs/0.133.0",
+  "serverBuild": {
+    "schemaVersion": 1,
+    "version": "0.133.0",
+    "sourceCommit": "0000000000000000000000000000000000000000",
+    "dirtyState": "clean",
+    "buildProfile": "release",
+    "buildChannel": "lab"
+  },
+  "codexHome": "/Users/alice/.codex",
+  "platformFamily": "unix",
+  "platformOs": "macos"
 }
 ```
 
@@ -225,6 +252,7 @@ Example with notification opt-out:
 - `app/list` — list available apps.
 - `remoteControl/enable` — experimental; enable remote control for the current app-server process and return the current remote-control status snapshot. By default, any missing enrollment is completed before the response and the preference is persisted for the current app-server client scope. Pass `ephemeral: true` to enable remote control only for the current process without changing the persisted preference.
 - `remoteControl/disable` — experimental; disable remote control for the current app-server process and return the current remote-control status snapshot. By default, the disabled preference is persisted for the current app-server client scope. Pass `ephemeral: true` to disable only for the current process without changing the persisted preference. This does not revoke already enrolled controller devices.
+- `remoteControl/reconnect` — experimental; reconnect only the remote-control relay for the current app-server process. The daemon, enrollment, environment id, pairing authorization, virtual clients, threads, and account state remain intact. Concurrent requests coalesce while a connection attempt is already in progress. Returns the connecting status snapshot and rejects requests while remote control is disabled.
 - `remoteControl/status/read` — experimental; read the current remote-control status snapshot. `status` is one of `disabled`, `connecting`, `connected`, or `errored`; `serverName` is the local machine name used by this app-server process; `environmentId` is a string when the app-server has a current enrollment and `null` when that enrollment is cleared, invalidated, or remote control is disabled.
 - `remoteControl/pairing/start` — experimental; start a short-lived remote-control pairing artifact for the current app-server process. Pass `manualCode: true` to also request a manual pairing code. Returns `pairingCode`, `manualPairingCode`, `environmentId`, and Unix-seconds `expiresAt`; app-server intentionally does not expose the backend `serverId`.
 - `remoteControl/pairing/status` — experimental; poll whether a remote-control `pairingCode` or `manualPairingCode` has been claimed. Pass exactly one of the two fields. Returns `claimed`.

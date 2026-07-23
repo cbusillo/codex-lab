@@ -9,12 +9,14 @@ use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeResponse;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ServerBuildInfo;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_features::Feature;
+use codex_login::default_client::get_codex_app_server_user_agent;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cargo_bin::cargo_bin;
 use core_test_support::fs_wait;
@@ -56,12 +58,14 @@ async fn initialize_uses_client_info_name_as_originator() -> Result<()> {
     };
     let InitializeResponse {
         user_agent,
+        server_build,
         codex_home: response_codex_home,
         platform_family,
         platform_os,
     } = to_response::<InitializeResponse>(response)?;
 
     assert!(user_agent.starts_with("codex_vscode/"));
+    assert_valid_server_build(server_build);
     assert_eq!(response_codex_home, expected_codex_home);
     assert_eq!(platform_family, std::env::consts::FAMILY);
     assert_eq!(platform_os, std::env::consts::OS);
@@ -97,7 +101,15 @@ async fn initialize_probe_does_not_override_originator() -> Result<()> {
     };
     let InitializeResponse { user_agent, .. } = to_response::<InitializeResponse>(response)?;
 
-    assert!(user_agent.starts_with("codex_cli_rs/"));
+    let expected_user_agent = get_codex_app_server_user_agent();
+    let expected_identity = expected_user_agent
+        .split_whitespace()
+        .next()
+        .expect("app-server user agent should contain an identity");
+    assert_eq!(
+        user_agent.split_whitespace().next(),
+        Some(expected_identity)
+    );
     Ok(())
 }
 
@@ -130,7 +142,15 @@ async fn initialize_codex_backend_does_not_override_originator() -> Result<()> {
     };
     let InitializeResponse { user_agent, .. } = to_response::<InitializeResponse>(response)?;
 
-    assert!(user_agent.starts_with("codex_cli_rs/"));
+    let expected_user_agent = get_codex_app_server_user_agent();
+    let expected_identity = expected_user_agent
+        .split_whitespace()
+        .next()
+        .expect("app-server user agent should contain an identity");
+    assert_eq!(
+        user_agent.split_whitespace().next(),
+        Some(expected_identity)
+    );
     Ok(())
 }
 
@@ -168,12 +188,14 @@ async fn initialize_respects_originator_override_env_var() -> Result<()> {
     };
     let InitializeResponse {
         user_agent,
+        server_build,
         codex_home: response_codex_home,
         platform_family,
         platform_os,
     } = to_response::<InitializeResponse>(response)?;
 
     assert!(user_agent.starts_with("codex_originator_via_env_var/"));
+    assert_valid_server_build(server_build);
     assert_eq!(response_codex_home, expected_codex_home);
     assert_eq!(platform_family, std::env::consts::FAMILY);
     assert_eq!(platform_os, std::env::consts::OS);
@@ -359,4 +381,20 @@ async fn turn_start_notify_payload_includes_initialize_client_name() -> Result<(
 
 fn toml_basic_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn assert_valid_server_build(server_build: Option<ServerBuildInfo>) {
+    let server_build = server_build.expect("new app-server should send serverBuild");
+    let provenance = codex_version::build_provenance();
+    assert_eq!(
+        server_build,
+        ServerBuildInfo {
+            schema_version: provenance.schema_version,
+            version: provenance.version,
+            source_commit: provenance.source_commit,
+            dirty_state: provenance.dirty_state.as_str().to_string(),
+            build_profile: provenance.build_profile,
+            build_channel: provenance.build_channel,
+        }
+    );
 }

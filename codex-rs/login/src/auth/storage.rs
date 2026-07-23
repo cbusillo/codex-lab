@@ -9,15 +9,13 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use tracing::warn;
 
 use super::BedrockApiKeyAuth;
@@ -36,6 +34,17 @@ use codex_secrets::SecretScope;
 use codex_secrets::SecretsBackendKind;
 use codex_secrets::SecretsManager;
 use once_cell::sync::Lazy;
+
+use super::atomic_file::write_auth_file_atomically;
+use super::encrypted_aggregate::PreparedMigration;
+use super::encrypted_aggregate::activate_encrypted_aggregate_with_keyring_backend;
+use super::encrypted_aggregate::is_encrypted_aggregate_enabled;
+use super::encrypted_aggregate::validate_encrypted_aggregate_for_read;
+use super::encrypted_aggregate::with_conditionally_invalidated_encrypted_aggregate;
+use super::encrypted_aggregate::with_invalidated_encrypted_aggregate;
+
+const AUTH_STORAGE_LOCK_FILE_NAME: &str = ".auth-storage.lock";
+static AUTH_FILE_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Expected structure for $CODEX_HOME/auth.json.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -166,11 +175,107 @@ pub(super) trait AuthStorageBackend: Debug + Send + Sync {
     fn load(&self) -> std::io::Result<Option<AuthDotJson>>;
     fn save(&self, auth: &AuthDotJson) -> std::io::Result<()>;
     fn delete(&self) -> std::io::Result<bool>;
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        if self.load()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save(replacement)?;
+        Ok(true)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AggregateAwareAuthStorage {
+    codex_home: PathBuf,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    legacy: Arc<dyn AuthStorageBackend>,
+}
+
+impl AuthStorageBackend for AggregateAwareAuthStorage {
+    fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
+        if self
+            .codex_home
+            .metadata()
+            .is_ok_and(|metadata| metadata.permissions().readonly())
+        {
+            validate_encrypted_aggregate_for_read(
+                &self.codex_home,
+                self.mode,
+                self.keyring_store.clone(),
+            )?;
+            return self.legacy.load();
+        }
+        match activate_encrypted_aggregate_with_keyring_backend(
+            &self.codex_home,
+            self.mode,
+            self.keyring_store.clone(),
+            self.keyring_backend_kind,
+        )? {
+            PreparedMigration::AlreadyEncrypted(document)
+            | PreparedMigration::Prepared(document) => Ok(document.active_auth),
+            PreparedMigration::Deferred | PreparedMigration::Nothing => self.legacy.load(),
+        }
+    }
+
+    fn save(&self, auth: &AuthDotJson) -> std::io::Result<()> {
+        with_invalidated_encrypted_aggregate(
+            &self.codex_home,
+            self.mode,
+            self.keyring_store.clone(),
+            || self.legacy.save(auth),
+        )
+    }
+
+    fn delete(&self) -> std::io::Result<bool> {
+        with_invalidated_encrypted_aggregate(
+            &self.codex_home,
+            self.mode,
+            self.keyring_store.clone(),
+            || self.legacy.delete(),
+        )
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        with_conditionally_invalidated_encrypted_aggregate(
+            &self.codex_home,
+            self.mode,
+            self.keyring_store.clone(),
+            || self.legacy.compare_and_swap(expected, replacement),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthStorageSource {
+    File,
+    Keyring,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct FileAuthStorage {
     codex_home: PathBuf,
+}
+
+struct AuthFileWriteGuard {
+    _process_guard: MutexGuard<'static, ()>,
+    lock_file: File,
+}
+
+impl Drop for AuthFileWriteGuard {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.lock_file);
+    }
 }
 
 impl FileAuthStorage {
@@ -188,47 +293,68 @@ impl FileAuthStorage {
 
         Ok(auth_dot_json)
     }
-}
 
-impl AuthStorageBackend for FileAuthStorage {
-    fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
-        let auth_file = get_auth_file(&self.codex_home);
-        let auth_dot_json = match self.try_read_auth_json(&auth_file) {
-            Ok(auth) => auth,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        Ok(Some(auth_dot_json))
-    }
-
-    fn save(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
-        let auth_file = get_auth_file(&self.codex_home);
-
-        if let Some(parent) = auth_file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json_data = serde_json::to_string_pretty(auth_dot_json)?;
+    fn acquire_write_guard(&self) -> std::io::Result<AuthFileWriteGuard> {
+        let process_guard = AUTH_FILE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::fs::create_dir_all(&self.codex_home)?;
         let mut options = OpenOptions::new();
-        options.truncate(false).write(true).create(true);
+        options.read(true).write(true).create(true);
         #[cfg(unix)]
         {
             options.mode(0o600);
         }
-        let mut file = options.open(auth_file)?;
-        #[cfg(unix)]
-        {
-            let mut permissions = file.metadata()?.permissions();
-            permissions.set_mode(0o600);
-            file.set_permissions(permissions)?;
+        let lock_file = options.open(self.codex_home.join(AUTH_STORAGE_LOCK_FILE_NAME))?;
+        fs2::FileExt::lock_exclusive(&lock_file)?;
+        Ok(AuthFileWriteGuard {
+            _process_guard: process_guard,
+            lock_file,
+        })
+    }
+
+    fn load_unlocked(&self) -> std::io::Result<Option<AuthDotJson>> {
+        let auth_file = get_auth_file(&self.codex_home);
+        match self.try_read_auth_json(&auth_file) {
+            Ok(auth) => Ok(Some(auth)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
         }
-        file.set_len(0)?;
-        file.write_all(json_data.as_bytes())?;
-        file.flush()?;
-        Ok(())
+    }
+
+    fn save_unlocked(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
+        let auth_file = get_auth_file(&self.codex_home);
+        let json_data = serde_json::to_string_pretty(auth_dot_json)?;
+        write_auth_file_atomically(&auth_file, json_data.as_bytes())
+    }
+}
+
+impl AuthStorageBackend for FileAuthStorage {
+    fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
+        self.load_unlocked()
+    }
+
+    fn save(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
+        let _guard = self.acquire_write_guard()?;
+        self.save_unlocked(auth_dot_json)
     }
 
     fn delete(&self) -> std::io::Result<bool> {
+        let _guard = self.acquire_write_guard()?;
         delete_file_if_exists(&self.codex_home)
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        let _guard = self.acquire_write_guard()?;
+        if self.load_unlocked()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save_unlocked(replacement)?;
+        Ok(true)
     }
 }
 
@@ -502,6 +628,20 @@ impl AuthStorageBackend for EphemeralAuthStorage {
     fn delete(&self) -> std::io::Result<bool> {
         self.with_store(|store, key| Ok(store.remove(&key).is_some()))
     }
+
+    fn compare_and_swap(
+        &self,
+        expected: &AuthDotJson,
+        replacement: &AuthDotJson,
+    ) -> std::io::Result<bool> {
+        self.with_store(|store, key| {
+            if store.get(&key) != Some(expected) {
+                return Ok(false);
+            }
+            store.insert(key, replacement.clone());
+            Ok(true)
+        })
+    }
 }
 
 pub(super) fn create_auth_storage(
@@ -519,6 +659,50 @@ fn create_auth_storage_with_store(
     keyring_store: Arc<dyn KeyringStore>,
     keyring_backend_kind: AuthKeyringBackendKind,
 ) -> Arc<dyn AuthStorageBackend> {
+    if !is_encrypted_aggregate_enabled(mode) {
+        return create_legacy_auth_storage_with_store(
+            codex_home,
+            mode,
+            keyring_store,
+            keyring_backend_kind,
+        );
+    }
+
+    create_aggregate_aware_auth_storage_with_store(
+        codex_home,
+        mode,
+        keyring_store,
+        keyring_backend_kind,
+    )
+}
+
+fn create_aggregate_aware_auth_storage_with_store(
+    codex_home: PathBuf,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> Arc<dyn AuthStorageBackend> {
+    let legacy = create_legacy_auth_storage_with_store(
+        codex_home.clone(),
+        mode,
+        Arc::clone(&keyring_store),
+        keyring_backend_kind,
+    );
+    Arc::new(AggregateAwareAuthStorage {
+        codex_home,
+        mode,
+        keyring_store,
+        keyring_backend_kind,
+        legacy,
+    })
+}
+
+fn create_legacy_auth_storage_with_store(
+    codex_home: PathBuf,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> Arc<dyn AuthStorageBackend> {
     match mode {
         AuthCredentialsStoreMode::File => Arc::new(FileAuthStorage::new(codex_home)),
         AuthCredentialsStoreMode::Keyring => {
@@ -531,6 +715,138 @@ fn create_auth_storage_with_store(
         )),
         AuthCredentialsStoreMode::Ephemeral => Arc::new(EphemeralAuthStorage::new(codex_home)),
     }
+}
+
+pub(crate) fn load_auth_for_migration(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<(Option<AuthDotJson>, Option<AuthStorageSource>)> {
+    match mode {
+        AuthCredentialsStoreMode::File => auth_with_source(
+            FileAuthStorage::new(codex_home.to_path_buf()).load(),
+            AuthStorageSource::File,
+        ),
+        AuthCredentialsStoreMode::Keyring => auth_with_source(
+            create_keyring_auth_storage(
+                codex_home.to_path_buf(),
+                keyring_store,
+                keyring_backend_kind,
+            )
+            .load(),
+            AuthStorageSource::Keyring,
+        ),
+        AuthCredentialsStoreMode::Auto => {
+            let keyring_storage = create_keyring_auth_storage(
+                codex_home.to_path_buf(),
+                keyring_store,
+                keyring_backend_kind,
+            );
+            match keyring_storage.load() {
+                Ok(Some(auth)) => Ok((Some(auth), Some(AuthStorageSource::Keyring))),
+                Ok(None) => auth_with_source(
+                    FileAuthStorage::new(codex_home.to_path_buf()).load(),
+                    AuthStorageSource::File,
+                ),
+                Err(err) => Err(std::io::Error::other(format!(
+                    "failed to load CLI auth from keyring for encrypted migration: {err}"
+                ))),
+            }
+        }
+        AuthCredentialsStoreMode::Ephemeral => Ok((None, None)),
+    }
+}
+
+fn auth_with_source(
+    auth: std::io::Result<Option<AuthDotJson>>,
+    source: AuthStorageSource,
+) -> std::io::Result<(Option<AuthDotJson>, Option<AuthStorageSource>)> {
+    let auth = auth?;
+    let resolved_source = auth.as_ref().map(|_| source);
+    Ok((auth, resolved_source))
+}
+
+#[cfg(test)]
+pub(crate) fn load_auth_with_keyring_store(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<Option<AuthDotJson>> {
+    create_legacy_auth_storage_with_store(
+        codex_home.to_path_buf(),
+        mode,
+        keyring_store,
+        AuthKeyringBackendKind::Direct,
+    )
+    .load()
+}
+
+#[cfg(test)]
+pub(crate) fn load_activated_auth_with_keyring_store(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<Option<AuthDotJson>> {
+    create_aggregate_aware_auth_storage_with_store(
+        codex_home.to_path_buf(),
+        mode,
+        keyring_store,
+        AuthKeyringBackendKind::Direct,
+    )
+    .load()
+}
+
+#[cfg(test)]
+pub(crate) fn auth_keyring_account_for_tests(codex_home: &Path) -> std::io::Result<String> {
+    compute_store_key(codex_home)
+}
+
+#[cfg(test)]
+pub(crate) fn save_auth_with_keyring_store(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<()> {
+    create_legacy_auth_storage_with_store(
+        codex_home.to_path_buf(),
+        mode,
+        keyring_store,
+        AuthKeyringBackendKind::Direct,
+    )
+    .save(auth)
+}
+
+#[cfg(test)]
+pub(crate) fn save_activated_auth_with_keyring_store(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<()> {
+    create_aggregate_aware_auth_storage_with_store(
+        codex_home.to_path_buf(),
+        mode,
+        keyring_store,
+        AuthKeyringBackendKind::Direct,
+    )
+    .save(auth)
+}
+
+#[cfg(test)]
+pub(crate) fn delete_activated_auth_with_keyring_store(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> std::io::Result<bool> {
+    create_aggregate_aware_auth_storage_with_store(
+        codex_home.to_path_buf(),
+        mode,
+        keyring_store,
+        AuthKeyringBackendKind::Direct,
+    )
+    .delete()
 }
 
 fn create_keyring_auth_storage(

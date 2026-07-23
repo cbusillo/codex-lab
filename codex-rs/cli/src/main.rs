@@ -12,6 +12,7 @@ use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::read_access_token_from_stdin;
 use codex_cli::read_api_key_from_stdin;
+use codex_cli::run_login_profiles;
 use codex_cli::run_login_status;
 use codex_cli::run_login_with_access_token;
 use codex_cli::run_login_with_api_key;
@@ -461,6 +462,10 @@ struct LoginCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
 
+    /// Store or inspect credentials for a named auth profile.
+    #[arg(long = "profile", value_name = "NAME", global = true)]
+    profile: Option<String>,
+
     #[arg(
         long = "with-api-key",
         help = "Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`)"
@@ -503,12 +508,19 @@ struct LoginCommand {
 enum LoginSubcommand {
     /// Show login status.
     Status,
+
+    /// List named auth profiles.
+    Profiles,
 }
 
 #[derive(Debug, Parser)]
 struct LogoutCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
+
+    /// Remove credentials for a named auth profile.
+    #[arg(long = "profile", value_name = "NAME")]
+    profile: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -1357,7 +1369,10 @@ async fn cli_main(
             );
             match login_cli.action {
                 Some(LoginSubcommand::Status) => {
-                    run_login_status(login_cli.config_overrides).await;
+                    run_login_status(login_cli.config_overrides, login_cli.profile).await;
+                }
+                Some(LoginSubcommand::Profiles) => {
+                    run_login_profiles(login_cli.config_overrides).await;
                 }
                 None => {
                     if login_cli.with_api_key && login_cli.with_access_token {
@@ -1368,6 +1383,7 @@ async fn cli_main(
                     } else if login_cli.use_device_code {
                         run_login_with_device_code(
                             login_cli.config_overrides,
+                            login_cli.profile,
                             login_cli.issuer_base_url,
                             login_cli.client_id,
                         )
@@ -1379,12 +1395,22 @@ async fn cli_main(
                         std::process::exit(1);
                     } else if login_cli.with_api_key {
                         let api_key = read_api_key_from_stdin();
-                        run_login_with_api_key(login_cli.config_overrides, api_key).await;
+                        run_login_with_api_key(
+                            login_cli.config_overrides,
+                            login_cli.profile,
+                            api_key,
+                        )
+                        .await;
                     } else if login_cli.with_access_token {
                         let access_token = read_access_token_from_stdin();
-                        run_login_with_access_token(login_cli.config_overrides, access_token).await;
+                        run_login_with_access_token(
+                            login_cli.config_overrides,
+                            login_cli.profile,
+                            access_token,
+                        )
+                        .await;
                     } else {
-                        run_login_with_chatgpt(login_cli.config_overrides).await;
+                        run_login_with_chatgpt(login_cli.config_overrides, login_cli.profile).await;
                     }
                 }
             }
@@ -1399,7 +1425,7 @@ async fn cli_main(
                 &mut logout_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            run_logout(logout_cli.config_overrides).await;
+            run_logout(logout_cli.config_overrides, logout_cli.profile).await;
         }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(

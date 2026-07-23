@@ -877,6 +877,7 @@ impl AuthModeWidget {
                         app_brand: None,
                         codex_streamlined_login: false,
                         use_hosted_login_success_page: false,
+                        preserve_existing_account: false,
                     },
                 })
                 .await

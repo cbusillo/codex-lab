@@ -5248,12 +5248,20 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         /*bundled_skills_enabled*/ true,
     ));
     let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
+    let execution_account = resolve_execution_account_for_session(
+        config.as_ref(),
+        Arc::clone(&auth_manager),
+        &InitialHistory::New,
+        /*forked_from_thread_id*/ None,
+    )
+    .await;
     let result = Session::new(
         session_configuration,
         Arc::clone(&config),
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
+        execution_account,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -5412,6 +5420,31 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::new(
         mcp_runtime_snapshot.manager_arc(),
     ));
+    let execution_account = resolve_execution_account_for_session(
+        config.as_ref(),
+        Arc::clone(&auth_manager),
+        &InitialHistory::New,
+        /*forked_from_thread_id*/ None,
+    )
+    .await;
+    let model_client = ModelClient::new(
+        Some(auth_manager.clone()),
+        AgentIdentityAuthPolicy::JwtOnly,
+        thread_id,
+        session_configuration.provider.clone(),
+        session_configuration.session_source.clone(),
+        session_configuration.originator.clone(),
+        config.model_verbosity,
+        config.features.enabled(Feature::EnableRequestCompression),
+        config.features.enabled(Feature::RuntimeMetrics),
+        Session::build_model_client_beta_features_header(config.as_ref()),
+        config
+            .features
+            .enabled(Feature::ConcurrentReasoningSummaries),
+        /*attestation_provider*/ None,
+        config.http_client_factory(),
+    );
+    model_client.set_execution_account_lease(execution_account.clone());
     let services = SessionServices {
         mcp_runtime,
         mcp_runtime_snapshot: arc_swap::ArcSwapOption::from(Some(mcp_runtime_snapshot)),
@@ -5437,6 +5470,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: auth_manager.clone(),
+        execution_account,
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
         tool_approvals: Mutex::new(ApprovalStore::default()),
@@ -5467,24 +5501,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
-        model_client: ModelClient::new(
-            Some(auth_manager.clone()),
-            AgentIdentityAuthPolicy::JwtOnly,
-            thread_id,
-            session_configuration.provider.clone(),
-            session_configuration.session_source.clone(),
-            session_configuration.originator.clone(),
-            config.model_verbosity,
-            config.features.enabled(Feature::EnableRequestCompression),
-            config.features.enabled(Feature::RuntimeMetrics),
-            Session::build_model_client_beta_features_header(config.as_ref()),
-            /*concurrent_reasoning_summaries_enabled*/
-            config
-                .features
-                .enabled(Feature::ConcurrentReasoningSummaries),
-            /*attestation_provider*/ None,
-            config.http_client_factory(),
-        ),
+        model_client,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
             &config.features,
@@ -5513,7 +5530,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let turn_context = Session::make_turn_context(
         thread_id,
         SessionId::from(thread_id),
-        Some(Arc::clone(&auth_manager)),
+        Some(services.execution_account.auth_manager()),
         &session_telemetry,
         session_configuration.provider.clone(),
         &session_configuration,
@@ -5540,6 +5557,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         features: config.features.clone(),
         multi_agent_version: OnceLock::from(config.multi_agent_version_from_features()),
         pending_mcp_server_refresh_config: Mutex::new(None),
+        apps_context: AppsContext::new(services.execution_account.cache_identity()),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
@@ -5636,6 +5654,13 @@ async fn make_session_with_config_and_rx(
         /*bundled_skills_enabled*/ true,
     ));
     let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
+    let execution_account = resolve_execution_account_for_session(
+        config.as_ref(),
+        Arc::clone(&auth_manager),
+        &InitialHistory::New,
+        /*forked_from_thread_id*/ None,
+    )
+    .await;
 
     let session = Session::new(
         session_configuration,
@@ -5643,6 +5668,7 @@ async fn make_session_with_config_and_rx(
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
+        execution_account,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -5744,6 +5770,13 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         /*bundled_skills_enabled*/ true,
     ));
     let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
+    let execution_account = resolve_execution_account_for_session(
+        config.as_ref(),
+        Arc::clone(&auth_manager),
+        &initial_history,
+        /*forked_from_thread_id*/ None,
+    )
+    .await;
 
     let session = Session::new(
         session_configuration,
@@ -5751,6 +5784,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
+        execution_account,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -7574,6 +7608,31 @@ where
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::new(
         mcp_runtime_snapshot.manager_arc(),
     ));
+    let execution_account = resolve_execution_account_for_session(
+        config.as_ref(),
+        Arc::clone(&auth_manager),
+        &InitialHistory::New,
+        /*forked_from_thread_id*/ None,
+    )
+    .await;
+    let model_client = ModelClient::new(
+        Some(Arc::clone(&auth_manager)),
+        AgentIdentityAuthPolicy::JwtOnly,
+        thread_id,
+        session_configuration.provider.clone(),
+        session_configuration.session_source.clone(),
+        session_configuration.originator.clone(),
+        config.model_verbosity,
+        config.features.enabled(Feature::EnableRequestCompression),
+        config.features.enabled(Feature::RuntimeMetrics),
+        Session::build_model_client_beta_features_header(config.as_ref()),
+        config
+            .features
+            .enabled(Feature::ConcurrentReasoningSummaries),
+        /*attestation_provider*/ None,
+        config.http_client_factory(),
+    );
+    model_client.set_execution_account_lease(execution_account.clone());
     let services = SessionServices {
         mcp_runtime,
         mcp_runtime_snapshot: arc_swap::ArcSwapOption::from(Some(mcp_runtime_snapshot)),
@@ -7599,6 +7658,7 @@ where
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: Arc::clone(&auth_manager),
+        execution_account,
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
         tool_approvals: Mutex::new(ApprovalStore::default()),
@@ -7629,24 +7689,7 @@ where
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
-        model_client: ModelClient::new(
-            Some(Arc::clone(&auth_manager)),
-            AgentIdentityAuthPolicy::JwtOnly,
-            thread_id,
-            session_configuration.provider.clone(),
-            session_configuration.session_source.clone(),
-            session_configuration.originator.clone(),
-            config.model_verbosity,
-            config.features.enabled(Feature::EnableRequestCompression),
-            config.features.enabled(Feature::RuntimeMetrics),
-            Session::build_model_client_beta_features_header(config.as_ref()),
-            /*concurrent_reasoning_summaries_enabled*/
-            config
-                .features
-                .enabled(Feature::ConcurrentReasoningSummaries),
-            /*attestation_provider*/ None,
-            config.http_client_factory(),
-        ),
+        model_client,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
             &config.features,
@@ -7675,7 +7718,7 @@ where
     let turn_context = Arc::new(Session::make_turn_context(
         thread_id,
         SessionId::from(thread_id),
-        Some(Arc::clone(&auth_manager)),
+        Some(services.execution_account.auth_manager()),
         &session_telemetry,
         session_configuration.provider.clone(),
         &session_configuration,
@@ -7702,6 +7745,7 @@ where
         features: config.features.clone(),
         multi_agent_version: OnceLock::from(config.multi_agent_version_from_features()),
         pending_mcp_server_refresh_config: Mutex::new(None),
+        apps_context: AppsContext::new(services.execution_account.cache_identity()),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),

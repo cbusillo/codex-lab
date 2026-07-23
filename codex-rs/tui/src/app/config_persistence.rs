@@ -694,6 +694,129 @@ impl App {
         true
     }
 
+    pub(super) async fn update_auto_switch_accounts_on_rate_limit(
+        &mut self,
+        app_server: &mut AppServerSession,
+        enabled: bool,
+    ) {
+        if self
+            .update_account_switch_setting(
+                app_server,
+                "auto_switch_accounts_on_rate_limit",
+                enabled,
+                "Auto-switch account setting",
+                |effective| {
+                    account_switch_bool_from_effective_config(
+                        effective,
+                        "auto_switch_accounts_on_rate_limit",
+                        /*default*/ true,
+                    )
+                },
+                |app, enabled| {
+                    app.config.auto_switch_accounts_on_rate_limit = enabled;
+                    app.chat_widget
+                        .set_auto_switch_accounts_on_rate_limit(enabled);
+                },
+            )
+            .await
+        {
+            let message = if enabled {
+                "Auto-switch accounts enabled"
+            } else {
+                "Auto-switch accounts disabled"
+            };
+            self.chat_widget.add_info_message(message.to_string(), None);
+        }
+    }
+
+    pub(super) async fn update_api_key_fallback_on_all_accounts_limited(
+        &mut self,
+        app_server: &mut AppServerSession,
+        enabled: bool,
+    ) {
+        if self
+            .update_account_switch_setting(
+                app_server,
+                "api_key_fallback_on_all_accounts_limited",
+                enabled,
+                "API key fallback setting",
+                |effective| {
+                    account_switch_bool_from_effective_config(
+                        effective,
+                        "api_key_fallback_on_all_accounts_limited",
+                        /*default*/ false,
+                    )
+                },
+                |app, enabled| {
+                    app.config.api_key_fallback_on_all_accounts_limited = enabled;
+                    app.chat_widget
+                        .set_api_key_fallback_on_all_accounts_limited(enabled);
+                },
+            )
+            .await
+        {
+            let message = if enabled {
+                "API key fallback enabled"
+            } else {
+                "API key fallback disabled"
+            };
+            self.chat_widget.add_info_message(message.to_string(), None);
+        }
+    }
+
+    async fn update_account_switch_setting(
+        &mut self,
+        app_server: &mut AppServerSession,
+        key_path: &'static str,
+        enabled: bool,
+        label: &'static str,
+        effective_value: impl Fn(&ConfigReadResponse) -> bool,
+        apply: impl Fn(&mut Self, bool),
+    ) -> bool {
+        let write_response = match crate::config_update::write_config_batch(
+            app_server.request_handle(),
+            vec![crate::config_update::replace_config_value(
+                key_path,
+                serde_json::json!(enabled),
+            )],
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(error = %err, key_path, "failed to persist account switch setting");
+                self.chat_widget
+                    .add_error_message(format!("Failed to save {label}: {err}"));
+                self.chat_widget.dismiss_account_switch_settings_popup();
+                return false;
+            }
+        };
+
+        if write_response.status == WriteStatus::OkOverridden {
+            let message = overridden_write_message(&write_response);
+            tracing::warn!(
+                message,
+                key_path,
+                "account switch config write was overridden"
+            );
+            self.chat_widget
+                .add_error_message(format!("{label} was saved but not applied: {message}"));
+            let Some(effective_config) = self
+                .read_effective_config_after_overridden_write(app_server, label)
+                .await
+            else {
+                self.chat_widget.dismiss_account_switch_settings_popup();
+                return false;
+            };
+            apply(self, effective_value(&effective_config));
+            self.chat_widget.dismiss_account_switch_settings_popup();
+            return false;
+        }
+
+        apply(self, enabled);
+        true
+    }
+
     pub(super) async fn update_memory_settings_with_app_server(
         &mut self,
         app_server: &mut AppServerSession,
@@ -1115,6 +1238,19 @@ fn feature_enabled_from_effective_config(
         .as_ref()
         .and_then(|features| features.entries().get(feature.key()).copied())
         .unwrap_or_else(|| feature.default_enabled())
+}
+
+fn account_switch_bool_from_effective_config(
+    effective_config: &ConfigReadResponse,
+    key: &str,
+    default: bool,
+) -> bool {
+    effective_config
+        .config
+        .additional
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(default)
 }
 
 fn approvals_reviewer_from_effective_config(

@@ -228,7 +228,7 @@ impl RequestPluginInstallHandler {
             .as_ref()
             .is_some_and(|response| response.action == ElicitationAction::Accept);
 
-        let auth = session.services.auth_manager.auth().await;
+        let auth = turn.auth().await;
         let completed = if user_confirmed {
             verify_request_plugin_install_completed(&session, &turn, manager, &tool, auth.as_ref())
                 .await

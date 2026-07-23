@@ -890,6 +890,10 @@ pub struct Config {
     /// overridden by the `CODEX_HOME` environment variable).
     pub codex_home: AbsolutePathBuf,
 
+    /// Directory used for auth credential storage for this invocation. Defaults
+    /// to `codex_home`, but may point at an auth profile home.
+    pub auth_home: AbsolutePathBuf,
+
     /// Directory where Codex stores the SQLite state DB.
     pub sqlite_home: PathBuf,
 
@@ -972,6 +976,14 @@ pub struct Config {
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
+
+    /// Whether Codex may automatically switch saved accounts when the active
+    /// ChatGPT account is rate or usage limited.
+    pub auto_switch_accounts_on_rate_limit: bool,
+
+    /// Whether Codex may fall back to a saved API key account once all saved
+    /// ChatGPT accounts are rate or usage limited.
+    pub api_key_fallback_on_all_accounts_limited: bool,
 
     /// Whether Codex-owned clients should respect host system proxy settings.
     pub respect_system_proxy: bool,
@@ -1233,7 +1245,7 @@ pub struct TerminalResizeReflowConfig {
 
 impl AuthManagerConfig for Config {
     fn codex_home(&self) -> PathBuf {
-        self.codex_home.to_path_buf()
+        self.auth_home.to_path_buf()
     }
 
     fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode {
@@ -1260,6 +1272,7 @@ impl AuthManagerConfig for Config {
 #[derive(Clone, Default)]
 pub struct ConfigBuilder {
     codex_home: Option<PathBuf>,
+    auth_home: Option<PathBuf>,
     cli_overrides: Option<Vec<(String, TomlValue)>>,
     harness_overrides: Option<ConfigOverrides>,
     loader_overrides: Option<LoaderOverrides>,
@@ -1272,6 +1285,11 @@ pub struct ConfigBuilder {
 impl ConfigBuilder {
     pub fn codex_home(mut self, codex_home: PathBuf) -> Self {
         self.codex_home = Some(codex_home);
+        self
+    }
+
+    pub fn auth_home(mut self, auth_home: PathBuf) -> Self {
+        self.auth_home = Some(auth_home);
         self
     }
 
@@ -1321,6 +1339,7 @@ impl ConfigBuilder {
     async fn build_inner(self) -> std::io::Result<Config> {
         let Self {
             codex_home,
+            auth_home,
             cli_overrides,
             harness_overrides,
             loader_overrides,
@@ -1332,6 +1351,10 @@ impl ConfigBuilder {
         let codex_home = match codex_home {
             Some(codex_home) => AbsolutePathBuf::from_absolute_path(codex_home)?,
             None => find_codex_home()?,
+        };
+        let auth_home = match auth_home {
+            Some(auth_home) => AbsolutePathBuf::from_absolute_path(auth_home)?,
+            None => codex_home.clone(),
         };
         let cli_overrides = cli_overrides.unwrap_or_default();
         let mut harness_overrides = harness_overrides.unwrap_or_default();
@@ -1411,20 +1434,23 @@ impl ConfigBuilder {
                 lock_config_layer_stack,
             )
             .await?;
+            config.auth_home = auth_home;
             config.config_lock_toml = Some(Arc::new(expected_lock_config));
             config.config_lock_allow_codex_version_mismatch = allow_codex_version_mismatch;
             config.config_lock_save_fields_resolved_from_model_catalog =
                 save_fields_resolved_from_model_catalog;
             return Ok(config);
         }
-        Config::load_config_with_layer_stack(
+        let mut config = Config::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             config_toml,
             harness_overrides,
             codex_home,
             config_layer_stack,
         )
-        .await
+        .await?;
+        config.auth_home = auth_home;
+        Ok(config)
     }
 
     #[cfg(test)]
@@ -3987,6 +4013,7 @@ impl Config {
             agent_roles,
             memories: memories_config,
             agent_interrupt_message_enabled,
+            auth_home: codex_home.clone(),
             codex_home,
             sqlite_home,
             log_dir,
@@ -4033,6 +4060,12 @@ impl Config {
             chatgpt_base_url: cfg
                 .chatgpt_base_url
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+            auto_switch_accounts_on_rate_limit: cfg
+                .auto_switch_accounts_on_rate_limit
+                .unwrap_or(true),
+            api_key_fallback_on_all_accounts_limited: cfg
+                .api_key_fallback_on_all_accounts_limited
+                .unwrap_or(false),
             respect_system_proxy,
             apps_mcp_product_sku: cfg.apps_mcp_product_sku.clone(),
             realtime_audio: cfg

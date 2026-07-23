@@ -4,6 +4,9 @@
 //! orchestration module without changing their event wiring.
 
 use super::*;
+use crate::agent_install_helpers::AgentInstallStatus;
+use crate::agent_install_helpers::external_agent_install_statuses;
+use codex_config::agent_defaults::enabled_agent_model_specs;
 
 impl ChatWidget {
     pub(super) fn open_theme_picker(&mut self) {
@@ -90,6 +93,60 @@ impl ChatWidget {
         });
     }
 
+    pub(crate) fn open_settings_popup(&mut self) {
+        let items = vec![
+            SelectionItem {
+                name: "Manage accounts".to_string(),
+                description: Some("Add, switch, or disconnect stored accounts.".to_string()),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::ShowLoginAccounts);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Account switching".to_string(),
+                description: Some("Configure automatic account switching.".to_string()),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenAccountSwitchSettings);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Agents".to_string(),
+                description: Some("Check third-party agent CLIs used by spawn_agent.".to_string()),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenAgentsSettings);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Settings".to_string()),
+            subtitle: Some("Configure settings for Codex.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_agents_settings_popup(&mut self) {
+        let specs = enabled_agent_model_specs();
+        let statuses = external_agent_install_statuses(&specs);
+        self.open_agents_settings_popup_with_statuses(statuses);
+    }
+
+    pub(crate) fn open_agents_settings_popup_with_statuses(
+        &mut self,
+        statuses: Vec<AgentInstallStatus>,
+    ) {
+        self.bottom_pane
+            .show_selection_view(agents_settings_params(statuses));
+    }
+
     pub(crate) fn open_experimental_popup(&mut self) {
         let features: Vec<ExperimentalFeatureItem> = FEATURES
             .iter()
@@ -127,5 +184,55 @@ impl ChatWidget {
             Personality::Friendly => "Warm, collaborative, and helpful.",
             Personality::Pragmatic => "Concise, task-focused, and direct.",
         }
+    }
+}
+
+fn agents_settings_params(statuses: Vec<AgentInstallStatus>) -> SelectionViewParams {
+    let items = statuses
+        .into_iter()
+        .map(agent_status_selection_item)
+        .collect();
+    SelectionViewParams {
+        title: Some("Agents".to_string()),
+        subtitle: Some("Third-party agent CLI status for spawn_agent.".to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
+        items,
+        ..Default::default()
+    }
+}
+
+fn agent_status_selection_item(status: AgentInstallStatus) -> SelectionItem {
+    let marker = if status.installed {
+        "installed"
+    } else {
+        "not installed"
+    };
+    let description = if status.installed {
+        format!("{marker} - `{}` is on PATH", status.command)
+    } else {
+        format!("{marker} - {}", status.install_hint)
+    };
+    let selected_description = if status.installed {
+        Some(format!(
+            "{} Command: `{}` is available on PATH.",
+            status.description, status.command
+        ))
+    } else {
+        Some(format!(
+            "{} Command: `{}`. {}",
+            status.description, status.command, status.install_hint
+        ))
+    };
+
+    SelectionItem {
+        name: format!("{} ({marker})", status.name),
+        description: Some(description),
+        selected_description,
+        search_value: Some(format!(
+            "{} {} {} {}",
+            status.name, status.family, status.command, status.description
+        )),
+        dismiss_on_select: true,
+        ..Default::default()
     }
 }

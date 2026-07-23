@@ -44,6 +44,7 @@ use rmcp::model::ReadResourceResult;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::McpServerSource;
 use crate::ResolvedMcpCatalog;
 use crate::connection_manager::McpConnectionSet;
 use crate::runtime::McpRuntimeContext;
@@ -251,7 +252,18 @@ pub fn effective_mcp_servers(
     config: &McpConfig,
     auth: Option<&CodexAuth>,
 ) -> HashMap<String, EffectiveMcpServer> {
-    effective_mcp_servers_from_configured(configured_mcp_servers(config), config, auth)
+    let trusted_chatgpt_auth_servers = config
+        .mcp_server_catalog
+        .server(CODEX_APPS_MCP_SERVER_NAME)
+        .filter(|server| matches!(server.source(), McpServerSource::Compatibility { .. }))
+        .map(|_| HashSet::from([CODEX_APPS_MCP_SERVER_NAME.to_string()]))
+        .unwrap_or_default();
+    effective_mcp_servers_from_configured_inner(
+        configured_mcp_servers(config),
+        config,
+        auth,
+        &trusted_chatgpt_auth_servers,
+    )
 }
 
 /// Converts a materialized server map to its auth-gated runtime view.
@@ -262,6 +274,15 @@ pub fn effective_mcp_servers_from_configured(
     configured_servers: HashMap<String, McpServerConfig>,
     config: &McpConfig,
     auth: Option<&CodexAuth>,
+) -> HashMap<String, EffectiveMcpServer> {
+    effective_mcp_servers_from_configured_inner(configured_servers, config, auth, &HashSet::new())
+}
+
+fn effective_mcp_servers_from_configured_inner(
+    configured_servers: HashMap<String, McpServerConfig>,
+    config: &McpConfig,
+    auth: Option<&CodexAuth>,
+    trusted_chatgpt_auth_servers: &HashSet<String>,
 ) -> HashMap<String, EffectiveMcpServer> {
     let chatgpt_origin = url::Url::parse(CHATGPT_CODEX_BASE_URL)
         .ok()
@@ -280,7 +301,9 @@ pub fn effective_mcp_servers_from_configured(
                         }
                         McpServerTransportConfig::Stdio { .. } => None,
                     };
-                    if server_origin.as_ref() != chatgpt_origin.as_ref() {
+                    if !trusted_chatgpt_auth_servers.contains(&name)
+                        && server_origin.as_ref() != chatgpt_origin.as_ref()
+                    {
                         server.auth = McpServerAuth::OAuth;
                     }
                 }

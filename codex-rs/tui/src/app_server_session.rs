@@ -35,6 +35,7 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
@@ -42,6 +43,8 @@ use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::NewThreadModelDefaults;
 use codex_app_server_protocol::RateLimitSnapshot;
+use codex_app_server_protocol::RemoveAccountParams;
+use codex_app_server_protocol::RemoveAccountResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
@@ -50,6 +53,8 @@ use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::SwitchActiveAccountParams;
+use codex_app_server_protocol::SwitchActiveAccountResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionResponse;
@@ -1110,6 +1115,44 @@ impl AppServerSession {
         Ok(())
     }
 
+    pub(crate) async fn switch_active_account(&mut self, account_id: String) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: SwitchActiveAccountResponse = self
+            .client
+            .request_typed(ClientRequest::SwitchActiveAccount {
+                request_id,
+                params: SwitchActiveAccountParams { account_id },
+            })
+            .await
+            .wrap_err("account/switchActive failed in TUI")?;
+        Ok(())
+    }
+
+    pub(crate) async fn list_accounts(&mut self) -> Result<ListAccountsResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ListAccounts {
+                request_id,
+                params: None,
+            })
+            .await
+            .wrap_err("account/list failed in TUI")
+    }
+
+    pub(crate) async fn remove_account(
+        &mut self,
+        account_id: String,
+    ) -> Result<RemoveAccountResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::RemoveAccount {
+                request_id,
+                params: RemoveAccountParams { account_id },
+            })
+            .await
+            .wrap_err("account/remove failed in TUI")
+    }
+
     pub(crate) async fn thread_unsubscribe(&mut self, thread_id: ThreadId) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadUnsubscribeResponse = self
@@ -1267,11 +1310,24 @@ impl AppServerSession {
         self.client.shutdown().await
     }
 
+    pub(crate) fn into_client(self) -> AppServerClient {
+        self.client
+    }
+
+    pub(crate) fn swap_client(&mut self, client: AppServerClient) -> AppServerClient {
+        let old_client = std::mem::replace(&mut self.client, client);
+        self.next_request_id = 1;
+        self.thread_settings_update_supported = true;
+        self.default_model = None;
+        self.available_models.clear();
+        old_client
+    }
+
     pub(crate) fn request_handle(&self) -> AppServerRequestHandle {
         self.client.request_handle()
     }
 
-    fn next_request_id(&mut self) -> RequestId {
+    pub(crate) fn next_request_id(&mut self) -> RequestId {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
         RequestId::Integer(request_id)

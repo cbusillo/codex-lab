@@ -13,8 +13,11 @@ use codex_features::Feature;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::StoredAccount;
+use codex_login::TokenData;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::default_client::originator;
+use codex_login::token_data::IdTokenInfo;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
@@ -45,6 +48,10 @@ use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::WebSearchAction;
 use codex_protocol::openai_models::InputModality;
+use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelServiceTier;
+use codex_protocol::openai_models::ModelVisibility;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -58,6 +65,7 @@ use core_test_support::PathBufExt;
 use core_test_support::TestCodexResponsesRequestKind;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::load_default_config_for_test;
+use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -66,6 +74,7 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
@@ -680,6 +689,219 @@ fn write_auth_json(
     .unwrap();
 
     fake_jwt
+}
+
+#[expect(clippy::unwrap_used)]
+fn fake_chatgpt_token_data(account_id: &str, email: &str) -> TokenData {
+    use base64::Engine as _;
+
+    let header = json!({ "alg": "none", "typ": "JWT" });
+    let payload = json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_user_id": format!("user-{account_id}")
+        }
+    });
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let header_b64 = encode(&serde_json::to_vec(&header).unwrap());
+    let payload_b64 = encode(&serde_json::to_vec(&payload).unwrap());
+    let signature_b64 = encode(b"sig");
+
+    TokenData {
+        id_token: IdTokenInfo {
+            email: Some(email.to_string()),
+            chatgpt_plan_type: None,
+            chatgpt_user_id: Some(format!("user-{account_id}")),
+            chatgpt_account_id: Some(account_id.to_string()),
+            chatgpt_account_is_fedramp: false,
+            raw_jwt: format!("{header_b64}.{payload_b64}.{signature_b64}"),
+        },
+        access_token: format!("access-{account_id}"),
+        refresh_token: format!("refresh-{account_id}"),
+        account_id: Some(account_id.to_string()),
+    }
+}
+
+struct DivergentChatgptAccounts {
+    current_id: String,
+    candidate_id: String,
+    candidate_chatgpt_id: String,
+}
+
+fn write_divergent_chatgpt_accounts(home: &TempDir) -> anyhow::Result<DivergentChatgptAccounts> {
+    let current_id = "stored-0-current".to_string();
+    let current_chatgpt_id = "account_id".to_string();
+    let candidate_id = "stored-1-candidate".to_string();
+    let candidate_chatgpt_id = "candidate".to_string();
+    let accounts = vec![
+        StoredAccount {
+            id: current_id.clone(),
+            mode: codex_protocol::auth::AuthMode::Chatgpt,
+            label: Some("Current ChatGPT".to_string()),
+            openai_api_key: None,
+            tokens: Some(fake_chatgpt_token_data(
+                &current_chatgpt_id,
+                "user@example.com",
+            )),
+            last_refresh: Some(chrono::Utc::now()),
+            created_at: None,
+            last_used_at: None,
+        },
+        StoredAccount {
+            id: candidate_id.clone(),
+            mode: codex_protocol::auth::AuthMode::Chatgpt,
+            label: Some("Candidate ChatGPT".to_string()),
+            openai_api_key: None,
+            tokens: Some(fake_chatgpt_token_data(
+                &candidate_chatgpt_id,
+                "user@example.com",
+            )),
+            last_refresh: Some(chrono::Utc::now()),
+            created_at: None,
+            last_used_at: None,
+        },
+    ];
+    std::fs::write(
+        home.path().join("auth_accounts.json"),
+        serde_json::to_string_pretty(&json!({
+            "version": 1,
+            "active_account_id": current_id,
+            "accounts": accounts,
+        }))?,
+    )?;
+
+    Ok(DivergentChatgptAccounts {
+        current_id,
+        candidate_id,
+        candidate_chatgpt_id,
+    })
+}
+
+fn account_model(
+    slug: &str,
+    context_window: i64,
+    supports_parallel_tool_calls: bool,
+    service_tiers: &[&str],
+) -> ModelInfo {
+    let mut model = bundled_models_response()
+        .expect("bundled models should load")
+        .models
+        .into_iter()
+        .next()
+        .expect("bundled models should not be empty");
+    model.slug = slug.to_string();
+    model.display_name = slug.to_string();
+    model.base_instructions = format!("instructions for {slug}");
+    model.visibility = ModelVisibility::List;
+    model.priority = 0;
+    model.context_window = Some(context_window);
+    model.max_context_window = Some(context_window);
+    model.effective_context_window_percent = 100;
+    model.supports_parallel_tool_calls = supports_parallel_tool_calls;
+    model.use_responses_lite = false;
+    model.service_tiers = service_tiers
+        .iter()
+        .map(|service_tier| ModelServiceTier {
+            id: (*service_tier).to_string(),
+            name: (*service_tier).to_string(),
+            description: format!("{service_tier} service tier"),
+        })
+        .collect();
+    model.default_service_tier = None;
+    model
+}
+
+async fn mount_models_for_authorization(
+    server: &MockServer,
+    authorization: String,
+    models: Vec<ModelInfo>,
+) {
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", authorization))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(ModelsResponse { models }),
+        )
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+}
+
+async fn submit_prompt_without_waiting(fixture: &TestCodex) -> anyhow::Result<()> {
+    fixture
+        .codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    Ok(())
+}
+
+async fn start_usage_limit_failover(
+    server: &MockServer,
+    home: Arc<TempDir>,
+    accounts: &DivergentChatgptAccounts,
+    model_slug: &str,
+    candidate_models: Vec<ModelInfo>,
+) -> anyhow::Result<(TestCodex, ResponseMock)> {
+    mount_models_for_authorization(
+        server,
+        "Bearer Access Token".to_string(),
+        vec![account_model(
+            model_slug,
+            200_000,
+            /*supports_parallel_tool_calls*/ true,
+            &["priority"],
+        )],
+    )
+    .await;
+    mount_models_for_authorization(
+        server,
+        format!("Bearer access-{}", accounts.candidate_chatgpt_id),
+        candidate_models,
+    )
+    .await;
+    let usage_limit_response = ResponseTemplate::new(429).set_body_json(json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "limit reached",
+            "resets_at": 1704067242,
+            "plan_type": "pro"
+        }
+    }));
+    let success_response = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(sse(vec![
+            ev_assistant_message("msg-1", "recovered"),
+            ev_completed("resp-2"),
+        ]));
+    let response_mock =
+        mount_response_sequence(server, vec![usage_limit_response, success_response]).await;
+    let configured_model = model_slug.to_string();
+    let fixture = test_codex()
+        .with_home(home)
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.auto_switch_accounts_on_rate_limit = true;
+            config.model = Some(configured_model);
+            config.service_tier = Some("priority".to_string());
+            let _ = config.features.enable(Feature::FastMode);
+        })
+        .build(server)
+        .await?;
+    submit_prompt_without_waiting(&fixture).await?;
+    Ok((fixture, response_mock))
 }
 
 struct ProviderAuthCommandFixture {
@@ -3607,6 +3829,366 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         error_event.message.contains("spend cap set by the owner"),
         "unexpected error message for submission {submission_id}: {}",
         error_event.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_selected_execution_account_routes_first_response_and_persists_lease()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_divergent_chatgpt_accounts(&home)?;
+    let now = chrono::Utc::now();
+    codex_core::account_usage::record_usage_limit_hint(
+        home.path(),
+        &accounts.current_id,
+        /*plan*/ None,
+        Some(now + chrono::Duration::hours(1)),
+        now,
+        /*reached_type*/ None,
+    )?;
+
+    mount_models_for_authorization(
+        &server,
+        format!("Bearer access-{}", accounts.candidate_chatgpt_id),
+        vec![account_model(
+            "execution-default",
+            345_000,
+            /*supports_parallel_tool_calls*/ true,
+            &["priority"],
+        )],
+    )
+    .await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+
+    let fixture = test_codex()
+        .with_home(home)
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.auto_switch_accounts_on_rate_limit = true;
+            config.model = None;
+            config.service_tier = Some("priority".to_string());
+            let _ = config.features.enable(Feature::FastMode);
+        })
+        .build(&server)
+        .await?;
+
+    assert_eq!(fixture.session_configured.model, "execution-default");
+    assert_eq!(
+        fixture.session_configured.service_tier.as_deref(),
+        Some("priority")
+    );
+    submit_prompt_without_waiting(&fixture).await?;
+
+    let turn_started = wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::TurnStarted(_))
+    })
+    .await;
+    let EventMsg::TurnStarted(turn_started) = turn_started else {
+        unreachable!();
+    };
+    assert_eq!(turn_started.model_context_window, Some(345_000));
+    wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = response_mock.single_request();
+    let expected_prompt_cache_key = format!(
+        "{}:{}",
+        fixture.session_configured.thread_id, accounts.candidate_id
+    );
+    assert_eq!(request.path(), "/v1/responses");
+    assert_eq!(
+        request.header("authorization"),
+        Some(format!("Bearer access-{}", accounts.candidate_chatgpt_id))
+    );
+    assert_eq!(
+        request.body_json()["prompt_cache_key"].as_str(),
+        Some(expected_prompt_cache_key.as_str())
+    );
+
+    let lease_path = fixture
+        .codex_home_path()
+        .join("execution-account-leases")
+        .join(format!("{}.json", fixture.session_configured.thread_id));
+    let lease: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(lease_path)?)?;
+    assert_eq!(
+        lease["account_id"].as_str(),
+        Some(accounts.candidate_id.as_str())
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_failover_refreshes_model_metadata_and_service_tier() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_divergent_chatgpt_accounts(&home)?;
+    let model_slug = "lease-routed-model";
+    let (fixture, response_mock) = start_usage_limit_failover(
+        &server,
+        home,
+        &accounts,
+        model_slug,
+        vec![account_model(
+            model_slug,
+            300_000,
+            /*supports_parallel_tool_calls*/ false,
+            &[],
+        )],
+    )
+    .await?;
+    wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer Access Token".to_string())
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some(format!("Bearer access-{}", accounts.candidate_chatgpt_id))
+    );
+    let first_body = requests[0].body_json();
+    let second_body = requests[1].body_json();
+    assert_eq!(first_body["model"].as_str(), Some(model_slug));
+    assert_eq!(first_body["parallel_tool_calls"].as_bool(), Some(true));
+    assert_eq!(first_body["service_tier"].as_str(), Some("priority"));
+    assert_eq!(second_body["model"].as_str(), Some(model_slug));
+    assert_eq!(second_body["parallel_tool_calls"].as_bool(), Some(false));
+    assert_eq!(second_body.get("service_tier"), None);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_failover_preserves_missing_model_slug_with_fallback_metadata()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_divergent_chatgpt_accounts(&home)?;
+    let model_slug = "lease-only-missing-model";
+    let (fixture, response_mock) = start_usage_limit_failover(
+        &server,
+        home,
+        &accounts,
+        model_slug,
+        vec![account_model(
+            "candidate-other-model",
+            300_000,
+            /*supports_parallel_tool_calls*/ false,
+            &[],
+        )],
+    )
+    .await?;
+    let fallback_warning = wait_for_event(&fixture.codex, |msg| {
+        matches!(
+            msg,
+            EventMsg::Warning(warning)
+                if warning.message.starts_with("Model metadata for")
+        )
+    })
+    .await;
+    let EventMsg::Warning(fallback_warning) = fallback_warning else {
+        unreachable!();
+    };
+    assert_eq!(
+        fallback_warning.message,
+        format!(
+            "Model metadata for `{model_slug}` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+        )
+    );
+    wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let second_body = requests[1].body_json();
+    assert_eq!(second_body["model"].as_str(), Some(model_slug));
+    assert_eq!(second_body.get("service_tier"), None);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_auto_switch_emits_user_visible_notice() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+
+    let usage_limit_response = ResponseTemplate::new(429).set_body_json(json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "limit reached",
+            "resets_at": 1704067242,
+            "plan_type": "pro"
+        }
+    }));
+    let success_response = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(sse(vec![
+            ev_assistant_message("msg-1", "recovered"),
+            ev_completed("resp-2"),
+        ]));
+
+    let response_mock =
+        mount_response_sequence(&server, vec![usage_limit_response, success_response]).await;
+
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_divergent_chatgpt_accounts(&home)?;
+
+    let mut builder = test_codex()
+        .with_home(home.clone())
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.auto_switch_accounts_on_rate_limit = true;
+        });
+    let codex_fixture = builder.build(&server).await?;
+    let codex = codex_fixture.codex.clone();
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submission should retry after auto-switching accounts");
+
+    let warning_event = wait_for_event(&codex, |msg| {
+        matches!(
+            msg,
+            EventMsg::Warning(warning) if warning.message.starts_with("Execution switched")
+        )
+    })
+    .await;
+    let EventMsg::Warning(warning) = warning_event else {
+        unreachable!();
+    };
+    assert_eq!(
+        warning.message,
+        "Execution switched to Candidate ChatGPT due to a usage limit; your signed-in account is unchanged."
+    );
+
+    wait_for_event(&codex, |msg| matches!(msg, EventMsg::TurnComplete(_))).await;
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests
+            .get(1)
+            .and_then(|request| request.header("authorization")),
+        Some(format!("Bearer access-{}", accounts.candidate_chatgpt_id))
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
+        Some(accounts.current_id.clone())
+    );
+    assert_ne!(accounts.current_id, accounts.candidate_id);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_auto_switch_stops_after_all_stored_accounts_are_limited() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+
+    let usage_limit_response = ResponseTemplate::new(429).set_body_json(json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "limit reached",
+            "resets_at": 1704067242,
+            "plan_type": "pro"
+        }
+    }));
+    mount_response_sequence(
+        &server,
+        vec![usage_limit_response.clone(), usage_limit_response],
+    )
+    .await;
+
+    let home = Arc::new(TempDir::new()?);
+    let accounts = write_divergent_chatgpt_accounts(&home)?;
+    let mut builder = test_codex()
+        .with_home(home.clone())
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.auto_switch_accounts_on_rate_limit = true;
+        });
+    let codex_fixture = builder.build(&server).await?;
+    let codex = codex_fixture.codex.clone();
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submission should switch once before reporting the usage limit");
+
+    wait_for_event(&codex, |msg| {
+        matches!(
+            msg,
+            EventMsg::Warning(warning) if warning.message.starts_with("Execution switched")
+        )
+    })
+    .await;
+    let error_event = wait_for_event(&codex, |msg| matches!(msg, EventMsg::Error(_))).await;
+    let EventMsg::Error(error_event) = error_event else {
+        unreachable!();
+    };
+    assert!(error_event.message.to_lowercase().contains("usage limit"));
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    let response_requests: Vec<_> = requests
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "POST" && request.url.path().ends_with("/responses")
+        })
+        .collect();
+    assert_eq!(response_requests.len(), 2);
+    let expected_authorization = format!("Bearer access-{}", accounts.candidate_chatgpt_id);
+    assert_eq!(
+        response_requests
+            .get(1)
+            .and_then(|request| request.headers.get("authorization"))
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_authorization.as_str())
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
+        Some(accounts.current_id)
     );
 
     Ok(())

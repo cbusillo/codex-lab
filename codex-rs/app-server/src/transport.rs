@@ -21,6 +21,7 @@ pub(crate) use codex_app_server_transport::QueuedOutgoingMessage;
 pub(crate) use codex_app_server_transport::RemoteControlEnableError;
 pub(crate) use codex_app_server_transport::RemoteControlHandle;
 pub(crate) use codex_app_server_transport::RemoteControlPolicy;
+pub(crate) use codex_app_server_transport::RemoteControlReconnectUnavailable;
 pub(crate) use codex_app_server_transport::RemoteControlStartConfig;
 pub use codex_app_server_transport::RemoteControlStartupMode;
 pub(crate) use codex_app_server_transport::RemoteControlUnavailable;

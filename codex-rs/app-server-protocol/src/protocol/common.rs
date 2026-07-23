@@ -924,6 +924,12 @@ client_request_definitions! {
         serialization: global("remote-control"),
         response: v2::RemoteControlDisableResponse,
     },
+    #[experimental("remoteControl/reconnect")]
+    RemoteControlReconnect => "remoteControl/reconnect" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: global("remote-control"),
+        response: v2::RemoteControlReconnectResponse,
+    },
     #[experimental("remoteControl/status/read")]
     RemoteControlStatusRead => "remoteControl/status/read" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
@@ -2979,6 +2985,7 @@ mod tests {
                 app_brand: None,
                 codex_streamlined_login: false,
                 use_hosted_login_success_page: false,
+                preserve_existing_account: false,
             },
         };
         assert_eq!(
@@ -3003,6 +3010,7 @@ mod tests {
                 app_brand: None,
                 codex_streamlined_login: true,
                 use_hosted_login_success_page: false,
+                preserve_existing_account: false,
             },
         };
         assert_eq!(
@@ -3028,6 +3036,7 @@ mod tests {
                 app_brand: Some(v2::LoginAppBrand::Chatgpt),
                 codex_streamlined_login: true,
                 use_hosted_login_success_page: true,
+                preserve_existing_account: false,
             },
         };
         assert_eq!(
@@ -3050,7 +3059,9 @@ mod tests {
     fn serialize_account_login_chatgpt_device_code() -> Result<()> {
         let request = ClientRequest::LoginAccount {
             request_id: RequestId::Integer(4),
-            params: v2::LoginAccountParams::ChatgptDeviceCode,
+            params: v2::LoginAccountParams::ChatgptDeviceCode {
+                preserve_existing_account: false,
+            },
         };
         assert_eq!(
             json!({

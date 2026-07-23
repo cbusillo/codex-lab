@@ -696,7 +696,7 @@ async fn maybe_request_codex_apps_auth_elicitation(
 }
 
 async fn refresh_codex_apps_after_connector_auth(
-    sess: &Session,
+    _sess: &Session,
     turn_context: &TurnContext,
     manager: &McpConnectionSet,
 ) {
@@ -704,7 +704,7 @@ async fn refresh_codex_apps_after_connector_auth(
 
     match mcp_tools_result {
         Ok(mcp_tools) => {
-            let auth = sess.services.auth_manager.auth().await;
+            let auth = turn_context.auth().await;
             connectors::refresh_accessible_connectors_cache_from_mcp_tools(
                 &turn_context.config,
                 auth.as_ref(),

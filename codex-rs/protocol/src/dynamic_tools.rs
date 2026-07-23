@@ -82,9 +82,14 @@ struct LegacyDynamicToolSpec {
     namespace: Option<String>,
     name: String,
     description: String,
+    #[serde(default = "empty_json_object")]
     input_schema: JsonValue,
     defer_loading: Option<bool>,
     expose_to_context: Option<bool>,
+}
+
+fn empty_json_object() -> JsonValue {
+    JsonValue::Object(serde_json::Map::new())
 }
 
 pub fn normalize_dynamic_tool_specs(

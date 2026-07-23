@@ -8741,6 +8741,10 @@
             "codexStreamlinedLogin": {
               "type": "boolean"
             },
+            "preserveExistingAccount": {
+              "description": "Preserve the previously stored ChatGPT account instead of revoking and removing it.",
+              "type": "boolean"
+            },
             "type": {
               "enum": [
                 "chatgpt"
@@ -8760,6 +8764,10 @@
         },
         {
           "properties": {
+            "preserveExistingAccount": {
+              "description": "Preserve the previously stored ChatGPT account instead of revoking and removing it.",
+              "type": "boolean"
+            },
             "type": {
               "enum": [
                 "chatgptDeviceCode"

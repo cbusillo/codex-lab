@@ -3,6 +3,41 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 #[test]
+fn remote_control_reconnect_response_maps_and_round_trips() {
+    let response = RemoteControlReconnectResponse::from(RemoteControlStatusChangedNotification {
+        status: RemoteControlConnectionStatus::Connected,
+        server_name: "test-server".to_string(),
+        installation_id: "installation-id".to_string(),
+        environment_id: Some("environment-id".to_string()),
+    });
+    assert_eq!(
+        response,
+        RemoteControlReconnectResponse {
+            status: RemoteControlConnectionStatus::Connected,
+            server_name: "test-server".to_string(),
+            installation_id: "installation-id".to_string(),
+            environment_id: Some("environment-id".to_string()),
+        }
+    );
+
+    let value = json!({
+        "status": "connected",
+        "serverName": "test-server",
+        "installationId": "installation-id",
+        "environmentId": "environment-id",
+    });
+    assert_eq!(
+        serde_json::to_value(&response).expect("response should serialize"),
+        value
+    );
+    assert_eq!(
+        serde_json::from_value::<RemoteControlReconnectResponse>(value)
+            .expect("response should deserialize"),
+        response
+    );
+}
+
+#[test]
 fn remote_control_clients_list_params_serialize_nullable_optional_fields() {
     assert_eq!(
         serde_json::to_value(RemoteControlClientsListParams {

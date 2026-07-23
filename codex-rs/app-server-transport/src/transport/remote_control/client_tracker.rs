@@ -37,6 +37,7 @@ pub(crate) struct Stopped;
 struct ClientState {
     connection_id: ConnectionId,
     disconnect_token: CancellationToken,
+    explicit_stream_id: bool,
     last_activity_at: Instant,
     last_inbound_seq_id: Option<u64>,
     status_tx: watch::Sender<PongStatus>,
@@ -49,6 +50,18 @@ pub(crate) struct ClientTracker {
     server_event_tx: mpsc::Sender<QueuedServerEnvelope>,
     transport_event_tx: mpsc::Sender<TransportEvent>,
     shutdown_token: CancellationToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClientCloseReason {
+    Shutdown,
+    Reinitialized,
+    Explicit,
+    IdleTimeout,
+    OutboundStopped,
+    AccountChanged,
+    #[cfg(test)]
+    Requested,
 }
 
 impl ClientTracker {
@@ -81,7 +94,9 @@ impl ClientTracker {
         self.shutdown_token.cancel();
 
         while let Some(client_key) = self.clients.keys().next().cloned() {
-            let _ = self.close_client(&client_key).await;
+            let _ = self
+                .close_client_with_reason(&client_key, ClientCloseReason::Shutdown)
+                .await;
         }
 
         self.drain_join_set().await;
@@ -141,7 +156,8 @@ impl ClientTracker {
                 }
 
                 if is_initialize && self.clients.contains_key(&client_key) {
-                    self.close_client(&client_key).await?;
+                    self.close_client_with_reason(&client_key, ClientCloseReason::Reinitialized)
+                        .await?;
                 }
 
                 if let Some(connection_id) = self.clients.get_mut(&client_key).map(|client| {
@@ -187,6 +203,7 @@ impl ClientTracker {
                     ClientState {
                         connection_id,
                         disconnect_token,
+                        explicit_stream_id: !is_legacy_stream_id,
                         last_activity_at: Instant::now(),
                         last_inbound_seq_id: None,
                         status_tx,
@@ -195,6 +212,12 @@ impl ClientTracker {
                 if is_legacy_stream_id {
                     self.legacy_stream_ids.insert(client_id.clone(), stream_id);
                 }
+                info!(
+                    ?connection_id,
+                    explicit_stream_id = !is_legacy_stream_id,
+                    active_remote_streams = self.clients.len(),
+                    "remote control virtual client opened"
+                );
                 if let Err(err) = self
                     .send_transport_event(TransportEvent::IncomingMessage {
                         connection_id,
@@ -223,6 +246,17 @@ impl ClientTracker {
                     return Ok(());
                 }
 
+                info!(
+                    explicit_stream_id = !is_legacy_stream_id,
+                    active_remote_streams = self.clients.len(),
+                    active_streams_for_client = self
+                        .clients
+                        .keys()
+                        .filter(|(active_client_id, _)| active_client_id == &client_id)
+                        .count(),
+                    "remote control ping did not match an active virtual client"
+                );
+
                 let server_event_tx = self.server_event_tx.clone();
                 tokio::spawn(async move {
                     let server_envelope = QueuedServerEnvelope {
@@ -237,7 +271,10 @@ impl ClientTracker {
                 });
                 Ok(())
             }
-            ClientEvent::ClientClosed => self.close_client(&client_key).await,
+            ClientEvent::ClientClosed => {
+                self.close_client_with_reason(&client_key, ClientCloseReason::Explicit)
+                    .await
+            }
         }
     }
 
@@ -301,18 +338,44 @@ impl ClientTracker {
             })
             .collect();
         for client_key in &expired_client_ids {
-            self.close_client(client_key).await?;
+            self.close_client_with_reason(client_key, ClientCloseReason::IdleTimeout)
+                .await?;
         }
         Ok(expired_client_ids)
     }
 
+    pub(super) async fn close_all_for_account_change(&mut self) {
+        while let Some(client_key) = self.clients.keys().next().cloned() {
+            let _ = self
+                .close_client_with_reason(&client_key, ClientCloseReason::AccountChanged)
+                .await;
+        }
+    }
+
+    #[cfg(test)]
     pub(super) async fn close_client(
         &mut self,
         client_key: &(ClientId, StreamId),
     ) -> Result<(), Stopped> {
+        self.close_client_with_reason(client_key, ClientCloseReason::Requested)
+            .await
+    }
+
+    pub(super) async fn close_client_with_reason(
+        &mut self,
+        client_key: &(ClientId, StreamId),
+        reason: ClientCloseReason,
+    ) -> Result<(), Stopped> {
         let Some(client) = self.remove_client(client_key) else {
             return Ok(());
         };
+        info!(
+            ?reason,
+            connection_id = ?client.connection_id,
+            explicit_stream_id = client.explicit_stream_id,
+            active_remote_streams = self.clients.len(),
+            "remote control virtual client closed"
+        );
         client.disconnect_token.cancel();
         self.send_transport_event(TransportEvent::ConnectionClosed {
             connection_id: client.connection_id,

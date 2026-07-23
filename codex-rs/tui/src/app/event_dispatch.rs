@@ -409,6 +409,38 @@ impl App {
                         .add_error_message(format!("Logout failed: {err}"));
                 }
             },
+            AppEvent::ShowLoginAccounts => {
+                self.show_login_accounts_view(app_server).await;
+            }
+            AppEvent::ShowLoginAddAccount => {
+                self.chat_widget.open_login_add_account_view();
+            }
+            AppEvent::LoginStartChatGpt => {
+                self.start_login_add_account_chatgpt(app_server).await;
+            }
+            AppEvent::LoginAddAccountApiKey { api_key } => {
+                self.save_login_add_account_api_key(app_server, api_key.expose_secret())
+                    .await;
+            }
+            AppEvent::LoginStartDeviceCode => {
+                self.start_login_add_account_device_code(app_server).await;
+            }
+            AppEvent::LoginCancelChatGpt => {
+                self.cancel_login_add_account_chatgpt(app_server).await;
+            }
+            AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result } => {
+                self.complete_login_add_account_chatgpt(attempt_id, result)
+                    .await;
+            }
+            AppEvent::SwitchAuthProfile { selection } => {
+                self.switch_auth_profile(tui, app_server, selection).await;
+            }
+            AppEvent::SwitchAuthAccount { selection } => {
+                self.switch_auth_account(tui, app_server, selection).await;
+            }
+            AppEvent::RemoveAuthAccount { selection } => {
+                self.remove_auth_account(tui, app_server, selection).await;
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
@@ -1906,6 +1938,20 @@ impl App {
                     generate_memories,
                 )
                 .await;
+            }
+            AppEvent::OpenAccountSwitchSettings => {
+                self.chat_widget.open_account_switch_settings_popup();
+            }
+            AppEvent::OpenAgentsSettings => {
+                self.chat_widget.open_agents_settings_popup();
+            }
+            AppEvent::SetAutoSwitchAccountsOnRateLimit(enabled) => {
+                self.update_auto_switch_accounts_on_rate_limit(app_server, enabled)
+                    .await;
+            }
+            AppEvent::SetApiKeyFallbackOnAllAccountsLimited(enabled) => {
+                self.update_api_key_fallback_on_all_accounts_limited(app_server, enabled)
+                    .await;
             }
             AppEvent::ResetMemories => {
                 self.reset_memories_with_app_server(app_server).await;

@@ -6,13 +6,40 @@ use codex_secrets::LocalSecretsNamespace;
 use codex_secrets::SecretScope;
 use codex_secrets::SecretsBackendKind;
 use codex_secrets::SecretsManager;
-use codex_secrets::compute_keyring_account;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::tempdir;
 
 use codex_keyring_store::tests::MockKeyringStore;
 use keyring::Error as KeyringError;
+
+fn compute_secrets_keyring_account(codex_home: &Path) -> String {
+    let canonical = codex_home
+        .canonicalize()
+        .unwrap_or_else(|_| codex_home.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let digest = hasher.finalize();
+    let hex = format!("{digest:x}");
+    let short = hex.get(..16).unwrap_or(hex.as_str());
+    format!("secrets|codex-auth|{short}")
+}
+
+fn compute_login_aggregate_keyring_account(codex_home: &Path) -> String {
+    let canonical = codex_home
+        .canonicalize()
+        .unwrap_or_else(|_| codex_home.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let digest = hasher.finalize();
+    let hex = format!("{digest:x}");
+    let short = hex.get(..16).unwrap_or(hex.as_str());
+    format!("secrets|login-aggregate|{short}")
+}
 
 #[tokio::test]
 async fn file_storage_load_returns_auth_dot_json() -> anyhow::Result<()> {
@@ -34,6 +61,89 @@ async fn file_storage_load_returns_auth_dot_json() -> anyhow::Result<()> {
 
     let loaded = storage.load().context("failed to load auth file")?;
     assert_eq!(Some(auth_dot_json), loaded);
+    Ok(())
+}
+
+#[test]
+fn file_mode_auth_storage_does_not_access_keyring() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let keyring = Arc::new(MockKeyringStore::default());
+    keyring.set_error(
+        &compute_login_aggregate_keyring_account(codex_home.path()),
+        KeyringError::Invalid("file mode".into(), "keyring access".into()),
+    );
+    let storage = create_auth_storage_with_store(
+        codex_home.path().to_path_buf(),
+        AuthCredentialsStoreMode::File,
+        keyring,
+        AuthKeyringBackendKind::Direct,
+    );
+    let original = auth_with_prefix("original");
+    let replacement = auth_with_prefix("replacement");
+
+    storage.save(&original)?;
+    assert_eq!(storage.load()?, Some(original.clone()));
+    assert!(storage.compare_and_swap(&original, &replacement)?);
+    assert_eq!(storage.load()?, Some(replacement));
+    assert!(storage.delete()?);
+    assert!(
+        !codex_home
+            .path()
+            .join("secrets/login_aggregate.age")
+            .exists()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn file_storage_loads_from_read_only_home_without_creating_lock_file() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let codex_home = tempdir()?;
+    let expected = auth_with_prefix("read-only");
+    let auth_path = get_auth_file(codex_home.path());
+    std::fs::write(&auth_path, serde_json::to_vec_pretty(&expected)?)?;
+    std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o400))?;
+    std::fs::set_permissions(codex_home.path(), std::fs::Permissions::from_mode(0o500))?;
+
+    let loaded = load_activated_auth_with_keyring_store(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        Arc::new(MockKeyringStore::default()),
+    );
+
+    std::fs::set_permissions(codex_home.path(), std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))?;
+    assert_eq!(loaded?, Some(expected));
+    assert!(!codex_home.path().join(AUTH_STORAGE_LOCK_FILE_NAME).exists());
+    assert_eq!(
+        std::fs::read_dir(codex_home.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?,
+        vec![std::ffi::OsString::from("auth.json")]
+    );
+    Ok(())
+}
+
+#[test]
+fn file_storage_save_atomically_replaces_existing_auth() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let storage = FileAuthStorage::new(codex_home.path().to_path_buf());
+    let original = auth_with_prefix("original");
+    let replacement = auth_with_prefix("replacement");
+    storage.save(&original)?;
+
+    let mut original_handle = File::open(get_auth_file(codex_home.path()))?;
+    storage.save(&replacement)?;
+
+    let mut original_contents = String::new();
+    original_handle.read_to_string(&mut original_contents)?;
+    assert_eq!(
+        serde_json::from_str::<AuthDotJson>(&original_contents)?,
+        original
+    );
+    assert_eq!(storage.load()?, Some(replacement));
     Ok(())
 }
 
@@ -401,7 +511,7 @@ fn assert_keyring_saved_auth_and_removed_fallback(
         mock_keyring.saved_value(&old_key).is_none(),
         "legacy keyring auth entry should not be used"
     );
-    let secrets_key = compute_keyring_account(codex_home);
+    let secrets_key = compute_secrets_keyring_account(codex_home);
     assert!(
         mock_keyring.saved_value(&secrets_key).is_some(),
         "secrets backend should persist an encryption passphrase in the keyring"
@@ -594,10 +704,23 @@ fn factory_uses_secrets_backend_only_when_requested() -> anyhow::Result<()> {
     secrets_storage.save(&secrets_auth)?;
     assert!(
         secrets_keyring
-            .saved_value(&compute_keyring_account(secrets_home.path()))
+            .saved_value(&compute_secrets_keyring_account(secrets_home.path()))
             .is_some()
     );
     assert!(encrypted_auth_file(secrets_home.path()).exists());
+    assert_eq!(secrets_storage.load()?, Some(secrets_auth.clone()));
+    assert!(
+        secrets_home
+            .path()
+            .join("secrets/login_aggregate.age")
+            .exists()
+    );
+
+    let updated_auth = auth_with_prefix("factory-secrets-updated");
+    assert!(secrets_storage.compare_and_swap(&secrets_auth, &updated_auth)?);
+    assert_eq!(secrets_storage.load()?, Some(updated_auth));
+    assert!(secrets_storage.delete()?);
+    assert_eq!(secrets_storage.load()?, None);
     Ok(())
 }
 
@@ -741,7 +864,7 @@ fn auto_auth_storage_load_falls_back_when_keyring_errors() -> anyhow::Result<()>
         Arc::new(mock_keyring.clone()),
         AuthKeyringBackendKind::Secrets,
     );
-    let key = compute_keyring_account(codex_home.path());
+    let key = compute_secrets_keyring_account(codex_home.path());
 
     let encrypted = auth_with_prefix("encrypted");
     seed_secrets_backend_with_auth(&mock_keyring, codex_home.path(), &encrypted)?;
@@ -783,7 +906,7 @@ fn auto_auth_storage_save_falls_back_when_keyring_errors() -> anyhow::Result<()>
         Arc::new(mock_keyring.clone()),
         AuthKeyringBackendKind::Secrets,
     );
-    let key = compute_keyring_account(codex_home.path());
+    let key = compute_secrets_keyring_account(codex_home.path());
     mock_keyring.set_error(&key, KeyringError::Invalid("error".into(), "save".into()));
 
     let auth = auth_with_prefix("fallback");

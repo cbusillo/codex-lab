@@ -86,7 +86,9 @@ use uuid::Uuid;
 
 pub(crate) use codex_app_server_client::legacy_core;
 
+mod account_label;
 mod additional_dirs;
+mod agent_install_helpers;
 mod app;
 mod app_backtrack;
 mod app_command;
@@ -247,7 +249,7 @@ async fn start_embedded_app_server(
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<InProcessAppServerClient> {
     start_embedded_app_server_with(
-        arg0_paths,
+        arg0_paths.clone(),
         config,
         cli_kv_overrides,
         loader_overrides,
@@ -471,7 +473,7 @@ async fn start_app_server(
 ) -> color_eyre::Result<AppServerClient> {
     match target {
         AppServerTarget::Embedded => start_embedded_app_server(
-            arg0_paths,
+            arg0_paths.clone(),
             config,
             cli_kv_overrides,
             loader_overrides,
@@ -1743,7 +1745,7 @@ async fn run_ratatui_app(
         Some(app_server) => app_server,
         None => match start_app_server(
             &app_server_target,
-            arg0_paths,
+            arg0_paths.clone(),
             config.clone(),
             cli_kv_overrides.clone(),
             loader_overrides.clone(),
@@ -1806,6 +1808,8 @@ async fn run_ratatui_app(
         cli_kv_overrides.clone(),
         overrides.clone(),
         loader_overrides.clone(),
+        arg0_paths,
+        strict_config,
         cloud_config_bundle,
         prompt,
         images,

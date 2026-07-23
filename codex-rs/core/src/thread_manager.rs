@@ -523,9 +523,30 @@ impl ThreadManager {
     }
 
     pub async fn reload_auth_for_loaded_threads(&self) {
+        let threads = self
+            .state
+            .threads
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for thread in &threads {
+            thread
+                .session
+                .services
+                .execution_account
+                .prepare_for_control_auth_reload()
+                .await;
+        }
         self.state.auth_manager.reload().await;
-        let threads = self.state.threads.read().await;
-        for thread in threads.values() {
+        for thread in threads {
+            thread
+                .session
+                .services
+                .execution_account
+                .reconcile_after_control_auth_reload()
+                .await;
             if !thread.session_source.is_internal() {
                 thread
                     .session
@@ -1659,7 +1680,6 @@ impl ThreadManagerState {
             user_instructions,
             installation_id: self.installation_id.clone(),
             auth_manager,
-            models_manager: Arc::clone(&self.models_manager),
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),
             plugins_manager: Arc::clone(&self.plugins_manager),

@@ -132,6 +132,7 @@ use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WriteStatus;
+use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::LoaderOverrides;
@@ -555,6 +556,8 @@ pub(crate) struct App {
     feedback_audience: FeedbackAudience,
     environment_manager: Arc<EnvironmentManager>,
     app_server_target: AppServerTarget,
+    arg0_paths: Arg0DispatchPaths,
+    strict_config: bool,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
@@ -591,6 +594,54 @@ pub(crate) struct App {
     // Serialize hook enablement writes per hook so stale completions cannot
     // persist an older toggle after a newer one.
     pending_hook_enabled_writes: HashMap<String, Option<bool>>,
+    pending_direct_login_add_account: Option<PendingDirectLoginAddAccount>,
+    direct_login_add_account_attempt_id: u64,
+    pending_login_add_account_id: Option<String>,
+    completed_login_add_account_id: Option<String>,
+    pending_auth_profile_login: Option<PendingAuthProfileLogin>,
+}
+
+pub(crate) struct PendingDirectLoginAddAccount {
+    pub(crate) attempt_id: u64,
+    pub(crate) cancellation: PendingDirectLoginAddAccountCancellation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingDirectLoginAddAccountKind {
+    Browser,
+    DeviceCode,
+}
+
+pub(crate) enum PendingDirectLoginAddAccountCancellation {
+    Browser(codex_login::ShutdownHandle),
+    DeviceCode(tokio_util::sync::CancellationToken),
+}
+
+impl PendingDirectLoginAddAccountCancellation {
+    pub(crate) fn kind(&self) -> PendingDirectLoginAddAccountKind {
+        match self {
+            PendingDirectLoginAddAccountCancellation::Browser(_) => {
+                PendingDirectLoginAddAccountKind::Browser
+            }
+            PendingDirectLoginAddAccountCancellation::DeviceCode(_) => {
+                PendingDirectLoginAddAccountKind::DeviceCode
+            }
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        match self {
+            PendingDirectLoginAddAccountCancellation::Browser(shutdown) => shutdown.shutdown(),
+            PendingDirectLoginAddAccountCancellation::DeviceCode(token) => token.cancel(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingAuthProfileLogin {
+    pub(crate) login_id: String,
+    pub(crate) profile_name: String,
+    pub(crate) profile_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -771,6 +822,8 @@ impl App {
         cli_kv_overrides: Vec<(String, TomlValue)>,
         harness_overrides: ConfigOverrides,
         loader_overrides: LoaderOverrides,
+        arg0_paths: Arg0DispatchPaths,
+        strict_config: bool,
         cloud_config_bundle: CloudConfigBundleLoader,
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
@@ -1060,6 +1113,8 @@ See the Codex keymap documentation for supported actions and examples."
             feedback_audience,
             environment_manager,
             app_server_target,
+            arg0_paths,
+            strict_config,
             pending_update_action: None,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
@@ -1078,6 +1133,11 @@ See the Codex keymap documentation for supported actions and examples."
             rate_limit_hard_stop_generation: 0,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            pending_direct_login_add_account: None,
+            direct_login_add_account_attempt_id: 0,
+            pending_login_add_account_id: None,
+            completed_login_add_account_id: None,
+            pending_auth_profile_login: None,
         };
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);

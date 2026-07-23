@@ -4,6 +4,7 @@ use super::*;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
 use chrono::DateTime;
+use codex_login::PreviousAuthHandling;
 use codex_model_provider::is_supported_amazon_bedrock_region;
 
 mod rate_limit_resets;
@@ -92,6 +93,10 @@ impl AccountRequestProcessor {
             config_manager,
             active_login: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn auth_storage_home(config: &Config) -> &std::path::Path {
+        config.auth_home.as_path()
     }
 
     pub(crate) async fn login_account(
@@ -325,6 +330,7 @@ impl AccountRequestProcessor {
                 app_brand,
                 codex_streamlined_login,
                 use_hosted_login_success_page,
+                preserve_existing_account,
             } => {
                 let login_success_page = if use_hosted_login_success_page {
                     let app_brand = match app_brand.unwrap_or_default() {
@@ -340,11 +346,29 @@ impl AccountRequestProcessor {
                 } else {
                     LoginSuccessPage::default()
                 };
-                self.login_chatgpt_v2(request_id, codex_streamlined_login, login_success_page)
-                    .await;
+                let previous_auth_handling = if preserve_existing_account {
+                    PreviousAuthHandling::PreserveStoredAccount
+                } else {
+                    PreviousAuthHandling::RevokeAndRemoveStoredAccount
+                };
+                self.login_chatgpt_v2(
+                    request_id,
+                    codex_streamlined_login,
+                    login_success_page,
+                    previous_auth_handling,
+                )
+                .await;
             }
-            LoginAccountParams::ChatgptDeviceCode => {
-                self.login_chatgpt_device_code_v2(request_id).await;
+            LoginAccountParams::ChatgptDeviceCode {
+                preserve_existing_account,
+            } => {
+                let previous_auth_handling = if preserve_existing_account {
+                    PreviousAuthHandling::PreserveStoredAccount
+                } else {
+                    PreviousAuthHandling::RevokeAndRemoveStoredAccount
+                };
+                self.login_chatgpt_device_code_v2(request_id, previous_auth_handling)
+                    .await;
             }
             LoginAccountParams::ChatgptAuthTokens {
                 access_token,
@@ -398,12 +422,23 @@ impl AccountRequestProcessor {
             }
         }
 
-        match login_with_api_key(
-            &self.config.codex_home,
-            &params.api_key,
-            self.config.cli_auth_credentials_store_mode,
-            self.config.auth_keyring_backend_kind(),
-        ) {
+        let auth_home = Self::auth_storage_home(&self.config);
+        let login_result = if auth_home == self.config.codex_home.as_path() {
+            login_with_api_key(
+                auth_home,
+                &params.api_key,
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+            )
+        } else {
+            login_with_api_key_for_profile(
+                auth_home,
+                &params.api_key,
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+            )
+        };
+        match login_result {
             Ok(()) => {
                 self.auth_manager.reload().await;
                 Ok(())
@@ -490,6 +525,7 @@ impl AccountRequestProcessor {
         &self,
         codex_streamlined_login: bool,
         login_success_page: LoginSuccessPage,
+        previous_auth_handling: PreviousAuthHandling,
     ) -> std::result::Result<LoginServerOptions, JSONRPCErrorError> {
         let config = self.config.as_ref();
 
@@ -507,8 +543,9 @@ impl AccountRequestProcessor {
             open_browser: false,
             codex_streamlined_login,
             login_success_page,
+            previous_auth_handling,
             ..LoginServerOptions::new(
-                config.codex_home.to_path_buf(),
+                Self::auth_storage_home(config).to_path_buf(),
                 oauth_client_id(),
                 config.forced_chatgpt_workspace_id.clone(),
                 config.cli_auth_credentials_store_mode,
@@ -552,9 +589,14 @@ impl AccountRequestProcessor {
         request_id: ConnectionRequestId,
         codex_streamlined_login: bool,
         login_success_page: LoginSuccessPage,
+        previous_auth_handling: PreviousAuthHandling,
     ) {
         let result = self
-            .login_chatgpt_response(codex_streamlined_login, login_success_page)
+            .login_chatgpt_response(
+                codex_streamlined_login,
+                login_success_page,
+                previous_auth_handling,
+            )
             .await;
         self.outgoing.send_result(request_id, result).await;
     }
@@ -563,12 +605,21 @@ impl AccountRequestProcessor {
         &self,
         codex_streamlined_login: bool,
         login_success_page: LoginSuccessPage,
+        previous_auth_handling: PreviousAuthHandling,
     ) -> Result<LoginAccountResponse, JSONRPCErrorError> {
         let opts = self
-            .login_chatgpt_common(codex_streamlined_login, login_success_page)
+            .login_chatgpt_common(
+                codex_streamlined_login,
+                login_success_page,
+                previous_auth_handling,
+            )
             .await?;
-        let server = run_login_server(opts)
-            .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
+        let server = if Self::auth_storage_home(&self.config) == self.config.codex_home.as_path() {
+            run_login_server(opts)
+        } else {
+            run_profile_login_server(opts)
+        }
+        .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
         let login_id = Uuid::new_v4();
         let shutdown_handle = server.cancel_handle();
 
@@ -629,18 +680,26 @@ impl AccountRequestProcessor {
         })
     }
 
-    async fn login_chatgpt_device_code_v2(&self, request_id: ConnectionRequestId) {
-        let result = self.login_chatgpt_device_code_response().await;
+    async fn login_chatgpt_device_code_v2(
+        &self,
+        request_id: ConnectionRequestId,
+        previous_auth_handling: PreviousAuthHandling,
+    ) {
+        let result = self
+            .login_chatgpt_device_code_response(previous_auth_handling)
+            .await;
         self.outgoing.send_result(request_id, result).await;
     }
 
     async fn login_chatgpt_device_code_response(
         &self,
+        previous_auth_handling: PreviousAuthHandling,
     ) -> Result<LoginAccountResponse, JSONRPCErrorError> {
         let opts = self
             .login_chatgpt_common(
                 /*codex_streamlined_login*/ false,
                 LoginSuccessPage::default(),
+                previous_auth_handling,
             )
             .await?;
         let device_code = request_device_code(&opts)
@@ -668,12 +727,20 @@ impl AccountRequestProcessor {
         let thread_manager = Arc::clone(&self.thread_manager);
         let config = Arc::clone(&self.config);
         let active_login = self.active_login.clone();
+        let profile_login =
+            Self::auth_storage_home(&self.config) != self.config.codex_home.as_path();
         tokio::spawn(async move {
             let (success, error_msg) = tokio::select! {
                 _ = cancel.cancelled() => {
                     (false, Some("Login was not completed".to_string()))
                 }
-                r = complete_device_code_login(opts, device_code) => {
+                r = async {
+                    if profile_login {
+                        complete_profile_device_code_login(opts, device_code).await
+                    } else {
+                        complete_device_code_login(opts, device_code).await
+                    }
+                } => {
                     match r {
                         Ok(()) => (true, None),
                         Err(err) => (false, Some(err.to_string())),

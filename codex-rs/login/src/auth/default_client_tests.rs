@@ -39,10 +39,20 @@ impl Write for TestLogSink {
 }
 
 #[test]
-fn test_get_codex_user_agent() {
+fn general_user_agent_uses_wire_compatible_version() {
     let user_agent = get_codex_user_agent();
     let originator = originator().value;
-    let prefix = format!("{originator}/");
+    let version = codex_version::wire_compatible_version();
+    let prefix = format!("{originator}/{version} ");
+    assert!(user_agent.starts_with(&prefix));
+}
+
+#[test]
+fn app_server_user_agent_uses_build_version() {
+    let user_agent = get_codex_app_server_user_agent();
+    let originator = originator().value;
+    let version = codex_version::version();
+    let prefix = format!("{originator}/{version} ");
     assert!(user_agent.starts_with(&prefix));
 }
 

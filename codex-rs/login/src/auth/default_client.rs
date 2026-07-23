@@ -157,7 +157,37 @@ pub fn is_first_party_chat_originator(originator_value: &str) -> bool {
 }
 
 pub fn get_codex_user_agent() -> String {
-    let build_version = env!("CARGO_PKG_VERSION");
+    get_codex_user_agent_with_version(codex_version::wire_compatible_version())
+}
+
+pub fn get_codex_app_server_user_agent() -> String {
+    get_codex_user_agent_with_version(codex_version::version())
+}
+
+pub fn get_codex_user_agent_for_model(model: &str) -> String {
+    let build_version = codex_version::wire_compatible_version_for_model(model);
+    get_codex_user_agent_with_version(&build_version)
+}
+
+pub fn requested_model_headers(model: &str) -> HeaderMap {
+    let requested_version = codex_version::wire_compatible_version_for_model(model);
+    let user_agent = get_codex_user_agent_for_model(model);
+    let mut headers = HeaderMap::new();
+
+    headers.insert(
+        "version",
+        HeaderValue::from_str(&requested_version)
+            .expect("requested model version should be a valid header value"),
+    );
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_str(&user_agent)
+            .expect("requested model user-agent should be a valid header value"),
+    );
+    headers
+}
+
+fn get_codex_user_agent_with_version(build_version: &str) -> String {
     let os_info = os_info::get();
     let originator = originator();
     let prefix = format!(

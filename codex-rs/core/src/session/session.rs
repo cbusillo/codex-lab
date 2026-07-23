@@ -4,6 +4,7 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::execution_account::ExecutionAccountLease;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::skills::SkillError;
 use crate::state::ActiveTurn;
@@ -39,6 +40,7 @@ pub(crate) struct Session {
     pub(super) features: ManagedFeatures,
     pub(super) multi_agent_version: OnceLock<MultiAgentVersion>,
     pub(super) pending_mcp_server_refresh_config: Mutex<Option<McpServerRefreshConfig>>,
+    pub(super) apps_context: AppsContext,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) input_queue: InputQueue,
@@ -479,7 +481,8 @@ impl Session {
         config: Arc<Config>,
         user_instructions: Option<codex_extension_api::UserInstructions>,
         installation_id: String,
-        auth_manager: Arc<AuthManager>,
+        control_auth_manager: Arc<AuthManager>,
+        execution_account: ExecutionAccountLease,
         models_manager: SharedModelsManager,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
@@ -530,12 +533,7 @@ impl Session {
         let multi_agent_version = multi_agent_version.map(OnceLock::from).unwrap_or_default();
         let initial_multi_agent_version = multi_agent_version.get().copied();
 
-        let thread_id = match &initial_history {
-            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
-                ThreadId::default()
-            }
-            InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
-        };
+        let thread_id = execution_account.thread_id();
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
@@ -690,7 +688,8 @@ impl Session {
             session_init.ephemeral = config.ephemeral,
         ));
 
-        let auth_manager_clone = Arc::clone(&auth_manager);
+        let control_auth_manager_for_startup = Arc::clone(&control_auth_manager);
+        let execution_auth_manager = execution_account.auth_manager();
         let config_for_mcp = Arc::clone(&config);
         let mcp_manager_for_mcp = Arc::clone(&mcp_manager);
         let mcp_thread_init_for_startup = &mcp_thread_init;
@@ -705,7 +704,16 @@ impl Session {
         let mcp_runtime_context =
             McpRuntimeContext::new(Arc::clone(&environment_manager), mcp_runtime_cwd);
         let auth_and_mcp_fut = async move {
-            let auth = auth_manager_clone.auth().await;
+            let (control_auth, execution_auth) =
+                if Arc::ptr_eq(&control_auth_manager_for_startup, &execution_auth_manager) {
+                    let auth = control_auth_manager_for_startup.auth().await;
+                    (auth.clone(), auth)
+                } else {
+                    tokio::join!(
+                        control_auth_manager_for_startup.auth(),
+                        execution_auth_manager.auth()
+                    )
+                };
             let mcp_projection = mcp_manager_for_mcp
                 .runtime_config_for_step(
                     &config_for_mcp,
@@ -717,9 +725,15 @@ impl Session {
                 )
                 .await;
             let mcp_config = &mcp_projection.config;
-            let mcp_servers = codex_mcp::effective_mcp_servers(mcp_config, auth.as_ref());
+            let mcp_servers = codex_mcp::effective_mcp_servers(mcp_config, execution_auth.as_ref());
             let tool_plugin_provenance = codex_mcp::tool_plugin_provenance(mcp_config);
-            (auth, mcp_projection, mcp_servers, tool_plugin_provenance)
+            (
+                control_auth,
+                execution_auth,
+                mcp_projection,
+                mcp_servers,
+                tool_plugin_provenance,
+            )
         }
         .instrument(info_span!(
             "session_init.auth_mcp",
@@ -730,7 +744,7 @@ impl Session {
         let (
             thread_persistence_result,
             state_db_ctx,
-            (auth, mcp_projection, mcp_servers, tool_plugin_provenance),
+            (control_auth, execution_auth, mcp_projection, mcp_servers, tool_plugin_provenance),
         ) = tokio::join!(thread_persistence_fut, state_db_fut, auth_and_mcp_fut);
 
         let mut live_thread_init =
@@ -808,16 +822,18 @@ impl Session {
             ) {
                 post_session_configured_events.push(event);
             }
-            let auth = auth.as_ref();
-            let auth_mode = auth.map(CodexAuth::auth_mode).map(TelemetryAuthMode::from);
-            let account_id = auth.and_then(CodexAuth::get_account_id);
-            let account_email = auth.and_then(CodexAuth::get_account_email);
+            let control_auth = control_auth.as_ref();
+            let auth_mode = control_auth
+                .map(CodexAuth::auth_mode)
+                .map(TelemetryAuthMode::from);
+            let account_id = control_auth.and_then(CodexAuth::get_account_id);
+            let account_email = control_auth.and_then(CodexAuth::get_account_email);
             let originator = session_configuration.originator.clone();
             let terminal_type = user_agent();
             let session_model = session_configuration.collaboration_mode.model().to_string();
             let auth_env_telemetry = collect_auth_env_telemetry(
                 &session_configuration.provider,
-                auth_manager.codex_api_key_env_enabled(),
+                control_auth_manager.codex_api_key_env_enabled(),
             );
             let mut session_telemetry = SessionTelemetry::new(
                 thread_id,
@@ -1027,7 +1043,7 @@ impl Session {
 
             let analytics_events_client = analytics_events_client.unwrap_or_else(|| {
                 AnalyticsEventsClient::new(
-                    Arc::clone(&auth_manager),
+                    Arc::clone(&control_auth_manager),
                     config.chatgpt_base_url.trim_end_matches('/').to_string(),
                     config.analytics_enabled,
                 )
@@ -1054,6 +1070,35 @@ impl Session {
                 }).await;
             }
 
+            let model_client = ModelClient::new(
+                Some(Arc::clone(&control_auth_manager)),
+                if config.features.enabled(Feature::UseAgentIdentity) {
+                    AgentIdentityAuthPolicy::ChatGptAuth
+                } else {
+                    AgentIdentityAuthPolicy::JwtOnly
+                },
+                thread_id,
+                session_configuration.provider.clone(),
+                session_configuration.session_source.clone(),
+                session_configuration.originator.clone(),
+                config.model_verbosity,
+                config.features.enabled(Feature::EnableRequestCompression),
+                config.features.enabled(Feature::RuntimeMetrics),
+                Self::build_model_client_beta_features_header(config.as_ref()),
+                config
+                    .features
+                    .enabled(Feature::ConcurrentReasoningSummaries),
+                attestation_provider.clone(),
+                config.http_client_factory(),
+            )
+            .with_prompt_cache_key_override(
+                crate::guardian::prompt_cache_key_override_for_review_session(
+                    &session_configuration.session_source,
+                    session_configuration.parent_thread_id,
+                ),
+            );
+            model_client.set_execution_account_lease(execution_account.clone());
+
             let services = SessionServices {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
@@ -1073,7 +1118,8 @@ impl Session {
                 user_shell: Arc::new(default_shell),
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
-                auth_manager: Arc::clone(&auth_manager),
+                auth_manager: Arc::clone(&control_auth_manager),
+                execution_account,
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
                 tool_approvals: Mutex::new(ApprovalStore::default()),
@@ -1102,33 +1148,7 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client: ModelClient::new(
-                    Some(Arc::clone(&auth_manager)),
-                    if config.features.enabled(Feature::UseAgentIdentity) {
-                        AgentIdentityAuthPolicy::ChatGptAuth
-                    } else {
-                        AgentIdentityAuthPolicy::JwtOnly
-                    },
-                    thread_id,
-                    session_configuration.provider.clone(),
-                    session_configuration.session_source.clone(),
-                    session_configuration.originator.clone(),
-                    config.model_verbosity,
-                    config.features.enabled(Feature::EnableRequestCompression),
-                    config.features.enabled(Feature::RuntimeMetrics),
-                    Self::build_model_client_beta_features_header(config.as_ref()),
-                    /*concurrent_reasoning_summaries_enabled*/ config
-                        .features
-                        .enabled(Feature::ConcurrentReasoningSummaries),
-                    attestation_provider,
-                    config.http_client_factory(),
-                )
-                .with_prompt_cache_key_override(
-                    crate::guardian::prompt_cache_key_override_for_review_session(
-                        &session_configuration.session_source,
-                        session_configuration.parent_thread_id,
-                    ),
-                ),
+                model_client,
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
                     Arc::clone(&code_mode_session_provider),
                     &config.features,
@@ -1136,6 +1156,7 @@ impl Session {
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
             };
+            let apps_context = AppsContext::new(services.execution_account.cache_identity());
             let sess = Arc::new(Session {
                 thread_id,
                 installation_id,
@@ -1146,6 +1167,7 @@ impl Session {
                 features: config.features.clone(),
                 multi_agent_version,
                 pending_mcp_server_refresh_config: Mutex::new(None),
+                apps_context,
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
                 input_queue: InputQueue::new(),
@@ -1203,9 +1225,18 @@ impl Session {
                 *cancel_guard = cancel_token.clone();
                 cancel_token
             };
-            let codex_apps_auth_manager =
-                codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, auth)
-                    .then(|| Arc::clone(&sess.services.auth_manager));
+            let expected_execution_cache_identity =
+                sess.services.execution_account.cache_identity();
+            let codex_apps_auth_provider =
+                codex_mcp::host_owned_codex_apps_enabled(
+                    &mcp_projection.config,
+                    execution_auth.as_ref(),
+                )
+                .then(|| {
+                    sess.services
+                        .execution_account
+                        .codex_apps_auth_provider(expected_execution_cache_identity.clone())
+                });
             let mcp_connection_manager = McpConnectionSet::new(
                 &mcp_servers,
                 config.mcp_oauth_credentials_store_mode,
@@ -1219,7 +1250,7 @@ impl Session {
                 config.codex_home.to_path_buf(),
                 sess.services.mcp_manager.codex_apps_tools_cache(),
                 sess.services.mcp_manager.tool_catalog_cache(),
-                connector_runtime_context_key(auth),
+                connector_runtime_context_key(execution_auth.as_ref()),
                 config.prefix_mcp_tool_names(),
                 mcp_projection
                     .config
@@ -1229,8 +1260,8 @@ impl Session {
                     .supports_openai_form_elicitation
                     .load(std::sync::atomic::Ordering::Relaxed),
                 tool_plugin_provenance,
-                auth,
-                codex_apps_auth_manager,
+                execution_auth.as_ref(),
+                codex_apps_auth_provider,
                 Some(sess.mcp_elicitation_reviewer()),
                 Some(sess.mcp_elicitation_lifecycle()),
                 codex_mcp::ElicitationRequestRouter::default(),
@@ -1249,6 +1280,8 @@ impl Session {
                     mcp_connection_manager,
                 )
                 .await?;
+            sess.apps_context
+                .set_mcp_cache_identity(expected_execution_cache_identity);
             sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
                 .await;
             let session_start_source = match &initial_history {

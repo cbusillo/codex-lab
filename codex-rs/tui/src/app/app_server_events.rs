@@ -10,7 +10,10 @@ use crate::app_event::ConnectorsSnapshot;
 use crate::app_info::app_info_from_api;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
+use crate::bottom_pane::LoginAddAccountState;
 use codex_app_server_client::AppServerEvent;
+use codex_app_server_protocol::AccountLoginCompletedNotification;
+use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::ServerNotification;
@@ -94,6 +97,11 @@ impl App {
                     .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
                 return;
             }
+            ServerNotification::AccountLoginCompleted(notification) => {
+                self.handle_login_add_account_completed(notification);
+                self.handle_auth_profile_login_completed(notification);
+                return;
+            }
             ServerNotification::AccountUpdated(notification) => {
                 let has_codex_backend_auth = matches!(
                     notification.auth_mode,
@@ -115,6 +123,8 @@ impl App {
                         .is_some_and(AuthMode::has_chatgpt_account),
                     has_codex_backend_auth,
                 );
+                self.maybe_record_completed_auth_profile_login(notification);
+                self.maybe_complete_login_add_account(notification);
                 return;
             }
             ServerNotification::ExternalAgentConfigImportCompleted(notification) => {
@@ -233,5 +243,158 @@ impl App {
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");
         }
+    }
+
+    fn handle_auth_profile_login_completed(
+        &mut self,
+        notification: &AccountLoginCompletedNotification,
+    ) {
+        let Some(login_id) = notification.login_id.as_deref() else {
+            return;
+        };
+        let Some(pending) = self.pending_auth_profile_login.as_ref() else {
+            return;
+        };
+        if pending.login_id != login_id {
+            return;
+        }
+        if !notification.success {
+            let pending = self.pending_auth_profile_login.take().unwrap();
+            self.chat_widget.add_error_message(format!(
+                "Login for auth profile {} failed.",
+                pending.profile_label
+            ));
+            if let Some(error) = notification.error.as_ref() {
+                self.chat_widget
+                    .add_info_message(error.clone(), /*hint*/ None);
+            }
+        }
+    }
+
+    fn handle_login_add_account_completed(
+        &mut self,
+        notification: &AccountLoginCompletedNotification,
+    ) {
+        let Some(login_id) = notification.login_id.as_deref() else {
+            return;
+        };
+        if self.pending_login_add_account_id.as_deref() != Some(login_id) {
+            return;
+        }
+        if self.chat_widget.active_login_add_account_id() != Some(login_id) {
+            return;
+        }
+        if notification.success {
+            self.completed_login_add_account_id = Some(login_id.to_string());
+            return;
+        }
+
+        self.pending_login_add_account_id = None;
+        self.completed_login_add_account_id = None;
+        let message = notification
+            .error
+            .clone()
+            .unwrap_or_else(|| "ChatGPT login did not complete.".to_string());
+        self.chat_widget
+            .update_login_add_account_view(LoginAddAccountState::Failed(message));
+    }
+
+    fn maybe_complete_login_add_account(&mut self, notification: &AccountUpdatedNotification) {
+        let Some(login_id) = self.pending_login_add_account_id.as_deref() else {
+            return;
+        };
+        if self.completed_login_add_account_id.as_deref() != Some(login_id) {
+            return;
+        }
+        if self.chat_widget.active_login_add_account_id() != Some(login_id) {
+            return;
+        }
+        if !notification
+            .auth_mode
+            .is_some_and(AuthMode::has_chatgpt_account)
+        {
+            return;
+        }
+
+        self.pending_login_add_account_id = None;
+        self.completed_login_add_account_id = None;
+        if !self
+            .chat_widget
+            .update_login_add_account_view(LoginAddAccountState::Complete)
+        {
+            self.chat_widget
+                .add_info_message("ChatGPT account added.".to_string(), /*hint*/ None);
+        }
+    }
+
+    fn maybe_record_completed_auth_profile_login(
+        &mut self,
+        notification: &AccountUpdatedNotification,
+    ) {
+        if !notification
+            .auth_mode
+            .is_some_and(AuthMode::has_chatgpt_account)
+        {
+            return;
+        }
+        let Some(pending) = self.pending_auth_profile_login.take() else {
+            return;
+        };
+        let auth_home =
+            match codex_login::profile_home(&self.config.codex_home, &pending.profile_name) {
+                Ok(auth_home) => auth_home,
+                Err(err) => {
+                    self.chat_widget.add_error_message(format!(
+                        "Logged in, but failed to resolve auth profile {}: {err}",
+                        pending.profile_label
+                    ));
+                    return;
+                }
+            };
+        let (account_id, email) = match codex_login::load_auth_dot_json(
+            &auth_home,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+        ) {
+            Ok(Some(auth)) => {
+                let account_id = auth.tokens.as_ref().and_then(|tokens| {
+                    tokens
+                        .account_id
+                        .clone()
+                        .or_else(|| tokens.id_token.chatgpt_account_id.clone())
+                });
+                let email = auth
+                    .tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.id_token.email.clone());
+                (account_id, email)
+            }
+            Ok(None) => (None, None),
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Logged in, but failed to read auth profile {}: {err}",
+                    pending.profile_label
+                ));
+                return;
+            }
+        };
+
+        if let Err(err) = codex_login::record_auth_profile_login(
+            &self.config.codex_home,
+            &pending.profile_name,
+            account_id,
+            email,
+        ) {
+            self.chat_widget.add_error_message(format!(
+                "Logged in, but failed to update auth profile {}: {err}",
+                pending.profile_label
+            ));
+            return;
+        }
+
+        self.chat_widget.add_info_message(
+            format!("Logged in to auth profile {}.", pending.profile_label),
+            /*hint*/ None,
+        );
     }
 }

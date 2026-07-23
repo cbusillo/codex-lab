@@ -3,6 +3,52 @@ use crate::error_code::INTERNAL_ERROR_CODE;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 use pretty_assertions::assert_eq;
 
+#[test]
+fn reconnect_returns_internal_error_when_remote_control_is_unavailable() {
+    let err = RemoteControlRequestProcessor::new(/*remote_control_handle*/ None)
+        .reconnect()
+        .expect_err("missing remote control should fail reconnect");
+
+    assert_eq!(
+        err,
+        JSONRPCErrorError {
+            code: INTERNAL_ERROR_CODE,
+            data: None,
+            message: "remote control is unavailable for this app-server".to_string(),
+        }
+    );
+}
+
+#[test]
+fn reconnect_maps_disabled_to_invalid_request() {
+    let err = RemoteControlReconnectUnavailable::Disabled;
+    assert_eq!(
+        map_reconnect_error(err),
+        JSONRPCErrorError {
+            code: INVALID_REQUEST_ERROR_CODE,
+            data: None,
+            message: err.to_string(),
+        }
+    );
+}
+
+#[test]
+fn reconnect_maps_backend_failures_to_internal_error() {
+    for err in [
+        RemoteControlReconnectUnavailable::StateDbUnavailable,
+        RemoteControlReconnectUnavailable::WorkerUnavailable,
+    ] {
+        assert_eq!(
+            map_reconnect_error(err),
+            JSONRPCErrorError {
+                code: INTERNAL_ERROR_CODE,
+                data: None,
+                message: err.to_string(),
+            }
+        );
+    }
+}
+
 #[tokio::test]
 async fn pairing_start_returns_internal_error_when_remote_control_is_unavailable() {
     let err = RemoteControlRequestProcessor::new(/*remote_control_handle*/ None)

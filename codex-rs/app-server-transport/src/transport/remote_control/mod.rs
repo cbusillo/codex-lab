@@ -51,6 +51,8 @@ use std::ops::DerefMut;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
 use tokio::sync::mpsc;
@@ -108,6 +110,8 @@ pub struct RemoteControlHandle {
     desired_state_tx: Arc<watch::Sender<RemoteControlDesiredState>>,
     desired_state_rpc_lock: Arc<Semaphore>,
     desired_state_persistence_lock: Arc<Semaphore>,
+    reconnect_tx: mpsc::UnboundedSender<u64>,
+    next_reconnect_generation: Arc<AtomicU64>,
     status_tx: Arc<watch::Sender<RemoteControlStatusChangedNotification>>,
     state_db: Option<Arc<StateRuntime>>,
     remote_control_url: String,
@@ -232,6 +236,33 @@ impl fmt::Display for RemoteControlEnableError {
 }
 
 impl Error for RemoteControlEnableError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteControlReconnectUnavailable {
+    StateDbUnavailable,
+    Disabled,
+    WorkerUnavailable,
+}
+
+impl fmt::Display for RemoteControlReconnectUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StateDbUnavailable => write!(
+                f,
+                "remote control cannot reconnect because sqlite state db is unavailable"
+            ),
+            Self::Disabled => write!(f, "remote control cannot reconnect while disabled"),
+            Self::WorkerUnavailable => {
+                write!(
+                    f,
+                    "remote control cannot reconnect because its worker is unavailable"
+                )
+            }
+        }
+    }
+}
+
+impl Error for RemoteControlReconnectUnavailable {}
 
 impl RemoteControlHandle {
     pub fn ensure_remote_control_allowed(&self) -> Result<(), RemoteControlDisabledByRequirements> {
@@ -374,6 +405,85 @@ impl RemoteControlHandle {
             .await
             .map_err(io::Error::other)?;
         Ok(())
+    }
+
+    pub fn reconnect(
+        &self,
+    ) -> Result<RemoteControlStatusChangedNotification, RemoteControlReconnectUnavailable> {
+        if self.state_db.is_none() {
+            warn!("remote control cannot reconnect because sqlite state db is unavailable");
+            return Err(RemoteControlReconnectUnavailable::StateDbUnavailable);
+        }
+        let mut reconnect_generation = None;
+        let mut previous_status = None;
+        let mut response = None;
+        self.status_tx.send_if_modified(|status| {
+            if !self.desired_state_tx.borrow().is_enabled() {
+                response = Some(Err(RemoteControlReconnectUnavailable::Disabled));
+                return false;
+            }
+            if self.reconnect_tx.is_closed() {
+                response = Some(Err(RemoteControlReconnectUnavailable::WorkerUnavailable));
+                return false;
+            }
+            if status.status == RemoteControlConnectionStatus::Connecting {
+                response = Some(Ok(status.clone()));
+                return false;
+            }
+
+            let generation = self
+                .next_reconnect_generation
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            if self.reconnect_tx.send(generation).is_err() {
+                response = Some(Err(RemoteControlReconnectUnavailable::WorkerUnavailable));
+                return false;
+            }
+
+            let next_status = remote_control_status_with_connection_status(
+                status,
+                RemoteControlConnectionStatus::Connecting,
+            );
+            reconnect_generation = Some(generation);
+            previous_status = Some(status.status);
+            *status = next_status.clone();
+            response = Some(Ok(next_status));
+            true
+        });
+
+        let response = response.expect("remote control reconnect must produce a response");
+        let Ok(status) = &response else {
+            match &response {
+                Err(RemoteControlReconnectUnavailable::Disabled) => {
+                    warn!("remote control cannot reconnect while disabled");
+                }
+                Err(RemoteControlReconnectUnavailable::WorkerUnavailable) => {
+                    warn!("remote control cannot reconnect because its worker is unavailable");
+                }
+                Err(RemoteControlReconnectUnavailable::StateDbUnavailable) => {}
+                Ok(_) => unreachable!("reconnect response was already matched as an error"),
+            }
+            return response;
+        };
+        if let Some(reconnect_generation) = reconnect_generation {
+            info!(
+                reconnect_generation,
+                previous_status = ?previous_status,
+                environment_id = ?status.environment_id,
+                installation_id = %status.installation_id,
+                server_name = %status.server_name,
+                "remote control relay reconnect requested"
+            );
+        } else {
+            info!(
+                current_status = ?status.status,
+                environment_id = ?status.environment_id,
+                installation_id = %status.installation_id,
+                server_name = %status.server_name,
+                "remote control reconnect coalesced with an existing connection attempt"
+            );
+        }
+        response
     }
 
     pub fn status(&self) -> RemoteControlStatusChangedNotification {
@@ -969,6 +1079,7 @@ pub async fn start_remote_control(
     let desired_state_persistence_lock = Arc::new(Semaphore::new(1));
     let websocket_desired_state_tx = desired_state_tx.clone();
     let websocket_desired_state_persistence_lock = desired_state_persistence_lock.clone();
+    let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
     let current_enrollment = Arc::new(RemoteControlEnrollmentState::new(/*enrollment*/ None));
     let websocket_current_enrollment = current_enrollment.clone();
     let pairing_persistence_key_required = app_server_client_name_rx.is_some();
@@ -1030,6 +1141,7 @@ pub async fn start_remote_control(
             },
             shutdown_token,
             websocket_desired_state_tx,
+            reconnect_rx,
         )
         .run(app_server_client_name_rx);
         match AssertUnwindSafe(websocket_task).catch_unwind().await {
@@ -1072,6 +1184,8 @@ pub async fn start_remote_control(
             desired_state_tx,
             desired_state_rpc_lock,
             desired_state_persistence_lock,
+            reconnect_tx,
+            next_reconnect_generation: Arc::new(AtomicU64::new(0)),
             status_tx: Arc::new(status_tx),
             state_db: handle_state_db,
             remote_control_url: handle_remote_control_url,

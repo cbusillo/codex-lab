@@ -75,9 +75,17 @@ impl AppsRequestProcessor {
                         config.cwd.to_path_buf(),
                     );
                     let cancellation_token = CancellationToken::new();
-                    let codex_apps_auth_manager =
-                        host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-                            .then(|| Arc::clone(&self.auth_manager));
+                    let codex_apps_auth_provider =
+                        host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()).then(|| {
+                            auth.as_ref()
+                                .filter(|auth| auth.uses_codex_backend())
+                                .map(|auth| {
+                                    codex_model_provider::auth_provider_from_auth_manager(
+                                        Arc::clone(&self.auth_manager),
+                                        auth,
+                                    )
+                                })
+                        }).flatten();
                     let connection_manager = McpConnectionSet::new(
                         &mcp_servers,
                         config.mcp_oauth_credentials_store_mode,
@@ -97,7 +105,7 @@ impl AppsRequestProcessor {
                         /*supports_openai_form_elicitation*/ false,
                         tool_plugin_provenance(&mcp_config),
                         auth.as_ref(),
-                        codex_apps_auth_manager,
+                        codex_apps_auth_provider,
                         /*elicitation_reviewer*/ None,
                         /*elicitation_lifecycle*/ None,
                         codex_mcp::ElicitationRequestRouter::default(),

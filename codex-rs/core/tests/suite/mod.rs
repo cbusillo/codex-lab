@@ -60,6 +60,8 @@ mod current_time_reminder;
 mod deprecation_notice;
 mod exec;
 mod exec_policy;
+mod execution_account_apps;
+mod execution_account_lifecycle;
 #[cfg(not(target_os = "windows"))]
 mod extension_sandbox;
 mod external_auth;

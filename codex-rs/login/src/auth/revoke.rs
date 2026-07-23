@@ -52,7 +52,7 @@ struct RevokeTokenRequest<'a> {
     client_id: Option<String>,
 }
 
-pub(super) async fn revoke_auth_tokens(
+pub(crate) async fn revoke_auth_tokens(
     auth_dot_json: Option<&AuthDotJson>,
     auth_route_config: &AuthRouteConfig,
 ) -> Result<(), std::io::Error> {
@@ -63,6 +63,23 @@ pub(super) async fn revoke_auth_tokens(
     let endpoint = revoke_token_endpoint();
     let client = create_default_auth_client(&endpoint, auth_route_config)?;
     revoke_oauth_token(&client, endpoint.as_str(), token, kind, REVOKE_HTTP_TIMEOUT).await
+}
+
+pub(crate) fn should_revoke_auth_tokens(
+    auth_dot_json: Option<&AuthDotJson>,
+    replacement_auth: &AuthDotJson,
+) -> bool {
+    let Some((token, kind)) = auth_dot_json.and_then(revocable_token) else {
+        return false;
+    };
+    let Some(replacement_tokens) = managed_chatgpt_tokens(replacement_auth) else {
+        return true;
+    };
+
+    match kind {
+        RevokeTokenKind::Access => replacement_tokens.access_token != token,
+        RevokeTokenKind::Refresh => replacement_tokens.refresh_token != token,
+    }
 }
 
 fn revocable_token(auth_dot_json: &AuthDotJson) -> Option<(&str, RevokeTokenKind)> {

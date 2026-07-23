@@ -1,0 +1,13 @@
+---
+source: tui/src/bottom_pane/login_accounts_view_tests.rs
+expression: "render_snapshot(&buf, area)"
+---
+┌─────────────────── Replace Login ────────────────────┐
+│ Login replaced                                       │
+│                                                      │
+│ The account list will refresh with the current       │
+│ login.                                               │
+│                                                      │
+│ Enter Continue  Esc Back                             │
+│                                                      │
+└──────────────────────────────────────────────────────┘

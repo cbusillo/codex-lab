@@ -57,6 +57,16 @@ pub struct RemoteControlDisableResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct RemoteControlReconnectResponse {
+    pub status: RemoteControlConnectionStatus,
+    pub server_name: String,
+    pub installation_id: String,
+    pub environment_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct RemoteControlStatusReadResponse {
     pub status: RemoteControlConnectionStatus,
     pub server_name: String,
@@ -183,6 +193,23 @@ impl From<RemoteControlStatusChangedNotification> for RemoteControlEnableRespons
 }
 
 impl From<RemoteControlStatusChangedNotification> for RemoteControlDisableResponse {
+    fn from(notification: RemoteControlStatusChangedNotification) -> Self {
+        let RemoteControlStatusChangedNotification {
+            status,
+            server_name,
+            installation_id,
+            environment_id,
+        } = notification;
+        Self {
+            status,
+            server_name,
+            installation_id,
+            environment_id,
+        }
+    }
+}
+
+impl From<RemoteControlStatusChangedNotification> for RemoteControlReconnectResponse {
     fn from(notification: RemoteControlStatusChangedNotification) -> Self {
         let RemoteControlStatusChangedNotification {
             status,

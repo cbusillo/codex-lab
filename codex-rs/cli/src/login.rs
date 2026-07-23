@@ -14,11 +14,17 @@ use codex_login::AuthRouteConfig;
 use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
 use codex_login::ServerOptions;
+use codex_login::list_auth_profiles;
 use codex_login::login_with_access_token;
 use codex_login::login_with_api_key;
+use codex_login::login_with_api_key_for_profile;
 use codex_login::logout_with_revoke;
+use codex_login::profile_home;
+use codex_login::record_auth_profile_login;
 use codex_login::run_device_code_login;
 use codex_login::run_login_server;
+use codex_login::run_profile_device_code_login;
+use codex_login::run_profile_login_server;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_utils_cli::CliConfigOverrides;
@@ -41,6 +47,108 @@ const API_KEY_LOGIN_DISABLED_MESSAGE: &str =
 const ACCESS_TOKEN_LOGIN_DISABLED_MESSAGE: &str =
     "Access token login is disabled. Use API key login instead.";
 const LOGIN_SUCCESS_MESSAGE: &str = "Successfully logged in";
+
+struct LoginTarget {
+    codex_home: PathBuf,
+    profile: Option<String>,
+}
+
+impl LoginTarget {
+    fn is_default(&self) -> bool {
+        self.profile.is_none()
+    }
+
+    fn label(&self) -> String {
+        self.profile
+            .as_ref()
+            .map(|profile| format!("profile `{profile}`"))
+            .unwrap_or_else(|| "default profile".to_string())
+    }
+}
+
+fn profile_suffix(target: &LoginTarget) -> String {
+    if target.is_default() {
+        String::new()
+    } else {
+        format!(" for {}", target.label())
+    }
+}
+
+fn login_success_message(target: &LoginTarget) -> String {
+    if target.is_default() {
+        LOGIN_SUCCESS_MESSAGE.to_string()
+    } else {
+        format!(
+            "Successfully logged in to {}; the GUI control account was not changed",
+            target.label()
+        )
+    }
+}
+
+fn resolve_login_target(config: &Config, profile: Option<String>) -> std::io::Result<LoginTarget> {
+    let codex_home = match profile.as_deref() {
+        Some(profile_name) => profile_home(&config.codex_home, profile_name)?,
+        None => config.codex_home.to_path_buf(),
+    };
+    Ok(LoginTarget {
+        codex_home,
+        profile,
+    })
+}
+
+fn note_profile_login(
+    config: &Config,
+    target: &LoginTarget,
+    auth: &CodexAuth,
+) -> std::io::Result<()> {
+    let Some(profile) = target.profile.as_deref() else {
+        return Ok(());
+    };
+    record_auth_profile_login(
+        &config.codex_home,
+        profile,
+        auth.get_account_id(),
+        auth.get_account_email(),
+    )?;
+    Ok(())
+}
+
+async fn load_auth_for_target(
+    config: &Config,
+    target: &LoginTarget,
+) -> std::io::Result<Option<CodexAuth>> {
+    CodexAuth::from_auth_storage(
+        &target.codex_home,
+        config.cli_auth_credentials_store_mode,
+        Some(&config.chatgpt_base_url),
+        config.auth_keyring_backend_kind(),
+        &config.auth_route_config(),
+    )
+    .await
+}
+
+async fn record_profile_after_login(config: &Config, target: &LoginTarget) -> std::io::Result<()> {
+    if target.profile.is_none() {
+        return Ok(());
+    }
+    match load_auth_for_target(config, target).await? {
+        Some(auth) => note_profile_login(config, target, &auth),
+        None => Err(std::io::Error::other(format!(
+            "login completed but no credentials were stored for {}",
+            target.label()
+        ))),
+    }
+}
+
+fn resolve_login_target_or_exit(config: &Config, profile: Option<String>) -> LoginTarget {
+    match resolve_login_target(config, profile) {
+        Ok(target) => target,
+        Err(err) => {
+            eprintln!("Error resolving login target: {err}");
+            std::process::exit(1);
+        }
+    }
+}
 
 /// Installs a small file-backed tracing layer for direct `codex login` flows.
 ///
@@ -134,15 +242,15 @@ async fn clear_existing_auth_before_login(
     }
 }
 
-pub async fn login_with_chatgpt(
-    codex_home: PathBuf,
+async fn login_with_chatgpt(
+    target: &LoginTarget,
     forced_chatgpt_workspace_id: Option<Vec<String>>,
     cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
     auth_keyring_backend_kind: AuthKeyringBackendKind,
     auth_route_config: AuthRouteConfig,
 ) -> std::io::Result<()> {
     clear_existing_auth_before_login(
-        &codex_home,
+        &target.codex_home,
         cli_auth_credentials_store_mode,
         auth_keyring_backend_kind,
         &auth_route_config,
@@ -150,21 +258,28 @@ pub async fn login_with_chatgpt(
     .await;
 
     let opts = ServerOptions::new(
-        codex_home,
+        target.codex_home.clone(),
         CLIENT_ID.to_string(),
         forced_chatgpt_workspace_id,
         cli_auth_credentials_store_mode,
         auth_keyring_backend_kind,
         auth_route_config,
     );
-    let server = run_login_server(opts)?;
+    let server = if target.profile.is_some() {
+        run_profile_login_server(opts)?
+    } else {
+        run_login_server(opts)?
+    };
 
     print_login_server_start(server.actual_port, &server.auth_url);
 
     server.block_until_done().await
 }
 
-pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) -> ! {
+pub async fn run_login_with_chatgpt(
+    cli_config_overrides: CliConfigOverrides,
+    profile: Option<String>,
+) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting browser login flow");
@@ -174,9 +289,10 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
         std::process::exit(1);
     }
 
+    let target = resolve_login_target_or_exit(&config, profile);
     let forced_chatgpt_workspace_id = config.forced_chatgpt_workspace_id.clone();
     match login_with_chatgpt(
-        config.codex_home.to_path_buf(),
+        &target,
         forced_chatgpt_workspace_id,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
@@ -185,7 +301,11 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
     .await
     {
         Ok(_) => {
-            eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+            if let Err(err) = record_profile_after_login(&config, &target).await {
+                eprintln!("Error updating auth profile account data: {err}");
+                std::process::exit(1);
+            }
+            eprintln!("{}", login_success_message(&target));
             std::process::exit(0);
         }
         Err(e) => {
@@ -197,6 +317,7 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
 
 pub async fn run_login_with_api_key(
     cli_config_overrides: CliConfigOverrides,
+    profile: Option<String>,
     api_key: String,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
@@ -208,14 +329,30 @@ pub async fn run_login_with_api_key(
         std::process::exit(1);
     }
 
-    match login_with_api_key(
-        &config.codex_home,
-        &api_key,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-    ) {
+    let target = resolve_login_target_or_exit(&config, profile);
+
+    let login_result = if target.profile.is_some() {
+        login_with_api_key_for_profile(
+            &target.codex_home,
+            &api_key,
+            config.cli_auth_credentials_store_mode,
+            config.auth_keyring_backend_kind(),
+        )
+    } else {
+        login_with_api_key(
+            &target.codex_home,
+            &api_key,
+            config.cli_auth_credentials_store_mode,
+            config.auth_keyring_backend_kind(),
+        )
+    };
+    match login_result {
         Ok(_) => {
-            eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+            if let Err(err) = record_profile_after_login(&config, &target).await {
+                eprintln!("Error updating auth profile account data: {err}");
+                std::process::exit(1);
+            }
+            eprintln!("{}", login_success_message(&target));
             std::process::exit(0);
         }
         Err(e) => {
@@ -227,6 +364,7 @@ pub async fn run_login_with_api_key(
 
 pub async fn run_login_with_access_token(
     cli_config_overrides: CliConfigOverrides,
+    profile: Option<String>,
     access_token: String,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
@@ -238,9 +376,10 @@ pub async fn run_login_with_access_token(
         std::process::exit(1);
     }
 
+    let target = resolve_login_target_or_exit(&config, profile);
     let auth_route_config = config.auth_route_config();
     match login_with_access_token(
-        &config.codex_home,
+        &target.codex_home,
         &access_token,
         config.cli_auth_credentials_store_mode,
         config.forced_chatgpt_workspace_id.as_deref(),
@@ -251,7 +390,11 @@ pub async fn run_login_with_access_token(
     .await
     {
         Ok(_) => {
-            eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+            if let Err(err) = record_profile_after_login(&config, &target).await {
+                eprintln!("Error updating auth profile account data: {err}");
+                std::process::exit(1);
+            }
+            eprintln!("{}", login_success_message(&target));
             std::process::exit(0);
         }
         Err(e) => {
@@ -305,6 +448,7 @@ fn read_stdin_secret(terminal_message: &str, reading_message: &str, empty_messag
 /// Login using the OAuth device code flow.
 pub async fn run_login_with_device_code(
     cli_config_overrides: CliConfigOverrides,
+    profile: Option<String>,
     issuer_base_url: Option<String>,
     client_id: Option<String>,
 ) -> ! {
@@ -315,9 +459,10 @@ pub async fn run_login_with_device_code(
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
+    let target = resolve_login_target_or_exit(&config, profile);
     let auth_route_config = config.auth_route_config();
     clear_existing_auth_before_login(
-        &config.codex_home,
+        &target.codex_home,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         &auth_route_config,
@@ -325,7 +470,7 @@ pub async fn run_login_with_device_code(
     .await;
     let forced_chatgpt_workspace_id = config.forced_chatgpt_workspace_id.clone();
     let mut opts = ServerOptions::new(
-        config.codex_home.to_path_buf(),
+        target.codex_home.clone(),
         client_id.unwrap_or(CLIENT_ID.to_string()),
         forced_chatgpt_workspace_id,
         config.cli_auth_credentials_store_mode,
@@ -335,9 +480,18 @@ pub async fn run_login_with_device_code(
     if let Some(iss) = issuer_base_url {
         opts.issuer = iss;
     }
-    match run_device_code_login(opts).await {
+    let login_result = if target.profile.is_some() {
+        run_profile_device_code_login(opts).await
+    } else {
+        run_device_code_login(opts).await
+    };
+    match login_result {
         Ok(()) => {
-            eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+            if let Err(err) = record_profile_after_login(&config, &target).await {
+                eprintln!("Error updating auth profile account data: {err}");
+                std::process::exit(1);
+            }
+            eprintln!("{}", login_success_message(&target));
             std::process::exit(0);
         }
         Err(e) => {
@@ -421,23 +575,22 @@ pub async fn run_login_with_device_code_fallback_to_browser(
     }
 }
 
-pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
+pub async fn run_login_status(
+    cli_config_overrides: CliConfigOverrides,
+    profile: Option<String>,
+) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
-    let auth_route_config = config.auth_route_config();
+    let target = resolve_login_target_or_exit(&config, profile);
 
-    match CodexAuth::from_auth_storage(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        Some(&config.chatgpt_base_url),
-        config.auth_keyring_backend_kind(),
-        &auth_route_config,
-    )
-    .await
-    {
+    match load_auth_for_target(&config, &target).await {
         Ok(Some(auth)) => match auth.auth_mode() {
             AuthMode::ApiKey => match auth.get_token() {
                 Ok(api_key) => {
-                    eprintln!("Logged in using an API key - {}", safe_format_key(&api_key));
+                    eprintln!(
+                        "Logged in using an API key{} - {}",
+                        profile_suffix(&target),
+                        safe_format_key(&api_key)
+                    );
                     std::process::exit(0);
                 }
                 Err(e) => {
@@ -446,22 +599,28 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
                 }
             },
             AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
-                eprintln!("Logged in using ChatGPT");
+                eprintln!("Logged in using ChatGPT{}", profile_suffix(&target));
                 std::process::exit(0);
             }
             AuthMode::Headers => {
                 unreachable!("header auth cannot be loaded from auth storage")
             }
             AuthMode::AgentIdentity => {
-                eprintln!("Logged in using access token");
+                eprintln!("Logged in using access token{}", profile_suffix(&target));
                 std::process::exit(0);
             }
             AuthMode::PersonalAccessToken => {
-                eprintln!("Logged in using personal access token");
+                eprintln!(
+                    "Logged in using personal access token{}",
+                    profile_suffix(&target)
+                );
                 std::process::exit(0);
             }
             AuthMode::BedrockApiKey => {
-                eprintln!("Logged in using Amazon Bedrock API key");
+                eprintln!(
+                    "Logged in using Amazon Bedrock API key{}",
+                    profile_suffix(&target)
+                );
                 std::process::exit(0);
             }
         },
@@ -476,12 +635,46 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     }
 }
 
-pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
+pub async fn run_login_profiles(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
+    let profiles = match list_auth_profiles(&config.codex_home) {
+        Ok(profiles) => profiles,
+        Err(err) => {
+            eprintln!("Error listing auth profiles: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    if profiles.is_empty() {
+        eprintln!("No auth profiles configured");
+        std::process::exit(0);
+    }
+
+    for profile in profiles {
+        let mut details = Vec::new();
+        if let Some(email) = profile.metadata.email.as_deref() {
+            details.push(email.to_string());
+        }
+        if profile.metadata.priming_enabled == Some(true) {
+            details.push("priming enabled".to_string());
+        }
+        let suffix = if details.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", details.join(", "))
+        };
+        eprintln!("{}{}", profile.name, suffix);
+    }
+    std::process::exit(0);
+}
+
+pub async fn run_logout(cli_config_overrides: CliConfigOverrides, profile: Option<String>) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    let target = resolve_login_target_or_exit(&config, profile);
     let auth_route_config = config.auth_route_config();
 
     match logout_with_revoke(
-        &config.codex_home,
+        &target.codex_home,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         &auth_route_config,
@@ -489,10 +682,12 @@ pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     .await
     {
         Ok(true) => {
+            remove_profile_metadata_after_logout(&config, &target);
             eprintln!("Successfully logged out");
             std::process::exit(0);
         }
         Ok(false) => {
+            remove_profile_metadata_after_logout(&config, &target);
             eprintln!("Not logged in");
             std::process::exit(0);
         }
@@ -500,6 +695,14 @@ pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
             eprintln!("Error logging out: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+fn remove_profile_metadata_after_logout(config: &Config, target: &LoginTarget) {
+    if let Some(profile) = target.profile.as_deref()
+        && let Err(err) = codex_login::remove_auth_profile_metadata(&config.codex_home, profile)
+    {
+        eprintln!("Warning: failed to update auth profile metadata: {err}");
     }
 }
 
@@ -539,8 +742,13 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
+    use super::LoginTarget;
     use super::clear_existing_auth_before_login;
+    use super::login_success_message;
     use super::safe_format_key;
+    use std::path::PathBuf;
+
+    const TEST_AUTH_KEYRING_BACKEND: AuthKeyringBackendKind = AuthKeyringBackendKind::Direct;
 
     #[tokio::test]
     async fn clears_existing_auth_before_login() {
@@ -548,23 +756,23 @@ mod tests {
         login_with_api_key(
             codex_home.path(),
             "sk-existing",
-            AuthCredentialsStoreMode::File,
-            AuthKeyringBackendKind::default(),
+            AuthCredentialsStoreMode::Ephemeral,
+            TEST_AUTH_KEYRING_BACKEND,
         )
         .expect("save existing auth");
 
         clear_existing_auth_before_login(
             codex_home.path(),
-            AuthCredentialsStoreMode::File,
-            AuthKeyringBackendKind::default(),
+            AuthCredentialsStoreMode::Ephemeral,
+            TEST_AUTH_KEYRING_BACKEND,
             &codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
 
         let auth = load_auth_dot_json(
             codex_home.path(),
-            AuthCredentialsStoreMode::File,
-            AuthKeyringBackendKind::default(),
+            AuthCredentialsStoreMode::Ephemeral,
+            TEST_AUTH_KEYRING_BACKEND,
         )
         .expect("load auth after cleanup");
         assert_eq!(auth, None);
@@ -580,5 +788,18 @@ mod tests {
     fn short_key_returns_stars() {
         let key = "sk-proj-12345";
         assert_eq!(safe_format_key(key), "***");
+    }
+
+    #[test]
+    fn profile_login_message_explains_control_account_is_unchanged() {
+        let target = LoginTarget {
+            codex_home: PathBuf::from("unused"),
+            profile: Some("Main".to_string()),
+        };
+
+        assert_eq!(
+            login_success_message(&target),
+            "Successfully logged in to profile `Main`; the GUI control account was not changed"
+        );
     }
 }

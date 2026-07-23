@@ -2,6 +2,7 @@ use super::*;
 use crate::ServerNotification;
 use codex_protocol::approvals::ElicitationRequest as CoreElicitationRequest;
 use codex_protocol::config_types::MultiAgentMode;
+use codex_protocol::dynamic_tools::normalize_dynamic_tool_specs;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
@@ -4108,6 +4109,85 @@ fn dynamic_tool_response_serializes_text_image_and_audio_content_items() {
             "success": true,
         })
     );
+}
+
+#[test]
+fn dynamic_tool_spec_deserializes_defer_loading() {
+    let value = json!({
+        "name": "lookup_ticket",
+        "description": "Fetch a ticket",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" }
+            }
+        },
+        "deferLoading": true,
+    });
+
+    let actual = normalize_dynamic_tool_specs(vec![value])
+        .expect("deserialize")
+        .pop()
+        .expect("one dynamic tool");
+
+    assert_eq!(
+        actual,
+        DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: "lookup_ticket".to_string(),
+            description: "Fetch a ticket".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                }
+            }),
+            defer_loading: true,
+        })
+    );
+}
+
+#[test]
+fn dynamic_tool_spec_defaults_missing_input_schema_to_empty_object() {
+    let actual = normalize_dynamic_tool_specs(vec![json!({
+        "name": "lookup_ticket",
+        "description": "Fetch a ticket",
+    })])
+    .expect("deserialize")
+    .pop()
+    .expect("one dynamic tool");
+
+    assert_eq!(
+        actual,
+        DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: "lookup_ticket".to_string(),
+            description: "Fetch a ticket".to_string(),
+            input_schema: json!({}),
+            defer_loading: false,
+        })
+    );
+}
+
+#[test]
+fn dynamic_tool_spec_legacy_expose_to_context_inverts_to_defer_loading() {
+    let value = json!({
+        "name": "lookup_ticket",
+        "description": "Fetch a ticket",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        },
+        "exposeToContext": false,
+    });
+
+    let actual = normalize_dynamic_tool_specs(vec![value])
+        .expect("deserialize")
+        .pop()
+        .expect("one dynamic tool");
+
+    let DynamicToolSpec::Function(actual) = actual else {
+        panic!("expected a function dynamic tool");
+    };
+    assert!(actual.defer_loading);
 }
 
 #[test]

@@ -8,6 +8,7 @@
 //! Exit is modelled explicitly via `AppEvent::Exit(ExitMode)` so callers can request shutdown-first
 //! quits without reaching into the app loop or coupling to shutdown/exit sequencing.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -98,6 +99,46 @@ pub(crate) enum HistoryLookupResponse {
         cursor: HistoryBatchCursor,
         log_id: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AuthProfileSelection {
+    Default,
+    Named {
+        profile_name: String,
+        login_after_switch: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthAccountSelection {
+    pub(crate) account_id: String,
+    pub(crate) label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoveAuthAccountSelection {
+    pub(crate) account_id: String,
+    pub(crate) label: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SecretApiKey(String);
+
+impl SecretApiKey {
+    pub(crate) fn new(api_key: String) -> Self {
+        Self(api_key)
+    }
+
+    pub(crate) fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +340,47 @@ pub(crate) enum AppEvent {
 
     /// Request app-server account logout, then exit after it succeeds.
     Logout,
+
+    /// Show the interactive account manager for `/login`.
+    ShowLoginAccounts,
+
+    /// Show the add-account flow from the account manager.
+    ShowLoginAddAccount,
+
+    /// Start a ChatGPT browser login from the add-account flow.
+    LoginStartChatGpt,
+
+    /// Save an API key from the add-account flow.
+    LoginAddAccountApiKey {
+        api_key: SecretApiKey,
+    },
+
+    /// Start a ChatGPT device-code login from the add-account flow.
+    LoginStartDeviceCode,
+
+    /// Cancel the active ChatGPT add-account login attempt.
+    LoginCancelChatGpt,
+
+    /// Direct default-store ChatGPT add-account login finished.
+    LoginAddAccountChatGptCompleted {
+        attempt_id: u64,
+        result: Result<(), String>,
+    },
+
+    /// Start a fresh session using the selected auth profile for credential storage.
+    SwitchAuthProfile {
+        selection: AuthProfileSelection,
+    },
+
+    /// Start a fresh session using credentials from the selected stored account.
+    SwitchAuthAccount {
+        selection: AuthAccountSelection,
+    },
+
+    /// Remove the selected stored account from the default account store.
+    RemoveAuthAccount {
+        selection: RemoveAuthAccountSelection,
+    },
 
     /// Request to exit the application due to a fatal error.
     #[allow(dead_code)]
@@ -909,6 +991,18 @@ pub(crate) enum AppEvent {
         use_memories: bool,
         generate_memories: bool,
     },
+
+    /// Open account switching settings from the general settings menu.
+    OpenAccountSwitchSettings,
+
+    /// Open third-party agent install/status settings from the general settings menu.
+    OpenAgentsSettings,
+
+    /// Update whether Codex should switch accounts after rate or usage limits.
+    SetAutoSwitchAccountsOnRateLimit(bool),
+
+    /// Update whether saved API keys may be used after all ChatGPT accounts are limited.
+    SetApiKeyFallbackOnAllAccountsLimited(bool),
 
     /// Clear all persisted local memory artifacts via the app-server.
     ResetMemories,

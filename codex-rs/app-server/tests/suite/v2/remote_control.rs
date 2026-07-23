@@ -33,6 +33,7 @@ use codex_app_server_protocol::RemoteControlPairingStartParams;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_protocol::RemoteControlPairingStatusParams;
 use codex_app_server_protocol::RemoteControlPairingStatusResponse;
+use codex_app_server_protocol::RemoteControlReconnectResponse;
 use codex_app_server_protocol::RemoteControlStatusChangedNotification;
 use codex_app_server_protocol::RemoteControlStatusReadResponse;
 use codex_app_server_protocol::RequestId;
@@ -424,6 +425,30 @@ async fn remote_control_status_read_returns_disabled_status() -> Result<()> {
 }
 
 #[tokio::test]
+async fn remote_control_reconnect_rejects_disabled_remote_control() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+
+    let request_id = mcp.send_remote_control_reconnect_request().await?;
+    let error = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, -32600);
+    assert_eq!(
+        error.error.message,
+        "remote control cannot reconnect while disabled"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn remote_control_enable_returns_connecting_status() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
@@ -550,6 +575,41 @@ async fn rpc_updates_durable_preference_but_ephemeral_does_not() -> Result<()> {
         Some(false)
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_control_reconnect_returns_connecting_while_connecting() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+
+    let enable_request_id = mcp.send_remote_control_enable_request().await?;
+    assert_eq!(
+        timeout(DEFAULT_TIMEOUT, backend.wait_for_enroll_request()).await??,
+        "POST /backend-api/wham/remote/control/server/enroll HTTP/1.1"
+    );
+
+    let request_id = mcp.send_remote_control_reconnect_request().await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let received: RemoteControlReconnectResponse = to_response(response)?;
+
+    assert_eq!(received.status, RemoteControlConnectionStatus::Connecting);
+    assert!(!received.server_name.is_empty());
+    assert_eq!(received.environment_id, None);
+    assert!(!received.installation_id.is_empty());
+
+    backend.complete_enrollment()?;
+    let _: RemoteControlEnableResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(enable_request_id)).await??;
     Ok(())
 }
 

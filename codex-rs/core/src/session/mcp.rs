@@ -413,7 +413,7 @@ impl Session {
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
     ) -> Arc<McpRuntimeSnapshot> {
-        let auth = self.services.auth_manager.auth().await;
+        let auth = turn_context.auth().await;
         let McpRuntimeProjection {
             config: mcp_config,
             plugins_available,
@@ -442,9 +442,13 @@ impl Session {
             cancellation_token
         };
         let current_runtime = self.services.latest_mcp_runtime();
-        let codex_apps_auth_manager =
-            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-                .then(|| Arc::clone(&self.services.auth_manager));
+        let codex_apps_auth_provider =
+            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()).then(|| {
+                let expected_cache_identity = self.services.execution_account.cache_identity();
+                self.services
+                    .execution_account
+                    .codex_apps_auth_provider(expected_cache_identity)
+            });
         let refreshed_manager = McpConnectionSet::new(
             &mcp_servers,
             mcp_config.mcp_oauth_credentials_store_mode,
@@ -466,7 +470,7 @@ impl Session {
                 .load(std::sync::atomic::Ordering::Relaxed),
             tool_plugin_provenance,
             auth.as_ref(),
-            codex_apps_auth_manager,
+            codex_apps_auth_provider,
             elicitation_reviewer,
             Some(self.mcp_elicitation_lifecycle()),
             current_runtime.manager().elicitation_router(),
@@ -474,6 +478,8 @@ impl Session {
         .await;
         refreshed_manager
             .set_elicitations_auto_deny(current_runtime.manager().elicitations_auto_deny());
+        self.apps_context
+            .set_mcp_cache_identity(self.services.execution_account.cache_identity());
         self.services.publish_mcp_runtime(
             mcp_config,
             plugins_available,

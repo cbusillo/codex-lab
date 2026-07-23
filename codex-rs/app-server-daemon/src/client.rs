@@ -56,7 +56,7 @@ async fn probe_inner(socket_path: &Path) -> Result<ProbeInfo> {
     websocket.close(None).await.ok();
 
     Ok(ProbeInfo {
-        app_server_version: parse_version_from_user_agent(&initialize_response.user_agent)?,
+        app_server_version: initialize_response_version(&initialize_response)?,
     })
 }
 
@@ -145,6 +145,13 @@ where
     }
 }
 
+fn initialize_response_version(response: &InitializeResponse) -> Result<String> {
+    if let Some(server_build) = &response.server_build {
+        return Ok(server_build.version.clone());
+    }
+    parse_version_from_user_agent(&response.user_agent)
+}
+
 fn parse_version_from_user_agent(user_agent: &str) -> Result<String> {
     let (_originator, rest) = user_agent
         .split_once('/')
@@ -161,21 +168,60 @@ fn parse_version_from_user_agent(user_agent: &str) -> Result<String> {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use super::parse_version_from_user_agent;
+    use codex_app_server_protocol::InitializeResponse;
+    use codex_app_server_protocol::ServerBuildInfo;
+
+    use super::initialize_response_version;
 
     #[test]
-    fn parses_version_from_codex_user_agent() {
+    fn reads_probe_version_from_server_build() {
+        let response: InitializeResponse = serde_json::from_value(serde_json::json!({
+            "userAgent": "codex_app_server_daemon/9.9.9",
+            "serverBuild": {
+                "schemaVersion": 1,
+                "version": "1.2.3",
+                "sourceCommit": "unavailable",
+                "dirtyState": "unavailable",
+                "buildProfile": "release",
+                "buildChannel": "lab"
+            },
+            "codexHome": "/tmp/codex-home",
+            "platformFamily": "unix",
+            "platformOs": "macos"
+        }))
+        .expect("initialize response");
+
         assert_eq!(
-            parse_version_from_user_agent(
-                "codex_app_server_daemon/1.2.3 (Linux 6.8.0; x86_64) codex_cli_rs/1.2.3",
-            )
-            .expect("version"),
+            response.server_build,
+            Some(ServerBuildInfo {
+                schema_version: 1,
+                version: "1.2.3".to_string(),
+                source_commit: "unavailable".to_string(),
+                dirty_state: "unavailable".to_string(),
+                build_profile: "release".to_string(),
+                build_channel: "lab".to_string(),
+            })
+        );
+        assert_eq!(
+            initialize_response_version(&response).expect("version"),
             "1.2.3"
         );
     }
 
     #[test]
-    fn rejects_user_agent_without_version() {
-        assert!(parse_version_from_user_agent("codex_app_server_daemon").is_err());
+    fn reads_probe_version_from_legacy_user_agent_when_server_build_is_absent() {
+        let response: InitializeResponse = serde_json::from_value(serde_json::json!({
+            "userAgent": "codex_app_server_daemon/9.8.7",
+            "codexHome": "/tmp/codex-home",
+            "platformFamily": "unix",
+            "platformOs": "macos"
+        }))
+        .expect("legacy initialize response");
+
+        assert_eq!(response.server_build, None);
+        assert_eq!(
+            initialize_response_version(&response).expect("version"),
+            "9.8.7"
+        );
     }
 }

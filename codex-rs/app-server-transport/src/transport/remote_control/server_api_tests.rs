@@ -13,6 +13,7 @@ fn auth() -> RemoteControlConnectionAuth {
     RemoteControlConnectionAuth {
         auth_provider: codex_model_provider::unauthenticated_auth_provider(),
         account_id: "account-a".to_string(),
+        revision: 0,
     }
 }
 

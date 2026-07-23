@@ -5,10 +5,126 @@
 //! cache used for multi-agent navigation.
 
 use super::*;
+use crate::app::PendingDirectLoginAddAccount;
+use crate::app::PendingDirectLoginAddAccountCancellation;
+use crate::app::PendingDirectLoginAddAccountKind;
+use crate::app_event::AuthAccountSelection;
+use crate::app_event::AuthProfileSelection;
+use crate::app_event::RemoveAuthAccountSelection;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
+use crate::bottom_pane::LoginAccountsFeedback;
+use crate::bottom_pane::LoginAddAccountState;
+use codex_app_server_client::AppServerClient;
+use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_protocol::CancelLoginAccountParams;
+use codex_app_server_protocol::CancelLoginAccountResponse;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::LoginAccountParams;
+use codex_app_server_protocol::LoginAccountResponse;
+use codex_app_server_protocol::RemoveAccountStatus;
+use codex_cloud_config::cloud_config_bundle_loader_for_storage;
+use codex_config::CloudConfigBundleLoader;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::ResumeCwdMode;
+use codex_login::CLIENT_ID;
+use codex_login::ServerOptions;
 use std::collections::HashSet;
+use tokio_util::sync::CancellationToken;
+
+struct AppServerThreadUiSnapshot {
+    chat_widget: ChatWidget,
+    thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+    thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
+    agent_navigation: AgentNavigationState,
+    side_threads: HashMap<ThreadId, SideThreadState>,
+    active_thread_id: Option<ThreadId>,
+    active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
+    primary_thread_id: Option<ThreadId>,
+    last_subagent_backfill_attempt: Option<ThreadId>,
+    primary_session_configured: Option<ThreadSessionState>,
+    pending_primary_events: VecDeque<ThreadBufferedEvent>,
+    pending_app_server_requests: PendingAppServerRequests,
+    pending_startup_thread_start: bool,
+}
+
+impl AppServerThreadUiSnapshot {
+    fn take_from(app: &mut App, replacement_chat_widget: ChatWidget) -> Self {
+        Self {
+            chat_widget: std::mem::replace(&mut app.chat_widget, replacement_chat_widget),
+            thread_event_channels: std::mem::take(&mut app.thread_event_channels),
+            thread_event_listener_tasks: std::mem::take(&mut app.thread_event_listener_tasks),
+            agent_navigation: std::mem::take(&mut app.agent_navigation),
+            side_threads: std::mem::take(&mut app.side_threads),
+            active_thread_id: app.active_thread_id.take(),
+            active_thread_rx: app.active_thread_rx.take(),
+            primary_thread_id: app.primary_thread_id.take(),
+            last_subagent_backfill_attempt: app.last_subagent_backfill_attempt.take(),
+            primary_session_configured: app.primary_session_configured.take(),
+            pending_primary_events: std::mem::take(&mut app.pending_primary_events),
+            pending_app_server_requests: std::mem::take(&mut app.pending_app_server_requests),
+            pending_startup_thread_start: std::mem::take(&mut app.pending_startup_thread_start),
+        }
+    }
+
+    fn restore(self, app: &mut App) {
+        app.abort_all_thread_event_listeners();
+        app.chat_widget = self.chat_widget;
+        app.thread_event_channels = self.thread_event_channels;
+        app.thread_event_listener_tasks = self.thread_event_listener_tasks;
+        app.agent_navigation = self.agent_navigation;
+        app.side_threads = self.side_threads;
+        app.active_thread_id = self.active_thread_id;
+        app.active_thread_rx = self.active_thread_rx;
+        app.primary_thread_id = self.primary_thread_id;
+        app.last_subagent_backfill_attempt = self.last_subagent_backfill_attempt;
+        app.primary_session_configured = self.primary_session_configured;
+        app.pending_primary_events = self.pending_primary_events;
+        app.pending_app_server_requests = self.pending_app_server_requests;
+        app.pending_startup_thread_start = self.pending_startup_thread_start;
+        app.sync_active_agent_label();
+    }
+
+    fn previous_thread_ids(&self) -> Vec<ThreadId> {
+        let mut thread_ids: Vec<ThreadId> = self.thread_event_channels.keys().copied().collect();
+        for thread_id in [
+            self.chat_widget.thread_id(),
+            self.active_thread_id,
+            self.primary_thread_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !thread_ids.contains(&thread_id) {
+                thread_ids.push(thread_id);
+            }
+        }
+        thread_ids
+    }
+
+    async fn discard_previous_threads(
+        mut self,
+        app_server: &mut AppServerSession,
+    ) -> Vec<ThreadId> {
+        let thread_ids = self.previous_thread_ids();
+
+        for thread_id in thread_ids.iter().copied() {
+            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
+                tracing::warn!("failed to unsubscribe replaced thread {thread_id}: {err}");
+            }
+        }
+
+        for handle in self
+            .thread_event_listener_tasks
+            .drain()
+            .map(|(_, handle)| handle)
+        {
+            handle.abort();
+        }
+
+        thread_ids
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum ThreadAttachPresentation {
@@ -25,6 +141,107 @@ pub(super) struct LoadedSubagentBackfill {
 }
 
 impl App {
+    pub(super) async fn show_login_accounts_view(&mut self, app_server: &mut AppServerSession) {
+        self.show_login_accounts_view_with_feedback(app_server, /*feedback*/ None)
+            .await;
+    }
+
+    async fn show_login_accounts_view_with_feedback(
+        &mut self,
+        app_server: &mut AppServerSession,
+        feedback: Option<LoginAccountsFeedback>,
+    ) {
+        if matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            self.chat_widget
+                .show_login_accounts_view_with_feedback(feedback);
+            return;
+        }
+
+        match app_server.list_accounts().await {
+            Ok(response) => {
+                self.chat_widget
+                    .show_login_accounts_view_with_loaded_accounts(response.accounts, feedback);
+            }
+            Err(err) => {
+                self.chat_widget
+                    .show_login_accounts_view_with_loaded_accounts(
+                        Vec::new(),
+                        Some(LoginAccountsFeedback::Error(format!(
+                            "Failed to read accounts from app server: {err}"
+                        ))),
+                    );
+            }
+        }
+    }
+
+    async fn commit_replacement_app_server_thread(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        mut replacement_session: AppServerSession,
+        started: AppServerStartedThread,
+        config: Config,
+        cloud_config_bundle: CloudConfigBundleLoader,
+        old_client_shutdown_warning: &str,
+    ) -> Result<()> {
+        let previous_config = std::mem::replace(&mut self.config, config);
+        let previous_cloud_config_bundle =
+            std::mem::replace(&mut self.cloud_config_bundle, cloud_config_bundle);
+        if let Err(err) = self
+            .replace_chat_widget_with_app_server_thread_preserving_previous_ui_on_error(
+                tui,
+                app_server,
+                &mut replacement_session,
+                started,
+            )
+            .await
+        {
+            if let Err(shutdown_err) = replacement_session.shutdown().await {
+                tracing::warn!(
+                    "failed to shut down replacement app server after attach failure: {shutdown_err}"
+                );
+            }
+            self.config = previous_config;
+            self.cloud_config_bundle = previous_cloud_config_bundle;
+            return Err(err);
+        }
+
+        let old_client = app_server.swap_client(replacement_session.into_client());
+        drop(previous_config);
+        drop(previous_cloud_config_bundle);
+        if let Err(err) = old_client.shutdown().await {
+            tracing::warn!("{old_client_shutdown_warning}: {err}");
+        }
+        tui.frame_requester().schedule_frame();
+        Ok(())
+    }
+
+    async fn config_for_auth_profile_switch(
+        &self,
+        auth_home: AbsolutePathBuf,
+        cloud_config_bundle: CloudConfigBundleLoader,
+    ) -> std::io::Result<Config> {
+        ConfigBuilder::default()
+            .cli_overrides(self.cli_kv_overrides.clone())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(self.config.cwd.to_path_buf()),
+                approval_policy: Some(*self.config.permissions.approval_policy.get()),
+                codex_self_exe: self.config.codex_self_exe.clone(),
+                codex_linux_sandbox_exe: self.config.codex_linux_sandbox_exe.clone(),
+                main_execve_wrapper_exe: self.config.main_execve_wrapper_exe.clone(),
+                show_raw_agent_reasoning: Some(self.config.show_raw_agent_reasoning),
+                workspace_roots: Some(self.config.workspace_roots.clone()),
+                ..Default::default()
+            })
+            .loader_overrides(self.loader_overrides.clone())
+            .strict_config(self.strict_config)
+            .cloud_config_bundle(cloud_config_bundle)
+            .auth_home(auth_home.to_path_buf())
+            .build()
+            .await
+            .map_err(std::io::Error::other)
+    }
+
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
         let backfill = self.backfill_loaded_subagent_threads(app_server).await;
         // V2 subagents are identified by canonical paths observed from activity events or loaded
@@ -718,7 +935,63 @@ impl App {
             started.turns,
             presentation,
         )
-        .await?;
+        .await
+    }
+
+    async fn replace_chat_widget_with_app_server_thread_preserving_previous_ui_on_error(
+        &mut self,
+        tui: &mut tui::Tui,
+        previous_app_server: &mut AppServerSession,
+        replacement_app_server: &mut AppServerSession,
+        started: AppServerStartedThread,
+    ) -> Result<()> {
+        let init = self.chatwidget_init_for_forked_or_resumed_thread(
+            tui,
+            self.config.clone(),
+            /*initial_user_message*/ None,
+        );
+        let previous_ui =
+            AppServerThreadUiSnapshot::take_from(self, ChatWidget::new_with_app_event(init));
+        if started.blocks_direct_input {
+            self.mark_primary_thread_parent_owned(started.session.thread_id);
+        }
+        let result = self
+            .enqueue_primary_thread_session_with_presentation(
+                started.session,
+                started.turns,
+                ThreadAttachPresentation::SessionLineage,
+            )
+            .await;
+        self.finish_app_server_thread_replacement(
+            replacement_app_server,
+            Some(previous_ui),
+            Some(previous_app_server),
+            result,
+        )
+        .await
+    }
+
+    async fn finish_app_server_thread_replacement(
+        &mut self,
+        app_server: &mut AppServerSession,
+        previous_ui: Option<AppServerThreadUiSnapshot>,
+        previous_app_server_for_cleanup: Option<&mut AppServerSession>,
+        result: Result<()>,
+    ) -> Result<()> {
+        if let Err(err) = result {
+            if let Some(previous_ui) = previous_ui {
+                previous_ui.restore(self);
+            }
+            return Err(err);
+        }
+        if let Some(previous_ui) = previous_ui
+            && let Some(previous_app_server) = previous_app_server_for_cleanup
+        {
+            previous_ui
+                .discard_previous_threads(previous_app_server)
+                .await;
+        }
+        self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
     }
 
@@ -860,6 +1133,1134 @@ impl App {
         config.service_tier = self.chat_widget.configured_service_tier();
         config
     }
+
+    pub(super) async fn switch_auth_profile(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        selection: AuthProfileSelection,
+    ) {
+        self.pending_auth_profile_login = None;
+
+        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            self.chat_widget.add_error_message(
+                "/login profile switching requires an embedded Codex Lab app server.".to_string(),
+            );
+            self.chat_widget.add_info_message(
+                "Restart Codex Lab with `--auth-profile <name>` to use a profile with a shared or remote app server."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
+        if !self.pending_primary_events.is_empty() {
+            self.chat_widget.add_error_message(
+                "Cannot switch auth profiles while the primary thread is still attaching."
+                    .to_string(),
+            );
+            return;
+        }
+
+        let (auth_home, profile_name, profile_label) = match selection {
+            AuthProfileSelection::Default => (
+                self.config.codex_home.to_path_buf(),
+                None,
+                "default".to_string(),
+            ),
+            AuthProfileSelection::Named {
+                ref profile_name, ..
+            } => {
+                let auth_home =
+                    match codex_login::profile_home(&self.config.codex_home, profile_name.as_str())
+                    {
+                        Ok(auth_home) => auth_home,
+                        Err(err) => {
+                            self.chat_widget.add_error_message(format!(
+                                "Invalid auth profile {profile_name:?}: {err}"
+                            ));
+                            return;
+                        }
+                    };
+                (
+                    auth_home,
+                    Some(profile_name.clone()),
+                    format!("`{profile_name}`"),
+                )
+            }
+        };
+
+        let login_after_switch = matches!(
+            &selection,
+            AuthProfileSelection::Named {
+                login_after_switch: true,
+                ..
+            }
+        );
+
+        if auth_home == self.config.auth_home.as_path() {
+            self.chat_widget.add_info_message(
+                format!("Auth profile {profile_label} is already active."),
+                /*hint*/ None,
+            );
+            if login_after_switch {
+                self.start_auth_profile_login(app_server, profile_name.as_deref(), &profile_label)
+                    .await;
+            }
+            return;
+        }
+
+        let auth_home = match AbsolutePathBuf::from_absolute_path(auth_home) {
+            Ok(auth_home) => auth_home,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Invalid auth profile home for {profile_label}: {err}"
+                ));
+                return;
+            }
+        };
+        let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            auth_home.to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+            self.config.chatgpt_base_url.clone(),
+            self.config.auth_route_config(),
+        )
+        .await;
+        let config = match self
+            .config_for_auth_profile_switch(
+                auth_home.clone(),
+                replacement_cloud_config_bundle.clone(),
+            )
+            .await
+        {
+            Ok(config) => config,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to load config for auth profile {profile_label}: {err}"
+                ));
+                return;
+            }
+        };
+
+        let replacement_client = match crate::start_embedded_app_server(
+            self.arg0_paths.clone(),
+            config.clone(),
+            self.cli_kv_overrides.clone(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            replacement_cloud_config_bundle.clone(),
+            self.feedback.clone(),
+            /*log_db*/ None,
+            self.state_db.clone(),
+            self.environment_manager.clone(),
+        )
+        .await
+        {
+            Ok(client) => AppServerClient::InProcess(client),
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to start app server for auth profile {profile_label}: {err}"
+                ));
+                return;
+            }
+        };
+
+        let mut replacement_session =
+            AppServerSession::new(replacement_client, app_server.thread_params_mode())
+                .with_remote_cwd_override(app_server.remote_cwd_override().map(PathBuf::from));
+        let started = match replacement_session
+            .start_thread_with_session_start_source(&config, Some(ThreadStartSource::Clear))
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to start auth profile session for {profile_label}: {err}"
+                ));
+                if let Err(shutdown_err) = replacement_session.shutdown().await {
+                    tracing::warn!(
+                        "failed to shut down replacement app server after thread start failure: {shutdown_err}"
+                    );
+                }
+                return;
+            }
+        };
+
+        let switched = match self
+            .commit_replacement_app_server_thread(
+                tui,
+                app_server,
+                replacement_session,
+                started,
+                config.clone(),
+                replacement_cloud_config_bundle,
+                "failed to shut down previous app server after auth profile switch",
+            )
+            .await
+        {
+            Ok(()) => true,
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to attach to auth profile session: {err}"));
+                false
+            }
+        };
+        if switched {
+            self.chat_widget.add_info_message(
+                format!("Using auth profile {profile_label} for this session."),
+                Some("The previous session remains resumable.".to_string()),
+            );
+            if login_after_switch {
+                self.start_auth_profile_login(app_server, profile_name.as_deref(), &profile_label)
+                    .await;
+            }
+        }
+    }
+
+    pub(super) async fn switch_auth_account(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        selection: AuthAccountSelection,
+    ) {
+        self.pending_auth_profile_login = None;
+
+        if !self.pending_primary_events.is_empty() {
+            self.chat_widget.add_error_message(
+                "Cannot switch stored accounts while the primary thread is still attaching."
+                    .to_string(),
+            );
+            return;
+        }
+
+        if matches!(self.app_server_target, crate::AppServerTarget::Embedded)
+            && self.config.auth_home != self.config.codex_home
+        {
+            let previous_auth = match codex_login::load_auth_dot_json(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+            ) {
+                Ok(previous_auth) => previous_auth,
+                Err(err) => {
+                    self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(
+                            LoginAccountsFeedback::Error(format!(
+                                "Failed to read current default account before selecting {}: {err}",
+                                selection.label
+                            )),
+                        ));
+                    return;
+                }
+            };
+            let previous_active_account_id = match codex_login::get_active_account_id(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            ) {
+                Ok(previous_active_account_id) => previous_active_account_id,
+                Err(err) => {
+                    self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(
+                            LoginAccountsFeedback::Error(format!(
+                                "Failed to read current active account before selecting {}: {err}",
+                                selection.label
+                            )),
+                        ));
+                    return;
+                }
+            };
+
+            match codex_login::activate_account(
+                &self.config.codex_home,
+                &selection.account_id,
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+            ) {
+                Ok(_account) => {}
+                Err(err) => {
+                    self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(
+                            LoginAccountsFeedback::Error(format!(
+                                "Failed to activate stored account {}: {err}",
+                                selection.label
+                            )),
+                        ));
+                    return;
+                }
+            }
+
+            match self
+                .restart_default_auth_session_after_account_switch(
+                    tui,
+                    app_server,
+                    &selection.label,
+                )
+                .await
+            {
+                Ok(()) => {
+                    self.chat_widget.add_info_message(
+                        format!("Using stored account {} for this session.", selection.label),
+                        Some("The session switched from the auth profile to the default account store.".to_string()),
+                    );
+                    self.chat_widget
+                        .show_login_accounts_view_with_feedback(Some(LoginAccountsFeedback::Info(
+                            format!("Using stored account {}.", selection.label),
+                        )));
+                }
+                Err(err) => {
+                    if let Err(restore_err) = self
+                        .restore_default_auth_activation(previous_auth, previous_active_account_id)
+                    {
+                        tracing::warn!(
+                            "failed to restore previous default auth after account switch failure: {restore_err}"
+                        );
+                        self.chat_widget.add_error_message(format!(
+                            "{err}\n\nAlso failed to restore the previous default account: {restore_err}"
+                        ));
+                        return;
+                    }
+                    self.chat_widget.add_error_message(err);
+                }
+            }
+            return;
+        }
+
+        match app_server
+            .switch_active_account(selection.account_id.clone())
+            .await
+        {
+            Ok(()) => {
+                self.chat_widget.add_info_message(
+                    format!("Using stored account {} for this session.", selection.label),
+                    Some("The current session will use this account for new turns.".to_string()),
+                );
+            }
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to activate stored account {}: {err}",
+                    selection.label
+                ));
+            }
+        }
+    }
+
+    fn restore_default_auth_activation(
+        &self,
+        previous_auth: Option<codex_login::AuthDotJson>,
+        previous_active_account_id: Option<String>,
+    ) -> Result<(), String> {
+        match previous_auth {
+            Some(previous_auth) => codex_login::save_auth(
+                &self.config.codex_home,
+                &previous_auth,
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+            )
+            .map_err(|err| format!("failed to restore previous auth credentials: {err}"))?,
+            None => codex_login::delete_auth(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+            )
+            .map(|_| ())
+            .map_err(|err| format!("failed to clear selected auth credentials: {err}"))?,
+        }
+
+        codex_login::set_active_account_id(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            previous_active_account_id,
+        )
+        .map(|_| ())
+        .map_err(|err| format!("failed to restore previous active account: {err}"))
+    }
+
+    async fn restart_default_auth_session_after_account_switch(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        label: &str,
+    ) -> Result<(), String> {
+        let default_auth_home = self.config.codex_home.clone();
+        let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            default_auth_home.to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+            self.config.chatgpt_base_url.clone(),
+            self.config.auth_route_config(),
+        )
+        .await;
+        let config = self
+            .config_for_auth_profile_switch(
+                default_auth_home,
+                replacement_cloud_config_bundle.clone(),
+            )
+            .await
+            .map_err(|err| format!("Failed to load config after selecting {label}: {err}"))?;
+
+        let replacement_client = crate::start_embedded_app_server(
+            self.arg0_paths.clone(),
+            config.clone(),
+            self.cli_kv_overrides.clone(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            replacement_cloud_config_bundle.clone(),
+            self.feedback.clone(),
+            /*log_db*/ None,
+            self.state_db.clone(),
+            self.environment_manager.clone(),
+        )
+        .await
+        .map(AppServerClient::InProcess)
+        .map_err(|err| format!("Failed to restart app server after selecting {label}: {err}"))?;
+
+        let mut replacement_session =
+            AppServerSession::new(replacement_client, app_server.thread_params_mode())
+                .with_remote_cwd_override(app_server.remote_cwd_override().map(PathBuf::from));
+        let started = match replacement_session
+            .start_thread_with_session_start_source(&config, Some(ThreadStartSource::Clear))
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                if let Err(shutdown_err) = replacement_session.shutdown().await {
+                    tracing::warn!(
+                        "failed to shut down replacement app server after account switch start failure: {shutdown_err}"
+                    );
+                }
+                return Err(format!(
+                    "Failed to start session after selecting {label}: {err}"
+                ));
+            }
+        };
+
+        self.commit_replacement_app_server_thread(
+            tui,
+            app_server,
+            replacement_session,
+            started,
+            config,
+            replacement_cloud_config_bundle,
+            "failed to shut down previous app server after account switch",
+        )
+        .await
+        .map_err(|err| format!("Failed to attach to selected account session: {err}"))
+    }
+
+    pub(super) async fn remove_auth_account(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        selection: RemoveAuthAccountSelection,
+    ) {
+        if !self.pending_primary_events.is_empty() {
+            self.chat_widget.add_error_message(
+                "Cannot disconnect stored accounts while the primary thread is still attaching."
+                    .to_string(),
+            );
+            return;
+        }
+
+        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+            let feedback = match app_server
+                .remove_account(selection.account_id.clone())
+                .await
+            {
+                Ok(response) => match response.status {
+                    RemoveAccountStatus::Removed => {
+                        LoginAccountsFeedback::Info(format!("Disconnected {}.", selection.label))
+                    }
+                    RemoveAccountStatus::NotFound => LoginAccountsFeedback::Error(format!(
+                        "Stored account {} no longer exists.",
+                        selection.label
+                    )),
+                },
+                Err(err) => LoginAccountsFeedback::Error(format!(
+                    "Failed to disconnect {}: {err}",
+                    selection.label
+                )),
+            };
+            self.show_login_accounts_view_with_feedback(app_server, Some(feedback))
+                .await;
+            return;
+        }
+
+        let was_default_active = codex_login::get_active_account_id(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+        )
+        .ok()
+        .flatten()
+        .is_some_and(|active_id| active_id == selection.account_id);
+        let current_session_uses_default_auth_home =
+            self.config.auth_home == self.config.codex_home;
+        let needs_session_restart = was_default_active && current_session_uses_default_auth_home;
+
+        let removed = match codex_login::remove_account(
+            &self.config.codex_home,
+            self.config.cli_auth_credentials_store_mode,
+            &selection.account_id,
+        ) {
+            Ok(removed) => removed,
+            Err(err) => {
+                self.chat_widget
+                    .show_login_accounts_view_with_feedback(Some(LoginAccountsFeedback::Error(
+                        format!("Failed to disconnect {}: {err}", selection.label),
+                    )));
+                return;
+            }
+        };
+
+        let Some(_removed) = removed else {
+            self.chat_widget
+                .show_login_accounts_view_with_feedback(Some(LoginAccountsFeedback::Error(
+                    format!("Stored account {} no longer exists.", selection.label),
+                )));
+            return;
+        };
+
+        let mut feedback =
+            LoginAccountsFeedback::Info(format!("Disconnected {}.", selection.label));
+
+        if was_default_active {
+            match codex_login::get_active_account_id(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            ) {
+                Ok(Some(fallback_account_id)) => {
+                    if let Err(err) = codex_login::activate_account(
+                        &self.config.codex_home,
+                        &fallback_account_id,
+                        self.config.cli_auth_credentials_store_mode,
+                        self.config.auth_keyring_backend_kind(),
+                    ) {
+                        let clear_result = codex_login::clear_active_account(
+                            &self.config.codex_home,
+                            self.config.cli_auth_credentials_store_mode,
+                            self.config.auth_keyring_backend_kind(),
+                        );
+                        if let Err(clear_err) = clear_result {
+                            self.chat_widget.show_login_accounts_view_with_feedback(Some(
+                                LoginAccountsFeedback::Error(format!(
+                                    "Disconnected {}, but failed to activate the next account ({err}) or clear active auth ({clear_err}).",
+                                    selection.label
+                                )),
+                            ));
+                            return;
+                        }
+                        feedback = LoginAccountsFeedback::Error(format!(
+                            "Disconnected {}, but failed to activate the next account: {err}. Active auth was cleared.",
+                            selection.label
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    if let Err(err) = codex_login::clear_active_account(
+                        &self.config.codex_home,
+                        self.config.cli_auth_credentials_store_mode,
+                        self.config.auth_keyring_backend_kind(),
+                    ) {
+                        self.chat_widget
+                            .show_login_accounts_view_with_feedback(Some(
+                                LoginAccountsFeedback::Error(format!(
+                                    "Disconnected {}, but failed to clear active auth: {err}",
+                                    selection.label
+                                )),
+                            ));
+                        return;
+                    }
+                }
+                Err(err) => {
+                    self.chat_widget.show_login_accounts_view_with_feedback(Some(
+                        LoginAccountsFeedback::Error(format!(
+                            "Disconnected {}, but failed to read the next active account: {err}",
+                            selection.label
+                        )),
+                    ));
+                    return;
+                }
+            }
+
+            if needs_session_restart
+                && let Err(err) = self
+                    .restart_default_auth_session_after_account_removal(
+                        tui,
+                        app_server,
+                        &selection.label,
+                    )
+                    .await
+            {
+                self.chat_widget.add_error_message(err);
+                return;
+            }
+        }
+
+        self.chat_widget
+            .show_login_accounts_view_with_feedback(Some(feedback));
+    }
+
+    async fn restart_default_auth_session_after_account_removal(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        label: &str,
+    ) -> Result<(), String> {
+        let default_auth_home = self.config.codex_home.clone();
+        let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            default_auth_home.to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+            self.config.chatgpt_base_url.clone(),
+            self.config.auth_route_config(),
+        )
+        .await;
+        let config = self
+            .config_for_auth_profile_switch(
+                default_auth_home,
+                replacement_cloud_config_bundle.clone(),
+            )
+            .await
+            .map_err(|err| format!("Failed to load config after disconnecting {label}: {err}"))?;
+
+        let replacement_client = crate::start_embedded_app_server(
+            self.arg0_paths.clone(),
+            config.clone(),
+            self.cli_kv_overrides.clone(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            replacement_cloud_config_bundle.clone(),
+            self.feedback.clone(),
+            /*log_db*/ None,
+            self.state_db.clone(),
+            self.environment_manager.clone(),
+        )
+        .await
+        .map(AppServerClient::InProcess)
+        .map_err(|err| {
+            format!("Failed to restart app server after disconnecting {label}: {err}")
+        })?;
+
+        let mut replacement_session =
+            AppServerSession::new(replacement_client, app_server.thread_params_mode())
+                .with_remote_cwd_override(app_server.remote_cwd_override().map(PathBuf::from));
+        let started = match replacement_session
+            .start_thread_with_session_start_source(&config, Some(ThreadStartSource::Clear))
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                if let Err(shutdown_err) = replacement_session.shutdown().await {
+                    tracing::warn!(
+                        "failed to shut down replacement app server after account removal start failure: {shutdown_err}"
+                    );
+                }
+                return Err(format!(
+                    "Failed to start session after disconnecting {label}: {err}"
+                ));
+            }
+        };
+
+        self.commit_replacement_app_server_thread(
+            tui,
+            app_server,
+            replacement_session,
+            started,
+            config,
+            replacement_cloud_config_bundle,
+            "failed to shut down previous app server after account removal",
+        )
+        .await
+        .map_err(|err| format!("Failed to attach after disconnecting {label}: {err}"))?;
+        Ok(())
+    }
+
+    pub(super) async fn start_login_add_account_chatgpt(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        if !self
+            .chat_widget
+            .update_login_add_account_view(LoginAddAccountState::Starting)
+        {
+            return;
+        }
+
+        if self.config.auth_home != self.config.codex_home {
+            self.start_default_store_login_add_account_chatgpt().await;
+            return;
+        }
+
+        let request_handle = app_server.request_handle();
+        let response = request_handle
+            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
+                request_id: app_server.next_request_id(),
+                params: LoginAccountParams::Chatgpt {
+                    codex_streamlined_login: false,
+                    use_hosted_login_success_page: false,
+                    app_brand: None,
+                    preserve_existing_account: self.config.cli_auth_credentials_store_mode
+                        == AuthCredentialsStoreMode::File,
+                },
+            })
+            .await;
+
+        match response {
+            Ok(LoginAccountResponse::Chatgpt { login_id, auth_url }) => {
+                self.pending_login_add_account_id = Some(login_id.clone());
+                self.completed_login_add_account_id = None;
+                self.open_local_auth_url_in_browser(&request_handle, &auth_url);
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Waiting {
+                        login_id,
+                        auth_url,
+                    });
+            }
+            Ok(other) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Failed(format!(
+                        "Unexpected login response: {other:?}"
+                    )));
+            }
+            Err(err) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Failed(format!(
+                        "Failed to start ChatGPT login: {err}"
+                    )));
+            }
+        }
+    }
+
+    pub(super) async fn save_login_add_account_api_key(
+        &mut self,
+        app_server: &mut AppServerSession,
+        api_key: &str,
+    ) {
+        let trimmed_key = api_key.trim();
+        if trimmed_key.is_empty() {
+            self.chat_widget
+                .update_login_add_account_view(LoginAddAccountState::ApiKeyFailed(
+                    "API key cannot be empty".to_string(),
+                ));
+            return;
+        }
+
+        self.chat_widget
+            .update_login_add_account_view(LoginAddAccountState::SavingApiKey);
+
+        if self.config.auth_home != self.config.codex_home {
+            // /login manages the default stored-account list; named auth
+            // profiles use their dedicated login commands instead.
+            match codex_login::login_with_api_key(
+                &self.config.codex_home,
+                trimmed_key,
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+            ) {
+                Ok(()) => {
+                    self.chat_widget
+                        .update_login_add_account_view(LoginAddAccountState::Complete);
+                }
+                Err(err) => {
+                    self.chat_widget.update_login_add_account_view(
+                        LoginAddAccountState::ApiKeyFailed(format!(
+                            "Failed to store API key: {err}"
+                        )),
+                    );
+                }
+            }
+            return;
+        }
+
+        let response = app_server
+            .request_handle()
+            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
+                request_id: app_server.next_request_id(),
+                params: LoginAccountParams::ApiKey {
+                    api_key: trimmed_key.to_string(),
+                },
+            })
+            .await;
+
+        match response {
+            Ok(LoginAccountResponse::ApiKey {}) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Complete);
+            }
+            Ok(other) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::ApiKeyFailed(format!(
+                        "Unexpected login response: {other:?}"
+                    )));
+            }
+            Err(err) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::ApiKeyFailed(format!(
+                        "Failed to store API key: {err}"
+                    )));
+            }
+        }
+    }
+
+    pub(super) async fn start_login_add_account_device_code(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        self.cancel_login_add_account_chatgpt(app_server).await;
+        if !self
+            .chat_widget
+            .update_login_add_account_view(LoginAddAccountState::DeviceCodeStarting)
+        {
+            return;
+        }
+
+        if self.config.auth_home != self.config.codex_home {
+            self.start_default_store_login_add_account_device_code()
+                .await;
+            return;
+        }
+
+        let response = app_server
+            .request_handle()
+            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
+                request_id: app_server.next_request_id(),
+                params: LoginAccountParams::ChatgptDeviceCode {
+                    preserve_existing_account: self.config.cli_auth_credentials_store_mode
+                        == AuthCredentialsStoreMode::File,
+                },
+            })
+            .await;
+
+        match response {
+            Ok(LoginAccountResponse::ChatgptDeviceCode {
+                login_id,
+                verification_url,
+                user_code,
+            }) => {
+                self.pending_login_add_account_id = Some(login_id.clone());
+                self.completed_login_add_account_id = None;
+                if !self.chat_widget.update_login_add_account_view(
+                    LoginAddAccountState::DeviceCodeWaiting {
+                        login_id: login_id.clone(),
+                        verification_url,
+                        user_code,
+                    },
+                ) {
+                    self.pending_login_add_account_id = None;
+                    self.completed_login_add_account_id = None;
+                    let request_handle = app_server.request_handle();
+                    if let Err(err) = request_handle
+                        .request_typed::<CancelLoginAccountResponse>(
+                            ClientRequest::CancelLoginAccount {
+                                request_id: app_server.next_request_id(),
+                                params: CancelLoginAccountParams { login_id },
+                            },
+                        )
+                        .await
+                    {
+                        tracing::warn!("failed to cancel add-account device-code login: {err}");
+                    }
+                }
+            }
+            Ok(other) => {
+                self.chat_widget.update_login_add_account_view(
+                    LoginAddAccountState::DeviceCodeFailed(format!(
+                        "Unexpected login response: {other:?}"
+                    )),
+                );
+            }
+            Err(err) => {
+                self.chat_widget.update_login_add_account_view(
+                    LoginAddAccountState::DeviceCodeFailed(format!(
+                        "Failed to start code login: {err}"
+                    )),
+                );
+            }
+        }
+    }
+
+    async fn start_default_store_login_add_account_device_code(&mut self) {
+        let opts = if self.config.cli_auth_credentials_store_mode == AuthCredentialsStoreMode::File
+        {
+            ServerOptions::new_for_add_account(
+                self.config.codex_home.to_path_buf(),
+                CLIENT_ID.to_string(),
+                self.config.forced_chatgpt_workspace_id.clone(),
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+                self.config.auth_route_config(),
+            )
+        } else {
+            ServerOptions::new(
+                self.config.codex_home.to_path_buf(),
+                CLIENT_ID.to_string(),
+                self.config.forced_chatgpt_workspace_id.clone(),
+                self.config.cli_auth_credentials_store_mode,
+                self.config.auth_keyring_backend_kind(),
+                self.config.auth_route_config(),
+            )
+        };
+
+        let device_code = match codex_login::request_device_code(&opts).await {
+            Ok(device_code) => device_code,
+            Err(err) => {
+                self.chat_widget.update_login_add_account_view(
+                    LoginAddAccountState::DeviceCodeFailed(format!(
+                        "Failed to start code login: {err}"
+                    )),
+                );
+                return;
+            }
+        };
+
+        self.direct_login_add_account_attempt_id =
+            self.direct_login_add_account_attempt_id.wrapping_add(1);
+        let attempt_id = self.direct_login_add_account_attempt_id;
+        let login_id = format!("default-device-code-{attempt_id}");
+        let verification_url = device_code.verification_url.clone();
+        let user_code = device_code.user_code.clone();
+        let completion_tx = self.app_event_tx.clone();
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = cancel_for_task.cancelled() => Err("Login was not completed".to_string()),
+                result = codex_login::complete_device_code_login(opts, device_code) => {
+                    result.map_err(|err| err.to_string())
+                }
+            };
+            completion_tx.send(AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result });
+        });
+
+        self.pending_direct_login_add_account = Some(PendingDirectLoginAddAccount {
+            attempt_id,
+            cancellation: PendingDirectLoginAddAccountCancellation::DeviceCode(cancel),
+        });
+        if !self.chat_widget.update_login_add_account_view(
+            LoginAddAccountState::DeviceCodeWaiting {
+                login_id,
+                verification_url,
+                user_code,
+            },
+        ) && let Some(pending) = self.pending_direct_login_add_account.take()
+        {
+            pending.cancellation.cancel();
+        }
+    }
+
+    pub(super) async fn cancel_login_add_account_chatgpt(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        if let Some(pending) = self.pending_direct_login_add_account.take() {
+            pending.cancellation.cancel();
+            return;
+        }
+
+        let Some(login_id) = self.pending_login_add_account_id.take() else {
+            return;
+        };
+        self.completed_login_add_account_id = None;
+        let request_handle = app_server.request_handle();
+        if let Err(err) = request_handle
+            .request_typed::<CancelLoginAccountResponse>(ClientRequest::CancelLoginAccount {
+                request_id: app_server.next_request_id(),
+                params: CancelLoginAccountParams { login_id },
+            })
+            .await
+        {
+            tracing::warn!("failed to cancel add-account ChatGPT login: {err}");
+        }
+    }
+
+    async fn start_default_store_login_add_account_chatgpt(&mut self) {
+        let server_options =
+            if self.config.cli_auth_credentials_store_mode == AuthCredentialsStoreMode::File {
+                ServerOptions::new_for_add_account(
+                    self.config.codex_home.to_path_buf(),
+                    CLIENT_ID.to_string(),
+                    self.config.forced_chatgpt_workspace_id.clone(),
+                    self.config.cli_auth_credentials_store_mode,
+                    self.config.auth_keyring_backend_kind(),
+                    self.config.auth_route_config(),
+                )
+            } else {
+                ServerOptions::new(
+                    self.config.codex_home.to_path_buf(),
+                    CLIENT_ID.to_string(),
+                    self.config.forced_chatgpt_workspace_id.clone(),
+                    self.config.cli_auth_credentials_store_mode,
+                    self.config.auth_keyring_backend_kind(),
+                    self.config.auth_route_config(),
+                )
+            };
+        let opts = ServerOptions {
+            open_browser: false,
+            ..server_options
+        };
+
+        let server = match codex_login::run_login_server(opts) {
+            Ok(server) => server,
+            Err(err) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Failed(format!(
+                        "Failed to start ChatGPT login: {err}"
+                    )));
+                return;
+            }
+        };
+
+        let auth_url = server.auth_url.clone();
+        let shutdown = server.cancel_handle();
+        let completion_tx = self.app_event_tx.clone();
+        self.direct_login_add_account_attempt_id =
+            self.direct_login_add_account_attempt_id.wrapping_add(1);
+        let attempt_id = self.direct_login_add_account_attempt_id;
+        tokio::spawn(async move {
+            let result = server
+                .block_until_done()
+                .await
+                .map_err(|err| err.to_string());
+            completion_tx.send(AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result });
+        });
+
+        self.pending_direct_login_add_account = Some(PendingDirectLoginAddAccount {
+            attempt_id,
+            cancellation: PendingDirectLoginAddAccountCancellation::Browser(shutdown),
+        });
+        self.open_url_in_browser(auth_url.clone());
+        if !self
+            .chat_widget
+            .update_login_add_account_view(LoginAddAccountState::Waiting {
+                login_id: "default-store".to_string(),
+                auth_url,
+            })
+            && let Some(pending) = self.pending_direct_login_add_account.take()
+        {
+            pending.cancellation.cancel();
+        }
+    }
+
+    pub(super) async fn complete_login_add_account_chatgpt(
+        &mut self,
+        attempt_id: u64,
+        result: Result<(), String>,
+    ) {
+        if self
+            .pending_direct_login_add_account
+            .as_ref()
+            .map(|pending| pending.attempt_id)
+            != Some(attempt_id)
+        {
+            return;
+        }
+
+        let Some(pending) = self.pending_direct_login_add_account.take() else {
+            return;
+        };
+        let login_kind = pending.cancellation.kind();
+        match result {
+            Ok(()) => {
+                self.chat_widget
+                    .update_login_add_account_view(LoginAddAccountState::Complete);
+            }
+            Err(err) => {
+                let message = format!("ChatGPT login did not complete: {err}");
+                let state = match login_kind {
+                    PendingDirectLoginAddAccountKind::Browser => {
+                        LoginAddAccountState::Failed(message)
+                    }
+                    PendingDirectLoginAddAccountKind::DeviceCode => {
+                        LoginAddAccountState::DeviceCodeFailed(message)
+                    }
+                };
+                self.chat_widget.update_login_add_account_view(state);
+            }
+        }
+    }
+
+    fn open_local_auth_url_in_browser(
+        &mut self,
+        request_handle: &AppServerRequestHandle,
+        url: &str,
+    ) {
+        if matches!(request_handle, AppServerRequestHandle::InProcess(_)) {
+            self.open_url_in_browser(url.to_string());
+        }
+    }
+
+    async fn start_auth_profile_login(
+        &mut self,
+        app_server: &mut AppServerSession,
+        profile_name: Option<&str>,
+        profile_label: &str,
+    ) {
+        let request_handle = app_server.request_handle();
+        let response = request_handle
+            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
+                request_id: app_server.next_request_id(),
+                params: LoginAccountParams::Chatgpt {
+                    codex_streamlined_login: false,
+                    use_hosted_login_success_page: false,
+                    app_brand: None,
+                    preserve_existing_account: false,
+                },
+            })
+            .await;
+
+        match response {
+            Ok(LoginAccountResponse::Chatgpt { login_id, auth_url }) => {
+                if let Some(profile_name) = profile_name {
+                    self.pending_auth_profile_login = Some(PendingAuthProfileLogin {
+                        login_id,
+                        profile_name: profile_name.to_string(),
+                        profile_label: profile_label.to_string(),
+                    });
+                }
+                self.open_url_in_browser(auth_url.clone());
+                self.chat_widget.add_info_message(
+                    format!("Started ChatGPT login for auth profile {profile_label}."),
+                    Some(format!("If your browser did not open, visit {auth_url}")),
+                );
+            }
+            Ok(LoginAccountResponse::ApiKey {}) => {
+                self.chat_widget.add_info_message(
+                    format!("API key login configured for auth profile {profile_label}."),
+                    /*hint*/ None,
+                );
+            }
+            Ok(LoginAccountResponse::ChatgptDeviceCode {
+                verification_url,
+                user_code,
+                ..
+            }) => {
+                self.chat_widget.add_info_message(
+                    format!("Started device-code login for auth profile {profile_label}."),
+                    Some(format!("Visit {verification_url} and enter {user_code}.")),
+                );
+            }
+            Ok(LoginAccountResponse::ChatgptAuthTokens {}) => {
+                self.chat_widget.add_info_message(
+                    format!("ChatGPT tokens configured for auth profile {profile_label}."),
+                    /*hint*/ None,
+                );
+            }
+            Ok(LoginAccountResponse::AmazonBedrock {}) => {
+                self.chat_widget.add_error_message(format!(
+                    "Unexpected Amazon Bedrock response while starting ChatGPT login for auth profile {profile_label}."
+                ));
+            }
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to start login for auth profile {profile_label}: {err}"
+                ));
+            }
+        }
+    }
+
     pub(super) async fn resume_target_session(
         &mut self,
         tui: &mut tui::Tui,

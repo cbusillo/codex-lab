@@ -26,7 +26,13 @@ use std::time::Duration;
 
 use crate::auth::AuthDotJson;
 use crate::auth::AuthKeyringBackendKind;
+use crate::auth::LoginAccountCatalogPolicy;
+use crate::auth::load_auth_dot_json;
+use crate::auth::login_account_matches_auth;
+use crate::auth::remove_login_account_best_effort;
+use crate::auth::revoke_auth_tokens;
 use crate::auth::save_auth;
+use crate::auth::should_revoke_auth_tokens;
 use crate::auth::upsert_login_account_best_effort;
 use crate::default_client::create_raw_auth_client;
 use crate::default_client::originator;
@@ -76,9 +82,39 @@ pub struct ServerOptions {
     pub forced_chatgpt_workspace_id: Option<Vec<String>>,
     pub codex_streamlined_login: bool,
     pub login_success_page: LoginSuccessPage,
+    pub previous_auth_handling: PreviousAuthHandling,
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
     pub auth_keyring_backend_kind: AuthKeyringBackendKind,
     pub auth_route_config: AuthRouteConfig,
+}
+
+/// Controls what happens to an existing ChatGPT login when a new one is saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviousAuthHandling {
+    /// Revoke superseded credentials and remove a different previous account from local storage.
+    RevokeAndRemoveStoredAccount,
+    /// Keep a different previous account stored, while still revoking superseded credentials when
+    /// re-authenticating the same account.
+    PreserveStoredAccount,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenPersistencePolicy {
+    Mirrored(PreviousAuthHandling),
+    Isolated,
+}
+
+impl TokenPersistencePolicy {
+    fn should_mirror(self) -> bool {
+        matches!(self, Self::Mirrored(_))
+    }
+
+    fn previous_auth_handling(self) -> PreviousAuthHandling {
+        match self {
+            Self::Mirrored(previous_auth_handling) => previous_auth_handling,
+            Self::Isolated => PreviousAuthHandling::RevokeAndRemoveStoredAccount,
+        }
+    }
 }
 
 impl ServerOptions {
@@ -101,9 +137,32 @@ impl ServerOptions {
             forced_chatgpt_workspace_id,
             codex_streamlined_login: false,
             login_success_page: LoginSuccessPage::default(),
+            previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
             cli_auth_credentials_store_mode,
             auth_keyring_backend_kind,
             auth_route_config,
+        }
+    }
+
+    /// Creates a server configuration that preserves the previously stored account.
+    pub fn new_for_add_account(
+        codex_home: PathBuf,
+        client_id: String,
+        forced_chatgpt_workspace_id: Option<Vec<String>>,
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+        auth_keyring_backend_kind: AuthKeyringBackendKind,
+        auth_route_config: AuthRouteConfig,
+    ) -> Self {
+        Self {
+            previous_auth_handling: PreviousAuthHandling::PreserveStoredAccount,
+            ..Self::new(
+                codex_home,
+                client_id,
+                forced_chatgpt_workspace_id,
+                cli_auth_credentials_store_mode,
+                auth_keyring_backend_kind,
+                auth_route_config,
+            )
         }
     }
 }
@@ -150,6 +209,19 @@ impl ShutdownHandle {
 
 /// Starts a local callback server and returns the browser auth URL.
 pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+    run_login_server_with_catalog_policy(opts, LoginAccountCatalogPolicy::Mirror)
+}
+
+/// Starts a login server for a named auth profile without enrolling the
+/// resulting credentials in an account-switching catalog.
+pub fn run_profile_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+    run_login_server_with_catalog_policy(opts, LoginAccountCatalogPolicy::Isolated)
+}
+
+fn run_login_server_with_catalog_policy(
+    opts: ServerOptions,
+    account_catalog_policy: LoginAccountCatalogPolicy,
+) -> io::Result<LoginServer> {
     let pkce = generate_pkce();
     let state = opts.force_state.clone().unwrap_or_else(generate_state);
 
@@ -221,6 +293,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
                                 &pkce,
                                 actual_port,
                                 &state,
+                                account_catalog_policy,
                             )
                             .await;
 
@@ -314,6 +387,7 @@ async fn process_request(
     pkce: &PkceCodes,
     actual_port: u16,
     state: &str,
+    account_catalog_policy: LoginAccountCatalogPolicy,
 ) -> HandledRequest {
     let parsed_url = match url::Url::parse(&format!("http://localhost{url_raw}")) {
         Ok(u) => u,
@@ -414,17 +488,36 @@ async fn process_request(
                     )
                     .await
                     .ok();
-                    if let Err(err) = persist_tokens_async(
-                        &opts.codex_home,
-                        api_key.clone(),
-                        tokens.id_token.clone(),
-                        tokens.access_token.clone(),
-                        tokens.refresh_token.clone(),
-                        opts.cli_auth_credentials_store_mode,
-                        opts.auth_keyring_backend_kind,
-                    )
-                    .await
-                    {
+                    let persist_result = match account_catalog_policy {
+                        LoginAccountCatalogPolicy::Mirror => {
+                            persist_tokens_async(
+                                &opts.codex_home,
+                                api_key.clone(),
+                                tokens.id_token.clone(),
+                                tokens.access_token.clone(),
+                                tokens.refresh_token.clone(),
+                                opts.cli_auth_credentials_store_mode,
+                                opts.previous_auth_handling,
+                                opts.auth_keyring_backend_kind,
+                                opts.auth_route_config.clone(),
+                            )
+                            .await
+                        }
+                        LoginAccountCatalogPolicy::Isolated => {
+                            persist_profile_tokens_async(
+                                &opts.codex_home,
+                                api_key.clone(),
+                                tokens.id_token.clone(),
+                                tokens.access_token.clone(),
+                                tokens.refresh_token.clone(),
+                                opts.cli_auth_credentials_store_mode,
+                                opts.auth_keyring_backend_kind,
+                                opts.auth_route_config.clone(),
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(err) = persist_result {
                         eprintln!("Persist error: {err}");
                         return login_error_response(
                             "Sign-in completed but credentials could not be saved locally.",
@@ -868,11 +961,74 @@ pub(crate) async fn persist_tokens_async(
     access_token: String,
     refresh_token: String,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    previous_auth_handling: PreviousAuthHandling,
     keyring_backend_kind: AuthKeyringBackendKind,
+    auth_route_config: AuthRouteConfig,
+) -> io::Result<()> {
+    persist_tokens_async_with_policy(
+        codex_home,
+        api_key,
+        id_token,
+        access_token,
+        refresh_token,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+        auth_route_config,
+        TokenPersistencePolicy::Mirrored(previous_auth_handling),
+    )
+    .await
+}
+
+pub(crate) async fn persist_profile_tokens_async(
+    codex_home: &Path,
+    api_key: Option<String>,
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    auth_route_config: AuthRouteConfig,
+) -> io::Result<()> {
+    persist_tokens_async_with_policy(
+        codex_home,
+        api_key,
+        id_token,
+        access_token,
+        refresh_token,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+        auth_route_config,
+        TokenPersistencePolicy::Isolated,
+    )
+    .await
+}
+
+async fn persist_tokens_async_with_policy(
+    codex_home: &Path,
+    api_key: Option<String>,
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    auth_route_config: AuthRouteConfig,
+    persistence_policy: TokenPersistencePolicy,
 ) -> io::Result<()> {
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    let persist_codex_home = codex_home.clone();
+    let (previous_auth, auth) = tokio::task::spawn_blocking(move || {
+        let previous_auth = match load_auth_dot_json(
+            &persist_codex_home,
+            auth_credentials_store_mode,
+            keyring_backend_kind,
+        ) {
+            Ok(auth) => auth,
+            Err(err) => {
+                warn!("failed to load previous auth before saving new login: {err}");
+                None
+            }
+        };
         let mut tokens = TokenData {
             id_token: parse_chatgpt_jwt_claims(&id_token).map_err(io::Error::other)?,
             access_token,
@@ -895,16 +1051,53 @@ pub(crate) async fn persist_tokens_async(
             bedrock_api_key: None,
         };
         save_auth(
-            &codex_home,
+            &persist_codex_home,
             &auth,
             auth_credentials_store_mode,
             keyring_backend_kind,
         )?;
-        upsert_login_account_best_effort(&codex_home, &auth, auth_credentials_store_mode);
-        Ok(())
+        if persistence_policy.should_mirror() {
+            upsert_login_account_best_effort(
+                &persist_codex_home,
+                &auth,
+                auth_credentials_store_mode,
+            );
+        }
+        Ok::<_, io::Error>((previous_auth, auth))
     })
     .await
-    .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
+    .map_err(|e| io::Error::other(format!("persist task failed: {e}")))??;
+
+    let previous_account_matches = login_account_matches_auth(previous_auth.as_ref(), &auth);
+    if !persistence_policy.should_mirror() {
+        remove_login_account_best_effort(
+            &codex_home,
+            previous_auth.as_ref(),
+            auth_credentials_store_mode,
+        );
+    }
+    let previous_auth_handling = persistence_policy.previous_auth_handling();
+    let should_revoke_previous = should_revoke_auth_tokens(previous_auth.as_ref(), &auth)
+        && (previous_auth_handling == PreviousAuthHandling::RevokeAndRemoveStoredAccount
+            || previous_account_matches);
+    if should_revoke_previous {
+        let revoke_result = revoke_auth_tokens(previous_auth.as_ref(), &auth_route_config).await;
+        if persistence_policy.should_mirror()
+            && previous_auth_handling == PreviousAuthHandling::RevokeAndRemoveStoredAccount
+            && !previous_account_matches
+        {
+            remove_login_account_best_effort(
+                &codex_home,
+                previous_auth.as_ref(),
+                auth_credentials_store_mode,
+            );
+        }
+        if let Err(err) = revoke_result {
+            warn!("failed to revoke superseded auth tokens after login: {err}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Validates the ID token against an optional workspace restriction.
@@ -1151,16 +1344,555 @@ pub(crate) async fn obtain_api_key(
 }
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::io;
+    use std::path::Path;
+
+    use anyhow::Context;
+    use base64::Engine;
+    use codex_config::types::AuthCredentialsStoreMode;
+    use codex_protocol::auth::AuthMode;
+    use serde_json::Value;
+    use serde_json::json;
+    use tempfile::tempdir;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    use crate::auth::AuthDotJson;
+    use crate::auth::AuthKeyringBackendKind;
+    use crate::auth::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
+    use crate::auth::load_auth_dot_json as load_auth_dot_json_with_backend;
+    use crate::auth::logout;
+    use crate::auth::save_auth as save_auth_with_backend;
+    use crate::auth_accounts::list_accounts;
+    use crate::auth_accounts::upsert_chatgpt_account;
+    use crate::test_support::transport_default_auth_route_config;
+    use crate::token_data::TokenData;
+    use crate::token_data::parse_chatgpt_jwt_claims;
+    use core_test_support::skip_if_no_network;
     use pretty_assertions::assert_eq;
 
+    use super::PreviousAuthHandling;
     use super::TokenEndpointErrorDetail;
     use super::html_escape;
     use super::is_missing_codex_entitlement_error;
     use super::parse_token_endpoint_error;
+    use super::persist_profile_tokens_async as persist_profile_tokens_async_with_backend;
+    use super::persist_tokens_async as persist_tokens_async_with_backend;
     use super::redact_sensitive_query_value;
     use super::redact_sensitive_url_parts;
     use super::render_login_error_page;
     use super::sanitize_url_for_logging;
+
+    fn load_auth_dot_json(
+        codex_home: &Path,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+    ) -> io::Result<Option<AuthDotJson>> {
+        load_auth_dot_json_with_backend(
+            codex_home,
+            auth_credentials_store_mode,
+            AuthKeyringBackendKind::default(),
+        )
+    }
+
+    fn save_auth(
+        codex_home: &Path,
+        auth: &AuthDotJson,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+    ) -> io::Result<()> {
+        save_auth_with_backend(
+            codex_home,
+            auth,
+            auth_credentials_store_mode,
+            AuthKeyringBackendKind::default(),
+        )
+    }
+
+    async fn persist_profile_tokens_async(
+        codex_home: &Path,
+        api_key: Option<String>,
+        id_token: String,
+        access_token: String,
+        refresh_token: String,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+    ) -> io::Result<()> {
+        persist_profile_tokens_async_with_backend(
+            codex_home,
+            api_key,
+            id_token,
+            access_token,
+            refresh_token,
+            auth_credentials_store_mode,
+            AuthKeyringBackendKind::default(),
+            transport_default_auth_route_config(),
+        )
+        .await
+    }
+
+    async fn persist_tokens_async(
+        codex_home: &Path,
+        api_key: Option<String>,
+        id_token: String,
+        access_token: String,
+        refresh_token: String,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        previous_auth_handling: PreviousAuthHandling,
+    ) -> io::Result<()> {
+        persist_tokens_async_with_backend(
+            codex_home,
+            api_key,
+            id_token,
+            access_token,
+            refresh_token,
+            auth_credentials_store_mode,
+            previous_auth_handling,
+            AuthKeyringBackendKind::default(),
+            transport_default_auth_route_config(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn isolated_chatgpt_relogin_and_logout_leave_no_account_catalog_credentials()
+    -> anyhow::Result<()> {
+        let codex_home = tempdir()?;
+
+        for suffix in ["first", "second"] {
+            let expected_access_token = format!("profile-access-{suffix}");
+            persist_profile_tokens_async(
+                codex_home.path(),
+                /*api_key*/ None,
+                jwt_for_account("profile-account"),
+                expected_access_token.clone(),
+                format!("profile-refresh-{suffix}"),
+                AuthCredentialsStoreMode::File,
+            )
+            .await?;
+
+            let auth = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+                .context("profile auth should exist")?;
+            assert_eq!(
+                auth.tokens
+                    .as_ref()
+                    .map(|tokens| tokens.access_token.as_str()),
+                Some(expected_access_token.as_str())
+            );
+            assert_eq!(
+                list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?,
+                Vec::new()
+            );
+        }
+
+        assert!(logout(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )?);
+        assert_eq!(
+            load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?,
+            None
+        );
+        assert_eq!(
+            list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?,
+            Vec::new()
+        );
+        Ok(())
+    }
+
+    #[serial_test::serial(logout_revoke)]
+    #[tokio::test]
+    async fn persist_tokens_async_revokes_previous_auth_without_failing_login() -> anyhow::Result<()>
+    {
+        skip_if_no_network!(Ok(()));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": {
+                    "message": "revoke failed"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env_guard = EnvGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            format!("{}/oauth/revoke", server.uri()),
+        );
+
+        let codex_home = tempdir()?;
+        save_auth(
+            codex_home.path(),
+            &chatgpt_auth("old-access", "old-refresh", "old-account"),
+            AuthCredentialsStoreMode::File,
+        )?;
+        let old_auth = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+            .context("old auth should exist")?;
+        let old_tokens = old_auth
+            .tokens
+            .as_ref()
+            .context("old tokens should exist")?;
+        upsert_chatgpt_account(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            old_tokens.clone(),
+            chrono::Utc::now(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )?;
+
+        persist_tokens_async(
+            codex_home.path(),
+            /*api_key*/ None,
+            jwt_for_account("new-account"),
+            "new-access".to_string(),
+            "new-refresh".to_string(),
+            AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::RevokeAndRemoveStoredAccount,
+        )
+        .await?;
+
+        let auth = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+            .context("auth.json should exist after login")?;
+        assert_eq!(
+            auth.tokens.context("new tokens should be persisted")?,
+            TokenData {
+                id_token: parse_chatgpt_jwt_claims(&jwt_for_account("new-account"))
+                    .expect("new JWT should parse"),
+                access_token: "new-access".to_string(),
+                refresh_token: "new-refresh".to_string(),
+                account_id: Some("new-account".to_string()),
+            }
+        );
+
+        let requests = server
+            .received_requests()
+            .await
+            .context("failed to fetch revoke requests")?;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .body_json::<Value>()
+                .context("revoke request should be JSON")?,
+            json!({
+                "token": "old-refresh",
+                "token_type_hint": "refresh_token",
+                "client_id": crate::auth::CLIENT_ID,
+            })
+        );
+        let accounts = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
+        assert_eq!(accounts.len(), 1);
+        let account = &accounts[0];
+        let tokens = account.tokens.as_ref().context("new account tokens")?;
+        assert_eq!(tokens.account_id.as_deref(), Some("new-account"));
+        assert_eq!(tokens.access_token, "new-access");
+        server.verify().await;
+        Ok(())
+    }
+
+    #[serial_test::serial(logout_revoke)]
+    #[tokio::test]
+    async fn persist_tokens_async_removes_revoked_previous_account() -> anyhow::Result<()> {
+        skip_if_no_network!(Ok(()));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env_guard = EnvGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            format!("{}/oauth/revoke", server.uri()),
+        );
+
+        let codex_home = tempdir()?;
+        let old_auth = chatgpt_auth("old-access", "old-refresh", "old-account");
+        save_auth(codex_home.path(), &old_auth, AuthCredentialsStoreMode::File)?;
+        let old_tokens = old_auth
+            .tokens
+            .as_ref()
+            .context("old tokens should exist")?;
+        upsert_chatgpt_account(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            old_tokens.clone(),
+            chrono::Utc::now(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )?;
+
+        persist_tokens_async(
+            codex_home.path(),
+            /*api_key*/ None,
+            jwt_for_account("new-account"),
+            "new-access".to_string(),
+            "new-refresh".to_string(),
+            AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::RevokeAndRemoveStoredAccount,
+        )
+        .await?;
+
+        let accounts = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
+        assert_eq!(accounts.len(), 1);
+        let account = &accounts[0];
+        let tokens = account.tokens.as_ref().context("new account tokens")?;
+        assert_eq!(tokens.account_id.as_deref(), Some("new-account"));
+        assert_eq!(tokens.access_token, "new-access");
+
+        server.verify().await;
+        Ok(())
+    }
+
+    #[serial_test::serial(logout_revoke)]
+    #[tokio::test]
+    async fn persist_tokens_async_preserves_previous_account_when_adding_account()
+    -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let _env_guard = EnvGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            format!("{}/oauth/revoke", server.uri()),
+        );
+
+        let codex_home = tempdir()?;
+        let old_auth = chatgpt_auth("old-access", "old-refresh", "old-account");
+        save_auth(codex_home.path(), &old_auth, AuthCredentialsStoreMode::File)?;
+        let old_tokens = old_auth
+            .tokens
+            .as_ref()
+            .context("old tokens should exist")?;
+        upsert_chatgpt_account(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            old_tokens.clone(),
+            chrono::Utc::now(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )?;
+
+        persist_tokens_async(
+            codex_home.path(),
+            /*api_key*/ None,
+            jwt_for_account("new-account"),
+            "new-access".to_string(),
+            "new-refresh".to_string(),
+            AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::PreserveStoredAccount,
+        )
+        .await?;
+
+        let accounts = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
+        assert_eq!(accounts.len(), 2);
+        let account_ids = accounts
+            .iter()
+            .map(|account| {
+                account
+                    .tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.account_id.as_deref())
+            })
+            .collect::<Vec<_>>();
+        assert!(account_ids.contains(&Some("old-account")));
+        assert!(account_ids.contains(&Some("new-account")));
+        let active_account_id = crate::auth_accounts::get_active_account_id(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+        )?
+        .context("active account should be set")?;
+        let active_account = accounts
+            .iter()
+            .find(|account| account.id == active_account_id)
+            .context("active account should be listed")?;
+        let active_tokens = active_account
+            .tokens
+            .as_ref()
+            .context("active account tokens")?;
+        assert_eq!(active_tokens.account_id.as_deref(), Some("new-account"));
+
+        let requests = server
+            .received_requests()
+            .await
+            .context("failed to fetch revoke requests")?;
+        assert_eq!(requests.len(), 0);
+        Ok(())
+    }
+
+    #[serial_test::serial(logout_revoke)]
+    #[tokio::test]
+    async fn persist_tokens_async_revokes_superseded_token_when_readding_same_account()
+    -> anyhow::Result<()> {
+        skip_if_no_network!(Ok(()));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env_guard = EnvGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            format!("{}/oauth/revoke", server.uri()),
+        );
+
+        let codex_home = tempdir()?;
+        let old_auth = chatgpt_auth("old-access", "old-refresh", "same-account");
+        save_auth(codex_home.path(), &old_auth, AuthCredentialsStoreMode::File)?;
+        let old_tokens = old_auth
+            .tokens
+            .as_ref()
+            .context("old tokens should exist")?;
+        upsert_chatgpt_account(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            old_tokens.clone(),
+            chrono::Utc::now(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )?;
+
+        persist_tokens_async(
+            codex_home.path(),
+            /*api_key*/ None,
+            jwt_for_account("same-account"),
+            "new-access".to_string(),
+            "new-refresh".to_string(),
+            AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::PreserveStoredAccount,
+        )
+        .await?;
+
+        let accounts = list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?;
+        assert_eq!(accounts.len(), 1);
+        let tokens = accounts[0]
+            .tokens
+            .as_ref()
+            .context("updated account tokens")?;
+        assert_eq!(tokens.account_id.as_deref(), Some("same-account"));
+        assert_eq!(tokens.refresh_token, "new-refresh");
+
+        let requests = server
+            .received_requests()
+            .await
+            .context("failed to fetch revoke requests")?;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .body_json::<Value>()
+                .context("revoke request should be JSON")?,
+            json!({
+                "token": "old-refresh",
+                "token_type_hint": "refresh_token",
+                "client_id": crate::auth::CLIENT_ID,
+            })
+        );
+        server.verify().await;
+        Ok(())
+    }
+
+    #[serial_test::serial(logout_revoke)]
+    #[tokio::test]
+    async fn persist_tokens_async_does_not_revoke_reused_refresh_token() -> anyhow::Result<()> {
+        skip_if_no_network!(Ok(()));
+
+        let server = MockServer::start().await;
+        let _env_guard = EnvGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            format!("{}/oauth/revoke", server.uri()),
+        );
+
+        let codex_home = tempdir()?;
+        save_auth(
+            codex_home.path(),
+            &chatgpt_auth("old-access", "shared-refresh", "old-account"),
+            AuthCredentialsStoreMode::File,
+        )?;
+
+        persist_tokens_async(
+            codex_home.path(),
+            /*api_key*/ None,
+            jwt_for_account("new-account"),
+            "new-access".to_string(),
+            "shared-refresh".to_string(),
+            AuthCredentialsStoreMode::File,
+            PreviousAuthHandling::RevokeAndRemoveStoredAccount,
+        )
+        .await?;
+
+        let requests = server
+            .received_requests()
+            .await
+            .context("failed to fetch revoke requests")?;
+        assert_eq!(requests.len(), 0);
+        Ok(())
+    }
+
+    fn chatgpt_auth(access_token: &str, refresh_token: &str, account_id: &str) -> AuthDotJson {
+        AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: parse_chatgpt_jwt_claims(&jwt_for_account(account_id))
+                    .expect("test JWT should parse"),
+                access_token: access_token.to_string(),
+                refresh_token: refresh_token.to_string(),
+                account_id: Some(account_id.to_string()),
+            }),
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+            bedrock_api_key: None,
+        }
+    }
+
+    fn jwt_for_account(account_id: &str) -> String {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let header_b64 = encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload_b64 = encode(
+            serde_json::to_string(&json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": account_id,
+                }
+            }))
+            .expect("payload should serialize")
+            .as_bytes(),
+        );
+        let signature_b64 = encode(b"sig");
+        format!("{header_b64}.{payload_b64}.{signature_b64}")
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: this test executes serially with other revoke tests.
+            unsafe {
+                std::env::set_var(key, &value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the guard restores the original environment before other revoke tests run.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_token_endpoint_error_prefers_error_description() {

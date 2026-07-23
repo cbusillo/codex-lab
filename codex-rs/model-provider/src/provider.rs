@@ -836,4 +836,35 @@ mod tests {
                 .any(|model| model.slug == "provider-model")
         );
     }
+
+    #[tokio::test]
+    async fn configured_provider_can_keep_openai_account_state_with_provider_bearer_token() {
+        let mut provider_info = provider_for("https://example.test/v1".to_string());
+        provider_info.experimental_bearer_token = Some("provider-token".to_string());
+        provider_info.requires_openai_auth = true;
+        let provider = create_model_provider(
+            provider_info,
+            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "control-token",
+            ))),
+        );
+
+        assert_eq!(
+            provider.account_state(),
+            Ok(ProviderAccountState {
+                account: Some(ProviderAccount::ApiKey),
+                requires_openai_auth: true,
+            })
+        );
+        assert_eq!(
+            provider
+                .api_auth()
+                .await
+                .expect("provider auth should resolve")
+                .to_auth_headers()
+                .get(http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer provider-token")
+        );
+    }
 }
