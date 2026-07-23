@@ -1,0 +1,18 @@
+{
+  "crossStackDependencies": [],
+  "issue": "cbusillo/codex-lab#407",
+  "kind": "codex_lab_upstream_semantic_review",
+  "range": {"after":"b89ce9a2bcedcfddf3a48f387b7912d602d6d87c","implementationBaseline":"7fde0b24d31cdf5d1270d288e37c7130cae8efc2","through":"1bbdb32789e1f79932df44941236ea3658f6e965","window":"pre_checkpoint"},
+  "reviewerNotes": [
+    {"note":"This incremental ledger starts with the audit's only patch-equivalent commit; remaining commits stay intentionally unclassified until bounded subsystem review supplies semantic evidence.","sourceReview":"baseline"},
+    {"note":"Stable patch-id 1a064aa40b799932dfce02b52ee3b25d0510ee3e maps upstream 9e0d7f02c9416c46dde6e571068a0fb03a4facdf to local 15f0bf854bf82de2eaf3524f089dc8efaa88a307.","sourceReview":"app_server"},
+    {"note":"The first #418 batch reviews two adjacent plugin-cache changes together, but they remain separate rows because local curated cache pruning and remote global catalog listing have no shared symbols or semantic dependency.","sourceReview":"plugins"}
+  ],
+  "riskFlags": [],
+  "rows": [
+    {"confidence":"high","rationale":"The frozen audit marks this as the range's sole patch-equivalent commit. Both commits produce stable patch-id 1a064aa40b799932dfce02b52ee3b25d0510ee3e and change the same eight files with identical behavior: canonical auto_review output, legacy guardian_subagent input, and active reviewer propagation into delegated agents.","rowKey":"9e0d7f02c9416c46dde6e571068a0fb03a4facdf","sourceReview":"app_server"},
+    {"confidence":"high","rationale":"The baseline refresh_curated_plugin_cache checks the active cache version before marketplace membership and only warns when a configured plugin source is absent. It has no raw marketplace name loader, cache uninstall path, or removed-plugin regression test. The behavior is applicable local cache hygiene and leaves user configuration untouched.","rowKey":"daf76a57d2564be85b6e34c25a29380b3d4315b4","sourceReview":"plugins"},
+    {"confidence":"high","rationale":"The baseline writes the global remote catalog cache after a synchronous fetch and uses cached entries for recommendations, but plugin/list always awaits fetch_remote_marketplaces and has no cache-presence check or background-refresh option. The optimization is applicable, with future implementation preserving Every Code's existing auth-isolated cache key and remote route.","rowKey":"381f0de531e0bc7759863295fc333dd0087b4faf","sourceReview":"plugins"}
+  ],
+  "schemaVersion": 2
+}

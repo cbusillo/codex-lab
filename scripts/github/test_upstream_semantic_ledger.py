@@ -247,6 +247,27 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
             (list(PRE_COMMITS[1:]), [PRE_COMMITS[0]]),
         )
 
+    def test_render_bounds_missing_commit_list(self) -> None:
+        audit = upstream_semantic_ledger.validate_audit(audit_payload())
+        payload = ledger_payload()
+        payload["rows"] = [payload["rows"][0]]
+        summary, rows = upstream_semantic_ledger.validate_ledger(payload, audit)
+        missing = [
+            f"{index:040x}"
+            for index in range(upstream_semantic_ledger.MAX_RENDERED_STATUS_COMMITS + 2)
+        ]
+        summary["range"]["missingCommits"] = missing
+        summary["range"]["missingCommitCount"] = len(missing)
+
+        rendered = upstream_semantic_ledger.render(summary, rows)
+
+        self.assertIn(f"- `{missing[-3]}`", rendered)
+        self.assertNotIn(f"- `{missing[-2]}`", rendered)
+        self.assertIn(
+            "_2 additional commits omitted; run `validate` for the complete machine-readable list._",
+            rendered,
+        )
+
     def test_review_reconciles_with_ledger(self) -> None:
         audit = upstream_semantic_ledger.validate_audit(audit_payload())
         summary, rows = upstream_semantic_ledger.validate_ledger(
@@ -390,26 +411,44 @@ class UpstreamSemanticLedgerTests(unittest.TestCase):
         audit_paths = sorted(upstream_root.glob("*/audit.json"))
         self.assertTrue(audit_paths)
         for audit_path in audit_paths:
-            with self.subTest(wave=audit_path.parent.name):
-                wave = audit_path.parent
-                audit = upstream_semantic_ledger.validate_audit(
-                    json.loads(audit_path.read_text(encoding="utf-8"))
-                )
-                summary, rows = upstream_semantic_ledger.validate_ledger(
-                    json.loads((wave / "ledger.json").read_text(encoding="utf-8")),
-                    audit,
-                )
-                upstream_semantic_ledger.validate_review(
-                    json.loads((wave / "review.json").read_text(encoding="utf-8")),
-                    summary,
-                    rows,
-                )
-                self.assertEqual(
-                    upstream_semantic_ledger.render(summary, rows),
-                    (wave / "ledger.md").read_text(encoding="utf-8"),
-                )
-                semantic_lines = sum(
-                    len((wave / name).read_text(encoding="utf-8").splitlines())
-                    for name in ("ledger.json", "review.json", "ledger.md")
-                )
-                self.assertLessEqual(semantic_lines, 800)
+            wave = audit_path.parent
+            audit = upstream_semantic_ledger.validate_audit(
+                json.loads(audit_path.read_text(encoding="utf-8"))
+            )
+            artifact_sets = (
+                ("ledger.json", "review.json", "ledger.md", True),
+                (
+                    "pre-checkpoint-ledger.json",
+                    "pre-checkpoint-review.json",
+                    "pre-checkpoint-ledger.md",
+                    False,
+                ),
+            )
+            for ledger_name, review_name, markdown_name, required in artifact_sets:
+                ledger_path = wave / ledger_name
+                review_path = wave / review_name
+                markdown_path = wave / markdown_name
+                if not ledger_path.exists():
+                    self.assertFalse(required, f"missing required {ledger_name}")
+                    self.assertFalse(review_path.exists() or markdown_path.exists())
+                    continue
+                with self.subTest(wave=wave.name, ledger=ledger_name):
+                    self.assertTrue(review_path.exists())
+                    self.assertTrue(markdown_path.exists())
+                    summary, rows = upstream_semantic_ledger.validate_ledger(
+                        json.loads(ledger_path.read_text(encoding="utf-8")), audit
+                    )
+                    upstream_semantic_ledger.validate_review(
+                        json.loads(review_path.read_text(encoding="utf-8")),
+                        summary,
+                        rows,
+                    )
+                    self.assertEqual(
+                        upstream_semantic_ledger.render(summary, rows),
+                        markdown_path.read_text(encoding="utf-8"),
+                    )
+                    semantic_lines = sum(
+                        len((wave / name).read_text(encoding="utf-8").splitlines())
+                        for name in (ledger_name, review_name, markdown_name)
+                    )
+                    self.assertLessEqual(semantic_lines, 800)
