@@ -1091,7 +1091,7 @@ async fn run_sampling_request(
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
         let mut prompt_input = sess
-            .insert_current_apps_instructions(turn_context.as_ref(), prompt_input)
+            .project_current_apps_instructions(turn_context.as_ref(), prompt_input)
             .await;
         if let Some(request_only_input_item) = &request_only_input_item {
             prompt_input.push(request_only_input_item.clone());

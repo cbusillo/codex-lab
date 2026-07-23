@@ -269,6 +269,10 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_environment_manager(
 
     let (tx_event, rx_event) = unbounded();
     drop(rx_event);
+    let codex_apps_auth_provider = auth
+        .as_ref()
+        .filter(|auth| auth.uses_codex_backend())
+        .map(codex_model_provider::auth_provider_from_auth);
 
     let (mut mcp_connection_manager, cancel_token) = McpConnectionManager::new(
         &mcp_servers,
@@ -287,7 +291,7 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_environment_manager(
         mcp_config.prefix_mcp_tool_names,
         mcp_config.client_elicitation_capability,
         ToolPluginProvenance::default(),
-        auth.as_ref(),
+        codex_apps_auth_provider,
         /*elicitation_reviewer*/ None,
     )
     .await;

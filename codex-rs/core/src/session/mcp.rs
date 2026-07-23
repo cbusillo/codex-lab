@@ -336,6 +336,10 @@ impl Session {
                 turn_context.cwd.to_path_buf(),
             ),
         };
+        let codex_apps_auth_provider = auth
+            .as_ref()
+            .filter(|auth| auth.uses_codex_backend())
+            .map(|_| self.services.execution_account.auth_provider());
         {
             let mut guard = self.services.mcp_startup_cancellation_token.lock().await;
             guard.cancel();
@@ -356,7 +360,7 @@ impl Session {
             mcp_config.prefix_mcp_tool_names,
             mcp_config.client_elicitation_capability,
             tool_plugin_provenance,
-            auth.as_ref(),
+            codex_apps_auth_provider,
             elicitation_reviewer,
         )
         .await;
