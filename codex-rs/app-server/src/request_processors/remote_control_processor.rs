@@ -1,6 +1,7 @@
 use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
 use crate::transport::RemoteControlHandle;
+use crate::transport::RemoteControlReconnectUnavailable;
 use crate::transport::RemoteControlUnavailable;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RemoteControlClientsListParams;
@@ -13,6 +14,7 @@ use codex_app_server_protocol::RemoteControlPairingStartParams;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_protocol::RemoteControlPairingStatusParams;
 use codex_app_server_protocol::RemoteControlPairingStatusResponse;
+use codex_app_server_protocol::RemoteControlReconnectResponse;
 use codex_app_server_protocol::RemoteControlStatusReadResponse;
 use std::io;
 
@@ -39,6 +41,13 @@ impl RemoteControlRequestProcessor {
     pub(crate) fn disable(&self) -> Result<RemoteControlDisableResponse, JSONRPCErrorError> {
         let handle = self.handle()?;
         Ok(RemoteControlDisableResponse::from(handle.disable()))
+    }
+
+    pub(crate) fn reconnect(&self) -> Result<RemoteControlReconnectResponse, JSONRPCErrorError> {
+        self.handle()?
+            .reconnect()
+            .map(RemoteControlReconnectResponse::from)
+            .map_err(map_reconnect_error)
     }
 
     pub(crate) fn status_read(&self) -> Result<RemoteControlStatusReadResponse, JSONRPCErrorError> {
@@ -102,6 +111,14 @@ impl RemoteControlRequestProcessor {
 
 fn map_unavailable(err: RemoteControlUnavailable) -> JSONRPCErrorError {
     invalid_request(err.to_string())
+}
+
+fn map_reconnect_error(err: RemoteControlReconnectUnavailable) -> JSONRPCErrorError {
+    match err {
+        RemoteControlReconnectUnavailable::Disabled => invalid_request(err.to_string()),
+        RemoteControlReconnectUnavailable::StateDbUnavailable
+        | RemoteControlReconnectUnavailable::WorkerUnavailable => internal_error(err.to_string()),
+    }
 }
 
 fn map_pairing_start_error(err: io::Error) -> JSONRPCErrorError {

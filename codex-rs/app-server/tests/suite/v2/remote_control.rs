@@ -21,6 +21,7 @@ use codex_app_server_protocol::RemoteControlPairingStartParams;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_protocol::RemoteControlPairingStatusParams;
 use codex_app_server_protocol::RemoteControlPairingStatusResponse;
+use codex_app_server_protocol::RemoteControlReconnectResponse;
 use codex_app_server_protocol::RemoteControlStatusReadResponse;
 use codex_app_server_protocol::RequestId;
 use codex_config::types::AuthCredentialsStoreMode;
@@ -37,6 +38,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const APP_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn remote_control_disable_returns_disabled_status() -> Result<()> {
@@ -81,11 +83,32 @@ async fn remote_control_status_read_returns_disabled_status() -> Result<()> {
 }
 
 #[tokio::test]
+async fn remote_control_reconnect_rejects_disabled_remote_control() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp.send_remote_control_reconnect_request().await?;
+    let error = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, -32600);
+    assert_eq!(
+        error.error.message,
+        "remote control cannot reconnect while disabled"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn remote_control_enable_returns_connecting_status() -> Result<()> {
     let codex_home = TempDir::new()?;
     let _backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
     let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    timeout(APP_SERVER_STARTUP_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp.send_remote_control_enable_request().await?;
     let response: JSONRPCResponse = timeout(
@@ -94,6 +117,35 @@ async fn remote_control_enable_returns_connecting_status() -> Result<()> {
     )
     .await??;
     let received: RemoteControlEnableResponse = to_response(response)?;
+
+    assert_eq!(received.status, RemoteControlConnectionStatus::Connecting);
+    assert!(!received.server_name.is_empty());
+    assert_eq!(received.environment_id, None);
+    assert!(!received.installation_id.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_control_reconnect_returns_connecting_while_connecting() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let _backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(APP_SERVER_STARTUP_TIMEOUT, mcp.initialize()).await??;
+
+    let enable_request_id = mcp.send_remote_control_enable_request().await?;
+    let _: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(enable_request_id)),
+    )
+    .await??;
+
+    let request_id = mcp.send_remote_control_reconnect_request().await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let received: RemoteControlReconnectResponse = to_response(response)?;
 
     assert_eq!(received.status, RemoteControlConnectionStatus::Connecting);
     assert!(!received.server_name.is_empty());

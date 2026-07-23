@@ -282,9 +282,18 @@ pub(super) struct RemoteControlAuthContext<'a> {
 }
 
 enum ConnectOutcome {
-    Connected(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+    Connected {
+        websocket_connection: Box<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+        active_control_auth: ActiveControlAuth,
+    },
     Disabled,
     Shutdown,
+}
+
+#[derive(Debug)]
+pub(super) struct ActiveControlAuth {
+    account_id: String,
+    revision: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -293,6 +302,7 @@ enum ConnectionEndReason {
     Disabled,
     EnabledWatchClosed,
     ReconnectRequested,
+    ControlAuthChanged,
     ConnectionWorkerStopped,
 }
 
@@ -574,11 +584,14 @@ impl RemoteControlWebsocket {
                 "starting app-server remote control websocket connection cycle"
             );
             let shutdown_token = self.shutdown_token.child_token();
-            let websocket_connection = match self
+            let (websocket_connection, active_control_auth) = match self
                 .connect(&shutdown_token, app_server_client_name.as_deref())
                 .await
             {
-                ConnectOutcome::Connected(websocket_connection) => *websocket_connection,
+                ConnectOutcome::Connected {
+                    websocket_connection,
+                    active_control_auth,
+                } => (*websocket_connection, active_control_auth),
                 ConnectOutcome::Disabled => {
                     self.status_publisher
                         .publish_status(RemoteControlConnectionStatus::Disabled);
@@ -588,11 +601,12 @@ impl RemoteControlWebsocket {
             };
 
             let connection_end_reason = self
-                .run_connection(websocket_connection, shutdown_token)
+                .run_connection(websocket_connection, shutdown_token, active_control_auth)
                 .await;
             if matches!(
                 connection_end_reason,
                 ConnectionEndReason::ReconnectRequested
+                    | ConnectionEndReason::ControlAuthChanged
                     | ConnectionEndReason::ConnectionWorkerStopped
             ) {
                 self.consume_pending_reconnect_requests("completed connection cycle");
@@ -737,7 +751,7 @@ impl RemoteControlWebsocket {
             };
 
             match connect_result {
-                Ok((websocket_connection, response)) => {
+                Ok((websocket_connection, response, active_control_auth)) => {
                     if !*self.enabled_rx.borrow() {
                         return ConnectOutcome::Disabled;
                     }
@@ -753,10 +767,15 @@ impl RemoteControlWebsocket {
                         server_id = ?enrollment.as_ref().map(|enrollment| enrollment.server_id.as_str()),
                         environment_id = ?enrollment.as_ref().map(|enrollment| enrollment.environment_id.as_str()),
                         subscribe_cursor_present = subscribe_cursor.is_some(),
+                        control_account_id = %active_control_auth.account_id,
+                        control_auth_revision = active_control_auth.revision,
                         response_headers = %format_headers(response.headers()),
                         "connected to app-server remote control websocket"
                     );
-                    return ConnectOutcome::Connected(Box::new(websocket_connection));
+                    return ConnectOutcome::Connected {
+                        websocket_connection: Box::new(websocket_connection),
+                        active_control_auth,
+                    };
                 }
                 Err(err) => {
                     if !*self.enabled_rx.borrow() {
@@ -848,6 +867,7 @@ impl RemoteControlWebsocket {
         &mut self,
         websocket_connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
         shutdown_token: CancellationToken,
+        mut active_control_auth: ActiveControlAuth,
     ) -> ConnectionEndReason {
         let (websocket_writer, websocket_reader) = websocket_connection.split();
         let mut join_set = tokio::task::JoinSet::new();
@@ -868,33 +888,82 @@ impl RemoteControlWebsocket {
             shutdown_token.clone(),
         ));
 
+        enum ConnectionWake {
+            End(ConnectionEndReason),
+            ControlAuthRevisionChanged(u64),
+        }
+
         let mut enabled_rx = self.enabled_rx.clone();
-        let connection_end_reason = tokio::select! {
-            _ = shutdown_token.cancelled() => ConnectionEndReason::Shutdown,
-            changed = enabled_rx.wait_for(|enabled| !*enabled) => {
-                if changed.is_ok() {
+        let connection_end_reason = loop {
+            let connection_wake = tokio::select! {
+                _ = shutdown_token.cancelled() => ConnectionWake::End(ConnectionEndReason::Shutdown),
+                changed = enabled_rx.wait_for(|enabled| !*enabled) => {
+                    if changed.is_ok() {
+                        self.status_publisher
+                            .publish_status(RemoteControlConnectionStatus::Disabled);
+                        ConnectionWake::End(ConnectionEndReason::Disabled)
+                    } else {
+                        ConnectionWake::End(ConnectionEndReason::EnabledWatchClosed)
+                    }
+                }
+                changed = self.auth_change_rx.changed() => {
+                    if changed.is_err() {
+                        ConnectionWake::End(ConnectionEndReason::Shutdown)
+                    } else {
+                        ConnectionWake::ControlAuthRevisionChanged(*self.auth_change_rx.borrow())
+                    }
+                }
+                reconnect_generation = self.reconnect_rx.recv() => {
+                    let Some(reconnect_generation) = reconnect_generation else {
+                        return ConnectionEndReason::Shutdown;
+                    };
+                    self.consume_reconnect_requests(
+                        reconnect_generation,
+                        "active relay connection",
+                    );
+                    ConnectionWake::End(ConnectionEndReason::ReconnectRequested)
+                }
+                _ = join_set.join_next() => {
                     self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Disabled);
-                    ConnectionEndReason::Disabled
-                } else {
-                    ConnectionEndReason::EnabledWatchClosed
+                        .publish_status(RemoteControlConnectionStatus::Connecting);
+                    ConnectionWake::End(ConnectionEndReason::ConnectionWorkerStopped)
+                },
+            };
+
+            match connection_wake {
+                ConnectionWake::End(connection_end_reason) => break connection_end_reason,
+                ConnectionWake::ControlAuthRevisionChanged(current_auth_revision)
+                    if current_auth_revision == active_control_auth.revision =>
+                {
+                    continue;
+                }
+                ConnectionWake::ControlAuthRevisionChanged(current_auth_revision) => {
+                    let current_account_id = self
+                        .auth_manager
+                        .auth_cached()
+                        .and_then(|auth| auth.get_account_id());
+                    if current_account_id.as_deref()
+                        == Some(active_control_auth.account_id.as_str())
+                    {
+                        active_control_auth.revision = current_auth_revision;
+                        continue;
+                    }
+                    self.auth_recovery = self.auth_manager.unauthorized_recovery();
+                    self.reconnect_attempt = 0;
+                    self.status_publisher.publish_status_if_enabled(
+                        &self.enabled_rx,
+                        RemoteControlConnectionStatus::Connecting,
+                    );
+                    info!(
+                        active_control_account_id = %active_control_auth.account_id,
+                        current_control_account_id = ?current_account_id,
+                        active_control_auth_revision = active_control_auth.revision,
+                        current_control_auth_revision = current_auth_revision,
+                        "reconnecting app-server remote control websocket after control auth changed"
+                    );
+                    break ConnectionEndReason::ControlAuthChanged;
                 }
             }
-            reconnect_generation = self.reconnect_rx.recv() => {
-                let Some(reconnect_generation) = reconnect_generation else {
-                    return ConnectionEndReason::Shutdown;
-                };
-                self.consume_reconnect_requests(
-                    reconnect_generation,
-                    "active relay connection",
-                );
-                ConnectionEndReason::ReconnectRequested
-            }
-            _ = join_set.join_next() => {
-                self.status_publisher
-                    .publish_status(RemoteControlConnectionStatus::Connecting);
-                ConnectionEndReason::ConnectionWorkerStopped
-            },
         };
         shutdown_token.cancel();
 
@@ -1355,6 +1424,7 @@ pub(super) async fn connect_remote_control_websocket(
 ) -> io::Result<(
     WebSocketStream<MaybeTlsStream<TcpStream>>,
     tungstenite::http::Response<()>,
+    ActiveControlAuth,
 )> {
     ensure_rustls_crypto_provider();
 
@@ -1397,7 +1467,14 @@ pub(super) async fn connect_remote_control_websocket(
     })?;
 
     match websocket_connect_result {
-        Ok((websocket_stream, response)) => Ok((websocket_stream, response.map(|_| ()))),
+        Ok((websocket_stream, response)) => Ok((
+            websocket_stream,
+            response.map(|_| ()),
+            ActiveControlAuth {
+                account_id: auth.account_id,
+                revision: auth.revision,
+            },
+        )),
         Err(err) => {
             match &err {
                 tungstenite::Error::Http(response)
@@ -1808,6 +1885,9 @@ mod tests {
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::connect_async;
 
+    #[path = "auth_change_tests.rs"]
+    mod auth_change_tests;
+
     // Windows Bazel CI can take longer than a few seconds for the websocket
     // client connection attempt to reach the local test listener.
     #[cfg(windows)]
@@ -2032,7 +2112,14 @@ mod tests {
         );
 
         let reason = websocket
-            .run_connection(client_websocket, shutdown_token.child_token())
+            .run_connection(
+                client_websocket,
+                shutdown_token.child_token(),
+                ActiveControlAuth {
+                    account_id: "account_id".to_string(),
+                    revision: 0,
+                },
+            )
             .await;
 
         assert!(matches!(reason, ConnectionEndReason::Disabled));
@@ -2091,6 +2178,13 @@ mod tests {
     }
 
     fn remote_control_auth_dot_json(access_token: &str) -> AuthDotJson {
+        remote_control_auth_dot_json_for_account("account_id", access_token)
+    }
+
+    fn remote_control_auth_dot_json_for_account(
+        account_id: &str,
+        access_token: &str,
+    ) -> AuthDotJson {
         #[derive(serde::Serialize)]
         struct Header {
             alg: &'static str,
@@ -2106,7 +2200,7 @@ mod tests {
             "https://api.openai.com/auth": {
                 "chatgpt_user_id": "user-12345",
                 "user_id": "user-12345",
-                "chatgpt_account_id": "account_id"
+                "chatgpt_account_id": account_id
             }
         });
         let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
@@ -2121,7 +2215,7 @@ mod tests {
                 id_token: parse_chatgpt_jwt_claims(&fake_jwt).expect("fake jwt should parse"),
                 access_token: access_token.to_string(),
                 refresh_token: "refresh-token".to_string(),
-                account_id: Some("account_id".to_string()),
+                account_id: Some(account_id.to_string()),
             }),
             last_refresh: Some(Utc::now()),
             agent_identity: None,

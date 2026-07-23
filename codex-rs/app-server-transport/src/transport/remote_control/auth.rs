@@ -11,6 +11,7 @@ use tracing::warn;
 pub(super) struct RemoteControlConnectionAuth {
     pub(super) auth_provider: SharedAuthProvider,
     pub(super) account_id: String,
+    pub(super) revision: u64,
 }
 
 pub(super) async fn load_remote_control_auth(
@@ -47,14 +48,17 @@ pub(super) async fn load_remote_control_auth(
         ));
     }
 
+    let account_id = auth.get_account_id().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::WouldBlock,
+            "remote control enrollment is waiting for a ChatGPT account id",
+        )
+    })?;
+
     Ok(RemoteControlConnectionAuth {
         auth_provider: codex_model_provider::auth_provider_from_auth(&auth),
-        account_id: auth.get_account_id().ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::WouldBlock,
-                "remote control enrollment is waiting for a ChatGPT account id",
-            )
-        })?,
+        account_id,
+        revision: auth_manager.auth_revision(),
     })
 }
 

@@ -878,6 +878,12 @@ client_request_definitions! {
         serialization: global("remote-control"),
         response: v2::RemoteControlDisableResponse,
     },
+    #[experimental("remoteControl/reconnect")]
+    RemoteControlReconnect => "remoteControl/reconnect" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: global("remote-control"),
+        response: v2::RemoteControlReconnectResponse,
+    },
     #[experimental("remoteControl/status/read")]
     RemoteControlStatusRead => "remoteControl/status/read" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
