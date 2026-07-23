@@ -54,6 +54,23 @@ impl ExecutionAccountPooling {
     }
 }
 
+/// Whether a resolved execution-account lease may write its destination account
+/// back to disk. Durable threads persist their lease so later resumes and forks
+/// can reuse the same execution account; ephemeral threads (and forks of them)
+/// may read a durable source lease but must never write a destination record of
+/// their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionAccountLeasePersistence {
+    Durable,
+    Ephemeral,
+}
+
+impl ExecutionAccountLeasePersistence {
+    fn persists(self) -> bool {
+        matches!(self, Self::Durable)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutionAccountStart {
     New,
@@ -85,6 +102,23 @@ struct ExecutionAccountConfig {
     chatgpt_base_url: String,
     allow_api_key_fallback: bool,
     pooling: ExecutionAccountPooling,
+    persistence: ExecutionAccountLeasePersistence,
+}
+
+impl ExecutionAccountConfig {
+    /// Persists the destination lease record unless this lease is ephemeral, in
+    /// which case the write is intentionally skipped.
+    fn write_lease_record(
+        &self,
+        thread_id: ThreadId,
+        account_id: Option<&str>,
+        base_cache_identity: &str,
+    ) -> io::Result<()> {
+        if !self.persistence.persists() {
+            return Ok(());
+        }
+        persist_lease_record(&self.codex_home, thread_id, account_id, base_cache_identity)
+    }
 }
 
 struct ExecutionAccount {
@@ -137,6 +171,7 @@ pub(crate) struct ExecutionAccountOptions {
     pub(crate) chatgpt_base_url: String,
     pub(crate) allow_api_key_fallback: bool,
     pub(crate) pooling: ExecutionAccountPooling,
+    pub(crate) persistence: ExecutionAccountLeasePersistence,
     pub(crate) start: ExecutionAccountStart,
 }
 
@@ -190,6 +225,7 @@ impl ExecutionAccountLease {
             chatgpt_base_url: options.chatgpt_base_url,
             allow_api_key_fallback: options.allow_api_key_fallback,
             pooling: options.pooling,
+            persistence: options.persistence,
         };
         let control_account_id = config
             .matching_control_account_id(&control_auth_manager)
@@ -307,8 +343,7 @@ impl ExecutionAccountLease {
         } else {
             control_cache_identity
         };
-        if let Err(err) = persist_lease_record(
-            &config.codex_home,
+        if let Err(err) = config.write_lease_record(
             thread_id,
             account.stored_account_id.as_deref(),
             &base_cache_identity,
@@ -489,8 +524,7 @@ impl ExecutionAccountLease {
         let identity = next.identity();
         let next_account_id = next.stored_account_id.clone();
         self.inner.current.store(next);
-        if let Err(err) = persist_lease_record(
-            &self.inner.config.codex_home,
+        if let Err(err) = self.inner.config.write_lease_record(
             self.inner.thread_id,
             next_account_id.as_deref(),
             &self.inner.base_cache_identity,
@@ -558,8 +592,7 @@ impl ExecutionAccountLease {
                 return;
             }
             self.inner.current.store(replacement);
-            if let Err(error) = persist_lease_record(
-                &self.inner.config.codex_home,
+            if let Err(error) = self.inner.config.write_lease_record(
                 self.inner.thread_id,
                 /*account_id*/ None,
                 &self.inner.base_cache_identity,
@@ -602,8 +635,7 @@ impl ExecutionAccountLease {
         }
         let account_id = replacement.stored_account_id.clone();
         self.inner.current.store(replacement);
-        if let Err(error) = persist_lease_record(
-            &self.inner.config.codex_home,
+        if let Err(error) = self.inner.config.write_lease_record(
             self.inner.thread_id,
             account_id.as_deref(),
             &self.inner.base_cache_identity,

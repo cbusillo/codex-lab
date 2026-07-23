@@ -32,6 +32,7 @@ use crate::default_skill_metadata_budget;
 use crate::environment_selection::ResolvedTurnEnvironments;
 use crate::exec_policy::ExecPolicyManager;
 use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountLeasePersistence;
 use crate::execution_account::ExecutionAccountOptions;
 use crate::execution_account::ExecutionAccountPooling;
 use crate::execution_account::ExecutionAccountStart;
@@ -492,6 +493,13 @@ async fn resolve_execution_account_for_session(
     } else {
         ExecutionAccountPooling::Disabled
     };
+    // Ephemeral threads (sub-agents and forks of them) may reuse a durable
+    // source lease but must never write a destination lease of their own.
+    let persistence = if config.ephemeral {
+        ExecutionAccountLeasePersistence::Ephemeral
+    } else {
+        ExecutionAccountLeasePersistence::Durable
+    };
     ExecutionAccountLease::resolve(
         thread_id,
         auth_manager,
@@ -502,6 +510,7 @@ async fn resolve_execution_account_for_session(
             chatgpt_base_url: config.chatgpt_base_url.clone(),
             allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
             pooling,
+            persistence,
             start,
         },
     )

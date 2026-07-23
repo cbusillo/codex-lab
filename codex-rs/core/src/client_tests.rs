@@ -12,6 +12,7 @@ use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
 use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountLeasePersistence;
 use crate::execution_account::ExecutionAccountOptions;
 use crate::execution_account::ExecutionAccountPooling;
 use crate::execution_account::ExecutionAccountStart;
@@ -171,6 +172,7 @@ async fn model_client_uses_execution_lease_auth_without_changing_control_auth() 
             chatgpt_base_url: CHATGPT_CODEX_BASE_URL.to_string(),
             allow_api_key_fallback: false,
             pooling: ExecutionAccountPooling::Disabled,
+            persistence: ExecutionAccountLeasePersistence::Durable,
             start: ExecutionAccountStart::New,
         },
     )
