@@ -480,7 +480,7 @@ impl Session {
         mut session_configuration: SessionConfiguration,
         config: Arc<Config>,
         installation_id: String,
-        auth_manager: Arc<AuthManager>,
+        control_auth_manager: Arc<AuthManager>,
         execution_account: ExecutionAccountLease,
         models_manager: SharedModelsManager,
         exec_policy: Arc<ExecPolicyManager>,
@@ -646,21 +646,31 @@ impl Session {
             session_init.ephemeral = config.ephemeral,
         ));
 
-        let auth_manager_clone = Arc::clone(&auth_manager);
+        let control_auth_manager_for_startup = Arc::clone(&control_auth_manager);
+        let execution_auth_manager = execution_account.auth_manager();
         let config_for_mcp = Arc::clone(&config);
         let mcp_manager_for_mcp = Arc::clone(&mcp_manager);
         let auth_and_mcp_fut = async move {
-            let auth = auth_manager_clone.auth().await;
+            let (control_auth, execution_auth) =
+                if Arc::ptr_eq(&control_auth_manager_for_startup, &execution_auth_manager) {
+                    let auth = control_auth_manager_for_startup.auth().await;
+                    (auth.clone(), auth)
+                } else {
+                    tokio::join!(
+                        control_auth_manager_for_startup.auth(),
+                        execution_auth_manager.auth()
+                    )
+                };
             let mcp_servers = mcp_manager_for_mcp
-                .effective_servers(&config_for_mcp, auth.as_ref())
+                .effective_servers(&config_for_mcp, execution_auth.as_ref())
                 .await;
             let auth_statuses = compute_auth_statuses(
                 mcp_servers.iter(),
                 config_for_mcp.mcp_oauth_credentials_store_mode,
-                auth.as_ref(),
+                execution_auth.as_ref(),
             )
             .await;
-            (auth, mcp_servers, auth_statuses)
+            (control_auth, execution_auth, mcp_servers, auth_statuses)
         }
         .instrument(info_span!(
             "session_init.auth_mcp",
@@ -683,7 +693,7 @@ impl Session {
         let (
             thread_persistence_result,
             state_db_ctx,
-            (auth, mcp_servers, auth_statuses),
+            (control_auth, execution_auth, mcp_servers, auth_statuses),
             plugin_skill_errors,
         ) = tokio::join!(
             thread_persistence_fut,
@@ -784,16 +794,18 @@ impl Session {
                 });
             }
 
-            let auth = auth.as_ref();
-            let auth_mode = auth.map(CodexAuth::auth_mode).map(TelemetryAuthMode::from);
-            let account_id = auth.and_then(CodexAuth::get_account_id);
-            let account_email = auth.and_then(CodexAuth::get_account_email);
+            let control_auth = control_auth.as_ref();
+            let auth_mode = control_auth
+                .map(CodexAuth::auth_mode)
+                .map(TelemetryAuthMode::from);
+            let account_id = control_auth.and_then(CodexAuth::get_account_id);
+            let account_email = control_auth.and_then(CodexAuth::get_account_email);
             let originator = originator().value;
             let terminal_type = user_agent();
             let session_model = session_configuration.collaboration_mode.model().to_string();
             let auth_env_telemetry = collect_auth_env_telemetry(
                 &session_configuration.provider,
-                auth_manager.codex_api_key_env_enabled(),
+                control_auth_manager.codex_api_key_env_enabled(),
             );
             let mut session_telemetry = SessionTelemetry::new(
                 thread_id,
@@ -976,7 +988,7 @@ impl Session {
 
             let analytics_events_client = analytics_events_client.unwrap_or_else(|| {
                 AnalyticsEventsClient::new(
-                    Arc::clone(&auth_manager),
+                    Arc::clone(&control_auth_manager),
                     config.chatgpt_base_url.trim_end_matches('/').to_string(),
                     config.analytics_enabled,
                 )
@@ -996,7 +1008,7 @@ impl Session {
             }
 
             let model_client = ModelClient::new(
-                Some(Arc::clone(&auth_manager)),
+                Some(Arc::clone(&control_auth_manager)),
                 session_id,
                 thread_id,
                 installation_id.clone(),
@@ -1045,7 +1057,7 @@ impl Session {
                 shell_snapshot_tx,
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
-                auth_manager: Arc::clone(&auth_manager),
+                auth_manager: Arc::clone(&control_auth_manager),
                 execution_account,
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
@@ -1153,7 +1165,11 @@ impl Session {
             let tool_plugin_provenance = mcp_manager.tool_plugin_provenance(config.as_ref()).await;
             let host_owned_codex_apps_enabled = config
                 .features
-                .apps_enabled_for_auth(auth.as_ref().is_some_and(|auth| auth.uses_codex_backend()));
+                .apps_enabled_for_auth(
+                    execution_auth
+                        .as_ref()
+                        .is_some_and(CodexAuth::uses_codex_backend),
+                );
             let client_elicitation_capability = if config.features.enabled(Feature::AuthElicitation) {
                 ElicitationCapability {
                     form: Some(FormElicitationCapability::default()),
@@ -1199,12 +1215,12 @@ impl Session {
                 session_configuration.permission_profile(),
                 mcp_runtime_context,
                 config.codex_home.to_path_buf(),
-                codex_apps_tools_cache_key(auth),
+                codex_apps_tools_cache_key(execution_auth.as_ref()),
                 host_owned_codex_apps_enabled,
                 config.prefix_mcp_tool_names(),
                 client_elicitation_capability,
                 tool_plugin_provenance,
-                auth,
+                execution_auth.as_ref(),
                 Some(sess.mcp_elicitation_reviewer()),
             )
             .instrument(info_span!(

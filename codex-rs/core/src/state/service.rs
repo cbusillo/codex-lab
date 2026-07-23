@@ -55,6 +55,7 @@ pub(crate) struct SessionServices {
     pub(crate) shell_snapshot_tx: watch::Sender<Option<Arc<crate::shell_snapshot::ShellSnapshot>>>,
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
+    /// Signed-in control-plane auth. Model-visible work must use `execution_account` auth.
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) execution_account: ExecutionAccountLease,
     pub(crate) models_manager: SharedModelsManager,

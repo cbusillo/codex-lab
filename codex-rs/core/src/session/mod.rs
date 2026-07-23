@@ -21,7 +21,6 @@ use crate::config::ManagedFeatures;
 use crate::config::resolve_tool_suggest_config_from_layer_stack;
 use crate::connectors;
 use crate::context::ApprovedCommandPrefixSaved;
-use crate::context::AppsInstructions;
 use crate::context::AvailablePluginsInstructions;
 use crate::context::AvailableSkillsInstructions;
 use crate::context::CollaborationModeInstructions;
@@ -204,6 +203,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::protocol::RateLimitReachedType;
 
+mod apps_context;
 mod background_auto_review;
 pub(crate) mod cargo_validation_provider;
 mod config_lock;
@@ -2880,10 +2880,6 @@ impl Session {
         }
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "MCP app context rendering reads through the session-owned manager guard"
-    )]
     pub(crate) async fn build_initial_context(
         &self,
         turn_context: &TurnContext,
@@ -2973,20 +2969,6 @@ impl Session {
             {
                 developer_sections
                     .push(PersonalitySpecInstructions::new(personality_message).render());
-            }
-        }
-        if turn_context.config.include_apps_instructions && turn_context.apps_enabled() {
-            let mcp_connection_manager = self.services.mcp_connection_manager.read().await;
-            let accessible_and_enabled_connectors =
-                connectors::list_accessible_and_enabled_connectors_from_manager(
-                    &mcp_connection_manager,
-                    &turn_context.config,
-                )
-                .await;
-            if let Some(apps_instructions) =
-                AppsInstructions::from_connectors(&accessible_and_enabled_connectors)
-            {
-                developer_sections.push(apps_instructions.render());
             }
         }
         if turn_context.config.include_skill_instructions {

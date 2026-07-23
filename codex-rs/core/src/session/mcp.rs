@@ -309,7 +309,7 @@ impl Session {
         store_mode: OAuthCredentialsStoreMode,
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
     ) {
-        let auth = self.services.auth_manager.auth().await;
+        let auth = turn_context.auth().await;
         let config = self.get_config().await;
         let mcp_config = config
             .to_mcp_config(self.services.plugins_manager.as_ref())
