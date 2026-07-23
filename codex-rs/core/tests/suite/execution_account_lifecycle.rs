@@ -225,11 +225,12 @@ fn account_model(slug: &str, service_tiers: &[&str]) -> ModelInfo {
 
 async fn mount_models_for_authorization(
     server: &MockServer,
+    models_path: &str,
     authorization: String,
     models: Vec<ModelInfo>,
 ) {
     Mock::given(method("GET"))
-        .and(path("/v1/models"))
+        .and(path(models_path))
         .and(header("authorization", authorization))
         .respond_with(
             ResponseTemplate::new(200)
@@ -805,7 +806,8 @@ async fn resumed_and_forked_threads_reuse_the_source_execution_lease() -> Result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_catalog_cache_isolated_per_execution_account_across_restart() -> Result<()> {
+async fn model_catalog_cache_isolated_per_account_and_provider_config_across_restart() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = MockServer::start().await;
@@ -853,6 +855,7 @@ async fn model_catalog_cache_isolated_per_execution_account_across_restart() -> 
 
     mount_models_for_authorization(
         &server,
+        "/v1/models",
         "Bearer access-catalog-a".to_string(),
         vec![account_model("catalog-a-model", &["priority"])],
     )
@@ -891,6 +894,7 @@ async fn model_catalog_cache_isolated_per_execution_account_across_restart() -> 
 
     mount_models_for_authorization(
         &server,
+        "/v1/models",
         "Bearer access-catalog-b".to_string(),
         vec![account_model("catalog-b-model", &[])],
     )
@@ -899,36 +903,67 @@ async fn model_catalog_cache_isolated_per_execution_account_across_restart() -> 
     let second = second_builder.build(&server).await?;
     assert_eq!(second.session_configured.model, "catalog-b-model");
     assert_eq!(second.session_configured.service_tier, None);
+    second.codex.shutdown_and_wait().await?;
 
-    let model_authorizations = server
+    mount_models_for_authorization(
+        &server,
+        "/alternate/v1/models",
+        "Bearer access-catalog-b".to_string(),
+        vec![account_model("catalog-b-alternate-model", &[])],
+    )
+    .await;
+    let alternate_base_url = format!("{}/alternate/v1", server.uri());
+    let mut third_builder = model_catalog_builder(home.clone()).with_config(move |config| {
+        config.model_provider.base_url = Some(alternate_base_url);
+    });
+    let third = third_builder.build(&server).await?;
+    assert_eq!(third.session_configured.model, "catalog-b-alternate-model");
+
+    let model_requests = server
         .received_requests()
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|request| request.method.as_str() == "GET" && request.url.path() == "/v1/models")
+        .filter(|request| {
+            request.method.as_str() == "GET" && request.url.path().ends_with("/models")
+        })
         .map(|request| {
-            request
-                .headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .expect("model catalog request should include authorization")
-                .to_string()
+            (
+                request.url.path().to_string(),
+                request
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .expect("model catalog request should include authorization")
+                    .to_string(),
+            )
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        model_authorizations,
+        model_requests,
         vec![
-            "Bearer access-catalog-a".to_string(),
-            "Bearer access-catalog-b".to_string(),
+            (
+                "/v1/models".to_string(),
+                "Bearer access-catalog-a".to_string(),
+            ),
+            (
+                "/v1/models".to_string(),
+                "Bearer access-catalog-b".to_string(),
+            ),
+            (
+                "/alternate/v1/models".to_string(),
+                "Bearer access-catalog-b".to_string(),
+            ),
         ]
     );
 
     let cached_catalogs = cached_model_catalogs(home.path())?;
-    assert_eq!(cached_catalogs.len(), 2);
+    assert_eq!(cached_catalogs.len(), 3);
     assert!(cached_catalogs.contains(&vec!["catalog-a-model".to_string()]));
     assert!(cached_catalogs.contains(&vec!["catalog-b-model".to_string()]));
+    assert!(cached_catalogs.contains(&vec!["catalog-b-alternate-model".to_string()]));
 
-    second.codex.shutdown_and_wait().await?;
+    third.codex.shutdown_and_wait().await?;
     Ok(())
 }
 

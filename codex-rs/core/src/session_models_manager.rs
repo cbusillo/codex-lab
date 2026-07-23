@@ -90,7 +90,12 @@ impl LeaseAwareModelsManager {
             Some(Arc::clone(&models_context.auth_manager)),
         );
         provider.models_manager(
-            scoped_models_cache_home(codex_home, provider_id, &models_context.cache_key),
+            scoped_models_cache_home(
+                codex_home,
+                provider_id,
+                provider.info(),
+                &models_context.cache_key,
+            ),
             config_model_catalog,
         )
     }
@@ -136,15 +141,24 @@ impl ModelsManager for LeaseAwareModelsManager {
 
 fn scoped_models_cache_home(
     codex_home: &Path,
-    provider_key: &str,
+    provider_id: &str,
+    provider: &ModelProviderInfo,
     execution_account_key: &str,
 ) -> PathBuf {
-    let provider_key = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_OID,
-        format!("codex-model-cache-provider:{provider_key}").as_bytes(),
-    )
-    .simple()
-    .to_string();
+    let provider_identity = provider.cache_identity();
+    let mut provider_key_material = Vec::with_capacity(
+        "codex-model-cache-provider:".len()
+            + provider_id.len()
+            + provider_identity.as_ref().len()
+            + 1,
+    );
+    provider_key_material.extend_from_slice(b"codex-model-cache-provider:");
+    provider_key_material.extend_from_slice(provider_id.as_bytes());
+    provider_key_material.push(0);
+    provider_key_material.extend_from_slice(provider_identity.as_ref());
+    let provider_key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &provider_key_material)
+        .simple()
+        .to_string();
     codex_home
         .join(SESSION_MODELS_CACHE_SUBDIR)
         .join(provider_key)

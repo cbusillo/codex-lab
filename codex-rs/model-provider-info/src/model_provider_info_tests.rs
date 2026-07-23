@@ -493,3 +493,39 @@ refresh_interval_ms = 0
     assert_eq!(auth.refresh_interval_ms, 0);
     assert_eq!(auth.refresh_interval(), None);
 }
+
+#[test]
+fn provider_cache_identity_is_canonical_redacted_and_config_sensitive() {
+    let mut provider = ModelProviderInfo {
+        name: "Cache provider".to_string(),
+        base_url: Some("https://one.example.test/v1".to_string()),
+        experimental_bearer_token: Some("secret-provider-token".to_string()),
+        query_params: Some(HashMap::from([
+            ("z".to_string(), "last".to_string()),
+            ("a".to_string(), "first".to_string()),
+        ])),
+        http_headers: Some(HashMap::from([
+            ("X-Z".to_string(), "last".to_string()),
+            ("X-A".to_string(), "first".to_string()),
+        ])),
+        ..ModelProviderInfo::default()
+    };
+    let identity = provider.cache_identity();
+
+    provider.query_params = Some(HashMap::from([
+        ("a".to_string(), "first".to_string()),
+        ("z".to_string(), "last".to_string()),
+    ]));
+    provider.http_headers = Some(HashMap::from([
+        ("X-A".to_string(), "first".to_string()),
+        ("X-Z".to_string(), "last".to_string()),
+    ]));
+    assert_eq!(identity, provider.cache_identity());
+    assert_eq!(
+        format!("{identity:?}"),
+        "ModelProviderCacheIdentity([redacted])"
+    );
+
+    provider.base_url = Some("https://two.example.test/v1".to_string());
+    assert_ne!(identity, provider.cache_identity());
+}

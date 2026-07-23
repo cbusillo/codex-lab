@@ -19,6 +19,9 @@ use http::header::HeaderValue;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
@@ -145,6 +148,26 @@ pub struct ModelProviderInfo {
     pub supports_websockets: bool,
 }
 
+/// One-way identity for canonical provider configuration and credential fields.
+///
+/// The identity includes request-shaping fields and resolved environment-backed credentials so
+/// provider configurations or accounts that can expose different model catalogs do not share a
+/// cache. Its debug representation is deliberately redacted even though the digest is one-way.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ModelProviderCacheIdentity([u8; 32]);
+
+impl AsRef<[u8]> for ModelProviderCacheIdentity {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ModelProviderCacheIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ModelProviderCacheIdentity([redacted])")
+    }
+}
+
 /// AWS SigV4 auth configuration for a model provider.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -156,6 +179,36 @@ pub struct ModelProviderAwsAuthInfo {
 }
 
 impl ModelProviderInfo {
+    pub fn cache_identity(&self) -> ModelProviderCacheIdentity {
+        let provider = serde_json::to_value(self)
+            .unwrap_or_else(|error| serde_json::Value::String(error.to_string()));
+        let resolved_env_key = self
+            .env_key
+            .as_deref()
+            .and_then(std::env::var_os)
+            .map(|value| value.to_string_lossy().into_owned());
+        let resolved_env_headers = self
+            .env_http_headers
+            .iter()
+            .flat_map(|headers| headers.iter())
+            .map(|(header, env_var)| {
+                (
+                    header.clone(),
+                    std::env::var_os(env_var).map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let identity = serde_json::json!({
+            "schema": "model-provider-cache-v1",
+            "provider": provider,
+            "resolvedEnvKey": resolved_env_key,
+            "resolvedEnvHeaders": resolved_env_headers,
+        });
+        let mut digest = Sha256::new();
+        hash_canonical_json(&mut digest, &identity);
+        ModelProviderCacheIdentity(digest.finalize().into())
+    }
+
     pub fn validate(&self) -> std::result::Result<(), String> {
         if self.aws.is_some() {
             if self.supports_websockets {
@@ -420,6 +473,47 @@ impl ModelProviderInfo {
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
     }
+}
+
+fn hash_canonical_json(digest: &mut Sha256, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => digest.update(b"n"),
+        serde_json::Value::Bool(value) => {
+            digest.update(b"b");
+            digest.update(if *value { &b"true"[..] } else { &b"false"[..] });
+        }
+        serde_json::Value::Number(value) => {
+            digest.update(b"d");
+            digest.update(value.to_string().as_bytes());
+        }
+        serde_json::Value::String(value) => {
+            digest.update(b"s");
+            hash_canonical_len(digest, value.len());
+            digest.update(value.as_bytes());
+        }
+        serde_json::Value::Array(values) => {
+            digest.update(b"a");
+            hash_canonical_len(digest, values.len());
+            for value in values {
+                hash_canonical_json(digest, value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            digest.update(b"o");
+            hash_canonical_len(digest, values.len());
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(left, _)| *left);
+            for (key, value) in entries {
+                hash_canonical_len(digest, key.len());
+                digest.update(key.as_bytes());
+                hash_canonical_json(digest, value);
+            }
+        }
+    }
+}
+
+fn hash_canonical_len(digest: &mut Sha256, len: usize) {
+    digest.update(u64::try_from(len).unwrap_or(u64::MAX).to_be_bytes());
 }
 
 pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;

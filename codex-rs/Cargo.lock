@@ -3541,6 +3541,8 @@ dependencies = [
  "pretty_assertions",
  "schemars 0.8.22",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "toml 0.9.11+spec-1.1.0",
 ]

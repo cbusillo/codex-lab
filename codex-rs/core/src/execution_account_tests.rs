@@ -851,3 +851,34 @@ async fn persisted_api_key_cache_identity_never_contains_the_raw_key() {
     assert!(!contents.contains(api_key));
     assert!(contents.contains("credential:"));
 }
+
+#[tokio::test]
+async fn codex_apps_auth_provider_fails_closed_after_api_key_identity_transition() {
+    let (codex_home, control_manager, control, _execution) = test_accounts().await;
+    let lease = ExecutionAccountLease::resolve(
+        ThreadId::new(),
+        control_manager,
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Disabled,
+            ExecutionAccountStart::New,
+        ),
+    )
+    .await;
+    assert_eq!(lease.identity().stored_account_id, Some(control.id));
+
+    let auth_provider = lease.codex_apps_auth_provider(lease.cache_identity());
+    assert_eq!(
+        auth_provider
+            .to_auth_headers()
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer access-control")
+    );
+
+    lease.replace_auth_manager_for_testing(AuthManager::from_auth_for_testing(
+        CodexAuth::from_api_key("sk-must-not-reach-apps"),
+    ));
+
+    assert!(auth_provider.to_auth_headers().is_empty());
+}
