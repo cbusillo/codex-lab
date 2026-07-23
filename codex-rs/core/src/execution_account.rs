@@ -168,6 +168,13 @@ impl ExecutionAccountLease {
                 warn!("failed to resolve active control catalog account: {error}");
                 None
             });
+        if config.pooling.is_enabled()
+            && !control_auth_manager
+                .auth_mode()
+                .is_some_and(AuthMode::has_chatgpt_account)
+        {
+            config.pooling = ExecutionAccountPooling::Disabled;
+        }
         if config.pooling.is_enabled() && control_account_id.is_none() {
             config.pooling = ExecutionAccountPooling::Disabled;
         }

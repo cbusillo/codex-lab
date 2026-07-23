@@ -414,6 +414,102 @@ async fn pooled_execution_requires_control_to_match_active_catalog_account() {
 }
 
 #[tokio::test]
+async fn api_key_control_account_does_not_pool_chatgpt_accounts_for_any_start() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let control = codex_login::upsert_api_key_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        "sk-control".to_string(),
+        Some("Control API key".to_string()),
+        /*make_active*/ true,
+    )
+    .expect("store control api key account");
+    let execution = codex_login::upsert_chatgpt_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        chatgpt_tokens("execution"),
+        Utc::now(),
+        Some("Execution ChatGPT".to_string()),
+        /*make_active*/ false,
+    )
+    .expect("store execution ChatGPT account");
+    let (_account, control_auth) = codex_login::auth_for_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        &control.id,
+    )
+    .expect("control api key auth");
+    save_auth(
+        codex_home.path(),
+        &control_auth,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("save control api key auth");
+    let control_manager = Arc::new(
+        AuthManager::new(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*chatgpt_base_url*/ None,
+        )
+        .await,
+    );
+    assert_eq!(control_manager.auth_mode(), Some(AuthMode::ApiKey));
+    assert_eq!(
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)
+            .expect("active account"),
+        Some(control.id.clone())
+    );
+
+    let resumed_thread_id = ThreadId::new();
+    persist_lease(codex_home.path(), resumed_thread_id, &execution.id)
+        .expect("persist resumed ChatGPT lease");
+    let source_thread_id = ThreadId::new();
+    persist_lease(codex_home.path(), source_thread_id, &execution.id)
+        .expect("persist fork source ChatGPT lease");
+    let new_thread_id = ThreadId::new();
+    let cleared_thread_id = ThreadId::new();
+    let forked_thread_id = ThreadId::new();
+
+    for (thread_id, start) in [
+        (new_thread_id, ExecutionAccountStart::New),
+        (cleared_thread_id, ExecutionAccountStart::Cleared),
+        (resumed_thread_id, ExecutionAccountStart::Resumed),
+        (
+            forked_thread_id,
+            ExecutionAccountStart::Forked {
+                source_thread_id: Some(source_thread_id),
+            },
+        ),
+    ] {
+        let mut resolve_options =
+            options(codex_home.path(), ExecutionAccountPooling::Enabled, start);
+        resolve_options.allow_api_key_fallback = true;
+        let lease = ExecutionAccountLease::resolve(
+            thread_id,
+            Arc::clone(&control_manager),
+            resolve_options,
+        )
+        .await;
+
+        assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
+        assert_eq!(lease.identity().mode, AuthMode::ApiKey);
+        assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+        assert_eq!(lease.prompt_cache_discriminator(), None);
+    }
+
+    assert_eq!(read_persisted_lease(codex_home.path(), new_thread_id), None);
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), cleared_thread_id),
+        None
+    );
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), forked_thread_id),
+        None
+    );
+}
+
+#[tokio::test]
 async fn execution_auth_revision_is_strictly_monotonic_across_replacements() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let control_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-control"));
