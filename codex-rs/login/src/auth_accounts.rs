@@ -727,7 +727,7 @@ pub fn activate_account(
     account_id: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> io::Result<StoredAccount> {
-    commit_active_account(codex_home, account_id, auth_credentials_store_mode)
+    commit_stored_active_account(codex_home, account_id, auth_credentials_store_mode)
 }
 
 fn restore_previous_auth(
@@ -742,7 +742,22 @@ fn restore_previous_auth(
     }
 }
 
+/// Compatibility wrapper for callers that previously supplied the account's
+/// credentials while activating it.
+///
+/// The stored account remains authoritative so stale caller-provided
+/// credentials cannot be committed under a different account identity.
+#[deprecated(note = "use activate_account; stored account credentials are authoritative")]
 pub fn commit_active_account(
+    codex_home: &Path,
+    account_id: &str,
+    _auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<StoredAccount> {
+    commit_stored_active_account(codex_home, account_id, auth_credentials_store_mode)
+}
+
+fn commit_stored_active_account(
     codex_home: &Path,
     account_id: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,

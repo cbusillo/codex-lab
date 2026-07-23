@@ -124,7 +124,15 @@ async fn initialize_codex_backend_does_not_override_originator() -> Result<()> {
     };
     let InitializeResponse { user_agent, .. } = to_response::<InitializeResponse>(response)?;
 
-    assert!(user_agent.starts_with("codex_cli_rs/"));
+    let expected_user_agent = get_codex_app_server_user_agent();
+    let expected_identity = expected_user_agent
+        .split_whitespace()
+        .next()
+        .expect("app-server user agent should contain an identity");
+    assert_eq!(
+        user_agent.split_whitespace().next(),
+        Some(expected_identity)
+    );
     Ok(())
 }
 
@@ -397,10 +405,16 @@ fn toml_basic_string(value: &str) -> String {
 
 fn assert_valid_server_build(server_build: Option<ServerBuildInfo>) {
     let server_build = server_build.expect("new app-server should send serverBuild");
-    assert_eq!(server_build.schema_version, 1);
-    assert_eq!(server_build.version, codex_version::CODE_VERSION);
-    assert!(!server_build.source_commit.is_empty());
-    assert!(!server_build.dirty_state.is_empty());
-    assert!(!server_build.build_profile.is_empty());
-    assert!(!server_build.build_channel.is_empty());
+    let provenance = codex_version::build_provenance();
+    assert_eq!(
+        server_build,
+        ServerBuildInfo {
+            schema_version: provenance.schema_version,
+            version: provenance.version,
+            source_commit: provenance.source_commit,
+            dirty_state: provenance.dirty_state.as_str().to_string(),
+            build_profile: provenance.build_profile,
+            build_channel: provenance.build_channel,
+        }
+    );
 }

@@ -30,6 +30,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::user_input::UserInput;
+use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -454,6 +455,152 @@ async fn api_key_fallback_serves_turns_when_all_chatgpt_accounts_are_limited() -
             .iter()
             .all(|request| request.url.path() != "/api/codex/apps"),
         "API-key fallback unexpectedly attempted an Apps MCP handshake"
+    );
+
+    assert_eq!(
+        lease_account_id(home.path(), thread_id)?,
+        api_key_account.id
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
+        Some(control.id)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_chatgpt_429_falls_back_to_api_key_without_apps_on_retry() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let apps_server = AppsTestServer::mount(&server).await?;
+    let home = Arc::new(TempDir::new()?);
+    let control = add_chatgpt_account(
+        home.path(),
+        "account_id",
+        "Control",
+        /*make_active*/ true,
+    )?;
+    let api_key = "sk-api-fallback";
+    let api_key_account = add_api_key_account(home.path(), api_key)?;
+
+    for authorization in ["Bearer Access Token", "Bearer sk-api-fallback"] {
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", authorization))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                bundled_models_response().expect("bundled model catalog should load"),
+            ))
+            .up_to_n_times(4)
+            .mount(&server)
+            .await;
+    }
+
+    let now = Utc::now();
+    let usage_limit_response = ResponseTemplate::new(429).set_body_json(json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "limit reached",
+            "resets_at": (now + Duration::hours(2)).timestamp(),
+            "plan_type": "pro",
+        }
+    }));
+    let recovered_response = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(sse(vec![
+            ev_assistant_message("msg-api-fallback", "served by api key"),
+            ev_completed("resp-api-fallback"),
+        ]));
+    let response_mock =
+        mount_response_sequence(&server, vec![usage_limit_response, recovered_response]).await;
+
+    let apps_base_url = apps_server.chatgpt_base_url.clone();
+    let mut builder = execution_account_builder(home.clone()).with_config(move |config| {
+        config.api_key_fallback_on_all_accounts_limited = true;
+        config.model = Some("gpt-5.4".to_string());
+        config.chatgpt_base_url = apps_base_url;
+        config
+            .features
+            .enable(Feature::Apps)
+            .expect("test config should enable Apps");
+        config
+            .features
+            .disable(Feature::ToolSuggest)
+            .expect("test config should disable ToolSuggest");
+    });
+    let fixture = builder.build(&server).await?;
+    let thread_id = fixture.session_configured.thread_id;
+    assert_eq!(lease_account_id(home.path(), thread_id)?, control.id);
+
+    submit_text(&fixture.codex, "retry through the API-key fallback").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer Access Token".to_string())
+    );
+    assert_eq!(
+        requests[0].header("chatgpt-account-id"),
+        Some("account_id".to_string())
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some(format!("Bearer {api_key}"))
+    );
+    assert_eq!(requests[1].header("chatgpt-account-id"), None);
+    assert_eq!(
+        requests[0].body_json()["prompt_cache_key"],
+        thread_id.to_string()
+    );
+    assert_eq!(
+        requests[1].body_json()["prompt_cache_key"],
+        format!("{thread_id}:{}", api_key_account.id)
+    );
+
+    let initial_developer_text = requests[0].message_input_texts("developer").join("\n");
+    assert!(initial_developer_text.contains("<apps_instructions>"));
+    assert!(
+        requests[0].body_json()["tools"]
+            .to_string()
+            .contains("mcp__codex_apps__")
+    );
+    let retry_developer_text = requests[1].message_input_texts("developer").join("\n");
+    assert_eq!(
+        retry_developer_text.matches("<apps_instructions>").count(),
+        1
+    );
+    assert!(retry_developer_text.contains("<apps_update>"));
+    assert!(retry_developer_text.contains("state: unavailable"));
+    assert!(
+        !requests[1].body_json()["tools"]
+            .to_string()
+            .contains("mcp__codex_apps__")
+    );
+
+    let received_requests = server.received_requests().await.unwrap_or_default();
+    let first_model_request_index = received_requests
+        .iter()
+        .position(|request| request.url.path() == "/v1/responses")
+        .expect("initial model request should be recorded");
+    let initial_apps_requests = received_requests[..first_model_request_index]
+        .iter()
+        .filter(|request| request.url.path() == "/api/codex/apps")
+        .collect::<Vec<_>>();
+    assert!(!initial_apps_requests.is_empty());
+    assert!(initial_apps_requests.iter().all(|request| {
+        request
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            == Some("Bearer Access Token")
+    }));
+    assert!(
+        received_requests[first_model_request_index + 1..]
+            .iter()
+            .all(|request| request.url.path() != "/api/codex/apps"),
+        "API-key retry unexpectedly attempted an Apps MCP handshake"
     );
 
     assert_eq!(
@@ -1053,12 +1200,14 @@ async fn model_catalog_refresh_after_401_uses_refreshed_execution_auth() -> Resu
     // refresh must be served only to the refreshed execution token.
     mount_models_for_authorization(
         &server,
+        "/v1/models",
         stale_authorization.clone(),
         vec![account_model("catalog-exec", &["priority"])],
     )
     .await;
     mount_models_for_authorization(
         &server,
+        "/v1/models",
         refreshed_authorization.clone(),
         vec![account_model("catalog-exec-refreshed", &["priority"])],
     )
