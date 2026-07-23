@@ -72,6 +72,7 @@ pub use auth_accounts::set_active_account_id;
 pub use auth_accounts::update_account_last_refresh;
 pub use auth_accounts::upsert_api_key_account;
 pub use auth_accounts::upsert_chatgpt_account;
+pub use auth_accounts::upsert_inactive_chatgpt_account;
 pub use auth_env_telemetry::AuthEnvTelemetry;
 pub use auth_env_telemetry::collect_auth_env_telemetry;
 pub use auth_profiles::AuthProfileEntry;

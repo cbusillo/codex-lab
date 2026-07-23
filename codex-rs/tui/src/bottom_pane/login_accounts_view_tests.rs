@@ -15,6 +15,21 @@ fn app_event_sender() -> AppEventSender {
     AppEventSender::new(tx)
 }
 
+#[test]
+fn keyring_auth_is_not_mirrored_to_plaintext_account_catalog() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+
+    assert_eq!(
+        sync_account_store_from_auth(
+            codex_home.path(),
+            /*default_auth_home_is_current*/ true,
+            codex_config::types::AuthCredentialsStoreMode::Keyring,
+        ),
+        None
+    );
+    assert!(!codex_home.path().join("auth_accounts.json").exists());
+}
+
 fn app_event_sender_with_rx() -> (
     AppEventSender,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,

@@ -21,11 +21,14 @@ use codex_login::profile_home;
 use codex_login::record_auth_profile_login;
 use codex_login::run_device_code_login;
 use codex_login::run_login_server;
+use codex_login::upsert_api_key_account;
+use codex_login::upsert_inactive_chatgpt_account;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_utils_cli::CliConfigOverrides;
 use std::fs::OpenOptions;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::path::Path;
 use std::path::PathBuf;
 use tracing_appender::non_blocking;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -65,6 +68,17 @@ fn profile_suffix(target: &LoginTarget) -> String {
         String::new()
     } else {
         format!(" for {}", target.label())
+    }
+}
+
+fn login_success_message(target: &LoginTarget) -> String {
+    if target.is_default() {
+        LOGIN_SUCCESS_MESSAGE.to_string()
+    } else {
+        format!(
+            "Successfully logged in to {}; the GUI control account was not changed",
+            target.label()
+        )
     }
 }
 
@@ -113,12 +127,54 @@ async fn record_profile_after_login(config: &Config, target: &LoginTarget) -> st
         return Ok(());
     }
     match load_auth_for_target(config, target).await? {
-        Some(auth) => note_profile_login(config, target, &auth),
+        Some(auth) => {
+            sync_profile_account_to_pool(
+                &config.codex_home,
+                config.cli_auth_credentials_store_mode,
+                &auth,
+            )?;
+            note_profile_login(config, target, &auth)
+        }
         None => Err(std::io::Error::other(format!(
             "login completed but no credentials were stored for {}",
             target.label()
         ))),
     }
+}
+
+fn sync_profile_account_to_pool(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth: &CodexAuth,
+) -> std::io::Result<()> {
+    if auth_credentials_store_mode != AuthCredentialsStoreMode::File {
+        return Ok(());
+    }
+    match auth.auth_mode() {
+        AuthMode::ApiKey => {
+            let api_key = auth
+                .api_key()
+                .ok_or_else(|| std::io::Error::other("profile API key is unavailable"))?;
+            upsert_api_key_account(
+                codex_home,
+                auth_credentials_store_mode,
+                api_key.to_string(),
+                /*label*/ None,
+                /*make_active*/ false,
+            )?;
+        }
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
+            upsert_inactive_chatgpt_account(
+                codex_home,
+                auth_credentials_store_mode,
+                auth.get_token_data()?,
+                std::time::SystemTime::now().into(),
+                auth.get_account_email(),
+            )?;
+        }
+        AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => {}
+    }
+    Ok(())
 }
 
 /// Installs a small file-backed tracing layer for direct `codex login` flows.
@@ -238,10 +294,10 @@ pub async fn run_login_with_chatgpt(
     {
         Ok(_) => {
             if let Err(err) = record_profile_after_login(&config, &target).await {
-                eprintln!("Error updating auth profile metadata: {err}");
+                eprintln!("Error updating auth profile account data: {err}");
                 std::process::exit(1);
             }
-            eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+            eprintln!("{}", login_success_message(&target));
             std::process::exit(0);
         }
         Err(e) => {
@@ -274,10 +330,10 @@ pub async fn run_login_with_api_key(
     ) {
         Ok(_) => {
             if let Err(err) = record_profile_after_login(&config, &target).await {
-                eprintln!("Error updating auth profile metadata: {err}");
+                eprintln!("Error updating auth profile account data: {err}");
                 std::process::exit(1);
             }
-            eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+            eprintln!("{}", login_success_message(&target));
             std::process::exit(0);
         }
         Err(e) => {
@@ -313,10 +369,10 @@ pub async fn run_login_with_access_token(
     {
         Ok(_) => {
             if let Err(err) = record_profile_after_login(&config, &target).await {
-                eprintln!("Error updating auth profile metadata: {err}");
+                eprintln!("Error updating auth profile account data: {err}");
                 std::process::exit(1);
             }
-            eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+            eprintln!("{}", login_success_message(&target));
             std::process::exit(0);
         }
         Err(e) => {
@@ -395,10 +451,10 @@ pub async fn run_login_with_device_code(
     match run_device_code_login(opts).await {
         Ok(()) => {
             if let Err(err) = record_profile_after_login(&config, &target).await {
-                eprintln!("Error updating auth profile metadata: {err}");
+                eprintln!("Error updating auth profile account data: {err}");
                 std::process::exit(1);
             }
-            eprintln!("{LOGIN_SUCCESS_MESSAGE}");
+            eprintln!("{}", login_success_message(&target));
             std::process::exit(0);
         }
         Err(e) => {
@@ -560,7 +616,16 @@ fn safe_format_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::LoginTarget;
+    use super::login_success_message;
     use super::safe_format_key;
+    use super::sync_profile_account_to_pool;
+    use codex_config::types::AuthCredentialsStoreMode;
+    use codex_login::CodexAuth;
+    use codex_login::get_active_account_id;
+    use codex_login::list_accounts;
+    use codex_login::upsert_api_key_account;
+    use std::path::PathBuf;
 
     #[test]
     fn formats_long_key() {
@@ -572,5 +637,64 @@ mod tests {
     fn short_key_returns_stars() {
         let key = "sk-proj-12345";
         assert_eq!(safe_format_key(key), "***");
+    }
+
+    #[test]
+    fn profile_login_updates_pool_without_changing_active_account() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let active = upsert_api_key_account(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            "sk-control".to_string(),
+            /*label*/ None,
+            /*make_active*/ true,
+        )
+        .expect("store active account");
+
+        sync_profile_account_to_pool(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            &CodexAuth::from_api_key("sk-profile"),
+        )
+        .expect("sync profile account");
+
+        assert_eq!(
+            get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)
+                .expect("read active account"),
+            Some(active.id)
+        );
+        assert_eq!(
+            list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)
+                .expect("list accounts")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn profile_login_does_not_create_plaintext_pool_for_keyring_auth() {
+        let codex_home = tempfile::tempdir().expect("tempdir");
+
+        sync_profile_account_to_pool(
+            codex_home.path(),
+            AuthCredentialsStoreMode::Keyring,
+            &CodexAuth::from_api_key("sk-profile"),
+        )
+        .expect("skip profile pool sync");
+
+        assert!(!codex_home.path().join("auth_accounts.json").exists());
+    }
+
+    #[test]
+    fn profile_login_message_explains_control_account_is_unchanged() {
+        let target = LoginTarget {
+            codex_home: PathBuf::from("unused"),
+            profile: Some("Main".to_string()),
+        };
+
+        assert_eq!(
+            login_success_message(&target),
+            "Successfully logged in to profile `Main`; the GUI control account was not changed"
+        );
     }
 }
