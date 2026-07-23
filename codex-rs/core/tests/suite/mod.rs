@@ -51,6 +51,7 @@ mod deprecation_notice;
 mod exec;
 mod exec_policy;
 mod execution_account_apps;
+mod execution_account_lifecycle;
 mod external_agent_preflight;
 mod fork_thread;
 #[cfg(not(target_os = "windows"))]
