@@ -22,6 +22,7 @@ use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::RemoveAccountStatus;
 use codex_cloud_config::cloud_config_bundle_loader_for_storage;
 use codex_config::CloudConfigBundleLoader;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::CLIENT_ID;
 use codex_login::ServerOptions;
 use tokio_util::sync::CancellationToken;
@@ -877,13 +878,13 @@ impl App {
             }
             return Err(err);
         }
-        if let Some(previous_ui) = previous_ui {
-            if let Some(previous_app_server) = previous_app_server_for_cleanup {
-                previous_ui
-                    .discard_previous_threads(previous_app_server)
-                    .await;
-                self.backtrack.pending_rollback = None;
-            }
+        if let Some(previous_ui) = previous_ui
+            && let Some(previous_app_server) = previous_app_server_for_cleanup
+        {
+            previous_ui
+                .discard_previous_threads(previous_app_server)
+                .await;
+            self.backtrack.pending_rollback = None;
         }
         self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
@@ -1538,18 +1539,17 @@ impl App {
                 }
             }
 
-            if needs_session_restart {
-                if let Err(err) = self
+            if needs_session_restart
+                && let Err(err) = self
                     .restart_default_auth_session_after_account_removal(
                         tui,
                         app_server,
                         &selection.label,
                     )
                     .await
-                {
-                    self.chat_widget.add_error_message(err);
-                    return;
-                }
+            {
+                self.chat_widget.add_error_message(err);
+                return;
             }
         }
 
@@ -1654,7 +1654,8 @@ impl App {
                 request_id: app_server.next_request_id(),
                 params: LoginAccountParams::Chatgpt {
                     codex_streamlined_login: false,
-                    preserve_existing_account: true,
+                    preserve_existing_account: self.config.cli_auth_credentials_store_mode
+                        == AuthCredentialsStoreMode::File,
                 },
             })
             .await;
@@ -1778,7 +1779,8 @@ impl App {
             .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                 request_id: app_server.next_request_id(),
                 params: LoginAccountParams::ChatgptDeviceCode {
-                    preserve_existing_account: true,
+                    preserve_existing_account: self.config.cli_auth_credentials_store_mode
+                        == AuthCredentialsStoreMode::File,
                 },
             })
             .await;
@@ -1832,12 +1834,22 @@ impl App {
     }
 
     async fn start_default_store_login_add_account_device_code(&mut self) {
-        let opts = ServerOptions::new_for_add_account(
-            self.config.codex_home.to_path_buf(),
-            CLIENT_ID.to_string(),
-            self.config.forced_chatgpt_workspace_id.clone(),
-            self.config.cli_auth_credentials_store_mode,
-        );
+        let opts = if self.config.cli_auth_credentials_store_mode == AuthCredentialsStoreMode::File
+        {
+            ServerOptions::new_for_add_account(
+                self.config.codex_home.to_path_buf(),
+                CLIENT_ID.to_string(),
+                self.config.forced_chatgpt_workspace_id.clone(),
+                self.config.cli_auth_credentials_store_mode,
+            )
+        } else {
+            ServerOptions::new(
+                self.config.codex_home.to_path_buf(),
+                CLIENT_ID.to_string(),
+                self.config.forced_chatgpt_workspace_id.clone(),
+                self.config.cli_auth_credentials_store_mode,
+            )
+        };
 
         let device_code = match codex_login::request_device_code(&opts).await {
             Ok(device_code) => device_code,
@@ -1880,10 +1892,9 @@ impl App {
                 verification_url,
                 user_code,
             },
-        ) {
-            if let Some(pending) = self.pending_direct_login_add_account.take() {
-                pending.cancellation.cancel();
-            }
+        ) && let Some(pending) = self.pending_direct_login_add_account.take()
+        {
+            pending.cancellation.cancel();
         }
     }
 
@@ -1913,14 +1924,25 @@ impl App {
     }
 
     async fn start_default_store_login_add_account_chatgpt(&mut self) {
+        let server_options =
+            if self.config.cli_auth_credentials_store_mode == AuthCredentialsStoreMode::File {
+                ServerOptions::new_for_add_account(
+                    self.config.codex_home.to_path_buf(),
+                    CLIENT_ID.to_string(),
+                    self.config.forced_chatgpt_workspace_id.clone(),
+                    self.config.cli_auth_credentials_store_mode,
+                )
+            } else {
+                ServerOptions::new(
+                    self.config.codex_home.to_path_buf(),
+                    CLIENT_ID.to_string(),
+                    self.config.forced_chatgpt_workspace_id.clone(),
+                    self.config.cli_auth_credentials_store_mode,
+                )
+            };
         let opts = ServerOptions {
             open_browser: false,
-            ..ServerOptions::new_for_add_account(
-                self.config.codex_home.to_path_buf(),
-                CLIENT_ID.to_string(),
-                self.config.forced_chatgpt_workspace_id.clone(),
-                self.config.cli_auth_credentials_store_mode,
-            )
+            ..server_options
         };
 
         let server = match codex_login::run_login_server(opts) {
@@ -1959,10 +1981,9 @@ impl App {
                 login_id: "default-store".to_string(),
                 auth_url,
             })
+            && let Some(pending) = self.pending_direct_login_add_account.take()
         {
-            if let Some(pending) = self.pending_direct_login_add_account.take() {
-                pending.cancellation.cancel();
-            }
+            pending.cancellation.cancel();
         }
     }
 
