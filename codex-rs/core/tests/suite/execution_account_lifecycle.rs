@@ -17,6 +17,7 @@ use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_login::StoredAccount;
 use codex_login::TokenData;
+use codex_login::auth::save_auth;
 use codex_login::token_data::IdTokenInfo;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::ThreadId;
@@ -340,6 +341,18 @@ async fn startup_and_failover_prefer_the_soonest_active_chatgpt_window() -> Resu
         requests[1].header("authorization"),
         Some("Bearer access-secondary-candidate".to_string())
     );
+    assert_eq!(
+        requests[0].body_json()["prompt_cache_key"],
+        thread_id.to_string()
+    );
+    assert_eq!(
+        requests[1].body_json()["prompt_cache_key"],
+        format!("{thread_id}:{}", secondary_candidate.id)
+    );
+    assert_ne!(
+        requests[0].body_json()["prompt_cache_key"],
+        requests[1].body_json()["prompt_cache_key"]
+    );
     assert!(
         requests.iter().all(|request| {
             request.header("authorization") != Some(format!("Bearer {api_key}"))
@@ -352,6 +365,79 @@ async fn startup_and_failover_prefer_the_soonest_active_chatgpt_window() -> Resu
     assert_eq!(
         codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
         Some(control.id)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_cache_key_survives_control_switch_detach_and_reattach() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let control = add_chatgpt_account(
+        home.path(),
+        "account_id",
+        "Control",
+        /*make_active*/ true,
+    )?;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+            sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+            sse(vec![ev_response_created("resp-3"), ev_completed("resp-3")]),
+        ],
+    )
+    .await;
+    let mut builder = execution_account_builder(home.clone());
+    let fixture = builder.build(&server).await?;
+    let thread_id = fixture.session_configured.thread_id;
+    submit_text(&fixture.codex, "before control switch").await?;
+
+    let alternate = add_chatgpt_account(
+        home.path(),
+        "alternate-control",
+        "Alternate control",
+        /*make_active*/ false,
+    )?;
+    let (_account, alternate_auth) =
+        codex_login::auth_for_account(home.path(), AuthCredentialsStoreMode::File, &alternate.id)?;
+    save_auth(home.path(), &alternate_auth, AuthCredentialsStoreMode::File)?;
+    codex_login::set_active_account_id(
+        home.path(),
+        AuthCredentialsStoreMode::File,
+        Some(alternate.id),
+    )?;
+    fixture
+        .thread_manager
+        .reload_auth_for_loaded_threads()
+        .await;
+    submit_text(&fixture.codex, "while detached").await?;
+
+    let (_account, control_auth) =
+        codex_login::auth_for_account(home.path(), AuthCredentialsStoreMode::File, &control.id)?;
+    save_auth(home.path(), &control_auth, AuthCredentialsStoreMode::File)?;
+    codex_login::set_active_account_id(
+        home.path(),
+        AuthCredentialsStoreMode::File,
+        Some(control.id),
+    )?;
+    fixture
+        .thread_manager
+        .reload_auth_for_loaded_threads()
+        .await;
+    submit_text(&fixture.codex, "after reattach").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.body_json()["prompt_cache_key"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(thread_id.to_string()); 3]
     );
 
     Ok(())
@@ -466,12 +552,24 @@ async fn resumed_and_forked_threads_reuse_the_source_execution_lease() -> Result
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 3);
-    for request in requests {
+    for request in &requests {
         assert_eq!(
             request.header("authorization"),
             Some("Bearer access-execution".to_string())
         );
     }
+    assert_eq!(
+        requests[0].body_json()["prompt_cache_key"],
+        format!("{source_thread_id}:{}", execution.id)
+    );
+    assert_eq!(
+        requests[1].body_json()["prompt_cache_key"],
+        requests[0].body_json()["prompt_cache_key"]
+    );
+    assert_eq!(
+        requests[2].body_json()["prompt_cache_key"],
+        format!("{forked_thread_id}:{}", execution.id)
+    );
 
     resumed.codex.shutdown_and_wait().await?;
     forked.shutdown_and_wait().await?;
