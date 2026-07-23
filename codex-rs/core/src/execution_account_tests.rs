@@ -230,7 +230,7 @@ async fn usage_limit_failover_changes_only_execution_lease() {
 }
 
 #[tokio::test]
-async fn pooled_execution_lease_is_isolated_from_control_account_switch() {
+async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
     let (codex_home, control_manager, control, execution) = test_accounts().await;
     let thread_id = ThreadId::default();
     persist_lease(codex_home.path(), thread_id, &control.id).expect("persist control lease");
@@ -241,7 +241,7 @@ async fn pooled_execution_lease_is_isolated_from_control_account_switch() {
     )
     .await;
     assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
-    assert!(!Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
 
     let (_account, execution_auth) = codex_login::auth_for_account(
         codex_home.path(),
@@ -263,6 +263,7 @@ async fn pooled_execution_lease_is_isolated_from_control_account_switch() {
     .expect("switch control account");
 
     lease.prepare_for_control_auth_reload().await;
+    assert!(!Arc::ptr_eq(&lease.auth_manager(), &control_manager));
     control_manager.reload().await;
     lease.reconcile_after_control_auth_reload().await;
 
@@ -272,7 +273,7 @@ async fn pooled_execution_lease_is_isolated_from_control_account_switch() {
             .and_then(|auth| auth.get_account_id()),
         Some("execution".to_string())
     );
-    assert_eq!(lease.identity().stored_account_id, Some(control.id));
+    assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
     assert_eq!(
         lease
             .auth_manager()
@@ -280,4 +281,30 @@ async fn pooled_execution_lease_is_isolated_from_control_account_switch() {
             .and_then(|auth| auth.get_account_id()),
         Some("control".to_string())
     );
+
+    let (_account, control_auth) = codex_login::auth_for_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        &control.id,
+    )
+    .expect("control auth");
+    save_auth(
+        codex_home.path(),
+        &control_auth,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("restore control auth");
+    codex_login::set_active_account_id(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        Some(control.id.clone()),
+    )
+    .expect("restore control account");
+
+    lease.prepare_for_control_auth_reload().await;
+    control_manager.reload().await;
+    lease.reconcile_after_control_auth_reload().await;
+
+    assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(lease.identity().stored_account_id, Some(control.id));
 }

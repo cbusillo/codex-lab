@@ -452,7 +452,9 @@ impl CodexAuth {
         match self {
             Self::AgentIdentity(auth) => Some(auth.account_id().to_string()),
             Self::PersonalAccessToken(auth) => Some(auth.account_id().to_string()),
-            _ => self.get_current_token_data().and_then(|t| t.account_id),
+            _ => self
+                .get_current_token_data()
+                .and_then(|tokens| tokens.account_id.or(tokens.id_token.chatgpt_account_id)),
         }
     }
 
