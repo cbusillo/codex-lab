@@ -1222,6 +1222,9 @@ fn session_configured_from_thread_resume_response(
 fn review_target_to_api(target: ReviewTarget) -> ApiReviewTarget {
     match target {
         ReviewTarget::UncommittedChanges => ApiReviewTarget::UncommittedChanges,
+        ReviewTarget::CurrentTurnDiff { .. } => {
+            unreachable!("current-turn diff reviews are background status targets only")
+        }
         ReviewTarget::BaseBranch { branch } => ApiReviewTarget::BaseBranch { branch },
         ReviewTarget::Commit { sha, title } => ApiReviewTarget::Commit { sha, title },
         ReviewTarget::Custom { instructions } => ApiReviewTarget::Custom { instructions },

@@ -414,6 +414,9 @@ impl TurnRequestProcessor {
                 "Review the current code changes (staged, unstaged, and untracked files)."
                     .to_string()
             }
+            CoreReviewTarget::CurrentTurnDiff { .. } => {
+                unreachable!("current-turn diff reviews are background status targets only")
+            }
             CoreReviewTarget::BaseBranch { branch } => {
                 format!("Review the code changes against the base branch {branch:?}.")
             }
