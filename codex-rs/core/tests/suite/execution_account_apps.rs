@@ -4,6 +4,7 @@ use codex_core::ForkSnapshot;
 use codex_core::NewThread;
 use codex_core::config::Config;
 use codex_features::Feature;
+use codex_login::AuthDotJson;
 use codex_login::CodexAuth;
 use codex_login::StoredAccount;
 use codex_login::TokenData;
@@ -18,6 +19,7 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_compact_user_history_with_summary_once;
 use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
@@ -31,6 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tempfile::TempDir;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -46,6 +49,7 @@ const CONTROL_STORED_ACCOUNT_ID: &str = "stored-0-control";
 const CONTROL_CHATGPT_ACCOUNT_ID: &str = "account_id";
 const CONTROL_AUTHORIZATION: &str = "Bearer Access Token";
 const CONTROL_CONNECTOR_NAME: &str = "Control Calendar";
+const CONTROL_NAMESPACE: &str = "mcp__codex_apps__control_calendar";
 const CONTROL_TOOL_MARKER: &str = "CONTROL_ACCOUNT_ONLY_TOOL";
 const EXECUTION_STORED_ACCOUNT_ID: &str = "stored-1-execution";
 const EXECUTION_CHATGPT_ACCOUNT_ID: &str = "execution-account";
@@ -295,10 +299,10 @@ fn assert_request_uses_only_account_apps(
     forbidden_tool_marker: &str,
 ) {
     let developer_text = request.message_input_texts("developer").join("\n");
-    assert_eq!(
-        developer_text.matches("<apps_instructions>").count(),
-        1,
-        "expected exactly one current-account Apps instructions block: {developer_text}"
+    assert!(
+        developer_text.contains("<apps_instructions>")
+            || developer_text.contains("state: available"),
+        "expected model-visible Apps availability context: {developer_text}"
     );
 
     let tools = request.body_json()["tools"].to_string();
@@ -315,6 +319,10 @@ fn assert_request_uses_only_account_apps(
 fn assert_request_has_no_apps(request: &ResponsesRequest) {
     let developer_text = request.message_input_texts("developer").join("\n");
     assert_eq!(developer_text.matches("<apps_instructions>").count(), 0);
+    assert_request_has_no_apps_tools(request);
+}
+
+fn assert_request_has_no_apps_tools(request: &ResponsesRequest) {
     let tools = request.body_json()["tools"].to_string();
     assert!(!tools.contains(CONTROL_TOOL_MARKER));
     assert!(!tools.contains(EXECUTION_TOOL_MARKER));
@@ -692,8 +700,252 @@ async fn execution_401_refresh_updates_apps_tools_without_refreshing_control_aut
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_resume_and_fork_canonicalize_apps_instructions_for_current_state()
--> anyhow::Result<()> {
+async fn apps_history_keeps_a_stable_prefix_across_turns() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    write_accounts(home.as_ref())?;
+    mount_models(&server, CONTROL_AUTHORIZATION).await;
+    mount_account_apps(
+        &server,
+        Vec::new(),
+        /*control_tools_enabled*/ true,
+        /*execution_tools_enabled*/ false,
+    )
+    .await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-prefix-1"),
+                ev_completed("resp-prefix-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-prefix-2"),
+                ev_completed("resp-prefix-2"),
+            ]),
+        ],
+    )
+    .await;
+    let apps_base_url = server.uri();
+    let fixture = test_codex()
+        .with_home(home)
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.model = Some(MODEL.to_string());
+            config.chatgpt_base_url = apps_base_url;
+            config
+                .features
+                .enable(Feature::Apps)
+                .expect("Apps feature should be configurable");
+            config
+                .features
+                .disable(Feature::ToolSuggest)
+                .expect("tool suggest feature should be configurable");
+        })
+        .build(&server)
+        .await?;
+
+    fixture.submit_turn("first turn").await?;
+    fixture.submit_turn("second turn").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let first_body = requests[0].body_json();
+    let second_body = requests[1].body_json();
+    let first_input = first_body["input"]
+        .as_array()
+        .expect("first request should contain input");
+    let second_input = second_body["input"]
+        .as_array()
+        .expect("second request should contain input");
+    assert!(second_input.len() > first_input.len());
+    assert_eq!(first_input.as_slice(), &second_input[..first_input.len()]);
+    assert_eq!(
+        requests[1]
+            .message_input_texts("developer")
+            .join("\n")
+            .matches("<apps_instructions>")
+            .count(),
+        1
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_key_transition_never_sends_the_raw_key_to_apps() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let home = Arc::new(TempDir::new()?);
+    write_accounts(home.as_ref())?;
+    let raw_api_key = "sk-api-key-transition";
+    let api_key_authorization = format!("Bearer {raw_api_key}");
+    mount_models(&server, CONTROL_AUTHORIZATION).await;
+    mount_models(&server, &api_key_authorization).await;
+    mount_account_apps(
+        &server,
+        Vec::new(),
+        /*control_tools_enabled*/ true,
+        /*execution_tools_enabled*/ false,
+    )
+    .await;
+    let delayed_app_call = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(sse(vec![
+            ev_response_created("resp-api-key-1"),
+            ev_function_call_with_namespace(
+                "control-app-call",
+                CONTROL_NAMESPACE,
+                LOOKUP_TOOL_NAME,
+                "{}",
+            ),
+            ev_completed("resp-api-key-1"),
+        ]))
+        .set_delay(Duration::from_secs(2));
+    let response_mock = mount_response_sequence(
+        &server,
+        vec![
+            delayed_app_call,
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    ev_assistant_message("msg-api-key-1", "transitioned"),
+                    ev_completed("resp-api-key-2"),
+                ])),
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    ev_assistant_message("msg-api-key-2", "still safe"),
+                    ev_completed("resp-api-key-3"),
+                ])),
+        ],
+    )
+    .await;
+    let apps_base_url = server.uri();
+    let fixture = test_codex()
+        .with_home(home.clone())
+        .with_home_backed_auth_manager()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.model = Some(MODEL.to_string());
+            config.chatgpt_base_url = apps_base_url;
+            config
+                .features
+                .enable(Feature::Apps)
+                .expect("Apps feature should be configurable");
+            config
+                .features
+                .disable(Feature::ToolSuggest)
+                .expect("tool suggest feature should be configurable");
+            approve_account_app_tools(config);
+        })
+        .build(&server)
+        .await?;
+
+    fixture
+        .codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "use my calendar app".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let request_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let received_requests = server.received_requests().await.unwrap_or_default();
+        if received_requests
+            .iter()
+            .any(|request| request.url.path() == "/v1/responses")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < request_deadline,
+            "initial model request was not observed before auth transition"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    codex_login::save_auth(
+        home.path(),
+        &AuthDotJson {
+            auth_mode: Some(codex_app_server_protocol::AuthMode::ApiKey),
+            openai_api_key: Some(raw_api_key.to_string()),
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+        },
+        AuthCredentialsStoreMode::File,
+    )?;
+    codex_login::set_active_account_id(
+        home.path(),
+        AuthCredentialsStoreMode::File,
+        /*account_id*/ None,
+    )?;
+    fixture
+        .thread_manager
+        .reload_auth_for_loaded_threads()
+        .await;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    fixture.submit_turn("continue without apps").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].header("authorization").as_deref(),
+        Some(CONTROL_AUTHORIZATION)
+    );
+    assert_eq!(
+        requests[1].header("authorization").as_deref(),
+        Some(api_key_authorization.as_str())
+    );
+    assert_eq!(
+        requests[2].header("authorization").as_deref(),
+        Some(api_key_authorization.as_str())
+    );
+    let second_turn_developer_text = requests[2].message_input_texts("developer").join("\n");
+    assert!(second_turn_developer_text.contains("state: unavailable"));
+    assert_request_has_no_apps_tools(&requests[2]);
+
+    let received_requests = server.received_requests().await.unwrap_or_default();
+    let apps_requests = received_requests
+        .iter()
+        .filter(|request| request.url.path() == "/api/codex/apps")
+        .collect::<Vec<_>>();
+    assert!(!apps_requests.is_empty());
+    assert!(apps_requests.iter().all(|request| {
+        request
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            != Some(api_key_authorization.as_str())
+    }));
+    assert!(apps_requests.iter().any(|request| {
+        request
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .is_none()
+    }));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_resume_compaction_and_fork_preserve_incremental_apps_context() -> anyhow::Result<()>
+{
     skip_if_no_network!(Ok(()));
     let server = MockServer::start().await;
     let home = Arc::new(TempDir::new()?);
@@ -792,6 +1044,24 @@ async fn legacy_resume_and_fork_canonicalize_apps_instructions_for_current_state
     let resumed = resumed_builder
         .resume(&server, home.clone(), rollout_path.clone())
         .await?;
+    let compact_mock =
+        mount_compact_user_history_with_summary_once(&server, "legacy apps compacted").await;
+    resumed.codex.submit(Op::Compact).await?;
+    wait_for_event(&resumed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let compact_request = compact_mock.single_request();
+    let compact_developer_text = compact_request.message_input_texts("developer").join("\n");
+    assert_eq!(
+        compact_developer_text
+            .matches("<apps_instructions>")
+            .count(),
+        1
+    );
+    assert!(compact_developer_text.contains("preserved legacy developer context"));
+    assert!(!compact_developer_text.contains("legacy apps one"));
+    assert!(!compact_developer_text.contains("legacy apps two"));
     resumed.submit_turn("resumed turn").await?;
 
     let mut fork_config = resumed.config.clone();
@@ -833,13 +1103,14 @@ async fn legacy_resume_and_fork_canonicalize_apps_instructions_for_current_state
             .count(),
         1
     );
-    assert!(resumed_developer_text.contains("preserved legacy developer context"));
     let forked_developer_text = requests[2].message_input_texts("developer").join("\n");
     assert_eq!(
         forked_developer_text.matches("<apps_instructions>").count(),
-        0
+        1
     );
-    assert_request_has_no_apps(&requests[2]);
+    assert!(forked_developer_text.contains("<apps_update>"));
+    assert!(forked_developer_text.contains("state: unavailable"));
+    assert_request_has_no_apps_tools(&requests[2]);
 
     resumed.codex.shutdown_and_wait().await?;
     forked.shutdown_and_wait().await?;

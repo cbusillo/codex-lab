@@ -183,6 +183,9 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> Option<TurnRunResult> {
+    turn_context = sess
+        .ensure_mcp_manager_for_execution_account(&turn_context)
+        .await;
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
@@ -258,7 +261,7 @@ pub(crate) async fn run_turn(
 
         // Construct the input that we will send to the model.
         let prompt_history_input: Vec<ResponseItem> = {
-            sess.clone_history()
+            sess.prepare_model_visible_history(turn_context.as_ref())
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
@@ -1086,13 +1089,11 @@ async fn run_sampling_request(
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.clone_history()
+            sess.prepare_model_visible_history(turn_context.as_ref())
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
-        let mut prompt_input = sess
-            .project_current_apps_instructions(turn_context.as_ref(), prompt_input)
-            .await;
+        let mut prompt_input = prompt_input;
         if let Some(request_only_input_item) = &request_only_input_item {
             prompt_input.push(request_only_input_item.clone());
         }

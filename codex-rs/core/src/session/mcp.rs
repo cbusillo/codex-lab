@@ -336,10 +336,15 @@ impl Session {
                 turn_context.cwd.to_path_buf(),
             ),
         };
-        let codex_apps_auth_provider = auth
-            .as_ref()
-            .filter(|auth| auth.uses_codex_backend())
-            .map(|_| self.services.execution_account.auth_provider());
+        let expected_execution_cache_identity = self.services.execution_account.cache_identity();
+        let codex_apps_auth_provider =
+            auth.as_ref()
+                .filter(|auth| auth.uses_codex_backend())
+                .map(|_| {
+                    self.services
+                        .execution_account
+                        .codex_apps_auth_provider(expected_execution_cache_identity.clone())
+                });
         {
             let mut guard = self.services.mcp_startup_cancellation_token.lock().await;
             guard.cancel();
@@ -380,6 +385,8 @@ impl Session {
             let mut manager = self.services.mcp_connection_manager.write().await;
             std::mem::replace(&mut *manager, refreshed_manager)
         };
+        self.apps_context
+            .set_mcp_cache_identity(expected_execution_cache_identity);
         old_manager.shutdown().await;
     }
 

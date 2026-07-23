@@ -203,7 +203,9 @@ async fn run_compact_task_inner_impl(
         .await;
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
 
-    let mut history = sess.clone_history().await;
+    let mut history = sess
+        .prepare_model_visible_history(turn_context.as_ref())
+        .await;
     history.record_items(
         &[initial_input_for_turn.into()],
         turn_context.truncation_policy,
@@ -298,7 +300,9 @@ async fn run_compact_task_inner_impl(
         initial_context_injection,
         InitialContextInjection::BeforeLastUserMessage
     ) {
-        let initial_context = sess.build_initial_context(turn_context.as_ref()).await;
+        let initial_context = sess
+            .build_compaction_initial_context(turn_context.as_ref())
+            .await;
         new_history =
             insert_initial_context_before_last_real_user_or_summary(new_history, initial_context);
     }

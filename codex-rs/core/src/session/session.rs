@@ -1092,6 +1092,8 @@ impl Session {
                 .set_window_generation(window_generation);
             let (out_of_band_elicitation_paused, _out_of_band_elicitation_paused_rx) =
                 watch::channel(false);
+            let apps_context =
+                AppsContext::new(services.execution_account.cache_identity());
 
             let sess = Arc::new(Session {
                 thread_id,
@@ -1104,7 +1106,7 @@ impl Session {
                 features: config.features.clone(),
                 multi_agent_version,
                 pending_mcp_server_refresh_config: Mutex::new(None),
-                apps_context: AppsContext::default(),
+                apps_context,
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
                 input_queue: InputQueue::new(),
@@ -1207,10 +1209,16 @@ impl Session {
                     session_configuration.cwd.to_path_buf(),
                 ),
             };
+            let expected_execution_cache_identity =
+                sess.services.execution_account.cache_identity();
             let codex_apps_auth_provider = execution_auth
                 .as_ref()
                 .filter(|auth| auth.uses_codex_backend())
-                .map(|_| sess.services.execution_account.auth_provider());
+                .map(|_| {
+                    sess.services.execution_account.codex_apps_auth_provider(
+                        expected_execution_cache_identity.clone(),
+                    )
+                });
             let (mcp_connection_manager, cancel_token) = McpConnectionManager::new(
                 &mcp_servers,
                 config.mcp_oauth_credentials_store_mode,
@@ -1240,6 +1248,8 @@ impl Session {
                 let mut manager_guard = sess.services.mcp_connection_manager.write().await;
                 *manager_guard = mcp_connection_manager;
             }
+            sess.apps_context
+                .set_mcp_cache_identity(expected_execution_cache_identity);
             {
                 let mut cancel_guard = sess.services.mcp_startup_cancellation_token.lock().await;
                 if cancel_guard.is_cancelled() {
