@@ -11,15 +11,17 @@
 | Measure | Commits |
 |---|---:|
 | Audit | 1017 |
-| Classified | 1 |
-| Missing | 1016 |
-| Blocking | 0 |
+| Classified | 3 |
+| Missing | 1014 |
+| Blocking | 2 |
 
 ## Classifications
 
 | Subject | Area | Mechanical / Path | Disposition | Implementation | Summary | Evidence |
 |---|---|---|---|---|---|---|
 | `9e0d7f02c9416c46dde6e571068a0fb03a4facdf` | `app_server` | `9e0d7f02c941:patch_equivalent/app_server` | `adopted` | `implemented` | Adopted through patch-equivalent local commit 15f0bf854b, preserving canonical auto_review serialization, legacy guardian_subagent input, and delegated reviewer propagation. | github_issue:cbusillo/codex-lab#407, github_pull_request:openai/codex#26230, git_commit:openai/codex@9e0d7f02c9416c46dde6e571068a0fb03a4facdf, git_commit:cbusillo/codex-lab@15f0bf854bf82de2eaf3524f089dc8efaa88a307 |
+| `daf76a57d2564be85b6e34c25a29380b3d4315b4` | `other_codex_rs` | `daf76a57d256:missing_patch/other_codex_rs` | `missing` | `missing` | Prune stale curated plugin cache entries when their names disappear from the raw marketplace while preserving user configuration. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#26934, git_commit:openai/codex@daf76a57d2564be85b6e34c25a29380b3d4315b4, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
+| `381f0de531e0bc7759863295fc333dd0087b4faf` | `other_codex_rs` | `381f0de531e0:missing_patch/other_codex_rs` | `missing` | `missing` | Serve plugin/list from the cached global remote catalog when present and refresh it asynchronously without duplicating cache-miss fetches. | github_issue:cbusillo/codex-lab#418, github_pull_request:openai/codex#26932, git_commit:openai/codex@381f0de531e0bc7759863295fc333dd0087b4faf, git_commit:cbusillo/codex-lab@7fde0b24d31cdf5d1270d288e37c7130cae8efc2 |
 
 ## Missing Commits
 
@@ -51,8 +53,6 @@
 - `ee6c91d5cfd0e63239c75b41f4a2dc14130d5688`
 - `56554904babcaacf4444a2cc90716880837dff7c`
 - `b89d91f6ffee5474f23a97b23b401644c4e087d5`
-- `daf76a57d2564be85b6e34c25a29380b3d4315b4`
-- `381f0de531e0bc7759863295fc333dd0087b4faf`
 - `feca160da47b678b73b33dd8a08e010e86b81786`
 - `0473a5cc522cd8d0a798595c0a08ce661eb2a0ab`
 - `6042e5810e7062cc937bb0397afaa5bea431fbc4`
@@ -123,5 +123,12 @@
 - `13468115fc6443970b8bf521927fceaf58ad35c1`
 - `e3528434cdfb9b822057095c7edbf4c99363f709`
 - `1deae7bd4a1212f94ec5b877fc4c9d7edea644f1`
+- `b4445f275838981bfd22429c5c41f2c5be0bde7a`
+- `7011044c1c0f51185eee007b45f0f42140fa794c`
 
-_916 additional commits omitted; run `validate` for the complete machine-readable list._
+_914 additional commits omitted; run `validate` for the complete machine-readable list._
+
+## Blocking Commits
+
+- `daf76a57d2564be85b6e34c25a29380b3d4315b4`
+- `381f0de531e0bc7759863295fc333dd0087b4faf`
