@@ -7,6 +7,7 @@ version.workspace = true
 [lib]
 name = "codex_code_bridge_service"
 path = "src/lib.rs"
+doctest = false
 
 [lints]
 workspace = true
@@ -23,7 +24,6 @@ codex-utils-home-dir = { workspace = true }
 constant_time_eq = { workspace = true }
 http = { workspace = true }
 rand = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [

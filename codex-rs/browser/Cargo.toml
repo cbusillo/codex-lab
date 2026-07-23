@@ -7,14 +7,13 @@ version.workspace = true
 [lib]
 name = "codex_browser"
 path = "src/lib.rs"
+doctest = false
 
 [lints]
 workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
 base64 = { workspace = true }
-bytes = { workspace = true }
 chromiumoxide = { workspace = true }
 chromiumoxide_types = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
@@ -22,16 +21,13 @@ fs2 = { workspace = true }
 futures = { workspace = true }
 once_cell = { workspace = true }
 rand = { workspace = true }
-regex = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 tracing = { workspace = true }
-url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-tokio-test = { workspace = true }
+anyhow = { workspace = true }

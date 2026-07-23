@@ -241,6 +241,9 @@ deny = [
         # Temporary migration exceptions.
         "codex-api",
         "codex-app-server",
+        "codex-browser",
+        "codex-code-bridge-client",
+        "codex-code-bridge-service",
         "codex-core",
         "codex-exec-server",
         "codex-ollama",
@@ -256,7 +259,7 @@ deny = [
         "opentelemetry-otlp",
         "rmcp",
         "sentry",
-        "webrtc-sys-build",
+        "chromiumoxide",
     ], reason = "new direct reqwest dependencies must use codex-http-client; temporary wrappers track migration debt" },
 ]
 
