@@ -1053,12 +1053,14 @@ async fn model_catalog_refresh_after_401_uses_refreshed_execution_auth() -> Resu
     // refresh must be served only to the refreshed execution token.
     mount_models_for_authorization(
         &server,
+        "/v1/models",
         stale_authorization.clone(),
         vec![account_model("catalog-exec", &["priority"])],
     )
     .await;
     mount_models_for_authorization(
         &server,
+        "/v1/models",
         refreshed_authorization.clone(),
         vec![account_model("catalog-exec-refreshed", &["priority"])],
     )
