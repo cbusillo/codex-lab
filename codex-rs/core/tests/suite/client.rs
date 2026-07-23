@@ -3311,6 +3311,7 @@ async fn startup_selected_execution_account_routes_first_response_and_persists_l
         lease["account_id"].as_str(),
         Some(accounts.candidate_id.as_str())
     );
+
     Ok(())
 }
 

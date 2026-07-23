@@ -124,7 +124,15 @@ async fn initialize_codex_backend_does_not_override_originator() -> Result<()> {
     };
     let InitializeResponse { user_agent, .. } = to_response::<InitializeResponse>(response)?;
 
-    assert!(user_agent.starts_with("codex_cli_rs/"));
+    let expected_user_agent = get_codex_app_server_user_agent();
+    let expected_identity = expected_user_agent
+        .split_whitespace()
+        .next()
+        .expect("app-server user agent should contain an identity");
+    assert_eq!(
+        user_agent.split_whitespace().next(),
+        Some(expected_identity)
+    );
     Ok(())
 }
 
