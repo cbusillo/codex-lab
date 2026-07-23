@@ -37,6 +37,15 @@ use crate::render::renderable::Renderable;
 use super::BottomPaneView;
 use super::ViewCompletion;
 
+#[path = "login_accounts_view/account_pool.rs"]
+mod account_pool;
+
+use account_pool::AccountPoolBehavior;
+use account_pool::CURRENT_AUTH_ACCOUNT_ID;
+use account_pool::CURRENT_ONLY_POOL_NOTICE;
+use account_pool::account_matches_auth;
+use account_pool::current_auth_account_row;
+
 pub(crate) const LOGIN_ACCOUNTS_VIEW_ID: &str = "login-accounts";
 pub(crate) const LOGIN_ADD_ACCOUNT_VIEW_ID: &str = "login-add-account";
 
@@ -46,6 +55,7 @@ pub(crate) struct LoginAccountsView {
     codex_home: PathBuf,
     default_auth_home_is_current: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    pool_behavior: AccountPoolBehavior,
     accounts: Vec<AccountRow>,
     remote_loaded: bool,
     selected: usize,
@@ -56,13 +66,14 @@ pub(crate) struct LoginAccountsView {
     completion: Option<ViewCompletion>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct AccountRow {
     id: String,
     label: String,
     detail: Option<String>,
     mode: AuthMode,
     is_active: bool,
+    is_pooled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +108,7 @@ impl LoginAccountsView {
             codex_home: codex_home.to_path_buf(),
             default_auth_home_is_current,
             auth_credentials_store_mode,
+            pool_behavior: AccountPoolBehavior::for_store_mode(auth_credentials_store_mode),
             accounts: loaded.accounts,
             remote_loaded: false,
             selected: loaded.selected,
@@ -128,6 +140,7 @@ impl LoginAccountsView {
             codex_home: PathBuf::new(),
             default_auth_home_is_current: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::default(),
+            pool_behavior: AccountPoolBehavior::Pooled,
             accounts: rows,
             remote_loaded: true,
             selected,
@@ -209,6 +222,12 @@ impl LoginAccountsView {
         let Some(account) = self.selected_account() else {
             return;
         };
+        if !account.is_pooled {
+            self.feedback = Some(LoginAccountsFeedback::Info(
+                "This login is not pooled. Use /logout to disconnect it.".to_string(),
+            ));
+            return;
+        }
         self.mode = LoginAccountsMode::ConfirmRemove {
             account_id: account.id.clone(),
             label: account.label.clone(),
@@ -262,6 +281,9 @@ impl LoginAccountsView {
             lines += Self::wrapped_line_count(message, content_width) + 1;
         }
         lines += 2;
+        if self.pool_behavior == AccountPoolBehavior::CurrentOnly {
+            lines += Self::wrapped_line_count(CURRENT_ONLY_POOL_NOTICE, content_width) + 1;
+        }
         lines += self.accounts.len().max(1);
         lines += 3;
         let hint = "up/down Navigate  Enter Select  d Disconnect  Esc Close";
@@ -349,26 +371,46 @@ pub(crate) struct LoginAddAccountView {
     selected: usize,
     is_complete: bool,
     completion: Option<ViewCompletion>,
+    pool_behavior: AccountPoolBehavior,
 }
 
 impl LoginAddAccountView {
+    #[cfg(test)]
     pub(crate) fn new(app_event_tx: AppEventSender) -> Self {
+        Self::new_for_store_mode(app_event_tx, AuthCredentialsStoreMode::File)
+    }
+
+    pub(crate) fn new_for_store_mode(
+        app_event_tx: AppEventSender,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+    ) -> Self {
         Self {
             app_event_tx,
             state: LoginAddAccountState::Choose,
             selected: 0,
             is_complete: false,
             completion: None,
+            pool_behavior: AccountPoolBehavior::for_store_mode(auth_credentials_store_mode),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_state(app_event_tx: AppEventSender, state: LoginAddAccountState) -> Self {
+        Self::with_state_for_store_mode(app_event_tx, state, AuthCredentialsStoreMode::File)
+    }
+
+    pub(crate) fn with_state_for_store_mode(
+        app_event_tx: AppEventSender,
+        state: LoginAddAccountState,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+    ) -> Self {
         Self {
             app_event_tx,
             state,
             selected: 0,
             is_complete: false,
             completion: None,
+            pool_behavior: AccountPoolBehavior::for_store_mode(auth_credentials_store_mode),
         }
     }
 
@@ -581,7 +623,7 @@ impl Renderable for LoginAddAccountView {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
             .style(Style::default().fg(Color::White))
-            .title(" Add Account ")
+            .title(self.pool_behavior.add_view_title())
             .title_alignment(Alignment::Center);
         let inner = block.inner(area);
         block.render(area, buf);
@@ -641,7 +683,11 @@ impl Renderable for LoginAddAccountView {
                 )]));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "The account list will refresh when the key is saved.",
+                    if self.pool_behavior.supports_pooling() {
+                        "The account list will refresh when the key is saved."
+                    } else {
+                        "The current login will be replaced when the key is saved."
+                    },
                     Style::default().fg(Color::DarkGray),
                 )));
                 lines.push(Line::from(""));
@@ -732,7 +778,11 @@ impl Renderable for LoginAddAccountView {
             LoginAddAccountState::DeviceCodeFailed(message)
             | LoginAddAccountState::ApiKeyFailed(message) => {
                 lines.push(Line::from(vec![Span::styled(
-                    "Add account failed",
+                    if self.pool_behavior.supports_pooling() {
+                        "Add account failed"
+                    } else {
+                        "Replace login failed"
+                    },
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )]));
                 lines.push(Line::from(""));
@@ -762,14 +812,22 @@ impl Renderable for LoginAddAccountView {
             }
             LoginAddAccountState::Complete => {
                 lines.push(Line::from(vec![Span::styled(
-                    "Account added",
+                    if self.pool_behavior.supports_pooling() {
+                        "Account added"
+                    } else {
+                        "Login replaced"
+                    },
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 )]));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "The account list will refresh with your new ChatGPT account.",
+                    if self.pool_behavior.supports_pooling() {
+                        "The account list will refresh with your new ChatGPT account."
+                    } else {
+                        "The account list will refresh with the current login."
+                    },
                     Style::default().fg(Color::DarkGray),
                 )));
                 lines.push(Line::from(""));
@@ -838,6 +896,14 @@ impl Renderable for LoginAccountsView {
         )]));
         lines.push(Line::from(""));
 
+        if self.pool_behavior == AccountPoolBehavior::CurrentOnly {
+            lines.push(Line::from(Span::styled(
+                CURRENT_ONLY_POOL_NOTICE,
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(""));
+        }
+
         if self.accounts.is_empty() {
             lines.push(Line::from(Span::styled(
                 "No accounts connected yet.",
@@ -852,7 +918,7 @@ impl Renderable for LoginAccountsView {
         let add_selected = self.selected == self.add_row_index();
         lines.push(Line::from(""));
         lines.push(render_selectable_line(
-            "Add account...",
+            self.pool_behavior.account_action_label(),
             add_selected,
             false,
         ));
@@ -918,6 +984,7 @@ impl AccountRow {
             detail,
             mode,
             is_active,
+            is_pooled: true,
         }
     }
 
@@ -931,14 +998,16 @@ impl AccountRow {
             detail,
             mode: entry.auth_mode,
             is_active: entry.is_active,
+            is_pooled: true,
         }
     }
 
     fn activation_supported(&self) -> bool {
-        matches!(
-            self.mode,
-            AuthMode::ApiKey | AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens
-        )
+        self.is_pooled
+            && matches!(
+                self.mode,
+                AuthMode::ApiKey | AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens
+            )
     }
 
     fn render_line(&self, selected: bool) -> Line<'static> {
@@ -959,7 +1028,7 @@ impl AccountRow {
                 Style::default().fg(Color::DarkGray),
             ));
         }
-        if !self.activation_supported() {
+        if !self.is_active && !self.activation_supported() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 "activation unavailable",
@@ -1109,6 +1178,7 @@ fn sort_account_rows(accounts: &mut [AccountRow]) {
     });
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct LoadedLoginAccounts {
     accounts: Vec<AccountRow>,
     selected: usize,
@@ -1121,30 +1191,65 @@ fn load_account_rows(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     previously_selected_id: Option<String>,
 ) -> LoadedLoginAccounts {
+    let pool_behavior = AccountPoolBehavior::for_store_mode(auth_credentials_store_mode);
     let mut error = sync_account_store_from_auth(
         codex_home,
         default_auth_home_is_current,
         auth_credentials_store_mode,
     );
-    let active_account_id = default_auth_home_is_current
-        .then(|| {
-            codex_login::get_active_account_id(codex_home, auth_credentials_store_mode)
-                .ok()
-                .flatten()
-        })
-        .flatten();
-    let mut accounts = match codex_login::list_accounts(codex_home, auth_credentials_store_mode) {
-        Ok(accounts) => accounts
-            .into_iter()
-            .map(|account| AccountRow::from(account, active_account_id.as_deref()))
-            .collect::<Vec<_>>(),
-        Err(err) => {
-            if error.is_none() {
-                error = Some(format!("Failed to read accounts: {err}"));
+    let current_auth = if default_auth_home_is_current && !pool_behavior.supports_pooling() {
+        match codex_login::load_auth_dot_json(codex_home, auth_credentials_store_mode) {
+            Ok(auth) => auth,
+            Err(err) => {
+                if error.is_none() {
+                    error = Some(format!("Failed to read current auth: {err}"));
+                }
+                None
             }
-            Vec::new()
         }
+    } else {
+        None
     };
+    let stored_accounts = if pool_behavior.supports_pooling() {
+        match codex_login::list_accounts(codex_home, auth_credentials_store_mode) {
+            Ok(accounts) => accounts,
+            Err(err) => {
+                if error.is_none() {
+                    error = Some(format!("Failed to read accounts: {err}"));
+                }
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let matching_current_account_id = current_auth.as_ref().and_then(|auth| {
+        stored_accounts
+            .iter()
+            .find(|account| account_matches_auth(account, auth))
+            .map(|account| account.id.clone())
+    });
+    let mut active_account_id = if pool_behavior.supports_pooling() {
+        default_auth_home_is_current
+            .then(|| {
+                codex_login::get_active_account_id(codex_home, auth_credentials_store_mode)
+                    .ok()
+                    .flatten()
+            })
+            .flatten()
+    } else {
+        matching_current_account_id
+    };
+    let mut accounts = stored_accounts
+        .into_iter()
+        .map(|account| AccountRow::from(account, active_account_id.as_deref()))
+        .collect::<Vec<_>>();
+    if let Some(auth) = current_auth
+        && active_account_id.is_none()
+    {
+        accounts.push(current_auth_account_row(&auth, auth_credentials_store_mode));
+        active_account_id = Some(CURRENT_AUTH_ACCOUNT_ID.to_string());
+    }
 
     sort_account_rows(&mut accounts);
 
