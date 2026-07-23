@@ -29,6 +29,7 @@ use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 
+use super::LoginAccountCatalogPolicy;
 use super::access_token::CodexAccessToken;
 use super::access_token::classify_codex_access_token;
 use super::catalog_storage::CatalogAccountStorage;
@@ -679,6 +680,48 @@ pub fn login_with_api_key(
     api_key: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<()> {
+    login_with_api_key_and_catalog_policy(
+        codex_home,
+        api_key,
+        auth_credentials_store_mode,
+        LoginAccountCatalogPolicy::Mirror,
+    )
+}
+
+/// Stores an API key for a named auth profile without enrolling it in that
+/// profile home's account-switching catalog.
+pub fn login_with_api_key_for_profile(
+    codex_home: &Path,
+    api_key: &str,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<()> {
+    login_with_api_key_and_catalog_policy(
+        codex_home,
+        api_key,
+        auth_credentials_store_mode,
+        LoginAccountCatalogPolicy::Isolated,
+    )
+}
+
+fn login_with_api_key_and_catalog_policy(
+    codex_home: &Path,
+    api_key: &str,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    account_catalog_policy: LoginAccountCatalogPolicy,
+) -> std::io::Result<()> {
+    let previous_auth = if account_catalog_policy.should_mirror() {
+        None
+    } else {
+        match load_auth_dot_json(codex_home, auth_credentials_store_mode) {
+            Ok(auth) => auth,
+            Err(err) => {
+                tracing::warn!(
+                    "failed to load previous profile auth before isolated API key login: {err}"
+                );
+                None
+            }
+        }
+    };
     let auth_dot_json = AuthDotJson {
         auth_mode: Some(ApiAuthMode::ApiKey),
         openai_api_key: Some(api_key.to_string()),
@@ -688,7 +731,15 @@ pub fn login_with_api_key(
         personal_access_token: None,
     };
     save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)?;
-    upsert_login_account_best_effort(codex_home, &auth_dot_json, auth_credentials_store_mode);
+    if account_catalog_policy.should_mirror() {
+        upsert_login_account_best_effort(codex_home, &auth_dot_json, auth_credentials_store_mode);
+    } else {
+        remove_login_account_best_effort(
+            codex_home,
+            previous_auth.as_ref(),
+            auth_credentials_store_mode,
+        );
+    }
     Ok(())
 }
 
@@ -1380,7 +1431,8 @@ impl AuthDotJson {
         Self::from_external_tokens(&external)
     }
 
-    pub(crate) fn resolved_mode(&self) -> ApiAuthMode {
+    /// Resolves the effective mode for persisted auth records that predate `auth_mode`.
+    pub fn resolved_mode(&self) -> ApiAuthMode {
         if let Some(mode) = self.auth_mode {
             return mode;
         }

@@ -9,11 +9,8 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,8 +28,10 @@ use codex_keyring_store::KeyringStore;
 use codex_protocol::account::PlanType as AccountPlanType;
 use once_cell::sync::Lazy;
 
+use super::atomic_file::write_auth_file_atomically;
 use super::encrypted_aggregate::PreparedMigration;
 use super::encrypted_aggregate::activate_encrypted_aggregate;
+use super::encrypted_aggregate::validate_encrypted_aggregate_for_read;
 use super::encrypted_aggregate::with_conditionally_invalidated_encrypted_aggregate;
 use super::encrypted_aggregate::with_invalidated_encrypted_aggregate;
 
@@ -136,6 +135,18 @@ struct AggregateAwareAuthStorage {
 
 impl AuthStorageBackend for AggregateAwareAuthStorage {
     fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
+        if self
+            .codex_home
+            .metadata()
+            .is_ok_and(|metadata| metadata.permissions().readonly())
+        {
+            validate_encrypted_aggregate_for_read(
+                &self.codex_home,
+                self.mode,
+                self.keyring_store.clone(),
+            )?;
+            return self.legacy.load();
+        }
         match activate_encrypted_aggregate(&self.codex_home, self.mode, self.keyring_store.clone())?
         {
             PreparedMigration::AlreadyEncrypted(document)
@@ -245,28 +256,12 @@ impl FileAuthStorage {
     fn save_unlocked(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
         let auth_file = get_auth_file(&self.codex_home);
         let json_data = serde_json::to_string_pretty(auth_dot_json)?;
-        let mut options = OpenOptions::new();
-        options.truncate(false).write(true).create(true);
-        #[cfg(unix)]
-        {
-            options.mode(0o600);
-        }
-        let mut file = options.open(auth_file)?;
-        #[cfg(unix)]
-        {
-            let mut permissions = file.metadata()?.permissions();
-            permissions.set_mode(0o600);
-            file.set_permissions(permissions)?;
-        }
-        file.set_len(0)?;
-        file.write_all(json_data.as_bytes())?;
-        file.flush()
+        write_auth_file_atomically(&auth_file, json_data.as_bytes())
     }
 }
 
 impl AuthStorageBackend for FileAuthStorage {
     fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
-        let _guard = self.acquire_write_guard()?;
         self.load_unlocked()
     }
 

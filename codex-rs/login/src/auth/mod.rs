@@ -1,5 +1,7 @@
 mod access_token;
+mod account_catalog_policy;
 mod agent_identity;
+mod atomic_file;
 mod catalog_storage;
 pub mod default_client;
 pub(crate) mod encrypted_aggregate;
@@ -16,6 +18,7 @@ mod revoke;
 #[path = "encrypted_aggregate_tests.rs"]
 mod encrypted_aggregate_tests;
 
+pub(crate) use account_catalog_policy::LoginAccountCatalogPolicy;
 pub use error::RefreshTokenFailedError;
 pub use error::RefreshTokenFailedReason;
 pub use manager::*;

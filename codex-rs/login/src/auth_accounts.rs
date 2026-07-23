@@ -840,7 +840,9 @@ pub fn remove_account_matching_credentials(
         data.active_account_id = None;
     }
 
-    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
+    if removed.is_some() {
+        write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
+    }
     Ok(removed)
 }
 
