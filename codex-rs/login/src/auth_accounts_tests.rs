@@ -476,6 +476,7 @@ fn activate_api_key_account_writes_auth_and_marks_active() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn commit_active_account_writes_stored_auth_and_marks_active() {
     let temp = TempDir::new().expect("tempdir");
     let stored = upsert_api_key_account(
@@ -486,9 +487,21 @@ fn commit_active_account_writes_stored_auth_and_marks_active() {
     )
     .expect("upsert api key");
 
-    let activated =
-        commit_active_account(temp.path(), &stored.id, TEST_AUTH_CREDENTIALS_STORE_MODE)
-            .expect("commit active account");
+    let stale_caller_auth = crate::AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-stale-caller".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    let activated = commit_active_account(
+        temp.path(),
+        &stored.id,
+        &stale_caller_auth,
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+    )
+    .expect("commit active account");
 
     assert_eq!(stored.id, activated.id);
     assert!(activated.last_used_at.is_some());
@@ -568,7 +581,7 @@ fn commit_active_account_leaves_existing_state_unchanged_when_account_is_missing
     };
     crate::save_auth(temp.path(), &previous_auth, AuthCredentialsStoreMode::File)
         .expect("save previous auth");
-    let err = commit_active_account(temp.path(), "missing", AuthCredentialsStoreMode::File)
+    let err = activate_account(temp.path(), "missing", AuthCredentialsStoreMode::File)
         .expect_err("missing account should fail");
 
     assert_eq!(io::ErrorKind::Other, err.kind());
@@ -596,7 +609,7 @@ fn commit_active_account_preserves_stored_accounts_without_existing_auth() {
         /*make_active*/ false,
     )
     .expect("upsert api key");
-    let err = commit_active_account(temp.path(), "missing", AuthCredentialsStoreMode::File)
+    let err = activate_account(temp.path(), "missing", AuthCredentialsStoreMode::File)
         .expect_err("missing account should fail");
 
     assert_eq!(io::ErrorKind::Other, err.kind());
@@ -657,7 +670,7 @@ fn commit_active_account_restores_auth_when_accounts_write_fails() {
         .expect("occupy accounts temp path");
     }
 
-    let err = commit_active_account(temp.path(), &target.id, TEST_AUTH_CREDENTIALS_STORE_MODE)
+    let err = activate_account(temp.path(), &target.id, TEST_AUTH_CREDENTIALS_STORE_MODE)
         .expect_err("accounts write should fail");
 
     assert_eq!(io::ErrorKind::Other, err.kind());
