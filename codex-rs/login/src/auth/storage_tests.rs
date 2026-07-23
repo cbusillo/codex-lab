@@ -31,6 +31,58 @@ async fn file_storage_load_returns_auth_dot_json() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn file_storage_loads_from_read_only_home_without_creating_lock_file() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let codex_home = tempdir()?;
+    let expected = auth_with_prefix("read-only");
+    let auth_path = get_auth_file(codex_home.path());
+    std::fs::write(&auth_path, serde_json::to_vec_pretty(&expected)?)?;
+    std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o400))?;
+    std::fs::set_permissions(codex_home.path(), std::fs::Permissions::from_mode(0o500))?;
+
+    let loaded = load_activated_auth_with_keyring_store(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        Arc::new(MockKeyringStore::default()),
+    );
+
+    std::fs::set_permissions(codex_home.path(), std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))?;
+    assert_eq!(loaded?, Some(expected));
+    assert!(!codex_home.path().join(AUTH_STORAGE_LOCK_FILE_NAME).exists());
+    assert_eq!(
+        std::fs::read_dir(codex_home.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?,
+        vec![std::ffi::OsString::from("auth.json")]
+    );
+    Ok(())
+}
+
+#[test]
+fn file_storage_save_atomically_replaces_existing_auth() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let storage = FileAuthStorage::new(codex_home.path().to_path_buf());
+    let original = auth_with_prefix("original");
+    let replacement = auth_with_prefix("replacement");
+    storage.save(&original)?;
+
+    let mut original_handle = File::open(get_auth_file(codex_home.path()))?;
+    storage.save(&replacement)?;
+
+    let mut original_contents = String::new();
+    original_handle.read_to_string(&mut original_contents)?;
+    assert_eq!(
+        serde_json::from_str::<AuthDotJson>(&original_contents)?,
+        original
+    );
+    assert_eq!(storage.load()?, Some(replacement));
+    Ok(())
+}
+
 #[tokio::test]
 async fn file_storage_save_persists_auth_dot_json() -> anyhow::Result<()> {
     let codex_home = tempdir()?;

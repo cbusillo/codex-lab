@@ -894,6 +894,23 @@ fn remove_account_matching_credentials_removes_api_key_or_chatgpt_account() {
 }
 
 #[test]
+fn remove_account_matching_credentials_does_not_create_an_empty_catalog() {
+    let temp = TempDir::new().expect("tempdir");
+
+    assert_eq!(
+        None,
+        remove_account_matching_credentials(
+            temp.path(),
+            AuthMode::ApiKey,
+            Some("sk-missing"),
+            /*tokens*/ None,
+        )
+        .expect("remove missing account")
+    );
+    assert!(!temp.path().join("auth_accounts.json").exists());
+}
+
+#[test]
 fn remove_account_matching_credentials_clears_active_account_and_preserves_remaining_account() {
     let temp = TempDir::new().expect("tempdir");
     let active_tokens = make_chatgpt_tokens(Some("acct-active"), Some("active@example.com"));

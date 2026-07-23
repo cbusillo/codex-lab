@@ -25,6 +25,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::auth::AuthDotJson;
+use crate::auth::LoginAccountCatalogPolicy;
 use crate::auth::load_auth_dot_json;
 use crate::auth::login_account_matches_auth;
 use crate::auth::remove_login_account_best_effort;
@@ -86,6 +87,25 @@ pub enum PreviousAuthHandling {
     /// Keep a different previous account stored, while still revoking superseded credentials when
     /// re-authenticating the same account.
     PreserveStoredAccount,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenPersistencePolicy {
+    Mirrored(PreviousAuthHandling),
+    Isolated,
+}
+
+impl TokenPersistencePolicy {
+    fn should_mirror(self) -> bool {
+        matches!(self, Self::Mirrored(_))
+    }
+
+    fn previous_auth_handling(self) -> PreviousAuthHandling {
+        match self {
+            Self::Mirrored(previous_auth_handling) => previous_auth_handling,
+            Self::Isolated => PreviousAuthHandling::RevokeAndRemoveStoredAccount,
+        }
+    }
 }
 
 impl ServerOptions {
@@ -171,6 +191,19 @@ impl ShutdownHandle {
 
 /// Starts a local callback server and returns the browser auth URL.
 pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+    run_login_server_with_catalog_policy(opts, LoginAccountCatalogPolicy::Mirror)
+}
+
+/// Starts a login server for a named auth profile without enrolling the
+/// resulting credentials in an account-switching catalog.
+pub fn run_profile_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+    run_login_server_with_catalog_policy(opts, LoginAccountCatalogPolicy::Isolated)
+}
+
+fn run_login_server_with_catalog_policy(
+    opts: ServerOptions,
+    account_catalog_policy: LoginAccountCatalogPolicy,
+) -> io::Result<LoginServer> {
     let pkce = generate_pkce();
     let state = opts.force_state.clone().unwrap_or_else(generate_state);
 
@@ -235,7 +268,16 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
 
                         let url_raw = req.url().to_string();
                         let response =
-                            process_request(&url_raw, &opts, &redirect_uri, &pkce, actual_port, &state).await;
+                            process_request(
+                                &url_raw,
+                                &opts,
+                                &redirect_uri,
+                                &pkce,
+                                actual_port,
+                                &state,
+                                account_catalog_policy,
+                            )
+                            .await;
 
                         let exit_result = match response {
                             HandledRequest::Response(response) => {
@@ -300,6 +342,7 @@ async fn process_request(
     pkce: &PkceCodes,
     actual_port: u16,
     state: &str,
+    account_catalog_policy: LoginAccountCatalogPolicy,
 ) -> HandledRequest {
     let parsed_url = match url::Url::parse(&format!("http://localhost{url_raw}")) {
         Ok(u) => u,
@@ -388,17 +431,32 @@ async fn process_request(
                     let api_key = obtain_api_key(&opts.issuer, &opts.client_id, &tokens.id_token)
                         .await
                         .ok();
-                    if let Err(err) = persist_tokens_async(
-                        &opts.codex_home,
-                        api_key.clone(),
-                        tokens.id_token.clone(),
-                        tokens.access_token.clone(),
-                        tokens.refresh_token.clone(),
-                        opts.cli_auth_credentials_store_mode,
-                        opts.previous_auth_handling,
-                    )
-                    .await
-                    {
+                    let persist_result = match account_catalog_policy {
+                        LoginAccountCatalogPolicy::Mirror => {
+                            persist_tokens_async(
+                                &opts.codex_home,
+                                api_key.clone(),
+                                tokens.id_token.clone(),
+                                tokens.access_token.clone(),
+                                tokens.refresh_token.clone(),
+                                opts.cli_auth_credentials_store_mode,
+                                opts.previous_auth_handling,
+                            )
+                            .await
+                        }
+                        LoginAccountCatalogPolicy::Isolated => {
+                            persist_profile_tokens_async(
+                                &opts.codex_home,
+                                api_key.clone(),
+                                tokens.id_token.clone(),
+                                tokens.access_token.clone(),
+                                tokens.refresh_token.clone(),
+                                opts.cli_auth_credentials_store_mode,
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(err) = persist_result {
                         eprintln!("Persist error: {err}");
                         return login_error_response(
                             "Sign-in completed but credentials could not be saved locally.",
@@ -829,6 +887,47 @@ pub(crate) async fn persist_tokens_async(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     previous_auth_handling: PreviousAuthHandling,
 ) -> io::Result<()> {
+    persist_tokens_async_with_policy(
+        codex_home,
+        api_key,
+        id_token,
+        access_token,
+        refresh_token,
+        auth_credentials_store_mode,
+        TokenPersistencePolicy::Mirrored(previous_auth_handling),
+    )
+    .await
+}
+
+pub(crate) async fn persist_profile_tokens_async(
+    codex_home: &Path,
+    api_key: Option<String>,
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<()> {
+    persist_tokens_async_with_policy(
+        codex_home,
+        api_key,
+        id_token,
+        access_token,
+        refresh_token,
+        auth_credentials_store_mode,
+        TokenPersistencePolicy::Isolated,
+    )
+    .await
+}
+
+async fn persist_tokens_async_with_policy(
+    codex_home: &Path,
+    api_key: Option<String>,
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    persistence_policy: TokenPersistencePolicy,
+) -> io::Result<()> {
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
     let persist_codex_home = codex_home.clone();
@@ -862,19 +961,34 @@ pub(crate) async fn persist_tokens_async(
             personal_access_token: None,
         };
         save_auth(&persist_codex_home, &auth, auth_credentials_store_mode)?;
-        upsert_login_account_best_effort(&persist_codex_home, &auth, auth_credentials_store_mode);
+        if persistence_policy.should_mirror() {
+            upsert_login_account_best_effort(
+                &persist_codex_home,
+                &auth,
+                auth_credentials_store_mode,
+            );
+        }
         Ok::<_, io::Error>((previous_auth, auth))
     })
     .await
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))??;
 
     let previous_account_matches = login_account_matches_auth(previous_auth.as_ref(), &auth);
+    if !persistence_policy.should_mirror() {
+        remove_login_account_best_effort(
+            &codex_home,
+            previous_auth.as_ref(),
+            auth_credentials_store_mode,
+        );
+    }
+    let previous_auth_handling = persistence_policy.previous_auth_handling();
     let should_revoke_previous = should_revoke_auth_tokens(previous_auth.as_ref(), &auth)
         && (previous_auth_handling == PreviousAuthHandling::RevokeAndRemoveStoredAccount
             || previous_account_matches);
     if should_revoke_previous {
         let revoke_result = revoke_auth_tokens(previous_auth.as_ref()).await;
-        if previous_auth_handling == PreviousAuthHandling::RevokeAndRemoveStoredAccount
+        if persistence_policy.should_mirror()
+            && previous_auth_handling == PreviousAuthHandling::RevokeAndRemoveStoredAccount
             && !previous_account_matches
         {
             remove_login_account_best_effort(
@@ -1240,6 +1354,7 @@ mod tests {
     use crate::auth::AuthDotJson;
     use crate::auth::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
     use crate::auth::load_auth_dot_json;
+    use crate::auth::logout;
     use crate::auth::save_auth;
     use crate::auth_accounts::list_accounts;
     use crate::auth_accounts::upsert_chatgpt_account;
@@ -1255,11 +1370,55 @@ mod tests {
     use super::html_escape;
     use super::is_missing_codex_entitlement_error;
     use super::parse_token_endpoint_error;
+    use super::persist_profile_tokens_async;
     use super::persist_tokens_async;
     use super::redact_sensitive_query_value;
     use super::redact_sensitive_url_parts;
     use super::render_login_error_page;
     use super::sanitize_url_for_logging;
+
+    #[tokio::test]
+    async fn isolated_chatgpt_relogin_and_logout_leave_no_account_catalog_credentials()
+    -> anyhow::Result<()> {
+        let codex_home = tempdir()?;
+
+        for suffix in ["first", "second"] {
+            let expected_access_token = format!("profile-access-{suffix}");
+            persist_profile_tokens_async(
+                codex_home.path(),
+                /*api_key*/ None,
+                jwt_for_account("profile-account"),
+                expected_access_token.clone(),
+                format!("profile-refresh-{suffix}"),
+                AuthCredentialsStoreMode::File,
+            )
+            .await?;
+
+            let auth = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?
+                .context("profile auth should exist")?;
+            assert_eq!(
+                auth.tokens
+                    .as_ref()
+                    .map(|tokens| tokens.access_token.as_str()),
+                Some(expected_access_token.as_str())
+            );
+            assert_eq!(
+                list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?,
+                Vec::new()
+            );
+        }
+
+        assert!(logout(codex_home.path(), AuthCredentialsStoreMode::File)?);
+        assert_eq!(
+            load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)?,
+            None
+        );
+        assert_eq!(
+            list_accounts(codex_home.path(), AuthCredentialsStoreMode::File)?,
+            Vec::new()
+        );
+        Ok(())
+    }
 
     #[serial_test::serial(logout_revoke)]
     #[tokio::test]

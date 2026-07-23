@@ -9,6 +9,7 @@ use serde::de::{self};
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::auth::LoginAccountCatalogPolicy;
 use crate::pkce::PkceCodes;
 use crate::server::ServerOptions;
 use codex_client::build_reqwest_client_with_custom_ca;
@@ -321,6 +322,33 @@ pub async fn complete_device_code_login(
     opts: ServerOptions,
     device_code: DeviceCode,
 ) -> std::io::Result<()> {
+    complete_device_code_login_with_catalog_policy(
+        opts,
+        device_code,
+        LoginAccountCatalogPolicy::Mirror,
+    )
+    .await
+}
+
+/// Completes device-code login for a named auth profile without enrolling the
+/// resulting credentials in an account-switching catalog.
+pub async fn complete_profile_device_code_login(
+    opts: ServerOptions,
+    device_code: DeviceCode,
+) -> std::io::Result<()> {
+    complete_device_code_login_with_catalog_policy(
+        opts,
+        device_code,
+        LoginAccountCatalogPolicy::Isolated,
+    )
+    .await
+}
+
+async fn complete_device_code_login_with_catalog_policy(
+    opts: ServerOptions,
+    device_code: DeviceCode,
+    account_catalog_policy: LoginAccountCatalogPolicy,
+) -> std::io::Result<()> {
     let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let base_url = opts.issuer.trim_end_matches('/');
     let api_base_url = format!("{base_url}/api/accounts");
@@ -357,22 +385,45 @@ pub async fn complete_device_code_login(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
     }
 
-    crate::server::persist_tokens_async(
-        &opts.codex_home,
-        /*api_key*/ None,
-        tokens.id_token,
-        tokens.access_token,
-        tokens.refresh_token,
-        opts.cli_auth_credentials_store_mode,
-        opts.previous_auth_handling,
-    )
-    .await
+    match account_catalog_policy {
+        LoginAccountCatalogPolicy::Mirror => {
+            crate::server::persist_tokens_async(
+                &opts.codex_home,
+                /*api_key*/ None,
+                tokens.id_token,
+                tokens.access_token,
+                tokens.refresh_token,
+                opts.cli_auth_credentials_store_mode,
+                opts.previous_auth_handling,
+            )
+            .await
+        }
+        LoginAccountCatalogPolicy::Isolated => {
+            crate::server::persist_profile_tokens_async(
+                &opts.codex_home,
+                /*api_key*/ None,
+                tokens.id_token,
+                tokens.access_token,
+                tokens.refresh_token,
+                opts.cli_auth_credentials_store_mode,
+            )
+            .await
+        }
+    }
 }
 
 pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {
     let device_code = request_device_code(&opts).await?;
     print_device_code_prompt(&device_code.verification_url, &device_code.user_code);
     complete_device_code_login(opts, device_code).await
+}
+
+/// Runs device-code login for a named auth profile without enrolling the
+/// resulting credentials in an account-switching catalog.
+pub async fn run_profile_device_code_login(opts: ServerOptions) -> std::io::Result<()> {
+    let device_code = request_device_code(&opts).await?;
+    print_device_code_prompt(&device_code.verification_url, &device_code.user_code);
+    complete_profile_device_code_login(opts, device_code).await
 }
 
 #[cfg(test)]

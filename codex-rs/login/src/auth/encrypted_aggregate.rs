@@ -74,6 +74,27 @@ pub(crate) enum PreparedMigration {
     Prepared(LoginAggregateV1),
 }
 
+/// Validates any existing encrypted shadow without attempting activation or mutation.
+pub(crate) fn validate_encrypted_aggregate_for_read(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+) -> io::Result<()> {
+    if mode == AuthCredentialsStoreMode::Ephemeral {
+        return Ok(());
+    }
+
+    let manager = secrets_manager(codex_home, keyring_store);
+    let name = aggregate_secret_name()?;
+    if let Some(raw) = manager
+        .get(&SecretScope::Global, &name)
+        .map_err(secret_err)?
+    {
+        parse_document(&raw)?;
+    }
+    Ok(())
+}
+
 /// Activate the verified encrypted shadow when the current legacy sources form
 /// a consistent aggregate.
 ///

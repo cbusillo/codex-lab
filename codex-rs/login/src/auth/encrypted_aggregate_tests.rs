@@ -594,6 +594,26 @@ fn corrupt_shadow_blocks_reads_and_trusted_mutations() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn read_only_home_still_rejects_corrupt_shadow() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new()?;
+    let keyring = Arc::new(MockKeyringStore::default());
+    seed_auth_file(temp.path())?;
+    load_activated_auth_with_keyring_store(temp.path(), File, keyring.clone())?
+        .expect("legacy auth should load");
+    fs::write(temp.path().join("secrets/codex_auth.age"), b"garbage")?;
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o500))?;
+
+    let loaded = load_activated_auth_with_keyring_store(temp.path(), File, keyring);
+
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))?;
+    assert!(loaded.is_err());
+    Ok(())
+}
+
 fn activate(
     home: &Path,
     mode: AuthCredentialsStoreMode,
