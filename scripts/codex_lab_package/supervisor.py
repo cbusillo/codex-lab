@@ -603,10 +603,21 @@ def _launchctl_loaded(launchctl_path: Path, service: str) -> bool:
 
 def _launchctl(
     launchctl_path: Path, *args: str, check: bool = True
-) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        [str(launchctl_path), *args], check=check, capture_output=True
+) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        [str(launchctl_path), *args], capture_output=True, text=True
     )
+    if check and completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"launchctl {' '.join(args)} failed: {detail}")
+    if args[:1] == ("bootout",) and completed.returncode == 0:
+        service = args[1]
+        deadline = time.monotonic() + 10
+        while _launchctl_loaded(launchctl_path, service):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out unloading {service}")
+            time.sleep(0.1)
+    return completed
 
 
 def _wait_for_health(runner: Path, timeout_seconds: float) -> None:

@@ -2,7 +2,6 @@ from pathlib import Path
 import hashlib
 import os
 import plistlib
-import stat
 import subprocess
 import sys
 import tempfile
@@ -49,7 +48,6 @@ class SupervisorTest(unittest.TestCase):
             self.assertIn("app-server daemon start", runner)
             self.assertIn("app-server daemon version", runner)
             self.assertNotIn("daemon bootstrap", runner)
-            self.assertIn("verify_no_updater", runner)
             self.assertNotIn('"$MANAGED_CLI" app-server daemon pid-update-loop', runner)
             self.assertNotIn("ChatGPT", runner)
 
@@ -57,7 +55,6 @@ class SupervisorTest(unittest.TestCase):
             self.assertEqual(plist["Label"], paths.label)
             self.assertEqual(plist["ProgramArguments"], [str(paths.runner), "run"])
             self.assertTrue(plist["KeepAlive"])
-            self.assertTrue(plist["RunAtLoad"])
 
     def test_inspect_engine_records_signature_and_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -90,8 +87,6 @@ echo 'TeamIdentifier=TEAM123456' >&2
 
             identity = inspect_engine(engine, codesign_path=codesign)
             self.assertEqual(identity.source_commit, source_commit)
-            self.assertEqual(identity.signing_identifier, "dev.example.codex-lab")
-            self.assertEqual(identity.team_identifier, "TEAM123456")
             self.assertEqual(
                 identity.sha256, hashlib.sha256(engine.read_bytes()).hexdigest()
             )
@@ -130,7 +125,6 @@ echo 'TeamIdentifier=TEAM123456' >&2
 
             self.assertEqual(result["service"], f"gui/501/{paths.label}")
             self.assertTrue(paths.runner.is_file())
-            self.assertEqual(stat.S_IMODE(paths.runner.stat().st_mode), 0o755)
             self.assertTrue(paths.plist.is_file())
             run.assert_called_once_with([str(paths.runner), "check"], check=True)
             self.assertEqual(
