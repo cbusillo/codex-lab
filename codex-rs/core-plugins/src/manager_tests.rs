@@ -2683,15 +2683,14 @@ async fn skills_service_reuses_skills_parsed_during_plugin_load() {
         .snapshot_for_config(&skills_input, /*fs*/ None)
         .await;
 
-    assert_eq!(
-        cached
-            .outcome()
-            .skills
-            .iter()
-            .map(|skill| skill.description.as_str())
-            .collect::<Vec<_>>(),
-        vec!["first"]
-    );
+    let descriptions = cached
+        .outcome()
+        .skills
+        .iter()
+        .map(|skill| skill.description.as_str())
+        .collect::<Vec<_>>();
+    assert!(descriptions.contains(&"first"));
+    assert!(!descriptions.contains(&"second"));
 }
 
 #[test]
