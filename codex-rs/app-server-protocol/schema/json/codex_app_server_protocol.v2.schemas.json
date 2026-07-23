@@ -3451,6 +3451,30 @@
             },
             "method": {
               "enum": [
+                "externalAgentConfig/import/recordHistory"
+              ],
+              "title": "ExternalAgentConfig/import/recordHistoryRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ExternalAgentConfigImportHistoryRecordParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ExternalAgentConfig/import/recordHistoryRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "externalAgentConfig/import/readHistories"
               ],
               "title": "ExternalAgentConfig/import/readHistoriesRequestMethod",
@@ -4706,7 +4730,7 @@
           ]
         },
         "reloadUserConfig": {
-          "description": "When true, hot-reload the updated user config into all loaded threads after writing.",
+          "description": "When true, hot-reload updated runtime settings into loaded threads after writing. Session-static model, reasoning-effort, Plan-mode reasoning-effort, service-tier, and personality defaults are not reloaded.",
           "type": "boolean"
         }
       },
@@ -6206,6 +6230,12 @@
         "importId": {
           "type": "string"
         },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "successes": {
           "items": {
             "$ref": "#/definitions/ExternalAgentConfigImportItemTypeSuccess"
@@ -6219,6 +6249,41 @@
         "importId",
         "successes"
       ],
+      "type": "object"
+    },
+    "ExternalAgentConfigImportHistoryRecordParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "itemTypeResults": {
+          "description": "Completed results grouped by imported item type.",
+          "items": {
+            "$ref": "#/definitions/ExternalAgentConfigImportTypeResult"
+          },
+          "type": "array"
+        },
+        "providerId": {
+          "description": "Opaque provider identifier for the externally completed import.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemTypeResults",
+        "providerId"
+      ],
+      "title": "ExternalAgentConfigImportHistoryRecordParams",
+      "type": "object"
+    },
+    "ExternalAgentConfigImportHistoryRecordResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "importId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "importId"
+      ],
+      "title": "ExternalAgentConfigImportHistoryRecordResponse",
       "type": "object"
     },
     "ExternalAgentConfigImportItemTypeFailure": {
@@ -6310,7 +6375,7 @@
           ]
         },
         "providerId": {
-          "description": "Opaque provider identifier supplied by the caller for analytics attribution. This does not select the migration source.",
+          "description": "Opaque provider identifier supplied by the caller for analytics attribution and import history display. This does not select the migration source.",
           "type": [
             "string",
             "null"

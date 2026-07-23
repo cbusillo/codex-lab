@@ -40,7 +40,6 @@ use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
-use crate::session::McpRuntimeSnapshot;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -89,6 +88,7 @@ use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::error::UsageLimitReachedError;
 use codex_protocol::items::PlanItem;
@@ -174,7 +174,7 @@ pub(crate) async fn run_turn(
     )
     .await
     {
-        if matches!(err, CodexErr::TurnAborted) {
+        if matches!(err.details(), CodexErrorDetails::TurnAborted) {
             run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
             return Err(err);
         }
@@ -191,7 +191,7 @@ pub(crate) async fn run_turn(
         .await
     {
         Ok(step_context) => step_context,
-        Err(err @ CodexErr::TurnAborted) => {
+        Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
             run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
             return Err(err);
         }
@@ -412,7 +412,7 @@ pub(crate) async fn run_turn(
                     )
                     .await
                     {
-                        if matches!(err, CodexErr::TurnAborted) {
+                        if matches!(err.details(), CodexErrorDetails::TurnAborted) {
                             return Err(err);
                         }
                         let error = err.to_codex_protocol_error();
@@ -480,10 +480,15 @@ pub(crate) async fn run_turn(
                 }
                 continue;
             }
-            Err(err @ CodexErr::TurnAborted) => {
+            Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
                 return Err(err);
             }
-            Err(codex_error @ CodexErr::InvalidImageRequest()) => {
+            Err(codex_error)
+                if matches!(
+                    codex_error.details(),
+                    CodexErrorDetails::InvalidImageRequest()
+                ) =>
+            {
                 sess.track_turn_codex_error(turn_context.as_ref(), &codex_error);
                 let error = CodexErrorInfo::BadRequest;
                 sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
@@ -496,14 +501,15 @@ pub(crate) async fn run_turn(
                 sess.send_event(&turn_context, event).await;
                 break;
             }
-            Err(CodexErr::UsageLimitReached(limit_err)) => {
-                if let Some(refreshed_turn_context) = maybe_switch_account_after_usage_limit(
-                    &sess,
-                    &turn_context,
-                    &mut rate_limit_switch_state,
-                    &limit_err,
-                )
-                .await
+            Err(error) => {
+                if let CodexErrorDetails::UsageLimitReached(limit_err) = error.details()
+                    && let Some(refreshed_turn_context) = maybe_switch_account_after_usage_limit(
+                        &sess,
+                        &turn_context,
+                        &mut rate_limit_switch_state,
+                        limit_err,
+                    )
+                    .await
                 {
                     sess.services
                         .model_client
@@ -517,7 +523,6 @@ pub(crate) async fn run_turn(
                     continue;
                 }
 
-                let error = CodexErr::UsageLimitReached(limit_err);
                 info!("Turn error: {error:#}");
                 let protocol_error = error.to_codex_protocol_error();
                 sess.emit_turn_error_lifecycle(turn_context.as_ref(), protocol_error)
@@ -528,17 +533,6 @@ pub(crate) async fn run_turn(
                     EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
                 )
                 .await;
-                break;
-            }
-            Err(e) => {
-                info!("Turn error: {e:#}");
-                let error = e.to_codex_protocol_error();
-                sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
-                    .await;
-                sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                sess.send_event(&turn_context, event).await;
-                // let the user continue the conversation
                 break;
             }
         }
@@ -642,17 +636,7 @@ async fn build_skills_and_plugins(
         // Plugin mentions need raw MCP/app inventory even when app tools
         // are normally hidden so we can describe the plugin's currently
         // usable capabilities for this turn.
-        match step_context
-            .mcp
-            .manager_arc()
-            .list_all_tools()
-            .or_cancel(cancellation_token)
-            .await
-        {
-            Ok(mcp_tools) => mcp_tools,
-            Err(_) if turn_context.apps_enabled() => return None,
-            Err(_) => Vec::new(),
-        }
+        step_context.mcp.tools().to_vec()
     } else {
         Vec::new()
     };
@@ -1273,25 +1257,26 @@ async fn run_sampling_request(
             Ok(output) => {
                 return Ok((output, original_input.unwrap_or(prompt.input)));
             }
-            Err(CodexErr::ContextWindowExceeded) => {
-                sess.set_total_tokens_full(turn_context.as_ref()).await;
-                return Err(CodexErr::ContextWindowExceeded);
-            }
-            Err(CodexErr::UsageLimitReached(e)) => {
-                sess.record_usage_limit_hint_for_active_account(
-                    e.plan_type.clone().map(Into::into),
-                    e.resets_at,
-                    e.rate_limit_reached_type,
-                )
-                .await;
-                let rate_limits = e.rate_limits.clone();
-                if let Some(rate_limits) = rate_limits {
-                    sess.update_rate_limits(turn_context.as_ref(), *rate_limits)
-                        .await;
+            Err(err) => match err.details() {
+                CodexErrorDetails::ContextWindowExceeded => {
+                    sess.set_total_tokens_full(&turn_context).await;
+                    return Err(err);
                 }
-                return Err(CodexErr::UsageLimitReached(e));
-            }
-            Err(err) => err,
+                CodexErrorDetails::UsageLimitReached(e) => {
+                    sess.record_usage_limit_hint_for_active_account(
+                        e.plan_type.clone().map(Into::into),
+                        e.resets_at,
+                        e.rate_limit_reached_type,
+                    )
+                    .await;
+                    let rate_limits = e.rate_limits.clone();
+                    if let Some(rate_limits) = rate_limits {
+                        sess.update_rate_limits(&turn_context, *rate_limits).await;
+                    }
+                    return Err(err);
+                }
+                _ => err,
+            },
         };
 
         if original_input.is_none() {
@@ -1403,14 +1388,9 @@ pub(crate) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
     environments: &TurnEnvironmentSnapshot,
-    mcp: &McpRuntimeSnapshot,
-    cancellation_token: &CancellationToken,
-) -> CodexResult<(Vec<ToolInfo>, Arc<ToolRouter>)> {
-    let all_mcp_tools = mcp
-        .manager()
-        .list_all_tools()
-        .or_cancel(cancellation_token)
-        .await?;
+    mcp: &codex_mcp::McpBinding,
+) -> (Vec<ToolInfo>, Arc<ToolRouter>) {
+    let all_mcp_tools = mcp.tools().to_vec();
     let loaded_plugins = sess
         .services
         .plugins_manager
@@ -1531,7 +1511,7 @@ pub(crate) async fn built_tools(
         },
         &sess.services.tool_search_handler_cache,
     ));
-    Ok((all_mcp_tools, tool_router))
+    (all_mcp_tools, tool_router)
 }
 
 #[derive(Debug)]
@@ -2212,7 +2192,9 @@ async fn try_run_sampling_request(
             .await
         {
             Ok(event) => event,
-            Err(codex_async_utils::CancelErr::Cancelled) => break Err(CodexErr::TurnAborted),
+            Err(codex_async_utils::CancelErr::Cancelled) => {
+                break Err(CodexErr::TurnAborted);
+            }
         };
 
         let event = match event {
@@ -2221,7 +2203,6 @@ async fn try_run_sampling_request(
             None => {
                 break Err(CodexErr::Stream(
                     "stream closed before response.completed".into(),
-                    None,
                 ));
             }
         };

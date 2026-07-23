@@ -97,10 +97,9 @@ impl Session {
     async fn refresh_apps_context(&self, turn_context: &TurnContext) -> AppsContextChange {
         let availability =
             if turn_context.config.include_apps_instructions && turn_context.apps_enabled() {
-                let mcp_runtime = self.services.latest_mcp_runtime();
                 let accessible_and_enabled_connectors =
-                    connectors::list_accessible_and_enabled_connectors_from_manager(
-                        mcp_runtime.manager(),
+                    connectors::list_accessible_and_enabled_connectors_from_runtime(
+                        self.services.mcp_runtime.as_ref(),
                         &turn_context.config,
                     )
                     .await;

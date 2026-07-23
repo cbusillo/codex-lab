@@ -1,9 +1,7 @@
 pub use binding::McpBinding;
 pub use binding::PreparedMcpCall;
-pub use connection_manager::McpConnectionSet;
 pub use connection_manager::tool_is_model_visible;
 pub use elicitation::ElicitationLifecycle;
-pub use elicitation::ElicitationRequestRouter;
 pub use elicitation::ElicitationReviewRequest;
 pub use elicitation::ElicitationReviewer;
 pub use elicitation::ElicitationReviewerHandle;
@@ -12,14 +10,13 @@ pub use resource_client::McpResourceClientCacheKey;
 pub use resource_client::McpResourcePage;
 pub use resource_client::McpResourceReadResult;
 pub use rmcp_client::MCP_SANDBOX_STATE_META_CAPABILITY;
+pub use runtime::CodexAppsAuthContext;
 pub use runtime::McpRuntime;
 pub use runtime::McpRuntimeContext;
+pub use runtime::McpRuntimeInput;
 pub use runtime::SandboxState;
 pub use tool_catalog_cache::McpToolCatalogCache;
 pub use tools::ToolInfo;
-
-/// Backward-compatible name for the MCP connection set.
-pub type McpConnectionManager = McpConnectionSet;
 
 /// Backward-compatible name for the shared Codex Apps tools runtime.
 pub type CodexAppsToolsCache = codex_connectors::ConnectorRuntimeManager<ToolInfo>;

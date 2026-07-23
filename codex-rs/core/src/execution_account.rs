@@ -151,11 +151,23 @@ impl fmt::Debug for ExecutionAccountCacheIdentity {
     }
 }
 
+impl ExecutionAccountCacheIdentity {
+    pub(crate) fn connection_discriminator(&self) -> String {
+        self.0.clone()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ExecutionAccountModelsContext {
     pub(crate) generation: u64,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) cache_key: String,
+}
+
+pub(crate) struct ExecutionAccountCodexAppsContext {
+    pub(crate) cache_identity: ExecutionAccountCacheIdentity,
+    pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) auth_provider: SharedAuthProvider,
 }
 
 #[derive(Clone, Debug)]
@@ -456,6 +468,7 @@ impl ExecutionAccountLease {
         ExecutionAccountCacheIdentity(self.inner.current.load().cache_identity.clone())
     }
 
+    #[cfg(test)]
     pub(crate) fn codex_apps_auth_provider(
         &self,
         expected_cache_identity: ExecutionAccountCacheIdentity,
@@ -464,6 +477,20 @@ impl ExecutionAccountLease {
             lease: self.clone(),
             expected_cache_identity,
         })
+    }
+
+    pub(crate) fn codex_apps_context(&self) -> ExecutionAccountCodexAppsContext {
+        let account = self.inner.current.load_full();
+        let cache_identity = ExecutionAccountCacheIdentity(account.cache_identity.clone());
+        let auth_provider = Arc::new(ExecutionAccountCodexAppsAuthProvider {
+            lease: self.clone(),
+            expected_cache_identity: cache_identity.clone(),
+        });
+        ExecutionAccountCodexAppsContext {
+            cache_identity,
+            auth_manager: Arc::clone(&account.auth_manager),
+            auth_provider,
+        }
     }
 
     pub(crate) fn models_context(&self) -> ExecutionAccountModelsContext {

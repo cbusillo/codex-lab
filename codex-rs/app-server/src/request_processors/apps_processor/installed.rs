@@ -6,12 +6,12 @@ use codex_connectors::connector_tool_is_synthetic;
 use codex_connectors::installed_connector_runtime;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
-use codex_mcp::McpConnectionSet;
+use codex_mcp::McpRuntime;
+use codex_mcp::McpRuntimeInput;
 use codex_mcp::ToolInfo;
 use codex_mcp::effective_mcp_servers;
 use codex_mcp::host_owned_codex_apps_enabled;
 use codex_mcp::tool_is_model_visible;
-use codex_mcp::tool_plugin_provenance;
 use codex_protocol::models::PermissionProfile;
 
 const CONNECTOR_RUNTIME_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -52,7 +52,10 @@ impl AppsRequestProcessor {
             let runtime_enabled = apps_enabled && workspace_enabled;
 
             let mcp_manager = self.thread_manager.mcp_manager();
-            let mcp_config = mcp_manager.runtime_config(&config).await;
+            let mut mcp_config = mcp_manager.runtime_config(&config).await;
+            // Installed-app discovery has no active turn or reviewer.
+            mcp_config.permission_profile = PermissionProfile::default();
+            let mcp_config = Arc::new(mcp_config);
             let mut mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
             mcp_servers.retain(|name, _| name == CODEX_APPS_MCP_SERVER_NAME);
             let cache_key = connector_runtime_context_key(auth.as_ref());
@@ -67,53 +70,49 @@ impl AppsRequestProcessor {
                     );
                     let startup_timeout = mcp_servers
                         .get(CODEX_APPS_MCP_SERVER_NAME)
-                        .and_then(|server| server.configured_config())
-                        .and_then(|config| config.startup_timeout_sec)
+                        .and_then(|server| server.config().startup_timeout_sec)
                         .unwrap_or(CONNECTOR_RUNTIME_REFRESH_TIMEOUT);
                     let runtime_context = McpRuntimeContext::new(
                         self.thread_manager.environment_manager(),
                         config.cwd.to_path_buf(),
                     );
                     let cancellation_token = CancellationToken::new();
-                    let codex_apps_auth_provider =
-                        host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()).then(|| {
-                            auth.as_ref()
-                                .filter(|auth| auth.uses_codex_backend())
-                                .map(|auth| {
-                                    codex_model_provider::auth_provider_from_auth_manager(
+                    let codex_apps_auth =
+                        host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
+                            .then(|| {
+                                auth.as_ref().map(|auth| {
+                                    codex_mcp::CodexAppsAuthContext::from_auth_manager(
                                         Arc::clone(&self.auth_manager),
                                         auth,
                                     )
                                 })
-                        }).flatten();
-                    let connection_manager = McpConnectionSet::new(
-                        &mcp_servers,
-                        config.mcp_oauth_credentials_store_mode,
-                        config.auth_keyring_backend_kind(),
-                        &config.permissions.approval_policy,
-                        APPS_INSTALLED_SUBMIT_ID.to_string(),
-                        /*tx_event*/ None,
-                        cancellation_token.clone(),
-                        PermissionProfile::default(),
+                            })
+                            .flatten();
+                    let runtime = McpRuntime::new(McpRuntimeInput {
+                        config: Arc::clone(&mcp_config),
+                        plugins_available: false,
+                        ready_selected_capability_roots: Vec::new(),
+                        mcp_servers,
+                        submit_id: APPS_INSTALLED_SUBMIT_ID.to_string(),
+                        tx_event: None,
+                        startup_cancellation_token: cancellation_token.clone(),
                         runtime_context,
-                        mcp_config.codex_home.clone(),
-                        mcp_manager.codex_apps_tools_cache(),
-                        mcp_manager.tool_catalog_cache(),
-                        cache_key.clone(),
-                        mcp_config.prefix_mcp_tool_names,
-                        mcp_config.client_elicitation_capability.clone(),
-                        /*supports_openai_form_elicitation*/ false,
-                        tool_plugin_provenance(&mcp_config),
-                        auth.as_ref(),
-                        codex_apps_auth_provider,
-                        /*elicitation_reviewer*/ None,
-                        /*elicitation_lifecycle*/ None,
-                        codex_mcp::ElicitationRequestRouter::default(),
-                    )
+                        codex_apps_tools_cache: mcp_manager.codex_apps_tools_cache(),
+                        tool_catalog_cache: mcp_manager.tool_catalog_cache(),
+                        codex_apps_tools_cache_key: cache_key.clone(),
+                        supports_openai_form_elicitation: false,
+                        auth: auth.clone(),
+                        codex_apps_auth,
+                        elicitation_reviewer: None,
+                        elicitation_lifecycle: None,
+                    })
                     .await;
 
-                    let result = if connection_manager
-                        .wait_for_server_ready(CODEX_APPS_MCP_SERVER_NAME, startup_timeout)
+                    let result = if runtime
+                        .latest_wait_for_server_ready(
+                            CODEX_APPS_MCP_SERVER_NAME,
+                            startup_timeout,
+                        )
                         .await
                     {
                         mcp_manager
@@ -130,7 +129,7 @@ impl AppsRequestProcessor {
                         ))
                     };
                     cancellation_token.cancel();
-                    connection_manager.shutdown().await;
+                    runtime.shutdown().await;
                     result
                 }
                 .await;
