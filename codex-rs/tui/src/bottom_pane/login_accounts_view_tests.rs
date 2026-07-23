@@ -30,6 +30,114 @@ fn keyring_auth_is_not_mirrored_to_plaintext_account_catalog() {
     assert!(!codex_home.path().join("auth_accounts.json").exists());
 }
 
+fn current_only_api_key_view(
+    app_event_tx: AppEventSender,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> LoginAccountsView {
+    let auth = codex_login::AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-secure".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+    };
+    LoginAccountsView {
+        app_event_tx,
+        codex_home: std::path::PathBuf::new(),
+        default_auth_home_is_current: true,
+        auth_credentials_store_mode,
+        pool_behavior: AccountPoolBehavior::CurrentOnly,
+        accounts: vec![current_auth_account_row(&auth, auth_credentials_store_mode)],
+        remote_loaded: false,
+        selected: 0,
+        error: None,
+        feedback: None,
+        mode: LoginAccountsMode::List,
+        is_complete: false,
+        completion: None,
+    }
+}
+
+#[test]
+fn keyring_current_login_renders_without_claiming_pool_membership() {
+    let view = current_only_api_key_view(app_event_sender(), AuthCredentialsStoreMode::Keyring);
+    let area = Rect::new(0, 0, 76, view.desired_height(/*width*/ 76));
+    let mut buf = Buffer::empty(area);
+    view.render(area, &mut buf);
+
+    insta::assert_snapshot!(
+        "keyring_current_login_not_pooled",
+        render_snapshot(&buf, area)
+    );
+}
+
+#[test]
+fn auto_current_login_renders_without_claiming_pool_membership() {
+    let view = current_only_api_key_view(app_event_sender(), AuthCredentialsStoreMode::Auto);
+    let area = Rect::new(0, 0, 76, view.desired_height(/*width*/ 76));
+    let mut buf = Buffer::empty(area);
+    view.render(area, &mut buf);
+
+    insta::assert_snapshot!("auto_current_login_not_pooled", render_snapshot(&buf, area));
+}
+
+#[test]
+fn current_only_modes_ignore_stale_plaintext_catalog() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    codex_login::upsert_api_key_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        "sk-stale".to_string(),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("seed stale file account");
+    codex_login::login_with_api_key(
+        codex_home.path(),
+        "sk-current",
+        AuthCredentialsStoreMode::Ephemeral,
+    )
+    .expect("seed current ephemeral auth");
+    let current_auth =
+        codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::Ephemeral)
+            .expect("load current auth")
+            .expect("current auth should exist");
+
+    assert_eq!(
+        load_account_rows(
+            codex_home.path(),
+            /*default_auth_home_is_current*/ true,
+            AuthCredentialsStoreMode::Ephemeral,
+            /*previously_selected_id*/ None,
+        ),
+        LoadedLoginAccounts {
+            accounts: vec![current_auth_account_row(
+                &current_auth,
+                AuthCredentialsStoreMode::Ephemeral,
+            )],
+            selected: 0,
+            error: None,
+        }
+    );
+}
+
+#[test]
+fn keyring_current_login_disconnect_points_to_logout() {
+    let (tx, mut rx) = app_event_sender_with_rx();
+    let mut view = current_only_api_key_view(tx, AuthCredentialsStoreMode::Keyring);
+
+    view.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+    assert_eq!(
+        view.feedback,
+        Some(LoginAccountsFeedback::Info(
+            "This login is not pooled. Use /logout to disconnect it.".to_string()
+        ))
+    );
+    assert_matches!(rx.try_recv(), Err(_));
+}
+
 fn app_event_sender_with_rx() -> (
     AppEventSender,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
@@ -382,6 +490,20 @@ fn add_account_back_hint_states_render_back() {
         .join("\n\n");
 
     insta::assert_snapshot!("add_account_back_hint_states", rendered);
+}
+
+#[test]
+fn keyring_complete_view_explains_login_replacement() {
+    let view = LoginAddAccountView::with_state_for_store_mode(
+        app_event_sender(),
+        LoginAddAccountState::Complete,
+        AuthCredentialsStoreMode::Keyring,
+    );
+    let area = Rect::new(0, 0, 56, view.desired_height(/*width*/ 56));
+    let mut buf = Buffer::empty(area);
+    view.render(area, &mut buf);
+
+    insta::assert_snapshot!("keyring_login_replaced", render_snapshot(&buf, area));
 }
 
 fn render_snapshot(buf: &Buffer, area: Rect) -> String {

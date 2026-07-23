@@ -1079,7 +1079,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_login_add_account_view(&mut self) {
-        let view = LoginAddAccountView::new(self.app_event_tx.clone());
+        let view = LoginAddAccountView::new_for_store_mode(
+            self.app_event_tx.clone(),
+            self.config.cli_auth_credentials_store_mode,
+        );
         self.bottom_pane.show_view(Box::new(view));
     }
 
@@ -1090,7 +1093,11 @@ impl ChatWidget {
         {
             return false;
         }
-        let view = LoginAddAccountView::with_state(self.app_event_tx.clone(), state);
+        let view = LoginAddAccountView::with_state_for_store_mode(
+            self.app_event_tx.clone(),
+            state,
+            self.config.cli_auth_credentials_store_mode,
+        );
         self.bottom_pane.show_view(Box::new(view));
         true
     }

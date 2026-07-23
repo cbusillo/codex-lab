@@ -1,0 +1,16 @@
+---
+source: tui/src/bottom_pane/login_accounts_view_tests.rs
+expression: "render_snapshot(&buf, area)"
+---
+┌──────────────────────────── Manage Accounts ─────────────────────────────┐
+│ Connected Accounts                                                       │
+│                                                                          │
+│ This credential mode keeps one current login. It is not enrolled in the  │
+│ account-switching pool; signing in again replaces it.                    │
+│                                                                          │
+│ > API key (current)  keyring - not in switching pool                     │
+│                                                                          │
+│ Replace current login...                                                 │
+│                                                                          │
+│ up/down Navigate  Enter Select  d Disconnect  Esc Close                  │
+└──────────────────────────────────────────────────────────────────────────┘
