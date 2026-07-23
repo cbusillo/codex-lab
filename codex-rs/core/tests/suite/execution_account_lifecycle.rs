@@ -371,6 +371,103 @@ async fn startup_and_failover_prefer_the_soonest_active_chatgpt_window() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_key_fallback_serves_turns_when_all_chatgpt_accounts_are_limited() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let control = add_chatgpt_account(
+        home.path(),
+        "account_id",
+        "Control",
+        /*make_active*/ true,
+    )?;
+    let secondary = add_chatgpt_account(
+        home.path(),
+        "secondary-candidate",
+        "Secondary candidate",
+        /*make_active*/ false,
+    )?;
+    let api_key = "sk-api-fallback";
+    let api_key_account = add_api_key_account(home.path(), api_key)?;
+    let now = Utc::now();
+
+    // Every ChatGPT account has hit its usage limit, with resets in the future,
+    // so only the API-key account remains healthy.
+    for account in [&control, &secondary] {
+        codex_core::account_usage::record_usage_limit_hint(
+            home.path(),
+            &account.id,
+            /*plan*/ None,
+            Some(now + Duration::hours(2)),
+            now,
+            /*reached_type*/ None,
+        )?;
+    }
+
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![sse(vec![
+            ev_assistant_message("msg-1", "served by api key"),
+            ev_completed("resp-1"),
+        ])],
+    )
+    .await;
+
+    let mut builder = execution_account_builder(home.clone()).with_config(|config| {
+        config.api_key_fallback_on_all_accounts_limited = true;
+        config
+            .features
+            .enable(Feature::Apps)
+            .expect("test config should enable Apps");
+    });
+    let fixture = builder.build(&server).await?;
+    let thread_id = fixture.session_configured.thread_id;
+    assert_eq!(
+        lease_account_id(home.path(), thread_id)?,
+        api_key_account.id
+    );
+
+    submit_text(&fixture.codex, "use whatever account is healthy").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some(format!("Bearer {api_key}"))
+    );
+    // API-key auth never carries a ChatGPT account header.
+    assert_eq!(requests[0].header("chatgpt-account-id"), None);
+    assert_eq!(
+        requests[0].body_json()["prompt_cache_key"],
+        format!("{thread_id}:{}", api_key_account.id)
+    );
+
+    // The API-key execution account cannot back Apps, so no Apps context leaks
+    // into the request and no Apps MCP handshake is attempted.
+    let developer_text = requests[0].message_input_texts("developer").join("\n");
+    assert_eq!(developer_text.matches("<apps_instructions>").count(), 0);
+    let received_requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        received_requests
+            .iter()
+            .all(|request| request.url.path() != "/api/codex/apps"),
+        "API-key fallback unexpectedly attempted an Apps MCP handshake"
+    );
+
+    assert_eq!(
+        lease_account_id(home.path(), thread_id)?,
+        api_key_account.id
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
+        Some(control.id)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prompt_cache_key_survives_control_switch_detach_and_reattach() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -440,6 +537,137 @@ async fn prompt_cache_key_survives_control_switch_detach_and_reattach() -> Resul
         vec![json!(thread_id.to_string()); 3]
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loaded_threads_pin_execution_auth_across_a_control_account_switch() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let control = add_chatgpt_account(
+        home.path(),
+        "account_id",
+        "Control",
+        /*make_active*/ true,
+    )?;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+            sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+            sse(vec![ev_response_created("resp-3"), ev_completed("resp-3")]),
+            sse(vec![ev_response_created("resp-4"), ev_completed("resp-4")]),
+            sse(vec![ev_response_created("resp-5"), ev_completed("resp-5")]),
+            sse(vec![ev_response_created("resp-6"), ev_completed("resp-6")]),
+        ],
+    )
+    .await;
+
+    // Two threads are loaded on the same manager while `control` is the only,
+    // active account, so both bind their execution lease to it.
+    let mut builder = execution_account_builder(home.clone());
+    let fixture = builder.build(&server).await?;
+    let thread_a = fixture.codex.clone();
+    let thread_a_id = fixture.session_configured.thread_id;
+    let NewThread {
+        thread_id: thread_b_id,
+        thread: thread_b,
+        ..
+    } = fixture
+        .thread_manager
+        .start_thread(fixture.config.clone())
+        .await?;
+    assert_ne!(thread_a_id, thread_b_id);
+
+    submit_text(&thread_a, "thread a before switch").await?;
+    submit_text(&thread_b, "thread b before switch").await?;
+
+    // Switch the active control account to a freshly added ChatGPT account.
+    let alternate = add_chatgpt_account(
+        home.path(),
+        "alternate-control",
+        "Alternate control",
+        /*make_active*/ false,
+    )?;
+    let (_account, alternate_auth) =
+        codex_login::auth_for_account(home.path(), AuthCredentialsStoreMode::File, &alternate.id)?;
+    save_auth(home.path(), &alternate_auth, AuthCredentialsStoreMode::File)?;
+    codex_login::set_active_account_id(
+        home.path(),
+        AuthCredentialsStoreMode::File,
+        Some(alternate.id.clone()),
+    )?;
+    fixture
+        .thread_manager
+        .reload_auth_for_loaded_threads()
+        .await;
+
+    submit_text(&thread_a, "thread a while switched").await?;
+    submit_text(&thread_b, "thread b while switched").await?;
+
+    // Switch the active control account back to the original control.
+    let (_account, control_auth) =
+        codex_login::auth_for_account(home.path(), AuthCredentialsStoreMode::File, &control.id)?;
+    save_auth(home.path(), &control_auth, AuthCredentialsStoreMode::File)?;
+    codex_login::set_active_account_id(
+        home.path(),
+        AuthCredentialsStoreMode::File,
+        Some(control.id.clone()),
+    )?;
+    fixture
+        .thread_manager
+        .reload_auth_for_loaded_threads()
+        .await;
+
+    submit_text(&thread_a, "thread a after reattach").await?;
+    submit_text(&thread_b, "thread b after reattach").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 6);
+    // Submissions were awaited sequentially, so requests interleave A, B per phase.
+    let cache_key = |request: &core_test_support::responses::ResponsesRequest| {
+        request.body_json()["prompt_cache_key"].clone()
+    };
+    let authorization =
+        |request: &core_test_support::responses::ResponsesRequest| request.header("authorization");
+    // Each thread keeps its own thread id as a stable cache namespace across the
+    // whole detach/reattach cycle, and the two threads never collide.
+    for index in [0usize, 2, 4] {
+        assert_eq!(cache_key(&requests[index]), json!(thread_a_id.to_string()));
+    }
+    for index in [1usize, 3, 5] {
+        assert_eq!(cache_key(&requests[index]), json!(thread_b_id.to_string()));
+    }
+
+    // The newly activated account's auth must never leak into either loaded
+    // thread's requests.
+    let alternate_authorization = Some("Bearer access-alternate-control".to_string());
+    assert!(
+        requests
+            .iter()
+            .all(|request| authorization(request).is_some()
+                && authorization(request) != alternate_authorization),
+        "a loaded thread leaked the newly activated control account's auth"
+    );
+    // Both loaded threads start on the same live control authorization.
+    assert_eq!(authorization(&requests[0]), authorization(&requests[1]));
+    // Once the manager reloads, both threads detach onto the pinned control
+    // execution account and stay there through the switch away and the reattach
+    // back, never following the active account over to `alternate`.
+    let pinned_authorization = authorization(&requests[2]);
+    for index in [2usize, 3, 4, 5] {
+        assert_eq!(authorization(&requests[index]), pinned_authorization);
+    }
+
+    assert_eq!(
+        codex_login::get_active_account_id(home.path(), AuthCredentialsStoreMode::File)?,
+        Some(control.id)
+    );
+
+    thread_a.shutdown_and_wait().await?;
+    thread_b.shutdown_and_wait().await?;
     Ok(())
 }
 

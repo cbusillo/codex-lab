@@ -118,6 +118,7 @@ fn options(
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
         allow_api_key_fallback: false,
         pooling,
+        persistence: ExecutionAccountLeasePersistence::Durable,
         start,
     }
 }
@@ -210,6 +211,72 @@ async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control()
         resumed.prompt_cache_discriminator(),
         Some(execution.id.clone())
     );
+}
+
+#[tokio::test]
+async fn ephemeral_lease_reads_source_lease_but_never_persists_a_destination_record() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    prefer_execution_account(codex_home.path(), &control, &execution, Utc::now());
+    let source_thread_id = ThreadId::new();
+    persist_lease(codex_home.path(), source_thread_id, &execution.id)
+        .expect("persist source lease");
+    let forked_thread_id = ThreadId::new();
+
+    let mut resolve_options = options(
+        codex_home.path(),
+        ExecutionAccountPooling::Enabled,
+        ExecutionAccountStart::Forked {
+            source_thread_id: Some(source_thread_id),
+        },
+    );
+    resolve_options.persistence = ExecutionAccountLeasePersistence::Ephemeral;
+    let lease =
+        ExecutionAccountLease::resolve(forked_thread_id, control_manager, resolve_options).await;
+
+    // The ephemeral fork still inherits the durable source lease's account...
+    assert_eq!(
+        lease.identity().stored_account_id,
+        Some(execution.id.clone())
+    );
+    assert_eq!(lease.prompt_cache_discriminator(), Some(execution.id));
+    // ...but must not write a destination lease record of its own.
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), forked_thread_id),
+        None
+    );
+    assert!(!lease_path(codex_home.path(), forked_thread_id).exists());
+}
+
+#[tokio::test]
+async fn ephemeral_lease_failover_does_not_persist_a_destination_record() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    let now = Utc::now();
+    prefer_execution_account(codex_home.path(), &control, &execution, now);
+    let thread_id = ThreadId::new();
+
+    let mut resolve_options = options(
+        codex_home.path(),
+        ExecutionAccountPooling::Enabled,
+        ExecutionAccountStart::New,
+    );
+    resolve_options.persistence = ExecutionAccountLeasePersistence::Ephemeral;
+    let lease = ExecutionAccountLease::resolve(thread_id, control_manager, resolve_options).await;
+    assert_eq!(
+        lease.identity().stored_account_id,
+        Some(execution.id.clone())
+    );
+    assert!(!lease_path(codex_home.path(), thread_id).exists());
+
+    let switched = lease
+        .failover_after_usage_limit(
+            &mut RateLimitSwitchState::default(),
+            Some(now + Duration::hours(1)),
+        )
+        .await
+        .expect("fail over")
+        .expect("replacement account");
+    assert_eq!(switched.stored_account_id, Some(control.id));
+    assert!(!lease_path(codex_home.path(), thread_id).exists());
 }
 
 #[tokio::test]

@@ -5630,6 +5630,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             chatgpt_base_url: config.chatgpt_base_url.clone(),
             allow_api_key_fallback: false,
             pooling: crate::execution_account::ExecutionAccountPooling::Disabled,
+            persistence: crate::execution_account::ExecutionAccountLeasePersistence::Durable,
             start: crate::execution_account::ExecutionAccountStart::New,
         },
     )
@@ -7925,6 +7926,7 @@ where
             chatgpt_base_url: config.chatgpt_base_url.clone(),
             allow_api_key_fallback: false,
             pooling: crate::execution_account::ExecutionAccountPooling::Disabled,
+            persistence: crate::execution_account::ExecutionAccountLeasePersistence::Durable,
             start: crate::execution_account::ExecutionAccountStart::New,
         },
     )
