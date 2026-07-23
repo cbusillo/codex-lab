@@ -1,5 +1,7 @@
 use super::*;
 
+use std::path::Path;
+
 use base64::Engine;
 use chrono::Duration;
 use codex_login::auth::save_auth;
@@ -204,6 +206,10 @@ async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control()
         resumed.identity().stored_account_id,
         Some(execution.id.clone())
     );
+    assert_eq!(
+        resumed.prompt_cache_discriminator(),
+        Some(execution.id.clone())
+    );
 }
 
 #[tokio::test]
@@ -285,6 +291,10 @@ async fn fork_inherits_source_lease_or_binds_current_control() {
         Some(execution.id.clone())
     );
     assert_eq!(
+        inherited.prompt_cache_discriminator(),
+        Some(execution.id.clone())
+    );
+    assert_eq!(
         read_persisted_lease(codex_home.path(), inherited_thread_id),
         Some(execution.id)
     );
@@ -348,7 +358,7 @@ async fn invalid_or_corrupt_resumed_lease_falls_back_to_control_and_is_repaired(
 }
 
 #[tokio::test]
-async fn pooled_execution_disabled_stays_on_control_and_does_not_persist() {
+async fn pooled_execution_disabled_stays_on_control_and_persists_cache_owner() {
     let (codex_home, control_manager, control, execution) = test_accounts().await;
     prefer_execution_account(codex_home.path(), &control, &execution, Utc::now());
     let thread_id = ThreadId::new();
@@ -365,7 +375,10 @@ async fn pooled_execution_disabled_stays_on_control_and_does_not_persist() {
 
     assert_eq!(lease.identity().stored_account_id, Some(control.id));
     assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
-    assert_eq!(read_persisted_lease(codex_home.path(), thread_id), None);
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), thread_id),
+        lease.identity().stored_account_id
+    );
     assert_eq!(
         lease
             .failover_after_usage_limit(
@@ -471,15 +484,20 @@ async fn api_key_control_account_does_not_pool_chatgpt_accounts_for_any_start() 
     let cleared_thread_id = ThreadId::new();
     let forked_thread_id = ThreadId::new();
 
-    for (thread_id, start) in [
-        (new_thread_id, ExecutionAccountStart::New),
-        (cleared_thread_id, ExecutionAccountStart::Cleared),
-        (resumed_thread_id, ExecutionAccountStart::Resumed),
+    for (thread_id, start, expected_cache_discriminator) in [
+        (new_thread_id, ExecutionAccountStart::New, None),
+        (cleared_thread_id, ExecutionAccountStart::Cleared, None),
+        (
+            resumed_thread_id,
+            ExecutionAccountStart::Resumed,
+            Some(control.id.clone()),
+        ),
         (
             forked_thread_id,
             ExecutionAccountStart::Forked {
                 source_thread_id: Some(source_thread_id),
             },
+            None,
         ),
     ] {
         let mut resolve_options =
@@ -495,18 +513,23 @@ async fn api_key_control_account_does_not_pool_chatgpt_accounts_for_any_start() 
         assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
         assert_eq!(lease.identity().mode, AuthMode::ApiKey);
         assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
-        assert_eq!(lease.prompt_cache_discriminator(), None);
+        assert_eq!(
+            lease.prompt_cache_discriminator(),
+            expected_cache_discriminator
+        );
     }
 
-    assert_eq!(read_persisted_lease(codex_home.path(), new_thread_id), None);
-    assert_eq!(
-        read_persisted_lease(codex_home.path(), cleared_thread_id),
-        None
-    );
-    assert_eq!(
-        read_persisted_lease(codex_home.path(), forked_thread_id),
-        None
-    );
+    for thread_id in [
+        new_thread_id,
+        cleared_thread_id,
+        resumed_thread_id,
+        forked_thread_id,
+    ] {
+        assert_eq!(
+            read_persisted_lease(codex_home.path(), thread_id),
+            Some(control.id.clone())
+        );
+    }
 }
 
 #[tokio::test]
@@ -581,6 +604,7 @@ async fn usage_limit_failover_changes_only_execution_lease() {
 
     assert_eq!(switched.stored_account_id, Some(control.id.clone()));
     assert!(lease.auth_revision() > previous_revision);
+    assert_eq!(lease.prompt_cache_discriminator(), None);
     assert_eq!(
         codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)
             .expect("active account"),
@@ -644,7 +668,7 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
 
     lease.prepare_for_control_auth_reload().await;
     assert!(!Arc::ptr_eq(&lease.auth_manager(), &control_manager));
-    assert_eq!(lease.prompt_cache_discriminator(), Some(control.id.clone()));
+    assert_eq!(lease.prompt_cache_discriminator(), None);
     control_manager.reload().await;
     lease.reconcile_after_control_auth_reload().await;
 
@@ -689,4 +713,74 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
     assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
     assert_eq!(lease.identity().stored_account_id, Some(control.id));
     assert_eq!(lease.prompt_cache_discriminator(), None);
+}
+
+#[tokio::test]
+async fn legacy_resume_preserves_the_original_control_cache_namespace_when_possible() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    let thread_id = ThreadId::new();
+    let path = lease_path(codex_home.path(), thread_id);
+    std::fs::create_dir_all(path.parent().expect("lease parent")).expect("create lease directory");
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": LEGACY_LEASE_VERSION,
+            "account_id": execution.id,
+        }))
+        .expect("serialize legacy lease"),
+    )
+    .expect("write legacy lease");
+
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        control_manager,
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Resumed,
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        lease.identity().stored_account_id,
+        Some(execution.id.clone())
+    );
+    assert_eq!(
+        lease.prompt_cache_discriminator(),
+        Some(execution.id.clone())
+    );
+    assert_eq!(
+        read_persisted_lease_record(codex_home.path(), thread_id),
+        Some(PersistedExecutionAccountLease {
+            version: LEASE_VERSION,
+            account_id: Some(execution.id),
+            base_cache_identity: Some(format!("stored:{}", control.id)),
+        })
+    );
+}
+
+#[tokio::test]
+async fn persisted_api_key_cache_identity_never_contains_the_raw_key() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let api_key = "sk-secret-execution-key";
+    let control_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key(api_key));
+    let thread_id = ThreadId::new();
+
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        control_manager,
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Disabled,
+            ExecutionAccountStart::New,
+        ),
+    )
+    .await;
+
+    assert_eq!(lease.prompt_cache_discriminator(), None);
+    let contents = std::fs::read_to_string(lease_path(codex_home.path(), thread_id))
+        .expect("read persisted lease");
+    assert!(!contents.contains(api_key));
+    assert!(contents.contains("credential:"));
 }
