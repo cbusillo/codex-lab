@@ -2498,12 +2498,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-code-bridge-client"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "codex-code-bridge-protocol",
+ "codex-code-bridge-service",
+ "eventsource-stream",
+ "futures",
+ "image",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
 name = "codex-code-bridge-protocol"
 version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
  "url",
+]
+
+[[package]]
+name = "codex-code-bridge-service"
+version = "0.0.0"
+dependencies = [
+ "async-stream",
+ "axum",
+ "codex-code-bridge-protocol",
+ "codex-utils-home-dir",
+ "constant_time_eq",
+ "eventsource-stream",
+ "futures",
+ "http 1.4.0",
+ "rand 0.9.3",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

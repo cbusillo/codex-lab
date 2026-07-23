@@ -1,0 +1,43 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-code-bridge-service"
+version.workspace = true
+
+[lib]
+name = "codex_code_bridge_service"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-stream = { workspace = true }
+axum = { workspace = true, default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+] }
+codex-code-bridge-protocol = { workspace = true }
+codex-utils-home-dir = { workspace = true }
+constant_time_eq = { workspace = true }
+http = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "net",
+    "rt",
+    "sync",
+    "time",
+] }
+tokio-util = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+
+[dev-dependencies]
+eventsource-stream = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream"] }
+tempfile = { workspace = true }

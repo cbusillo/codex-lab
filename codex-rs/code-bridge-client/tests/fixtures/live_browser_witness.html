@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Code Bridge Live Browser Witness</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #f6f7f9;
+        color: #17202a;
+        font:
+          16px system-ui,
+          sans-serif;
+      }
+
+      main {
+        display: grid;
+        min-height: 100vh;
+        place-items: center;
+      }
+
+      canvas {
+        border: 1px solid #222;
+        box-shadow: 0 4px 12px rgb(0 0 0 / 18%);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <canvas id="witness" width="96" height="64"></canvas>
+    </main>
+    <script>
+      const protocolVersion = "code_bridge.v1";
+      const clientId = "live-browser-witness";
+      let sessionToken = "";
+      let messageSequence = 0;
+      let eventCursor = 0;
+
+      const canvas = document.getElementById("witness");
+      const context = canvas.getContext("2d");
+
+      function drawWitness() {
+        context.fillStyle = "#f6f7f9";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = "#126b5c";
+        context.fillRect(8, 8, 32, 48);
+        context.fillStyle = "#c2412d";
+        context.fillRect(48, 8, 40, 20);
+        context.fillStyle = "#1f4f9d";
+        context.beginPath();
+        context.arc(66, 44, 14, 0, Math.PI * 2);
+        context.fill();
+      }
+
+      function nowMs() {
+        return Date.now();
+      }
+
+      function envelope(messageId, payload) {
+        return {
+          protocolVersion,
+          messageId,
+          timestampUnixMs: nowMs(),
+          payload,
+        };
+      }
+
+      async function readConfig() {
+        const response = await fetch("/config.json", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`config failed: ${response.status}`);
+        }
+        return await response.json();
+      }
+
+      async function postMessage(config, payload) {
+        const headers = {
+          "authorization": `Bearer ${config.authSecret}`,
+          "content-type": "application/json",
+        };
+        if (sessionToken) {
+          headers["x-code-bridge-client-session"] = sessionToken;
+        }
+        const response = await fetch(`${config.endpointUrl}/message`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(
+            envelope(
+              `${payload.family}-${clientId}-${++messageSequence}`,
+              payload,
+            ),
+          ),
+        });
+        if (!response.ok) {
+          throw new Error(`message failed: ${response.status}`);
+        }
+        return await response.json();
+      }
+
+      async function hello(config) {
+        const response = await postMessage(config, {
+          family: "hello",
+          body: {
+            clientId,
+            role: "producer",
+            auth: {
+              kind: "localSecret",
+              body: { secret: config.authSecret },
+            },
+            requestedCapabilities: {
+              publishEvents: true,
+              provideScreenshot: true,
+              provideControl: true,
+              provideJavascriptExecution: true,
+            },
+            metadata: {
+              sourceKind: "browserApp",
+              label: "live browser witness",
+              provenance: null,
+            },
+          },
+        });
+        sessionToken = response.payload.body.clientSessionToken;
+      }
+
+      async function publishPageview(config) {
+        await postMessage(config, {
+          family: "event",
+          body: {
+            clientId,
+            eventId: "live-browser-pageview",
+            event: {
+              kind: "pageview",
+              body: {
+                url: window.location.href,
+                title: document.title,
+              },
+            },
+          },
+        });
+      }
+
+      async function publishConsole(config) {
+        await postMessage(config, {
+          family: "event",
+          body: {
+            clientId,
+            eventId: "live-browser-console",
+            event: {
+              kind: "console",
+              body: {
+                level: "info",
+                text: "live browser fixture ready",
+              },
+            },
+          },
+        });
+      }
+
+      function screenshotPayload() {
+        const dataUrl = canvas.toDataURL("image/png");
+        const [, dataBase64] = dataUrl.split(",");
+        return {
+          width: canvas.width,
+          height: canvas.height,
+          mediaType: "png",
+          dataBase64,
+        };
+      }
+
+      function decodedBase64ByteLength(dataBase64) {
+        const padding = dataBase64.endsWith("==")
+          ? 2
+          : dataBase64.endsWith("=")
+            ? 1
+            : 0;
+        return Math.floor((dataBase64.length * 3) / 4) - padding;
+      }
+
+      async function handleScreenshotRequest(config, body) {
+        const screenshot = screenshotPayload();
+        await postMessage(config, {
+          family: "screenshotResponse",
+          body: {
+            requestId: body.requestId,
+            respondingClientId: clientId,
+            status: "ok",
+            screenshot,
+            error: null,
+          },
+        });
+        await postMessage(config, {
+          family: "event",
+          body: {
+            clientId,
+            eventId: "live-browser-screenshot-event",
+            event: {
+              kind: "screenshot",
+              body: {
+                screenshotId: body.requestId,
+                width: screenshot.width,
+                height: screenshot.height,
+                mediaType: screenshot.mediaType,
+                bytes: decodedBase64ByteLength(screenshot.dataBase64),
+              },
+            },
+          },
+        });
+      }
+
+      async function handleControlRequest(config, body) {
+        let status = "ok";
+        let summary = "";
+        let result = null;
+        let error = null;
+        if (body.command.kind === "executeJavascript") {
+          const code = body.command.body.code;
+          if (code === "window.location.href") {
+            summary = window.location.href;
+            result = window.location.href;
+          } else {
+            status = "denied";
+            summary = "denied";
+            error = {
+              code: "capabilityDenied",
+              message: "unsupported witness JS",
+            };
+          }
+        } else if (body.command.kind === "captureScreenshot") {
+          summary = "captured screenshot";
+        } else {
+          status = "denied";
+          summary = "denied";
+          error = {
+            code: "capabilityDenied",
+            message: "unsupported witness command",
+          };
+        }
+
+        await postMessage(config, {
+          family: "controlResponse",
+          body: {
+            requestId: body.requestId,
+            respondingClientId: clientId,
+            status,
+            summary,
+            result,
+            error,
+          },
+        });
+      }
+
+      async function handleBridgeMessage(config, message) {
+        eventCursor = message.sequence;
+        const payload = message.envelope.payload;
+        if (payload.family === "screenshotRequest") {
+          await handleScreenshotRequest(config, payload.body);
+        } else if (payload.family === "controlRequest") {
+          await handleControlRequest(config, payload.body);
+        }
+      }
+
+      async function readEventStream(config) {
+        const response = await fetch(
+          `${config.endpointUrl}/events/${encodeURIComponent(clientId)}`,
+          {
+            headers: {
+              "authorization": `Bearer ${config.authSecret}`,
+              "last-event-id": String(eventCursor),
+              "x-code-bridge-client-session": sessionToken,
+            },
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`events failed: ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            return;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary !== -1) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const data = frame
+              .split("\n")
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trimStart())
+              .join("\n");
+            if (data) {
+              await handleBridgeMessage(config, JSON.parse(data));
+            }
+            boundary = buffer.indexOf("\n\n");
+          }
+        }
+      }
+
+      async function main() {
+        drawWitness();
+        const config = await readConfig();
+        await hello(config);
+        await publishPageview(config);
+        await publishConsole(config);
+        await readEventStream(config);
+      }
+
+      main().catch(async (error) => {
+        document.body.dataset.error = String(
+          error && error.message ? error.message : error,
+        );
+      });
+    </script>
+  </body>
+</html>
