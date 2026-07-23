@@ -1256,6 +1256,10 @@ fn codex_apps_auth_failure_metadata() -> McpToolApprovalMetadata {
 
 async fn install_host_owned_codex_apps_manager(session: &Session, turn_context: &TurnContext) {
     let auth = session.services.auth_manager.auth().await;
+    let codex_apps_auth_provider = auth
+        .as_ref()
+        .filter(|auth| auth.uses_codex_backend())
+        .map(codex_model_provider::auth_provider_from_auth);
     let (manager, _cancel_token) = codex_mcp::McpConnectionManager::new(
         &HashMap::new(),
         turn_context.config.mcp_oauth_credentials_store_mode,
@@ -1274,7 +1278,7 @@ async fn install_host_owned_codex_apps_manager(session: &Session, turn_context: 
         turn_context.config.prefix_mcp_tool_names(),
         rmcp::model::ElicitationCapability::default(),
         codex_mcp::ToolPluginProvenance::default(),
-        auth.as_ref(),
+        codex_apps_auth_provider,
         /*elicitation_reviewer*/ None,
     )
     .await;

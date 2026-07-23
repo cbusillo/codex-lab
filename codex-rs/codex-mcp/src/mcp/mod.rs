@@ -278,6 +278,9 @@ pub async fn read_mcp_resource(
     .await;
     let (tx_event, rx_event) = unbounded();
     drop(rx_event);
+    let codex_apps_auth_provider = auth
+        .filter(|auth| auth.uses_codex_backend())
+        .map(codex_model_provider::auth_provider_from_auth);
     let (manager, cancel_token) = McpConnectionManager::new(
         &mcp_servers,
         config.mcp_oauth_credentials_store_mode,
@@ -293,7 +296,7 @@ pub async fn read_mcp_resource(
         config.prefix_mcp_tool_names,
         config.client_elicitation_capability.clone(),
         tool_plugin_provenance(config),
-        auth,
+        codex_apps_auth_provider,
         /*elicitation_reviewer*/ None,
     )
     .await;
@@ -347,6 +350,9 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
 
     let (tx_event, rx_event) = unbounded();
     drop(rx_event);
+    let codex_apps_auth_provider = auth
+        .filter(|auth| auth.uses_codex_backend())
+        .map(codex_model_provider::auth_provider_from_auth);
 
     let (mcp_connection_manager, cancel_token) = McpConnectionManager::new(
         &mcp_servers,
@@ -363,7 +369,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         config.prefix_mcp_tool_names,
         config.client_elicitation_capability.clone(),
         tool_plugin_provenance,
-        auth,
+        codex_apps_auth_provider,
         /*elicitation_reviewer*/ None,
     )
     .await;

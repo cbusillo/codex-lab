@@ -35,6 +35,7 @@ pub(crate) struct Session {
     pub(super) features: ManagedFeatures,
     pub(super) multi_agent_version: OnceLock<MultiAgentVersion>,
     pub(super) pending_mcp_server_refresh_config: Mutex<Option<McpServerRefreshConfig>>,
+    pub(super) apps_context: AppsContext,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) input_queue: InputQueue,
@@ -1103,6 +1104,7 @@ impl Session {
                 features: config.features.clone(),
                 multi_agent_version,
                 pending_mcp_server_refresh_config: Mutex::new(None),
+                apps_context: AppsContext::default(),
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
                 input_queue: InputQueue::new(),
@@ -1205,6 +1207,10 @@ impl Session {
                     session_configuration.cwd.to_path_buf(),
                 ),
             };
+            let codex_apps_auth_provider = execution_auth
+                .as_ref()
+                .filter(|auth| auth.uses_codex_backend())
+                .map(|_| sess.services.execution_account.auth_provider());
             let (mcp_connection_manager, cancel_token) = McpConnectionManager::new(
                 &mcp_servers,
                 config.mcp_oauth_credentials_store_mode,
@@ -1220,7 +1226,7 @@ impl Session {
                 config.prefix_mcp_tool_names(),
                 client_elicitation_capability,
                 tool_plugin_provenance,
-                execution_auth.as_ref(),
+                codex_apps_auth_provider,
                 Some(sess.mcp_elicitation_reviewer()),
             )
             .instrument(info_span!(
