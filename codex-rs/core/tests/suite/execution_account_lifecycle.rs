@@ -569,8 +569,10 @@ async fn live_chatgpt_429_falls_back_to_api_key_without_apps_on_retry() -> Resul
     let retry_developer_text = requests[1].message_input_texts("developer").join("\n");
     assert_eq!(
         retry_developer_text.matches("<apps_instructions>").count(),
-        0
+        1
     );
+    assert!(retry_developer_text.contains("<apps_update>"));
+    assert!(retry_developer_text.contains("state: unavailable"));
     assert!(
         !requests[1].body_json()["tools"]
             .to_string()
