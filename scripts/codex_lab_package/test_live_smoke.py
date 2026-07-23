@@ -1,22 +1,55 @@
 from pathlib import Path
 import math
+import os
+import struct
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_lab_package.live_smoke import matching_app_server_pids
+from codex_lab_package.live_smoke import _parse_process_environment
 from codex_lab_package.live_smoke import desktop_transport_proof
 from codex_lab_package.live_smoke import is_serving_app_server_command
 from codex_lab_package.live_smoke import process_has_environment
 from codex_lab_package.live_smoke import process_has_ancestor
+from codex_lab_package.live_smoke import read_process_environment
+from codex_lab_package.live_smoke import read_process_rows
 from codex_lab_package.live_smoke import validate_cli_provenance
 from codex_lab_package.live_smoke import validate_matching_build_provenance
 from codex_lab_package.live_smoke import validate_timeout_seconds
 
 
 class LiveSmokeTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "requires KERN_PROCARGS2")
+    def test_reads_real_child_environment_with_spaces(self) -> None:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            env={**os.environ, "CODEX_LAB_ENV_PROBE": "value with spaces"},
+        )
+        try:
+            time.sleep(0.1)
+            self.assertEqual(
+                read_process_environment(process.pid)["CODEX_LAB_ENV_PROBE"],
+                "value with spaces",
+            )
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    @patch("codex_lab_package.live_smoke.subprocess.check_output")
+    def test_process_rows_request_untruncated_commands(self, check_output) -> None:
+        check_output.return_value = "10 1 /tmp/codex app-server\n"
+
+        self.assertEqual(read_process_rows(), [(10, 1, "/tmp/codex app-server")])
+        check_output.assert_called_once_with(
+            ["/bin/ps", "-ww", "-axo", "pid=,ppid=,command="], text=True
+        )
+
     def test_timeout_and_desktop_transport_proof(self) -> None:
         validate_timeout_seconds(10.0)
         for timeout_seconds in (9.9, math.inf, math.nan):
@@ -114,16 +147,18 @@ class LiveSmokeTest(unittest.TestCase):
         self.assertTrue(is_serving_app_server_command(rows[2][2]))
         self.assertFalse(is_serving_app_server_command(rows[3][2]))
         self.assertTrue(process_has_ancestor(21, {20}, rows))
-        process = (
-            "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT "
-            "CODEX_HOME=/tmp/lab CODEX_APP_SERVER_USE_LOCAL_DAEMON=1"
-        )
+        process = {
+            "CODEX_APP_SERVER_USE_LOCAL_DAEMON": "",
+            "CODEX_APP_SERVER_WS_URL": "ws://127.0.0.1:4766/rpc",
+            "CODEX_HOME": "/tmp/Codex Lab",
+        }
         self.assertTrue(
             process_has_environment(
                 20,
                 {
-                    "CODEX_APP_SERVER_USE_LOCAL_DAEMON": "1",
-                    "CODEX_HOME": "/tmp/lab",
+                    "CODEX_APP_SERVER_USE_LOCAL_DAEMON": "",
+                    "CODEX_APP_SERVER_WS_URL": "ws://127.0.0.1:4766/rpc",
+                    "CODEX_HOME": "/tmp/Codex Lab",
                 },
                 lambda _pid: process,
             )
@@ -138,7 +173,7 @@ class LiveSmokeTest(unittest.TestCase):
         self.assertTrue(
             process_has_environment(
                 20,
-                {"CODEX_HOME": "/tmp/lab"},
+                {"CODEX_HOME": "/tmp/Codex Lab"},
                 lambda _pid: process,
                 forbidden={"CODEX_CLI_PATH"},
             )
@@ -146,8 +181,20 @@ class LiveSmokeTest(unittest.TestCase):
         self.assertFalse(
             process_has_environment(
                 20,
-                {"CODEX_HOME": "/tmp/lab"},
-                lambda _pid: process + " CODEX_CLI_PATH=/tmp/codex",
+                {"CODEX_HOME": "/tmp/Codex Lab"},
+                lambda _pid: {**process, "CODEX_CLI_PATH": "/tmp/codex"},
                 forbidden={"CODEX_CLI_PATH"},
             )
+        )
+
+        argument_data = (
+            struct.pack("=i", 2)
+            + b"/Applications/ChatGPT.app/Contents/MacOS/ChatGPT\0\0"
+            + b"/Applications/ChatGPT.app/Contents/MacOS/ChatGPT\0--flag\0"
+            + b"CODEX_HOME=/tmp/Codex Lab\0CODEX_CLI_PATH=\0"
+            + b"CODEX_HOME=/tmp/ignored\0\0"
+        )
+        self.assertEqual(
+            _parse_process_environment(argument_data),
+            {"CODEX_HOME": "/tmp/Codex Lab", "CODEX_CLI_PATH": ""},
         )
