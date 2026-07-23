@@ -9,8 +9,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use arc_swap::ArcSwap;
+use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
@@ -24,6 +27,7 @@ use serde::Serialize;
 use tracing::warn;
 
 use crate::account_switching;
+use crate::account_switching::RateLimitSwitchState;
 
 const LEASE_VERSION: u32 = 1;
 const LEASE_SUBDIR: &str = "execution-account-leases";
@@ -35,8 +39,10 @@ pub(crate) struct ExecutionAccountLease {
 
 struct ExecutionAccountLeaseInner {
     current: ArcSwap<ExecutionAccount>,
+    control_auth_manager: Arc<AuthManager>,
     config: ExecutionAccountConfig,
     thread_id: ThreadId,
+    next_generation: AtomicU64,
     revision: StdMutex<ExecutionAccountRevision>,
 }
 
@@ -118,8 +124,10 @@ impl ExecutionAccountLease {
         Self {
             inner: Arc::new(ExecutionAccountLeaseInner {
                 current: ArcSwap::from(initial),
+                control_auth_manager,
                 config,
                 thread_id,
+                next_generation: AtomicU64::new(generation.saturating_add(1)),
                 revision: StdMutex::new(ExecutionAccountRevision {
                     generation,
                     auth_revision: 0,
@@ -288,6 +296,158 @@ impl ExecutionAccountLease {
             .or_else(|| auth.get_account_id())?;
         Some((account_id, auth.account_plan_type()))
     }
+
+    pub(crate) async fn failover_after_usage_limit(
+        &self,
+        switch_state: &mut RateLimitSwitchState,
+        blocked_until: Option<DateTime<Utc>>,
+    ) -> io::Result<Option<ExecutionAccountIdentity>> {
+        if !self.inner.config.pooled {
+            return Ok(None);
+        }
+        let current = self.inner.current.load_full();
+        let Some(current_account_id) = current.stored_account_id.as_deref() else {
+            return Ok(None);
+        };
+        switch_state.mark_limited(current_account_id, current.mode, blocked_until);
+        let Some(next_account_id) = account_switching::select_next_account_id(
+            &self.inner.config.codex_home,
+            &self.inner.config.auth_home,
+            self.inner.config.auth_credentials_store_mode,
+            switch_state,
+            self.inner.config.allow_api_key_fallback,
+            Utc::now(),
+            Some(current_account_id),
+        )?
+        else {
+            return Ok(None);
+        };
+        let control_account_id = codex_login::get_active_account_id(
+            &self.inner.config.auth_home,
+            self.inner.config.auth_credentials_store_mode,
+        )?;
+        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        let Some(next) = Self::load_account(
+            &self.inner.config,
+            &next_account_id,
+            control_account_id.as_deref(),
+            Arc::clone(&self.inner.control_auth_manager),
+            generation,
+        )
+        .await
+        else {
+            return Ok(None);
+        };
+        let identity = next.identity();
+        self.inner.current.store(next);
+        if let Err(err) = persist_lease(
+            &self.inner.config.codex_home,
+            self.inner.thread_id,
+            &next_account_id,
+        ) {
+            warn!("failed to persist execution account failover lease: {err}");
+        }
+        Ok(Some(identity))
+    }
+
+    pub(crate) async fn prepare_for_control_auth_reload(&self) {
+        if !self.inner.config.pooled {
+            return;
+        }
+        let current = self.inner.current.load_full();
+        if !Arc::ptr_eq(&current.auth_manager, &self.inner.control_auth_manager) {
+            return;
+        }
+        let Some(current_account_id) = current.stored_account_id.as_deref() else {
+            return;
+        };
+        let active_account_id = codex_login::get_active_account_id(
+            &self.inner.config.auth_home,
+            self.inner.config.auth_credentials_store_mode,
+        )
+        .ok()
+        .flatten();
+        if active_account_id.as_deref() == Some(current_account_id) {
+            return;
+        }
+        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        let Some(detached) = Self::load_account(
+            &self.inner.config,
+            current_account_id,
+            /*control_account_id*/ None,
+            Arc::clone(&self.inner.control_auth_manager),
+            generation,
+        )
+        .await
+        else {
+            return;
+        };
+        self.inner.current.store(detached);
+    }
+
+    pub(crate) async fn reconcile_after_control_auth_reload(&self) {
+        let current = self.inner.current.load_full();
+        if !Arc::ptr_eq(&current.auth_manager, &self.inner.control_auth_manager) {
+            return;
+        }
+        let active_account_id = codex_login::get_active_account_id(
+            &self.inner.config.auth_home,
+            self.inner.config.auth_credentials_store_mode,
+        )
+        .ok()
+        .flatten();
+        if current.stored_account_id == active_account_id {
+            return;
+        }
+        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        let replacement = match active_account_id.as_deref() {
+            Some(account_id) => {
+                Self::load_account(
+                    &self.inner.config,
+                    account_id,
+                    Some(account_id),
+                    Arc::clone(&self.inner.control_auth_manager),
+                    generation,
+                )
+                .await
+            }
+            None => None,
+        }
+        .unwrap_or_else(|| {
+            Arc::new(ExecutionAccount::from_control(
+                active_account_id,
+                Arc::clone(&self.inner.control_auth_manager),
+                generation,
+            ))
+        });
+        let account_id = replacement.stored_account_id.clone();
+        self.inner.current.store(replacement);
+        if self.inner.config.pooled
+            && let Some(account_id) = account_id.as_deref()
+            && let Err(error) = persist_lease(
+                &self.inner.config.codex_home,
+                self.inner.thread_id,
+                account_id,
+            )
+        {
+            warn!("failed to persist reconciled execution account lease: {error}");
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_auth_manager_for_testing(&self, auth_manager: Arc<AuthManager>) {
+        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        let stored_account_id = auth_manager
+            .auth_cached()
+            .and_then(|auth| auth.get_account_id());
+        self.inner
+            .current
+            .store(Arc::new(ExecutionAccount::from_control(
+                stored_account_id,
+                auth_manager,
+                generation,
+            )));
+    }
 }
 
 impl ExecutionAccount {
@@ -374,3 +534,7 @@ fn persist_lease(codex_home: &Path, thread_id: ThreadId, account_id: &str) -> io
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "execution_account_tests.rs"]
+mod tests;
