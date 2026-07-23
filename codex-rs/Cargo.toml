@@ -6,6 +6,7 @@ members = [
     "agent-identity",
     "auto-review",
     "backend-client",
+    "browser",
     "bwrap",
     "ansi-escape",
     "async-utils",
@@ -163,6 +164,7 @@ codex-arg0 = { path = "arg0" }
 codex-auto-review = { path = "auto-review" }
 codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }
+codex-browser = { path = "browser" }
 codex-chatgpt = { path = "chatgpt" }
 codex-cli = { path = "cli" }
 codex-code-bridge-client = { path = "code-bridge-client" }
@@ -297,6 +299,8 @@ base64 = "0.22.1"
 bm25 = "2.3.2"
 bytes = "1.10.1"
 chardetng = "0.1.17"
+chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
+chromiumoxide_types = "0.7"
 chrono = "0.4.43"
 clap = "4"
 clap_complete = "4"
@@ -328,6 +332,7 @@ encoding_rs = "0.8.35"
 eventsource-stream = "0.2.3"
 flate2 = "1.1.8"
 futures = { version = "0.3", default-features = false }
+fs2 = "0.4"
 gethostname = "1.1.0"
 gix = { version = "0.81.0", default-features = false, features = ["sha1"] }
 glob = "0.3"
