@@ -350,11 +350,21 @@ impl AccountRequestProcessor {
             }
         }
 
-        match login_with_api_key(
-            Self::auth_storage_home(&self.config),
-            &params.api_key,
-            self.config.cli_auth_credentials_store_mode,
-        ) {
+        let auth_home = Self::auth_storage_home(&self.config);
+        let login_result = if auth_home == self.config.codex_home.as_path() {
+            login_with_api_key(
+                auth_home,
+                &params.api_key,
+                self.config.cli_auth_credentials_store_mode,
+            )
+        } else {
+            login_with_api_key_for_profile(
+                auth_home,
+                &params.api_key,
+                self.config.cli_auth_credentials_store_mode,
+            )
+        };
+        match login_result {
             Ok(()) => {
                 self.reload_active_auth_state().await;
                 Ok(())
@@ -449,8 +459,12 @@ impl AccountRequestProcessor {
         let opts = self
             .login_chatgpt_common(codex_streamlined_login, previous_auth_handling)
             .await?;
-        let server = run_login_server(opts)
-            .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
+        let server = if Self::auth_storage_home(&self.config) == self.config.codex_home.as_path() {
+            run_login_server(opts)
+        } else {
+            run_profile_login_server(opts)
+        }
+        .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
         let login_id = Uuid::new_v4();
         let shutdown_handle = server.cancel_handle();
 
@@ -560,12 +574,20 @@ impl AccountRequestProcessor {
         let thread_manager = Arc::clone(&self.thread_manager);
         let chatgpt_base_url = self.config.chatgpt_base_url.clone();
         let active_login = self.active_login.clone();
+        let profile_login =
+            Self::auth_storage_home(&self.config) != self.config.codex_home.as_path();
         tokio::spawn(async move {
             let (success, error_msg) = tokio::select! {
                 _ = cancel.cancelled() => {
                     (false, Some("Login was not completed".to_string()))
                 }
-                r = complete_device_code_login(opts, device_code) => {
+                r = async {
+                    if profile_login {
+                        complete_profile_device_code_login(opts, device_code).await
+                    } else {
+                        complete_device_code_login(opts, device_code).await
+                    }
+                } => {
                     match r {
                         Ok(()) => (true, None),
                         Err(err) => (false, Some(err.to_string())),
