@@ -16,6 +16,23 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use ts_rs::TS;
 
+/// Compiled identity for the running app-server binary.
+///
+/// `initialize.userAgent` remains the negotiated HTTP user-agent string for
+/// compatibility. This struct carries the immutable build identity consumers
+/// should use when comparing backend versions or release provenance.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ServerBuildInfo {
+    pub schema_version: u32,
+    pub version: String,
+    pub source_commit: String,
+    pub dirty_state: String,
+    pub build_profile: String,
+    pub build_channel: String,
+}
+
 // Macro to declare a camelCased API v2 enum mirroring a core enum which
 // tends to use either snake_case or kebab-case.
 macro_rules! v2_enum_from_core {

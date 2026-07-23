@@ -726,6 +726,118 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(status.source_commit, "def456")
             self.assertEqual(status.version, "1.2.4")
 
+    def test_old_shim_launches_force_rebuilt_app_without_regenerating_shim(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            v1_release = build_test_release(
+                root / "v1",
+                command="printf v1",
+            )
+            v2_release = build_test_release(
+                root / "v2",
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+                command="printf v2",
+            )
+            app_dir = root / "install" / "Codex Lab.app"
+            shim_dir = root / "install" / "bin"
+            state_path = root / "install" / "install-state.json"
+            install = install_from_manifest_url(
+                v1_release.manifest_url,
+                app_dir=app_dir,
+                shim_dir=shim_dir,
+                state_path=state_path,
+                download=v1_release.download,
+            )
+            assert install.shim_path is not None
+            old_shim = install.shim_path.read_text(encoding="utf-8")
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[
+                    lab_release_summary("codex-lab-v1.2.3-lab.1"),
+                    lab_release_summary(
+                        "codex-lab-v1.2.4-lab.1",
+                        published_at="2026-06-08T02:00:00Z",
+                    ),
+                ],
+            ):
+                update = update_from_latest_release(
+                    state_path=state_path,
+                    download=v2_release.download,
+                )
+
+            assert update.install is not None
+            self.assertEqual(update.install.version, "1.2.4")
+            self.assertEqual(install.shim_path.read_text(encoding="utf-8"), old_shim)
+            completed = subprocess.run(
+                [str(install.shim_path)],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.stdout, "v2")
+
+    def test_rejected_update_metadata_leaves_previous_install_usable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            v1_release = build_test_release(
+                root / "v1",
+                command="printf v1",
+            )
+            bad_release = build_test_release(
+                root / "bad",
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+                command="printf bad",
+            )
+            bad_release.manifest["artifacts"]["appZip"]["sizeBytes"] += 1
+            app_dir = root / "install" / "Codex Lab.app"
+            shim_dir = root / "install" / "bin"
+            state_path = root / "install" / "install-state.json"
+            install = install_from_manifest_url(
+                v1_release.manifest_url,
+                app_dir=app_dir,
+                shim_dir=shim_dir,
+                state_path=state_path,
+                download=v1_release.download,
+            )
+            assert install.shim_path is not None
+
+            with (
+                mock.patch(
+                    "codex_lab_package.installer.lab_distribution_release_summaries",
+                    return_value=[
+                        lab_release_summary("codex-lab-v1.2.3-lab.1"),
+                        lab_release_summary(
+                            "codex-lab-v1.2.4-lab.1",
+                            published_at="2026-06-08T02:00:00Z",
+                        ),
+                    ],
+                ),
+                self.assertRaisesRegex(ValueError, "sizeBytes does not match"),
+            ):
+                update_from_latest_release(
+                    state_path=state_path,
+                    download=bad_release.download,
+                )
+
+            status = read_install_state(state_path)
+            self.assertEqual(status.version, "1.2.3")
+            completed = subprocess.run(
+                [str(install.shim_path)],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.stdout, "v1")
+
     def test_update_from_latest_release_preserves_no_shim_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1152,12 +1264,14 @@ def build_test_release(
     version: str = "1.2.3",
     bundle_version: str = "42",
     commit: str = "abc123",
+    command: str = 'exec /bin/sh "$@"',
 ) -> TestRelease:
+    root.mkdir(parents=True, exist_ok=True)
     build_root = root / "build"
     dist_dir = root / "dist"
     dist_dir.mkdir()
     codex_bin = root / "fake-codex"
-    write_file(codex_bin, '#!/bin/sh\nexec /bin/sh "$@"\n')
+    write_file(codex_bin, f"#!/bin/sh\n{command}\n")
     os.chmod(codex_bin, 0o755)
     result = build_codex_lab_app(
         CodexLabAppOptions(

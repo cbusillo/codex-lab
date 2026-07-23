@@ -2038,6 +2038,7 @@ dependencies = [
  "codex-utils-cli",
  "codex-utils-json-to-toml",
  "codex-utils-pty",
+ "codex-version",
  "codex-web-search-extension",
  "codex-windows-sandbox",
  "core_test_support",

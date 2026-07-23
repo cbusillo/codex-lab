@@ -134,6 +134,10 @@ pub fn get_codex_user_agent() -> String {
     get_codex_user_agent_with_version(codex_version::wire_compatible_version())
 }
 
+pub fn get_codex_app_server_user_agent() -> String {
+    get_codex_user_agent_with_version(codex_version::version())
+}
+
 pub fn get_codex_user_agent_for_model(model: &str) -> String {
     let build_version = codex_version::wire_compatible_version_for_model(model);
     get_codex_user_agent_with_version(&build_version)

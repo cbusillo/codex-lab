@@ -72,6 +72,7 @@ def smoke_check(
     _require_contains(launcher, "CODEX_CLI_PATH", launcher_path)
     _require_contains(launcher, "Resources/codex-lab", launcher_path)
     _require_contains(launcher, "EXPECTED_CLI_SHA256=", launcher_path)
+    _require_contains(launcher, "EXPECTED_CLI_VERSION=", launcher_path)
     _require_contains(launcher, "EXPECTED_SOURCE_COMMIT=", launcher_path)
     _require_contains(launcher, "/Applications/ChatGPT.app", launcher_path)
     _require_contains(launcher, "$HOME/Applications/ChatGPT.app", launcher_path)

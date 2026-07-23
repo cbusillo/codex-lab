@@ -3,11 +3,13 @@ use std::sync::atomic::Ordering;
 
 use axum::http::HeaderValue;
 use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::ServerBuildInfo;
 use codex_login::default_client::SetOriginatorError;
 use codex_login::default_client::USER_AGENT_SUFFIX;
-use codex_login::default_client::get_codex_user_agent;
+use codex_login::default_client::get_codex_app_server_user_agent;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
+use codex_version::BuildProvenance;
 
 use super::*;
 use crate::message_processor::ConnectionSessionState;
@@ -137,9 +139,10 @@ impl InitializeRequestProcessor {
             *suffix = Some(user_agent_suffix);
         }
 
-        let user_agent = get_codex_user_agent();
+        let user_agent = get_codex_app_server_user_agent();
         let response = InitializeResponse {
             user_agent,
+            server_build: Some(server_build_info(codex_version::build_provenance())),
             codex_home,
             platform_family: std::env::consts::FAMILY.to_string(),
             platform_os: std::env::consts::OS.to_string(),
@@ -187,5 +190,16 @@ impl InitializeRequestProcessor {
     ) {
         self.analytics_events_client
             .track_request(connection_id.0, request_id, request);
+    }
+}
+
+fn server_build_info(provenance: BuildProvenance) -> ServerBuildInfo {
+    ServerBuildInfo {
+        schema_version: provenance.schema_version,
+        version: provenance.version,
+        source_commit: provenance.source_commit,
+        dirty_state: provenance.dirty_state.as_str().to_string(),
+        build_profile: provenance.build_profile,
+        build_channel: provenance.build_channel,
     }
 }

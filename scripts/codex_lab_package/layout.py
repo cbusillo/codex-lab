@@ -38,6 +38,7 @@ class CodexLabAppOptions:
     display_name: str = DEFAULT_DISPLAY_NAME
     short_version: str = "0.0.0"
     bundle_version: str = "1"
+    embedded_cli_version: str | None = None
     source_commit: str | None = None
     force: bool = False
 
@@ -87,7 +88,8 @@ def build_codex_lab_app(options: CodexLabAppOptions) -> CodexLabAppResult:
                 codex_app_path=options.codex_app_path,
                 expected_cli_sha256=embedded_cli_sha256,
                 expected_source_commit=options.source_commit,
-                expected_version=options.short_version,
+                expected_cli_version=options.embedded_cli_version
+                or options.short_version,
             ),
             end="",
             file=handle,
@@ -139,7 +141,7 @@ def _launcher_script(
     codex_app_path: Path,
     expected_cli_sha256: str,
     expected_source_commit: str | None,
-    expected_version: str,
+    expected_cli_version: str,
     codesign_path: Path = Path("/usr/bin/codesign"),
     lsappinfo_path: Path = Path("/usr/bin/lsappinfo"),
     open_path: Path = Path("/usr/bin/open"),
@@ -155,7 +157,7 @@ LAB_CLI="$APP_CONTENTS_DIR/Resources/{embedded_cli_name}"
 CONFIGURED_CODEX_APP={_shell_quote(str(codex_app_path))}
 EXPECTED_CLI_SHA256={_shell_quote(expected_cli_sha256)}
 EXPECTED_SOURCE_COMMIT={_shell_quote(expected_source_commit or "")}
-EXPECTED_VERSION={_shell_quote(expected_version)}
+EXPECTED_CLI_VERSION={_shell_quote(expected_cli_version)}
 OFFICIAL_BUNDLE_IDENTIFIER={_shell_quote(OFFICIAL_APP_BUNDLE_IDENTIFIER)}
 OFFICIAL_TEAM_IDENTIFIER={_shell_quote(OFFICIAL_APP_TEAM_IDENTIFIER)}
 CODESIGN={_shell_quote(str(codesign_path))}
@@ -299,7 +301,7 @@ if [ -n "$EXPECTED_SOURCE_COMMIT" ] && [ "$source_commit" != "$EXPECTED_SOURCE_C
   echo "Codex Lab CLI source commit does not match the packaged candidate." >&2
   exit 1
 fi
-if [ "$version" != "$EXPECTED_VERSION" ]; then
+if [ "$version" != "$EXPECTED_CLI_VERSION" ]; then
   echo "Codex Lab CLI version does not match the packaged candidate." >&2
   exit 1
 fi
