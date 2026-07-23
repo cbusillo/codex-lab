@@ -5,6 +5,7 @@ import argparse
 import ctypes
 import ctypes.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,9 @@ PROVENANCE_FIELDS = (
 SELECTED_APP_PREFIX = "Selected OpenAI coding desktop app: "
 SOURCE_COMMIT_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 MANAGED_CLI_RELATIVE_PATH = Path("packages/standalone/current/codex")
+STABILITY_WINDOW_SECONDS = 5.0
+MIN_TIMEOUT_SECONDS = 10.0
+MAX_DESKTOP_LOG_BYTES = 512 * 1024
 
 
 def main() -> None:
@@ -44,8 +48,7 @@ def main() -> None:
 def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
     if sys.platform != "darwin":
         raise RuntimeError("live Codex Lab desktop smoke requires macOS")
-    if timeout_seconds <= 0:
-        raise ValueError("timeout seconds must be greater than zero")
+    validate_timeout_seconds(timeout_seconds)
 
     launcher = app_dir / "Contents/MacOS/Codex Lab Launcher"
     cli_path = app_dir / "Contents/Resources/codex-lab"
@@ -66,7 +69,16 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
     validate_matching_build_provenance(provenance, managed_provenance)
     before_rows = read_process_rows()
     before_pids = {pid for pid, _ppid, _command in before_rows}
-    launch = subprocess.run([str(launcher)], capture_output=True, text=True, timeout=20)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        launch = subprocess.run(
+            [str(launcher)],
+            capture_output=True,
+            text=True,
+            timeout=max(0.1, deadline - time.monotonic()),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("timed out launching Codex Lab") from exc
     if launch.returncode != 0:
         raise RuntimeError(
             "Codex Lab launcher failed: "
@@ -77,11 +89,12 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
     gui_executable = official_app_executable_path(selected_app)
     expected_environment = {
         "CODEX_APP_SERVER_USE_LOCAL_DAEMON": "1",
-        "CODEX_CLI_PATH": str(cli_path.resolve()),
+        "CODEX_APP_SERVER_FORCE_CLI": "",
+        "CODEX_CLI_PATH": "",
         "CODEX_HOME": str(lab_home),
         "CODEX_LAB_HOME": str(lab_home),
     }
-    deadline = time.monotonic() + timeout_seconds
+    stable_since = None
     while time.monotonic() < deadline:
         rows = read_process_rows()
         gui_pids = {
@@ -98,7 +111,7 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
             pid
             for pid, _ppid, command in rows
             if pid not in before_pids
-            and "app-server" in command.split()
+            and is_serving_app_server_command(command)
             and process_has_ancestor(pid, gui_pids, rows)
         ]
         if new_gui_app_servers:
@@ -106,17 +119,24 @@ def run_live_smoke(app_dir: Path, timeout_seconds: float) -> dict[str, Any]:
                 "official app launched a bundled stdio app-server instead of the persistent daemon"
             )
         managed_servers = sorted(matching_app_server_pids(rows, managed_cli_path))
-        if matching_gui_pids and managed_servers:
-            return {
-                "appServerExecutablePath": str(managed_cli_path.resolve()),
-                "appServerPid": managed_servers[0],
-                "guiPids": matching_gui_pids,
-                "managedProvenance": managed_provenance,
-                "mode": "persistentLocalDaemon",
-                "officialAppPath": str(selected_app),
-                "provenance": provenance,
-                "schemaVersion": 1,
-            }
+        transport_proof = desktop_transport_proof(matching_gui_pids)
+        if matching_gui_pids and managed_servers and transport_proof is not None:
+            stable_since = stable_since or time.monotonic()
+            if time.monotonic() - stable_since >= STABILITY_WINDOW_SECONDS:
+                return {
+                    "appServerExecutablePath": str(managed_cli_path.resolve()),
+                    "appServerPid": managed_servers[0],
+                    **transport_proof,
+                    "guiPids": matching_gui_pids,
+                    "managedProvenance": managed_provenance,
+                    "mode": "persistentLocalDaemon",
+                    "officialAppPath": str(selected_app),
+                    "provenance": provenance,
+                    "schemaVersion": 1,
+                    "stabilityWindowSeconds": STABILITY_WINDOW_SECONDS,
+                }
+        else:
+            stable_since = None
         time.sleep(0.2)
     raise TimeoutError(
         f"timed out waiting for the official app to use {managed_cli_path}"
@@ -139,6 +159,57 @@ def read_cli_provenance(cli_path: Path) -> dict[str, Any]:
         raise ValueError("Codex Lab CLI emitted invalid provenance JSON") from exc
     validate_cli_provenance(provenance, cli_path)
     return {field: provenance[field] for field in PROVENANCE_FIELDS}
+
+
+def validate_timeout_seconds(timeout_seconds: float) -> None:
+    if not math.isfinite(timeout_seconds) or timeout_seconds < MIN_TIMEOUT_SECONDS:
+        raise ValueError(
+            f"timeout seconds must be finite and at least {MIN_TIMEOUT_SECONDS}"
+        )
+
+
+def desktop_transport_proof(
+    gui_pids: list[int], *, log_root: Path | None = None
+) -> dict[str, str] | None:
+    root = log_root or Path.home() / "Library/Logs/com.openai.codex"
+    for pid in gui_pids:
+        paths = sorted(
+            root.rglob(f"*-{pid}-t0-*.log"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in paths:
+            log = _bounded_file_tail(path, MAX_DESKTOP_LOG_BYTES)
+            if "stdio_transport_spawned" in log:
+                raise RuntimeError(
+                    "official app log reported a bundled stdio app-server"
+                )
+            lines = log.splitlines()
+            transport_ready = any(
+                "Transport start success" in line
+                and "hostId=local" in line
+                and "transport=websocket" in line
+                for line in lines
+            )
+            initialized = any(
+                "initialize_handshake_result" in line
+                and "outcome=success" in line
+                and "transportKind=websocket" in line
+                for line in lines
+            )
+            if transport_ready and initialized:
+                return {
+                    "desktopLogPath": str(path.resolve()),
+                    "desktopTransport": "websocket",
+                }
+    return None
+
+
+def _bounded_file_tail(path: Path, limit: int) -> str:
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        handle.seek(max(0, handle.tell() - limit))
+        return handle.read(limit).decode(errors="replace")
 
 
 def validate_cli_provenance(provenance: Any, cli_path: Path) -> None:
@@ -207,8 +278,17 @@ def matching_app_server_pids(
     return [
         pid
         for pid, _ppid, command in rows
-        if "app-server" in command.split() and executable_path(pid) == expected
+        if is_serving_app_server_command(command) and executable_path(pid) == expected
     ]
+
+
+def is_serving_app_server_command(command: str) -> bool:
+    tokens = command.split()
+    return any(
+        token == "app-server"
+        and (index + 1 == len(tokens) or tokens[index + 1] != "daemon")
+        for index, token in enumerate(tokens)
+    )
 
 
 def process_executable_path(pid: int) -> Path | None:
@@ -230,16 +310,23 @@ def process_has_environment(
     pid: int,
     expected: dict[str, str],
     reader: Callable[[int], str] | None = None,
+    *,
+    forbidden: set[str] | None = None,
 ) -> bool:
     environment_reader = reader or read_process_environment
     try:
         process = environment_reader(pid)
     except (OSError, subprocess.SubprocessError):
         return False
-    return all(
+    has_expected = all(
         re.search(rf"(?:^|\s){re.escape(name)}={re.escape(value)}(?:\s|$)", process)
         for name, value in expected.items()
     )
+    forbidden = forbidden or set()
+    has_forbidden = any(
+        re.search(rf"(?:^|\s){re.escape(name)}=", process) for name in forbidden
+    )
+    return has_expected and not has_forbidden
 
 
 def read_process_environment(pid: int) -> str:

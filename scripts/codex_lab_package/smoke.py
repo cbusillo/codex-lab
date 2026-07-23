@@ -70,7 +70,12 @@ def smoke_check(
             )
 
     launcher = launcher_path.read_text(encoding="utf-8")
-    _require_contains(launcher, "CODEX_CLI_PATH", launcher_path)
+    _require_contains(
+        launcher, "unset CODEX_CLI_PATH CODEX_APP_SERVER_FORCE_CLI", launcher_path
+    )
+    _require_contains(launcher, '--env "CODEX_CLI_PATH="', launcher_path)
+    _require_contains(launcher, '--env "CODEX_APP_SERVER_FORCE_CLI="', launcher_path)
+    _require_not_contains(launcher, '--env "CODEX_CLI_PATH=$LAB_CLI"', launcher_path)
     _require_contains(launcher, "CODEX_HOME=$LAB_HOME", launcher_path)
     _require_contains(launcher, "CODEX_LAB_HOME=$LAB_HOME", launcher_path)
     _require_contains(launcher, "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1", launcher_path)
@@ -154,6 +159,11 @@ def _check_shell_syntax(path: Path) -> None:
 def _require_contains(contents: str, needle: str, path: Path) -> None:
     if needle not in contents:
         raise ValueError(f"{path}: missing {needle!r}")
+
+
+def _require_not_contains(contents: str, needle: str, path: Path) -> None:
+    if needle in contents:
+        raise ValueError(f"{path}: unexpected {needle!r}")
 
 
 if __name__ == "__main__":
