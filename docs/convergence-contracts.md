@@ -4,6 +4,9 @@ This file is the checked-in contract matrix for issue #126. It defines the
 minimum gates that an upstream-first candidate in #428 must satisfy before an
 Every Code-owned difference can survive.
 
+The matrix is versioned with the code; issue #126 remains the recovery record
+for current status and open product decisions.
+
 ## Lanes
 
 - **Upstream-owned:** adopt the upstream implementation by default. Local
