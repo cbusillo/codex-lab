@@ -1,6 +1,8 @@
 use super::*;
 use crate::auth::storage::FileAuthStorage;
 use crate::auth::storage::get_auth_file;
+use crate::auth_accounts::get_active_account_id;
+use crate::auth_accounts::list_accounts;
 use crate::token_data::IdTokenInfo;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::AuthMode;
@@ -96,6 +98,76 @@ fn login_with_api_key_overwrites_existing_auth_json() {
         .expect("auth.json should parse");
     assert_eq!(auth.openai_api_key.as_deref(), Some("sk-new"));
     assert!(auth.tokens.is_none(), "tokens should be cleared");
+}
+
+#[test]
+fn login_with_api_key_updates_file_account_catalog() {
+    let dir = tempdir().unwrap();
+
+    super::login_with_api_key(
+        dir.path(),
+        "sk-new",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("login_with_api_key should succeed");
+
+    let accounts = list_accounts(dir.path(), AuthCredentialsStoreMode::File)
+        .expect("stored accounts should load");
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].openai_api_key.as_deref(), Some("sk-new"));
+    assert_eq!(
+        get_active_account_id(dir.path(), AuthCredentialsStoreMode::File)
+            .expect("active account should load")
+            .as_deref(),
+        Some(accounts[0].id.as_str())
+    );
+}
+
+#[test]
+fn ephemeral_login_with_api_key_skips_account_catalog() {
+    let dir = tempdir().unwrap();
+
+    super::login_with_api_key(
+        dir.path(),
+        "sk-new",
+        AuthCredentialsStoreMode::Ephemeral,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("login_with_api_key should succeed");
+
+    assert_eq!(
+        list_accounts(dir.path(), AuthCredentialsStoreMode::File)
+            .expect("stored accounts should load"),
+        Vec::new()
+    );
+}
+
+#[test]
+fn logout_removes_matching_file_account() {
+    let dir = tempdir().unwrap();
+    super::login_with_api_key(
+        dir.path(),
+        "sk-new",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("login_with_api_key should succeed");
+
+    assert!(
+        super::logout(
+            dir.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("logout should succeed")
+    );
+
+    assert_eq!(
+        list_accounts(dir.path(), AuthCredentialsStoreMode::File)
+            .expect("stored accounts should load"),
+        Vec::new()
+    );
 }
 
 #[tokio::test]

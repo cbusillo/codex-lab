@@ -50,6 +50,9 @@ pub use crate::auth::storage::AuthKeyringBackendKind;
 use crate::auth::storage::AuthStorageBackend;
 use crate::auth::storage::create_auth_storage;
 use crate::auth::util::try_parse_error_message;
+use crate::auth_accounts::remove_account_matching_credentials;
+use crate::auth_accounts::upsert_api_key_account;
+use crate::auth_accounts::upsert_chatgpt_account;
 use crate::default_client::create_client;
 use crate::default_client::create_default_auth_client;
 use crate::outbound_proxy::AuthRouteConfig;
@@ -873,6 +876,39 @@ pub fn logout(
         auth_credentials_store_mode,
         keyring_backend_kind,
     );
+    let auth_to_remove = if account_cleanup_eligible(auth_credentials_store_mode) {
+        match storage.load() {
+            Ok(auth) => auth,
+            Err(err) => {
+                tracing::warn!("failed to load auth before removing login account record: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let removed = storage.delete()?;
+    if removed {
+        remove_login_account_best_effort(
+            codex_home,
+            auth_to_remove.as_ref(),
+            auth_credentials_store_mode,
+        );
+    }
+    Ok(removed)
+}
+
+/// Delete persisted auth without mirroring the removal into the stored-account catalog.
+pub fn delete_auth(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<bool> {
+    let storage = create_auth_storage(
+        codex_home.to_path_buf(),
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+    );
     storage.delete()
 }
 
@@ -924,7 +960,9 @@ pub fn login_with_api_key(
         &auth_dot_json,
         auth_credentials_store_mode,
         keyring_backend_kind,
-    )
+    )?;
+    upsert_login_account_best_effort(codex_home, &auth_dot_json, auth_credentials_store_mode);
+    Ok(())
 }
 
 /// Writes an `auth.json` that contains only the access token.
@@ -1019,6 +1057,84 @@ pub fn save_auth(
         keyring_backend_kind,
     );
     storage.save(auth)
+}
+
+pub(crate) fn upsert_login_account(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<()> {
+    if auth_credentials_store_mode != AuthCredentialsStoreMode::File {
+        return Ok(());
+    }
+
+    match auth.resolved_mode() {
+        AuthMode::ApiKey => {
+            if let Some(api_key) = auth.openai_api_key.as_ref() {
+                upsert_api_key_account(
+                    codex_home,
+                    auth_credentials_store_mode,
+                    api_key.clone(),
+                    /*label*/ None,
+                    /*make_active*/ true,
+                )?;
+            }
+        }
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
+            if let Some(tokens) = auth.tokens.as_ref() {
+                upsert_chatgpt_account(
+                    codex_home,
+                    auth_credentials_store_mode,
+                    tokens.clone(),
+                    auth.last_refresh.unwrap_or_else(Utc::now),
+                    tokens.id_token.email.clone(),
+                    /*make_active*/ true,
+                )?;
+            }
+        }
+        AuthMode::Headers
+        | AuthMode::AgentIdentity
+        | AuthMode::PersonalAccessToken
+        | AuthMode::BedrockApiKey => {}
+    }
+
+    Ok(())
+}
+
+pub(crate) fn upsert_login_account_best_effort(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) {
+    if let Err(err) = upsert_login_account(codex_home, auth, auth_credentials_store_mode) {
+        tracing::warn!("failed to upsert login account record after saving auth: {err}");
+    }
+}
+
+pub(crate) fn remove_login_account_best_effort(
+    codex_home: &Path,
+    auth: Option<&AuthDotJson>,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) {
+    if !account_cleanup_eligible(auth_credentials_store_mode) {
+        return;
+    }
+    let Some(auth) = auth else {
+        return;
+    };
+    if let Err(err) = remove_account_matching_credentials(
+        codex_home,
+        auth_credentials_store_mode,
+        auth.resolved_mode(),
+        auth.openai_api_key.as_deref(),
+        auth.tokens.as_ref(),
+    ) {
+        tracing::warn!("failed to remove login account record after removing auth: {err}");
+    }
+}
+
+fn account_cleanup_eligible(auth_credentials_store_mode: AuthCredentialsStoreMode) -> bool {
+    auth_credentials_store_mode == AuthCredentialsStoreMode::File
 }
 
 /// Load the raw stored auth payload without applying environment overrides.
@@ -2604,13 +2720,18 @@ impl AuthManager {
     ) -> Result<(), RefreshTokenError> {
         let refresh_response = request_chatgpt_token_refresh(refresh_token, auth.client()).await?;
 
-        persist_tokens(
+        let auth_dot_json = persist_tokens(
             auth.storage(),
             refresh_response.id_token,
             refresh_response.access_token,
             refresh_response.refresh_token,
         )
         .map_err(RefreshTokenError::from)?;
+        upsert_login_account_best_effort(
+            &self.codex_home,
+            &auth_dot_json,
+            self.auth_credentials_store_mode,
+        );
         self.reload().await;
 
         Ok(())

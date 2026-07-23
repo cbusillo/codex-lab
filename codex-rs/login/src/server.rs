@@ -27,6 +27,7 @@ use std::time::Duration;
 use crate::auth::AuthDotJson;
 use crate::auth::AuthKeyringBackendKind;
 use crate::auth::save_auth;
+use crate::auth::upsert_login_account_best_effort;
 use crate::default_client::create_raw_auth_client;
 use crate::default_client::originator;
 use crate::outbound_proxy::AuthRouteConfig;
@@ -898,7 +899,9 @@ pub(crate) async fn persist_tokens_async(
             &auth,
             auth_credentials_store_mode,
             keyring_backend_kind,
-        )
+        )?;
+        upsert_login_account_best_effort(&codex_home, &auth, auth_credentials_store_mode);
+        Ok(())
     })
     .await
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
