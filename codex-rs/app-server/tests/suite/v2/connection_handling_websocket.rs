@@ -1,10 +1,12 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use app_test_support::ChatGptAuthFixture;
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
 use app_test_support::USE_TEST_KEYRING_STORE_ARG;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
+use app_test_support::write_chatgpt_auth;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_app_server_protocol::ClientInfo;
@@ -14,11 +16,14 @@ use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::PluginListMarketplaceKind;
+use codex_app_server_protocol::PluginListParams;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_config::types::AuthCredentialsStoreMode;
 #[cfg(debug_assertions)]
 use codex_keyring_store::tests::shared_test_keyring_root;
 use futures::SinkExt;
@@ -31,12 +36,17 @@ use sha2::Sha256;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc as std_mpsc;
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
@@ -50,6 +60,14 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::header::ORIGIN;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::Request as WiremockRequest;
+use wiremock::Respond;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 // macOS and Windows CI can spend tens of seconds starting the app-server test
 // binary under Bazel before it accepts JSON-RPC or reports its websocket bind
@@ -61,6 +79,58 @@ pub(super) const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) type WsClient = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Clone)]
+struct GatedWorkspaceSettingsResponse {
+    request_started_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    release_rx: Arc<Mutex<Option<std_mpsc::Receiver<()>>>>,
+}
+
+struct WorkspaceSettingsReleaseGuard {
+    release_tx: Option<std_mpsc::Sender<()>>,
+}
+
+impl WorkspaceSettingsReleaseGuard {
+    fn new(release_tx: std_mpsc::Sender<()>) -> Self {
+        Self {
+            release_tx: Some(release_tx),
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some(release_tx) = self.release_tx.take() {
+            let _ = release_tx.send(());
+        }
+    }
+}
+
+impl Drop for WorkspaceSettingsReleaseGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl Respond for GatedWorkspaceSettingsResponse {
+    fn respond(&self, _: &WiremockRequest) -> ResponseTemplate {
+        let request_started_tx = self
+            .request_started_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(request_started_tx) = request_started_tx {
+            let _ = request_started_tx.send(());
+        }
+        let release_rx = self
+            .release_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(release_rx) = release_rx {
+            let _ = release_rx.recv();
+        }
+        ResponseTemplate::new(200).set_body_string(r#"{"beta_settings":{"enable_plugins":true}}"#)
+    }
+}
 
 #[tokio::test]
 async fn websocket_transport_routes_per_connection_handshake_and_responses() -> Result<()> {
@@ -99,6 +169,91 @@ async fn websocket_transport_routes_per_connection_handshake_and_responses() -> 
     assert_eq!(ws2_config.id, RequestId::Integer(77));
     assert!(ws1_config.result.get("config").is_some());
     assert!(ws2_config.result.get("config").is_some());
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_reinitialize_is_not_blocked_by_disconnected_client_rpc() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let workspace_server = MockServer::start().await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    let config_path = codex_home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        config_path,
+        format!(
+            "chatgpt_base_url = \"{}/backend-api/\"\n{config}\n[features]\nplugins = true\n",
+            workspace_server.uri()
+        ),
+    )?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("chatgpt-token")
+            .account_id("account-123")
+            .chatgpt_user_id("user-123")
+            .chatgpt_account_id("account-123")
+            .plan_type("team"),
+        AuthCredentialsStoreMode::File,
+    )?;
+    let (request_started_tx, request_started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = std_mpsc::channel();
+    let mut release_guard = WorkspaceSettingsReleaseGuard::new(release_tx);
+    Mock::given(method("GET"))
+        .and(path("/backend-api/accounts/account-123/settings"))
+        .and(header("authorization", "Bearer chatgpt-token"))
+        .and(header("chatgpt-account-id", "account-123"))
+        .respond_with(GatedWorkspaceSettingsResponse {
+            request_started_tx: Arc::new(Mutex::new(Some(request_started_tx))),
+            release_rx: Arc::new(Mutex::new(Some(release_rx))),
+        })
+        .mount(&workspace_server)
+        .await;
+
+    let (mut process, bind_addr, mut server_logs) = spawn_websocket_server_with_args_and_logs(
+        codex_home.path(),
+        "ws://127.0.0.1:0",
+        &[],
+        "codex_app_server::message_processor=debug,codex_app_server_transport=warn",
+    )
+    .await?;
+    let mut ws1 = connect_websocket(bind_addr).await?;
+    send_initialize_request(&mut ws1, /*id*/ 1, "blocking_plugin_client").await?;
+    read_response_for_id(&mut ws1, /*id*/ 1).await?;
+
+    send_request(
+        &mut ws1,
+        "plugin/list",
+        /*id*/ 2,
+        Some(serde_json::to_value(PluginListParams {
+            cwds: None,
+            marketplace_kinds: Some(vec![PluginListMarketplaceKind::Local]),
+        })?),
+    )
+    .await?;
+    timeout(DEFAULT_READ_TIMEOUT, request_started_rx)
+        .await
+        .context("plugin/list did not start the blocking workspace-settings request")??;
+
+    drop(ws1);
+    wait_for_server_log(&mut server_logs, "connection cleanup started").await?;
+    let mut ws2 = connect_websocket(bind_addr).await?;
+    send_initialize_request(&mut ws2, /*id*/ 3, "replacement_client").await?;
+    let initialize_result = timeout(
+        Duration::from_secs(/*secs*/ 5),
+        read_response_for_id(&mut ws2, /*id*/ 3),
+    )
+    .await;
+    release_guard.release();
+    let initialize_response = initialize_result
+        .context("replacement initialize was blocked by disconnected client cleanup")??;
+    assert_eq!(initialize_response.id, RequestId::Integer(3));
+    wait_for_server_log(&mut server_logs, "connection cleanup completed").await?;
 
     process
         .kill()
@@ -387,6 +542,18 @@ pub(super) async fn spawn_websocket_server_with_args(
     listen_url: &str,
     extra_args: &[String],
 ) -> Result<(Child, SocketAddr)> {
+    let (process, bind_addr, _server_logs) =
+        spawn_websocket_server_with_args_and_logs(codex_home, listen_url, extra_args, "warn")
+            .await?;
+    Ok((process, bind_addr))
+}
+
+async fn spawn_websocket_server_with_args_and_logs(
+    codex_home: &Path,
+    listen_url: &str,
+    extra_args: &[String],
+    rust_log: &str,
+) -> Result<(Child, SocketAddr, mpsc::UnboundedReceiver<String>)> {
     let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
         .context("should find app-server binary")?;
     let mut cmd = Command::new(program);
@@ -399,7 +566,7 @@ pub(super) async fn spawn_websocket_server_with_args(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("CODEX_LAB_HOME", codex_home)
-        .env("RUST_LOG", "warn");
+        .env("RUST_LOG", rust_log);
     #[cfg(debug_assertions)]
     cmd.env(
         "CODEX_APP_SERVER_TEST_KEYRING_DIR",
@@ -415,6 +582,7 @@ pub(super) async fn spawn_websocket_server_with_args(
         .take()
         .context("failed to capture websocket app-server stderr")?;
     let mut stderr_reader = BufReader::new(stderr).lines();
+    let (stderr_line_tx, stderr_line_rx) = mpsc::unbounded_channel();
     let deadline = Instant::now() + DEFAULT_READ_TIMEOUT;
     let bind_addr = loop {
         let line = timeout(
@@ -426,6 +594,7 @@ pub(super) async fn spawn_websocket_server_with_args(
         .context("failed to read websocket app-server stderr")?
         .context("websocket app-server exited before reporting bound websocket address")?;
         eprintln!("[websocket app-server stderr] {line}");
+        let _ = stderr_line_tx.send(line.clone());
 
         let stripped_line = {
             let mut stripped = String::with_capacity(line.len());
@@ -457,10 +626,28 @@ pub(super) async fn spawn_websocket_server_with_args(
     tokio::spawn(async move {
         while let Ok(Some(line)) = stderr_reader.next_line().await {
             eprintln!("[websocket app-server stderr] {line}");
+            let _ = stderr_line_tx.send(line);
         }
     });
 
-    Ok((process, bind_addr))
+    Ok((process, bind_addr, stderr_line_rx))
+}
+
+async fn wait_for_server_log(
+    server_logs: &mut mpsc::UnboundedReceiver<String>,
+    expected: &str,
+) -> Result<()> {
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        while let Some(line) = server_logs.recv().await {
+            if line.contains(expected) {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+        bail!("websocket app-server log stream closed before `{expected}`")
+    })
+    .await
+    .with_context(|| format!("timed out waiting for websocket app-server log `{expected}`"))??;
+    Ok(())
 }
 
 pub(super) async fn connect_websocket(bind_addr: SocketAddr) -> Result<WsClient> {
