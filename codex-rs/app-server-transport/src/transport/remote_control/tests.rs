@@ -173,7 +173,7 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
     });
     let (desired_state_tx, _desired_state_rx) = watch::channel(RemoteControlDesiredState::Unknown);
     let desired_state_tx = Arc::new(desired_state_tx);
-    let (_reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+    let (_reconnect_tx, reconnect_rx) = mpsc::channel(RECONNECT_CHANNEL_CAPACITY);
     let mut websocket = RemoteControlWebsocket::new(
         RemoteControlWebsocketConfig {
             remote_control_url: TEST_REMOTE_CONTROL_URL.to_string(),
@@ -382,12 +382,12 @@ fn test_server_name() -> String {
 fn remote_control_handle_with_reconnect_receiver(
     remote_control_url: &str,
     auth_manager: Arc<AuthManager>,
-) -> (RemoteControlHandle, mpsc::UnboundedReceiver<u64>) {
+) -> (RemoteControlHandle, mpsc::Receiver<u64>) {
     let (desired_state_tx, _desired_state_rx) =
         watch::channel(RemoteControlDesiredState::Enabled {
             persistence_preference: None,
         });
-    let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+    let (reconnect_tx, reconnect_rx) = mpsc::channel(RECONNECT_CHANNEL_CAPACITY);
     let (status_tx, _status_rx) = watch::channel(RemoteControlStatusChangedNotification {
         status: RemoteControlConnectionStatus::Connecting,
         server_name: test_server_name(),
@@ -454,7 +454,36 @@ async fn remote_control_reconnect_rejects_unavailable_worker() {
 }
 
 #[tokio::test]
-async fn remote_control_reconnect_coalesces_while_connecting() {
+async fn remote_control_reconnect_rejects_unavailable_state_db() {
+    let (handle, _reconnect_rx) = remote_control_handle_with_reconnect_receiver(
+        "http://127.0.0.1:1/backend-api/",
+        remote_control_auth_manager(),
+    );
+
+    assert_eq!(
+        handle.reconnect(),
+        Err(RemoteControlReconnectUnavailable::StateDbUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn remote_control_reconnect_rejects_disabled_remote_control() {
+    let codex_home = TempDir::new().expect("temp dir should create");
+    let mut handle = remote_control_handle_with_current_enrollment(
+        "http://127.0.0.1:1/backend-api/",
+        remote_control_auth_manager(),
+    );
+    handle.state_db = Some(remote_control_state_runtime(&codex_home).await);
+    handle.disable_ephemeral().await;
+
+    assert_eq!(
+        handle.reconnect(),
+        Err(RemoteControlReconnectUnavailable::Disabled)
+    );
+}
+
+#[tokio::test]
+async fn remote_control_reconnect_coalesces_pending_requests() {
     let codex_home = TempDir::new().expect("temp dir should create");
     let (mut handle, mut reconnect_rx) = remote_control_handle_with_reconnect_receiver(
         "http://127.0.0.1:1/backend-api/",
@@ -471,6 +500,28 @@ async fn remote_control_reconnect_coalesces_while_connecting() {
     assert_eq!(first.status, RemoteControlConnectionStatus::Connecting);
     assert_eq!(second, first);
     assert_eq!(reconnect_rx.try_recv(), Ok(1));
+    assert!(reconnect_rx.is_empty());
+}
+
+#[tokio::test]
+async fn remote_control_reconnect_queues_retry_after_worker_receives_request() {
+    let codex_home = TempDir::new().expect("temp dir should create");
+    let (mut handle, mut reconnect_rx) = remote_control_handle_with_reconnect_receiver(
+        "http://127.0.0.1:1/backend-api/",
+        remote_control_auth_manager(),
+    );
+    handle.state_db = Some(remote_control_state_runtime(&codex_home).await);
+    handle.publish_status(RemoteControlConnectionStatus::Connected);
+
+    let first = handle.reconnect().expect("first reconnect should queue");
+    assert_eq!(reconnect_rx.try_recv(), Ok(1));
+    let second = handle
+        .reconnect()
+        .expect("retry should queue after the worker receives the first request");
+
+    assert_eq!(first.status, RemoteControlConnectionStatus::Connecting);
+    assert_eq!(second, first);
+    assert_eq!(reconnect_rx.try_recv(), Ok(2));
     assert!(reconnect_rx.is_empty());
 }
 
@@ -1027,6 +1078,7 @@ async fn remote_control_handle_reconnects_without_disabling_or_reenrolling() {
 
     let client_id = ClientId("client-1".to_string());
     let stream_id = StreamId("stream-1".to_string());
+    let subscribe_cursor = "cursor-1".to_string();
     let initialize_message = JSONRPCMessage::Request(codex_app_server_protocol::JSONRPCRequest {
         id: codex_app_server_protocol::RequestId::Integer(1),
         method: "initialize".to_string(),
@@ -1047,7 +1099,7 @@ async fn remote_control_handle_reconnects_without_disabling_or_reenrolling() {
             client_id: client_id.clone(),
             stream_id: Some(stream_id.clone()),
             seq_id: Some(1),
-            cursor: None,
+            cursor: Some(subscribe_cursor.clone()),
         },
     )
     .await;
@@ -1124,12 +1176,6 @@ async fn remote_control_handle_reconnects_without_disabling_or_reenrolling() {
         remote_handle.reconnect().expect("reconnect should succeed"),
         connecting_status
     );
-    assert_eq!(
-        remote_handle
-            .reconnect()
-            .expect("duplicate reconnect should coalesce"),
-        connecting_status
-    );
     expect_remote_control_status_snapshot(&mut status_rx, connecting_status).await;
     timeout(Duration::from_secs(1), first_websocket.next())
         .await
@@ -1140,6 +1186,12 @@ async fn remote_control_handle_reconnects_without_disabling_or_reenrolling() {
     assert_eq!(
         second_handshake_request.headers.get("authorization"),
         Some(&format!("Bearer {TEST_REMOTE_CONTROL_SERVER_TOKEN}"))
+    );
+    assert_eq!(
+        second_handshake_request
+            .headers
+            .get("x-codex-subscribe-cursor"),
+        Some(&subscribe_cursor)
     );
     expect_remote_control_status_snapshot(
         &mut status_rx,

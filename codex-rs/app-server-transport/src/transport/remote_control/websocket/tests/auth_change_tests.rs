@@ -39,7 +39,7 @@ async fn active_remote_control_websocket(
     RemoteControlWebsocket,
     CancellationToken,
     Arc<watch::Sender<RemoteControlDesiredState>>,
-    mpsc::UnboundedSender<u64>,
+    mpsc::Sender<u64>,
 ) {
     let remote_control_url = remote_control_url_for_listener(listener);
     let remote_control_target =
@@ -51,7 +51,7 @@ async fn active_remote_control_websocket(
     let (status_publisher, _status_rx) = remote_control_status_channel();
     let shutdown_token = CancellationToken::new();
     let desired_state_tx = Arc::new(enabled_desired_state_sender());
-    let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+    let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
     let websocket = RemoteControlWebsocket::new(
         RemoteControlWebsocketConfig {
             remote_control_url,
