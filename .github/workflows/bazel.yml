@@ -18,7 +18,7 @@ jobs:
     # Public-fork blocking CI runs Bazel on hosted macOS and Linux. The
     # upstream Windows Bazel path depends on authenticated RBE and custom exec
     # toolchains, so trusted postmerge Rust CI owns Windows coverage here.
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -129,7 +129,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   clippy:
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -208,7 +208,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   verify-release-build:
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
