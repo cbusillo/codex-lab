@@ -14,6 +14,7 @@ from codex_lab_package.installer import DEFAULT_REPOSITORY
 from codex_lab_package.installer import DEFAULT_SHIM_DIR
 from codex_lab_package.installer import DEFAULT_STATE_PATH
 from codex_lab_package.installer import CodexLabInstallStateError
+from codex_lab_package.installer import CodexLabRollbackError
 from codex_lab_package.installer import CodexLabUpdateError
 from codex_lab_package.installer import check_for_update
 from codex_lab_package.installer import install_from_manifest_url
@@ -21,11 +22,12 @@ from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
 from codex_lab_package.installer import read_install_state
 from codex_lab_package.installer import update_from_latest_release
+from codex_lab_package.installer import uninstall_codex_lab
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Install Codex Lab app and CLI shim from a release manifest.",
+        description="Install Codex Lab app, CLI shim, signed engine, and supervisor.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     source = parser.add_mutually_exclusive_group(required=True)
@@ -52,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         "--update",
         action="store_true",
         help="Update the recorded Codex Lab install to the newest release.",
+    )
+    source.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove the recorded Codex Lab install and restore a prior managed engine.",
     )
     parser.add_argument(
         "--repository",
@@ -84,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Replace an existing app bundle or shim after verification succeeds.",
+        help="Replace existing app, shim, or engine paths after verification succeeds.",
     )
     return parser.parse_args()
 
@@ -105,7 +112,29 @@ def main() -> int:
             print(f"Shim: {status.shim_path}")
         else:
             print("Shim: not installed")
+        if status.engine_path is not None:
+            print(f"Engine: {status.engine_path}")
+        if status.supervisor_label is not None:
+            print(f"Supervisor: {status.supervisor_label}")
         print(f"State: {status.state_path}")
+        return 0
+
+    if args.uninstall:
+        try:
+            result = uninstall_codex_lab(state_path=args.state_path)
+        except CodexLabInstallStateError as exc:
+            return print_install_state_error(exc)
+        except (CodexLabRollbackError, OSError, ValueError) as exc:
+            return print_command_error("Could not uninstall Codex Lab", exc)
+        print("Uninstalled Codex Lab")
+        print(f"App: {result.app_path}")
+        if result.shim_path is not None:
+            print(f"Shim: {result.shim_path}")
+        if result.engine_path is not None:
+            print(f"Engine: {result.engine_path}")
+        if result.restored_engine_path is not None:
+            print(f"Restored prior engine: {result.restored_engine_path}")
+        print(f"State: {result.state_path}")
         return 0
 
     if args.check:
@@ -137,6 +166,7 @@ def main() -> int:
             return print_install_state_error(exc)
         except (
             CodexLabUpdateError,
+            CodexLabRollbackError,
             OSError,
             subprocess.CalledProcessError,
             ValueError,
@@ -176,12 +206,15 @@ def main() -> int:
     except (
         OSError,
         subprocess.CalledProcessError,
+        CodexLabRollbackError,
         ValueError,
         zipfile.BadZipFile,
     ) as exc:
         return print_command_error("Could not install Codex Lab", exc)
     print(f"Installed Codex Lab {result.version} from {result.release_tag}")
     print(f"App: {result.app_dir}")
+    print(f"Engine: {result.engine_path}")
+    print(f"Supervisor: {result.supervisor_label}")
     if result.shim_path is not None:
         print(f"Shim: {result.shim_path}")
     print(f"State: {result.state_path}")

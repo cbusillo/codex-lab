@@ -57,7 +57,10 @@ has matching runner capacity, secrets, and branch-protection expectations.
 - `codex-lab-app`
 
 The runner must have Rust, Python 3, Xcode command line tools, and macOS
-`ditto` available. The generated Codex Lab app artifact is currently unsigned.
+`ditto` available. Release runs also require the keychain identity
+`Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)`; the
+workflow checks for that exact identity before signing. The generated Codex Lab
+app artifact is currently unsigned.
 
 `exec-harness.yml` expects a self-hosted Linux x64 runner with these labels:
 
@@ -93,35 +96,47 @@ default target directory when no artifact root is configured or available.
 
 - `codex-lab-app-aarch64-apple-darwin.zip`
 - `codex-lab-shim-aarch64-apple-darwin.zip`
+- `codex-lab-engine-aarch64-apple-darwin.zip`
 - `SHA256SUMS`
 - `codex-lab-distribution.json`
 
 The distribution manifest is the contract for future installers and updaters.
 It marks the app zip as the canonical app update unit, the shim zip as a
-companion wrapper, and records supported layouts for extracted sibling installs,
-`CODEX_LAB_APP_PATH` overrides, and `/Applications` installs. Artifacts remain
-`signed: false` and `notarized: false` until the signing pipeline exists.
+companion wrapper, and the engine zip as the managed supervisor execution unit.
+It also records supported layouts for extracted sibling installs,
+`CODEX_LAB_APP_PATH` overrides, and `/Applications` installs. Pull-request app
+artifacts keep all three payloads unsigned so untrusted changes never receive
+signing credentials; their manifest is packaging-validation metadata, not a
+publishable installer manifest.
 
 ## Codex Lab Release Publication
 
-`codex-lab-release.yml` builds the same macOS ARM64 distribution files and
-stages them for GitHub Releases. It separates trust boundaries deliberately:
+`codex-lab-release.yml` builds the macOS ARM64 app, shim, and engine, then signs
+and verifies the engine before staging the final distribution for GitHub
+Releases. It separates trust boundaries deliberately:
 
-- the self-hosted macOS runner builds and uploads a workflow artifact with
-  `contents: read` permissions;
+- the self-hosted macOS runner builds the app and shim, copies the release
+  engine, and signs it with the runner's Shiny Developer ID identity while the
+  job retains only `contents: read` permissions;
+- that same job applies hardened runtime plus
+  `com.apple.security.cs.allow-jit`, then validates the signature,
+  TeamIdentifier, entitlement, executable digest, source commit, and version
+  before archiving the engine;
 - an `ubuntu-latest` validation job downloads the staged artifact, verifies
   checksums, and checks that the manifest has release metadata and download
   URLs. This validates internal consistency, not artifact provenance;
 - a separate `ubuntu-latest` publish job has `contents: write` and creates a
   public prerelease only for explicit manual dispatches with `publish: true`.
 
-Manual dispatch with `publish: false` is the dry-run path: it builds and
-validates the release artifact set, including checking that the release tag is
-available, without creating a GitHub Release. Publishing is restricted to manual
-dispatches from the repository default branch. Published Codex Lab releases are
-public prereleases and are not marked as latest while the artifacts remain
-unsigned and unnotarized. Public prereleases are used so manifest `downloadUrl`
-entries are immediately usable by installers and updaters.
+Manual dispatch with `publish: false` is the dry-run path: it builds, signs, and
+validates the release artifact set, including checking that the
+release tag is available, without creating a GitHub Release. Publishing is
+restricted to manual dispatches from the repository default branch. Published
+Codex Lab releases remain public prereleases and are not marked as latest. The
+app and shim are unsigned Lab launch surfaces; the managed engine is the signed
+execution boundary whose digest, source commit, version, stable identifier,
+TeamIdentifier, and JIT entitlement are pinned by the installer and LaunchAgent
+supervisor.
 
 Release IDs use this namespace:
 

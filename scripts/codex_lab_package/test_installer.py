@@ -21,11 +21,13 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_lab_package.distribution_manifest import APP_ZIP
+from codex_lab_package.distribution_manifest import ENGINE_ZIP
 from codex_lab_package.distribution_manifest import MANIFEST_NAME
 from codex_lab_package.distribution_manifest import SHIM_ZIP
 from codex_lab_package.distribution_manifest import build_manifest
 from codex_lab_package.distribution_manifest import sha256_file
 from codex_lab_package.installer import DOWNLOAD_TIMEOUT_SECONDS
+from codex_lab_package.installer import CodexLabRollbackError
 from codex_lab_package.installer import CodexLabReleaseSummary
 from codex_lab_package.installer import CodexLabUpdateError
 from codex_lab_package.installer import check_for_update
@@ -34,6 +36,7 @@ from codex_lab_package.installer import download_json_url
 from codex_lab_package.installer import download_url
 from codex_lab_package.installer import github_releases_url
 from codex_lab_package.installer import install_from_manifest_url
+from codex_lab_package.installer import EngineProvisioningOperations
 from codex_lab_package.installer import latest_release_tag
 from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
@@ -41,12 +44,57 @@ from codex_lab_package.installer import read_install_state
 from codex_lab_package.installer import replace_path
 from codex_lab_package.installer import select_latest_lab_release_tag
 from codex_lab_package.installer import update_from_latest_release
+from codex_lab_package.installer import uninstall_codex_lab
+from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
+from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
 from codex_lab_package.layout import CodexLabAppOptions
 from codex_lab_package.layout import build_codex_lab_app
+from codex_lab_package.supervisor import EngineIdentity
+from codex_lab_package.supervisor import SupervisorPaths
 import install_codex_lab as install_codex_lab_cli
 
 
 class CodexLabInstallerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.supervisor_temp_dir = tempfile.TemporaryDirectory()
+        supervisor_root = Path(self.supervisor_temp_dir.name)
+        self.supervisor_paths = SupervisorPaths(
+            lab_home=supervisor_root / "lab-home",
+            launch_agents_dir=supervisor_root / "LaunchAgents",
+        )
+        self.supervisor_installs: list[tuple[SupervisorPaths, object]] = []
+        self.supervisor_uninstalls: list[SupervisorPaths] = []
+        engine_operations = EngineProvisioningOperations(
+            inspect=fake_inspect_engine,
+            install_supervisor=self._install_supervisor,
+            uninstall_supervisor=self._uninstall_supervisor,
+        )
+        self.default_paths_patch = mock.patch(
+            "codex_lab_package.installer.default_supervisor_paths",
+            return_value=self.supervisor_paths,
+        )
+        self.default_operations_patch = mock.patch(
+            "codex_lab_package.installer.DEFAULT_ENGINE_OPERATIONS",
+            engine_operations,
+        )
+        self.default_paths_patch.start()
+        self.default_operations_patch.start()
+        self.addCleanup(self.default_paths_patch.stop)
+        self.addCleanup(self.default_operations_patch.stop)
+        self.addCleanup(self.supervisor_temp_dir.cleanup)
+
+    def _install_supervisor(self, paths: SupervisorPaths, release: object) -> None:
+        self.supervisor_installs.append((paths, release))
+        paths.runner.parent.mkdir(parents=True, exist_ok=True)
+        paths.launch_agents_dir.mkdir(parents=True, exist_ok=True)
+        write_file(paths.runner, "supervisor runner")
+        write_file(paths.plist, "launch agent")
+
+    def _uninstall_supervisor(self, paths: SupervisorPaths) -> None:
+        self.supervisor_uninstalls.append(paths)
+        paths.plist.unlink(missing_ok=True)
+        shutil.rmtree(paths.supervisor_dir, ignore_errors=True)
+
     def test_download_url_uses_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             dest = Path(temp_dir) / "artifact.zip"
@@ -227,6 +275,17 @@ class CodexLabInstallerTest(unittest.TestCase):
                 result.shim_path,
                 (install_root / "bin").resolve(strict=False) / "codex-lab",
             )
+            self.assertEqual(result.engine_path, self.supervisor_paths.managed_cli)
+            self.assertTrue(result.engine_path.is_file())
+            self.assertEqual(result.supervisor_label, self.supervisor_paths.label)
+            self.assertEqual(len(self.supervisor_installs), 1)
+            installed_release = self.supervisor_installs[0][1]
+            self.assertEqual(
+                installed_release.sha256,
+                release.manifest["managedEngine"]["sha256"],
+            )
+            self.assertEqual(installed_release.source_commit, "abc123")
+            self.assertEqual(installed_release.version, "1.2.3")
 
             assert result.shim_path is not None
             shim = result.shim_path.read_text(encoding="utf-8")
@@ -241,8 +300,17 @@ class CodexLabInstallerTest(unittest.TestCase):
 
             state = json.loads(result.state_path.read_text(encoding="utf-8"))
             self.assertEqual(state["appPath"], str(result.app_dir))
+            self.assertEqual(state["enginePath"], str(result.engine_path))
+            self.assertEqual(state["labHome"], str(self.supervisor_paths.lab_home))
+            self.assertEqual(
+                state["launchAgentsDir"],
+                str(self.supervisor_paths.launch_agents_dir),
+            )
+            self.assertEqual(state["listenHost"], self.supervisor_paths.listen_host)
+            self.assertEqual(state["listenPort"], self.supervisor_paths.listen_port)
             self.assertEqual(state["releaseTag"], "codex-lab-v1.2.3-lab.1")
             self.assertEqual(state["shimPath"], str(result.shim_path))
+            self.assertEqual(state["supervisorLabel"], self.supervisor_paths.label)
             self.assertEqual(state["version"], "1.2.3")
 
     def test_reads_install_state(self) -> None:
@@ -261,11 +329,247 @@ class CodexLabInstallerTest(unittest.TestCase):
 
             self.assertEqual(status.app_path, result.app_dir)
             self.assertEqual(status.bundle_version, "42")
+            self.assertEqual(status.engine_path, result.engine_path)
+            self.assertEqual(status.lab_home, self.supervisor_paths.lab_home)
+            self.assertEqual(
+                status.launch_agents_dir,
+                self.supervisor_paths.launch_agents_dir,
+            )
+            self.assertEqual(status.listen_host, self.supervisor_paths.listen_host)
+            self.assertEqual(status.listen_port, self.supervisor_paths.listen_port)
             self.assertEqual(status.release_tag, "codex-lab-v1.2.3-lab.1")
             self.assertEqual(status.shim_path, result.shim_path)
             self.assertEqual(status.source_commit, "abc123")
             self.assertEqual(status.state_path, result.state_path)
+            self.assertEqual(status.supervisor_label, self.supervisor_paths.label)
             self.assertEqual(status.version, "1.2.3")
+
+    def test_rejects_unsigned_engine_before_installing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+
+            def reject_unsigned_engine(path: Path) -> EngineIdentity:
+                raise ValueError(f"managed engine is unsigned: {path}")
+
+            operations = EngineProvisioningOperations(
+                inspect=reject_unsigned_engine,
+                install_supervisor=self._install_supervisor,
+                uninstall_supervisor=self._uninstall_supervisor,
+            )
+            with self.assertRaisesRegex(ValueError, "unsigned"):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=root / "install" / "Codex Lab.app",
+                    shim_dir=root / "install" / "bin",
+                    state_path=root / "install" / "install-state.json",
+                    download=release.download,
+                    engine_operations=operations,
+                )
+
+            self.assertFalse((root / "install").exists())
+            self.assertFalse(self.supervisor_paths.managed_cli.exists())
+
+    def test_supervisor_failure_rolls_back_app_shim_engine_and_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_release = build_test_release(root / "old")
+            new_release = build_test_release(
+                root / "new",
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+            )
+            install_root = root / "install"
+            old_result = install_from_manifest_url(
+                old_release.manifest_url,
+                app_dir=install_root / "Codex Lab.app",
+                shim_dir=install_root / "bin",
+                state_path=install_root / "install-state.json",
+                download=old_release.download,
+            )
+            old_engine = old_result.engine_path.read_bytes()
+            old_state = old_result.state_path.read_bytes()
+            assert old_result.shim_path is not None
+            old_shim = old_result.shim_path.read_bytes()
+            write_file(old_result.app_dir / "old-marker", "old app")
+
+            def fail_supervisor(
+                paths: SupervisorPaths,
+                release: object,
+            ) -> None:
+                raise RuntimeError(f"supervisor failed for {paths.label}: {release}")
+
+            operations = EngineProvisioningOperations(
+                inspect=fake_inspect_engine,
+                install_supervisor=fail_supervisor,
+                uninstall_supervisor=self._uninstall_supervisor,
+            )
+            with self.assertRaisesRegex(RuntimeError, "supervisor failed"):
+                install_from_manifest_url(
+                    new_release.manifest_url,
+                    app_dir=old_result.app_dir,
+                    shim_dir=old_result.shim_path.parent,
+                    state_path=old_result.state_path,
+                    supervisor_paths=self.supervisor_paths,
+                    force=True,
+                    download=new_release.download,
+                    engine_operations=operations,
+                )
+
+            self.assertTrue((old_result.app_dir / "old-marker").is_file())
+            self.assertEqual(old_result.shim_path.read_bytes(), old_shim)
+            self.assertEqual(old_result.engine_path.read_bytes(), old_engine)
+            self.assertEqual(old_result.state_path.read_bytes(), old_state)
+
+    def test_force_update_refuses_recorded_unmanaged_app_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_release = build_test_release(root / "old")
+            new_release = build_test_release(
+                root / "new",
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+            )
+            old_result = install_from_manifest_url(
+                old_release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=old_release.download,
+            )
+            old_engine = old_result.engine_path.read_bytes()
+            old_state = old_result.state_path.read_bytes()
+            shutil.rmtree(old_result.app_dir)
+            old_result.app_dir.mkdir()
+            write_file(old_result.app_dir / "unmanaged-marker", "do not replace")
+
+            with self.assertRaisesRegex(ValueError, "not a managed Codex Lab"):
+                install_from_manifest_url(
+                    new_release.manifest_url,
+                    app_dir=old_result.app_dir,
+                    shim_dir=old_result.shim_path.parent,
+                    state_path=old_result.state_path,
+                    supervisor_paths=self.supervisor_paths,
+                    force=True,
+                    download=new_release.download,
+                )
+
+            self.assertTrue((old_result.app_dir / "unmanaged-marker").is_file())
+            self.assertEqual(old_result.engine_path.read_bytes(), old_engine)
+            self.assertEqual(old_result.state_path.read_bytes(), old_state)
+            self.assertEqual(len(self.supervisor_installs), 1)
+
+    def test_reports_file_rollback_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+
+            def fail_supervisor(
+                paths: SupervisorPaths,
+                managed_engine: object,
+            ) -> None:
+                raise RuntimeError(
+                    f"supervisor provisioning failed: {paths.label} {managed_engine}"
+                )
+
+            operations = EngineProvisioningOperations(
+                inspect=fake_inspect_engine,
+                install_supervisor=fail_supervisor,
+                uninstall_supervisor=self._uninstall_supervisor,
+            )
+            with (
+                mock.patch(
+                    "codex_lab_package.installer.rollback_replacements",
+                    side_effect=OSError("rollback exploded"),
+                ),
+                self.assertRaisesRegex(
+                    CodexLabRollbackError,
+                    "rollback did not complete: rollback exploded",
+                ) as raised,
+            ):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=root / "install" / "Codex Lab.app",
+                    shim_dir=root / "install" / "bin",
+                    state_path=root / "install" / "install-state.json",
+                    download=release.download,
+                    engine_operations=operations,
+                )
+
+            self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+
+    def test_uninstall_restores_preinstaller_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            prior_engine = b"prior managed engine"
+            self.supervisor_paths.managed_cli.parent.mkdir(parents=True)
+            self.supervisor_paths.managed_cli.write_bytes(prior_engine)
+            os.chmod(self.supervisor_paths.managed_cli, 0o755)
+
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                force=True,
+                download=release.download,
+            )
+            status = read_install_state(result.state_path)
+            assert status.engine_backup_path is not None
+            self.assertEqual(status.engine_backup_path.read_bytes(), prior_engine)
+
+            uninstall = uninstall_codex_lab(state_path=result.state_path)
+
+            self.assertFalse(result.app_dir.exists())
+            assert result.shim_path is not None
+            self.assertFalse(result.shim_path.exists())
+            self.assertFalse(result.state_path.exists())
+            self.assertEqual(result.engine_path.read_bytes(), prior_engine)
+            self.assertEqual(uninstall.restored_engine_path, result.engine_path)
+            self.assertEqual(self.supervisor_uninstalls, [self.supervisor_paths])
+            self.assertFalse(self.supervisor_paths.runner.exists())
+            self.assertFalse(self.supervisor_paths.plist.exists())
+
+    def test_uninstall_failure_restores_install_and_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            installed_engine = result.engine_path.read_bytes()
+
+            def fail_uninstall(paths: SupervisorPaths) -> None:
+                raise RuntimeError(f"could not stop {paths.label}")
+
+            operations = EngineProvisioningOperations(
+                inspect=fake_inspect_engine,
+                install_supervisor=self._install_supervisor,
+                uninstall_supervisor=fail_uninstall,
+            )
+            with self.assertRaisesRegex(RuntimeError, "could not stop"):
+                uninstall_codex_lab(
+                    state_path=result.state_path,
+                    engine_operations=operations,
+                )
+
+            self.assertTrue(result.app_dir.is_dir())
+            assert result.shim_path is not None
+            self.assertTrue(result.shim_path.is_file())
+            self.assertTrue(result.state_path.is_file())
+            self.assertEqual(result.engine_path.read_bytes(), installed_engine)
+            self.assertEqual(len(self.supervisor_installs), 2)
+            self.assertTrue(self.supervisor_paths.runner.is_file())
+            self.assertTrue(self.supervisor_paths.plist.is_file())
 
     def test_status_command_prints_install_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -299,6 +603,8 @@ class CodexLabInstallerTest(unittest.TestCase):
                 "Source commit: abc123\n"
                 f"App: {result.app_dir}\n"
                 f"Shim: {result.shim_path}\n"
+                f"Engine: {result.engine_path}\n"
+                f"Supervisor: {result.supervisor_label}\n"
                 f"State: {result.state_path}\n",
             )
 
@@ -309,7 +615,7 @@ class CodexLabInstallerTest(unittest.TestCase):
                 state_path.parent.resolve(strict=False) / state_path.name
             )
 
-            for command in ["--status", "--check", "--update"]:
+            for command in ["--status", "--check", "--update", "--uninstall"]:
                 with self.subTest(command=command):
                     completed = subprocess.run(
                         [
@@ -945,7 +1251,8 @@ class CodexLabInstallerTest(unittest.TestCase):
             write_file(
                 release.dist_dir / "SHA256SUMS",
                 f"{sha256_file(release.dist_dir / APP_ZIP)}  {APP_ZIP}\n"
-                f"{sha256_file(release.dist_dir / SHIM_ZIP)}  {SHIM_ZIP}\n",
+                f"{sha256_file(release.dist_dir / SHIM_ZIP)}  {SHIM_ZIP}\n"
+                f"{sha256_file(release.dist_dir / ENGINE_ZIP)}  {ENGINE_ZIP}\n",
             )
 
             with self.assertRaisesRegex(ValueError, "Unsafe zip member"):
@@ -1115,7 +1422,7 @@ class CodexLabInstallerTest(unittest.TestCase):
                 )
             self.assertFalse(app_dir.exists())
 
-    def test_rolls_back_replacements_when_state_write_fails(self) -> None:
+    def test_preflights_state_parent_file_before_installing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             release = build_test_release(root)
@@ -1128,7 +1435,7 @@ class CodexLabInstallerTest(unittest.TestCase):
             write_file(shim_dir / "codex-lab", "old shim")
             write_file(install_root / "state-parent", "not a directory")
 
-            with self.assertRaises(OSError):
+            with self.assertRaises(NotADirectoryError):
                 install_from_manifest_url(
                     release.manifest_url,
                     app_dir=app_dir,
@@ -1142,6 +1449,51 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(
                 (shim_dir / "codex-lab").read_text(encoding="utf-8"), "old shim"
             )
+            self.assertFalse(self.supervisor_paths.managed_cli.exists())
+
+    def test_post_install_smoke_failure_restores_prior_engine_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            install_root = root / "install"
+            app_dir = install_root / "Codex Lab.app"
+            shim_dir = install_root / "bin"
+            app_dir.mkdir(parents=True)
+            shim_dir.mkdir(parents=True)
+            write_file(app_dir / "old-app-marker", "old app")
+            write_file(shim_dir / "codex-lab", "old shim")
+            self.supervisor_paths.managed_cli.parent.mkdir(parents=True)
+            prior_engine = b"prior managed engine"
+            self.supervisor_paths.managed_cli.write_bytes(prior_engine)
+            os.chmod(self.supervisor_paths.managed_cli, 0o755)
+
+            with (
+                mock.patch(
+                    "codex_lab_package.installer.smoke_check",
+                    side_effect=[None, RuntimeError("installed smoke failed")],
+                ),
+                self.assertRaisesRegex(RuntimeError, "installed smoke failed"),
+            ):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=app_dir,
+                    shim_dir=shim_dir,
+                    state_path=install_root / "state.json",
+                    force=True,
+                    download=release.download,
+                )
+
+            self.assertTrue((app_dir / "old-app-marker").is_file())
+            self.assertEqual(
+                (shim_dir / "codex-lab").read_text(encoding="utf-8"),
+                "old shim",
+            )
+            self.assertEqual(
+                self.supervisor_paths.managed_cli.read_bytes(),
+                prior_engine,
+            )
+            self.assertFalse((install_root / "state.json").exists())
+            self.assertEqual(self.supervisor_installs, [])
 
     def test_replace_path_restores_backup_after_partial_move_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1257,6 +1609,19 @@ def run_install_cli(*args: str) -> tuple[int, str, str]:
     return exit_code, stdout.getvalue(), stderr.getvalue()
 
 
+def fake_inspect_engine(path: Path) -> EngineIdentity:
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    return EngineIdentity(
+        build_channel="release",
+        build_profile="release",
+        sha256=sha256_file(path),
+        signing_identifier=ENGINE_SIGNING_IDENTIFIER,
+        source_commit=metadata["sourceCommit"],
+        team_identifier=ENGINE_TEAM_IDENTIFIER,
+        version=metadata["version"],
+    )
+
+
 def build_test_release(
     root: Path,
     *,
@@ -1285,10 +1650,19 @@ def build_test_release(
     assert result.shim_path is not None
     zip_tree(result.app_dir, dist_dir / APP_ZIP)
     zip_tree(result.shim_path, dist_dir / SHIM_ZIP, arcname=Path("bin/codex-lab"))
+    engine_bin = root / "engine" / "codex"
+    engine_bin.parent.mkdir()
+    write_file(
+        engine_bin,
+        json.dumps({"sourceCommit": commit, "version": version}),
+    )
+    os.chmod(engine_bin, 0o755)
+    zip_tree(engine_bin, dist_dir / ENGINE_ZIP, arcname=Path("codex"))
     write_file(
         dist_dir / "SHA256SUMS",
         f"{sha256_file(dist_dir / APP_ZIP)}  {APP_ZIP}\n"
-        f"{sha256_file(dist_dir / SHIM_ZIP)}  {SHIM_ZIP}\n",
+        f"{sha256_file(dist_dir / SHIM_ZIP)}  {SHIM_ZIP}\n"
+        f"{sha256_file(dist_dir / ENGINE_ZIP)}  {ENGINE_ZIP}\n",
     )
 
     manifest_url = manifest_url_for_release_tag(release_tag)
@@ -1297,6 +1671,7 @@ def build_test_release(
         checksums={
             APP_ZIP: sha256_file(dist_dir / APP_ZIP),
             SHIM_ZIP: sha256_file(dist_dir / SHIM_ZIP),
+            ENGINE_ZIP: sha256_file(dist_dir / ENGINE_ZIP),
         },
         version=version,
         bundle_version=bundle_version,
@@ -1308,6 +1683,7 @@ def build_test_release(
         release_tag=release_tag,
         download_base_url=manifest_url.rsplit("/", 1)[0],
         generated_at="2026-06-07T00:00:00Z",
+        engine_signed=True,
     )
     return TestRelease(dist_dir, manifest_url, manifest)
 

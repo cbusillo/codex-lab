@@ -68,22 +68,23 @@ GUI is running beside the launchd-supervised websocket app-server. The embedded
 and managed CLI builds must have matching fixed source/build provenance.
 
 The GitHub workflow uploads `codex-lab-distribution.json` beside the app zip,
-shim zip, and `SHA256SUMS`. The manifest records artifact roles, sizes,
-checksums, source workflow metadata, supported install layouts, release tags,
-download URLs when published, and the current signing state. Codex Lab artifacts
-are currently marked `signed: false` and `notarized: false` until a later
-signing/notarization stage is implemented.
+shim zip, managed-engine zip, and `SHA256SUMS`. The manifest records artifact
+roles, sizes, checksums, source workflow metadata, supported install layouts,
+release tags, download URLs when published, and the managed engine's binary
+digest, Developer ID identifier, TeamIdentifier, version, source commit, and
+required JIT entitlement. PR app artifacts carry an unsigned engine for package
+validation; published release manifests require the engine artifact to be
+individually Developer ID signed.
 
 Packaging workflows bind the static smoke to the expected source commit before
 the interactive GUI smoke is performed.
 
 ## Installing a published release
 
-The current published-release installer installs only the app and optional shim.
-It does not yet provision the individually signed managed engine or its user
-LaunchAgent. Until signed engine provisioning is added to the release path, the
-launcher intentionally fails closed unless that matching supervisor has already
-been installed by the Codex Lab canary workflow.
+The published-release installer provisions the app, optional shim, individually
+signed managed engine, and the `dev.everycode.codex-lab.app-server.v1` user
+LaunchAgent as one rollback-aware transaction. No manual canary provisioning is
+required for a supported release.
 
 Use `scripts/install_codex_lab.py` to install or manually update Codex Lab from a
 published release manifest:
@@ -122,15 +123,27 @@ scripts/install_codex_lab.py --update
 ```
 
 `--update` reads the recorded install state, preserves the installed app path and
-shim path, and replaces only when a newer published Lab release is available.
+shim path, installs the matching engine, and restarts the pinned supervisor only
+when a newer published Lab release is available. It does not enable the upstream
+standalone updater.
 
-The installer downloads the manifest, `SHA256SUMS`, app zip, and shim zip into a
-temporary staging directory. It validates the manifest shape, requires artifact
-URLs to be siblings of the manifest URL, checks artifact sizes and SHA-256
-hashes, rejects unsafe zip members, smoke-checks the staged app and shim, then
-replaces the requested install paths. Existing targets are refused unless
-`--force` is supplied.
+To remove the recorded install and restore any managed engine that predated the
+first supported installer run, use:
 
-Codex Lab release artifacts are currently unsigned and unnotarized. This
-installer is a manual Lab installer/update path; silent automatic updates should
-wait for signed or notarized artifacts, or a signed manifest.
+```shell
+scripts/install_codex_lab.py --uninstall
+```
+
+The installer downloads the manifest, `SHA256SUMS`, app zip, shim zip, and engine
+zip into a temporary staging directory. It validates release URLs, sizes, and
+SHA-256 hashes; rejects unsafe zip members; smoke-checks the app and shim; and
+uses macOS code-signing inspection plus engine provenance to require the exact
+binary digest, source commit, version, stable identifier, TeamIdentifier, and V8
+JIT entitlement from the release metadata. It then replaces the engine, app,
+shim, and state as a rollback set before installing and health-checking the
+LaunchAgent. A provisioning failure restores the prior files and the
+supervisor's own rollback restores its prior runner, plist, and load state.
+Existing targets are refused unless `--force` is supplied.
+
+The app and shim remain unsigned Lab launch surfaces. The managed engine is the
+individually Developer ID signed execution boundary pinned by the supervisor.
