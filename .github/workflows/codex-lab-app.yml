@@ -145,18 +145,28 @@ jobs:
           mkdir -p "$dist_dir"
           app_zip="${dist_dir}/codex-lab-app-aarch64-apple-darwin.zip"
           shim_zip="${dist_dir}/codex-lab-shim-aarch64-apple-darwin.zip"
+          engine_zip="${dist_dir}/codex-lab-engine-aarch64-apple-darwin.zip"
+          engine_dir="${output_root}/engine"
           source_commit="$(git rev-parse HEAD)"
+          mkdir -p "$engine_dir"
+          cp "$CODEX_LAB_BIN" "${engine_dir}/codex"
+          chmod 0755 "${engine_dir}/codex"
           start=$SECONDS
           ditto -c -k --norsrc --keepParent "${output_root}/Codex Lab.app" "$app_zip"
           app_zip_seconds=$((SECONDS - start))
           start=$SECONDS
           ditto -c -k --norsrc --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
           shim_zip_seconds=$((SECONDS - start))
+          start=$SECONDS
+          ditto -c -k --norsrc "${engine_dir}/codex" "$engine_zip"
+          engine_zip_seconds=$((SECONDS - start))
           app_zip_bytes="$(wc -c < "$app_zip" | tr -d '[:space:]')"
           shim_zip_bytes="$(wc -c < "$shim_zip" | tr -d '[:space:]')"
+          engine_zip_bytes="$(wc -c < "$engine_zip" | tr -d '[:space:]')"
           unzip -l "$app_zip" | grep -F "Codex Lab.app/Contents/Resources/codex-lab"
           unzip -l "$shim_zip" | grep -F "bin/codex-lab"
-          if { unzip -l "$app_zip"; unzip -l "$shim_zip"; } | grep -E '/\._|(^|[[:space:]])\._'; then
+          unzip -l "$engine_zip" | grep -F "codex"
+          if { unzip -l "$app_zip"; unzip -l "$shim_zip"; unzip -l "$engine_zip"; } | grep -E '/\._|(^|[[:space:]])\._'; then
             echo "unexpected AppleDouble file in archive" >&2
             exit 1
           fi
@@ -181,9 +191,11 @@ jobs:
           {
             echo "- App zip seconds: \`$app_zip_seconds\`"
             echo "- Shim zip seconds: \`$shim_zip_seconds\`"
+            echo "- Engine zip seconds: \`$engine_zip_seconds\`"
             echo "- Manifest/SHA seconds: \`$manifest_seconds\`"
             echo "- App zip bytes: \`$app_zip_bytes\`"
             echo "- Shim zip bytes: \`$shim_zip_bytes\`"
+            echo "- Engine zip bytes: \`$engine_zip_bytes\`"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "dist_dir=$dist_dir" >> "$GITHUB_OUTPUT"
 

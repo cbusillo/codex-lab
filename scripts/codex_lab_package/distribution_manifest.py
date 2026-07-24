@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import re
+import stat
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
@@ -15,15 +17,20 @@ from codex_lab_package.layout import MAX_PROVENANCE_BYTES
 from codex_lab_package.layout import OFFICIAL_APP_BUNDLE_IDENTIFIER
 from codex_lab_package.layout import OFFICIAL_APP_CANDIDATE_PATHS
 from codex_lab_package.layout import OFFICIAL_APP_TEAM_IDENTIFIER
+from codex_lab_package.engine_contract import ENGINE_ARCHIVE_ROOT
+from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
+from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
+from codex_lab_package.engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
 from codex_package.version import read_workspace_version
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PRODUCT = "codex-lab"
 CHANNEL = "lab"
 PLATFORM = "aarch64-apple-darwin"
 APP_ZIP = "codex-lab-app-aarch64-apple-darwin.zip"
 SHIM_ZIP = "codex-lab-shim-aarch64-apple-darwin.zip"
+ENGINE_ZIP = "codex-lab-engine-aarch64-apple-darwin.zip"
 MANIFEST_NAME = "codex-lab-distribution.json"
 RELEASE_TAG_PATTERN = re.compile(
     r"^codex-lab-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)"
@@ -52,6 +59,12 @@ ARTIFACTS = (
         archive_root="bin/codex-lab",
         description="Companion CLI wrapper that resolves an installed or sibling Codex Lab.app.",
     ),
+    ArtifactSpec(
+        role="engineZip",
+        file_name=ENGINE_ZIP,
+        archive_root=ENGINE_ARCHIVE_ROOT,
+        description="Individually signed managed engine pinned by the Codex Lab supervisor.",
+    ),
 )
 
 
@@ -76,6 +89,8 @@ def parse_args() -> argparse.Namespace:
     generate.add_argument("--release-tag")
     generate.add_argument("--download-base-url")
     generate.add_argument("--generated-at")
+    generate.add_argument("--engine-signed", action="store_true")
+    generate.add_argument("--engine-notarized", action="store_true")
     generate.set_defaults(func=cmd_generate)
 
     validate = subparsers.add_parser(
@@ -111,6 +126,8 @@ def cmd_generate(args: argparse.Namespace) -> None:
         release_tag=args.release_tag,
         download_base_url=args.download_base_url,
         generated_at=args.generated_at,
+        engine_signed=args.engine_signed,
+        engine_notarized=args.engine_notarized,
     )
     validate_manifest(manifest, dist_dir=args.dist_dir, checksums=checksums)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +156,11 @@ def build_manifest(
     release_tag: str | None = None,
     download_base_url: str | None = None,
     generated_at: str | None = None,
+    engine_signed: bool = False,
+    engine_notarized: bool = False,
 ) -> dict[str, Any]:
+    if engine_notarized and not engine_signed:
+        raise ValueError("The managed engine cannot be notarized unless it is signed")
     timestamp = generated_at or utc_timestamp()
     base_url = normalize_download_base_url(download_base_url)
     if (release_tag is None) != (base_url is None):
@@ -157,13 +178,14 @@ def build_manifest(
             raise ValueError(
                 f"Checksum mismatch for {artifact.file_name}: {checksum} != {actual_checksum}"
             )
+        is_engine = artifact.role == "engineZip"
         artifacts[artifact.role] = {
             "archiveRoot": artifact.archive_root,
             "description": artifact.description,
             "fileName": artifact.file_name,
-            "notarized": False,
+            "notarized": engine_notarized if is_engine else False,
             "sha256": checksum,
-            "signed": False,
+            "signed": engine_signed if is_engine else False,
             "sizeBytes": path.stat().st_size,
         }
         if base_url is not None:
@@ -188,6 +210,18 @@ def build_manifest(
             "requiresValidOfficialSignature": True,
         },
         "generatedAt": timestamp,
+        "managedEngine": {
+            "artifactRole": "engineZip",
+            "requiredEntitlements": list(REQUIRED_ENGINE_ENTITLEMENTS),
+            "sha256": sha256_zip_member(
+                dist_dir / ENGINE_ZIP,
+                ENGINE_ARCHIVE_ROOT,
+            ),
+            "signingIdentifier": ENGINE_SIGNING_IDENTIFIER if engine_signed else None,
+            "sourceCommit": commit,
+            "teamIdentifier": ENGINE_TEAM_IDENTIFIER if engine_signed else None,
+            "version": version,
+        },
         "platform": PLATFORM,
         "product": PRODUCT,
         "schemaVersion": SCHEMA_VERSION,
@@ -242,6 +276,7 @@ def validate_manifest(
         "channel",
         "desktopIntegration",
         "generatedAt",
+        "managedEngine",
         "platform",
         "product",
         "schemaVersion",
@@ -280,6 +315,14 @@ def validate_manifest(
         if not isinstance(entry, dict):
             raise ValueError(f"{artifact.role} must be an object")
         validate_artifact_entry(artifact, entry, dist_dir=dist_dir, checksums=checksums)
+    validate_managed_engine(
+        manifest["managedEngine"],
+        artifacts["engineZip"],
+        version=version,
+        source=manifest["source"],
+        release=manifest.get("release"),
+        dist_dir=dist_dir,
+    )
     validate_release_download_urls(manifest.get("release"), artifacts)
 
 
@@ -386,8 +429,14 @@ def validate_artifact_entry(
         raise ValueError(
             f"{artifact.role} has unexpected archiveRoot: {entry['archiveRoot']}"
         )
-    if entry["signed"] is not False or entry["notarized"] is not False:
+    signed = entry["signed"]
+    notarized = entry["notarized"]
+    if not isinstance(signed, bool) or not isinstance(notarized, bool):
+        raise ValueError(f"{artifact.role} signing fields must be booleans")
+    if artifact.role != "engineZip" and (signed or notarized):
         raise ValueError(f"{artifact.role} must be marked unsigned and not notarized")
+    if artifact.role == "engineZip" and notarized and not signed:
+        raise ValueError("engineZip cannot be notarized unless it is signed")
     if not is_sha256(entry["sha256"]):
         raise ValueError(f"{artifact.role} has invalid sha256: {entry['sha256']}")
     if not isinstance(entry["sizeBytes"], int) or entry["sizeBytes"] <= 0:
@@ -405,6 +454,66 @@ def validate_artifact_entry(
             raise ValueError(f"{artifact.role} sizeBytes does not match {path}")
         if sha256_file(path) != entry["sha256"]:
             raise ValueError(f"{artifact.role} sha256 does not match {path}")
+
+
+def validate_managed_engine(
+    managed_engine: object,
+    engine_artifact: dict[str, Any],
+    *,
+    version: str,
+    source: object,
+    release: object,
+    dist_dir: Path | None,
+) -> None:
+    if not isinstance(managed_engine, dict):
+        raise ValueError("Manifest managedEngine must be an object")
+    required_fields = {
+        "artifactRole",
+        "requiredEntitlements",
+        "sha256",
+        "signingIdentifier",
+        "sourceCommit",
+        "teamIdentifier",
+        "version",
+    }
+    missing = sorted(required_fields - managed_engine.keys())
+    if missing:
+        raise ValueError(f"managedEngine is missing required fields: {missing}")
+    if managed_engine["artifactRole"] != "engineZip":
+        raise ValueError("managedEngine artifactRole must be engineZip")
+    if managed_engine["version"] != version:
+        raise ValueError("managedEngine version must match the manifest version")
+    if not isinstance(source, dict) or managed_engine["sourceCommit"] != source.get(
+        "commit"
+    ):
+        raise ValueError("managedEngine sourceCommit must match the manifest source")
+    if not is_sha256(managed_engine["sha256"]):
+        raise ValueError("managedEngine sha256 must be a lowercase SHA-256 digest")
+    if managed_engine["requiredEntitlements"] != list(REQUIRED_ENGINE_ENTITLEMENTS):
+        raise ValueError("managedEngine requiredEntitlements are invalid")
+
+    if engine_artifact["signed"]:
+        if managed_engine["signingIdentifier"] != ENGINE_SIGNING_IDENTIFIER:
+            raise ValueError("managedEngine signingIdentifier is invalid")
+        if managed_engine["teamIdentifier"] != ENGINE_TEAM_IDENTIFIER:
+            raise ValueError("managedEngine teamIdentifier is invalid")
+    elif (
+        managed_engine["signingIdentifier"] is not None
+        or managed_engine["teamIdentifier"] is not None
+    ):
+        raise ValueError(
+            "Unsigned managedEngine metadata must not claim a signing identity"
+        )
+
+    if release is not None and not engine_artifact["signed"]:
+        raise ValueError("Published releases require a signed managed engine")
+    if dist_dir is not None:
+        actual_sha256 = sha256_zip_member(
+            dist_dir / ENGINE_ZIP,
+            ENGINE_ARCHIVE_ROOT,
+        )
+        if managed_engine["sha256"] != actual_sha256:
+            raise ValueError("managedEngine sha256 does not match the engine archive")
 
 
 def read_sha256sums(path: Path) -> dict[str, str]:
@@ -436,6 +545,23 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_zip_member(path: Path, member_name: str) -> str:
+    with zipfile.ZipFile(path) as archive:
+        members = [info for info in archive.infolist() if not info.is_dir()]
+        if len(members) != 1 or members[0].filename != member_name:
+            raise ValueError(
+                f"Engine archive must contain exactly {member_name}: {path}"
+            )
+        mode = (members[0].external_attr >> 16) & 0o777777
+        if mode and not stat.S_ISREG(mode):
+            raise ValueError(f"Engine archive member must be a regular file: {path}")
+        digest = hashlib.sha256()
+        with archive.open(members[0]) as artifact:
+            for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
 
 def normalize_download_base_url(url: str | None) -> str | None:
