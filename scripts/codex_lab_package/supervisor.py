@@ -497,9 +497,7 @@ def _code_signing_entitlements(
         raise ValueError("managed Codex Lab engine has invalid entitlements") from exc
     if not isinstance(entitlements, dict):
         raise ValueError("managed Codex Lab engine has invalid entitlements")
-    return tuple(
-        sorted(key for key, value in entitlements.items() if value is True)
-    )
+    return tuple(sorted(key for key, value in entitlements.items() if value is True))
 
 
 def _require_expected_identity(
