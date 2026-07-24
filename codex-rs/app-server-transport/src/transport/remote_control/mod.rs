@@ -425,22 +425,21 @@ impl RemoteControlHandle {
                 response = Some(Err(RemoteControlReconnectUnavailable::Disabled));
                 return false;
             }
-            let reconnect_permit = match self.reconnect_tx.try_reserve() {
-                Ok(reconnect_permit) => reconnect_permit,
-                Err(TrySendError::Full(())) => {
-                    response = Some(Ok(status.clone()));
-                    return false;
-                }
-                Err(TrySendError::Closed(())) => {
-                    response = Some(Err(RemoteControlReconnectUnavailable::WorkerUnavailable));
-                    return false;
-                }
-            };
             let generation = self
                 .next_reconnect_generation
                 .fetch_add(1, Ordering::Relaxed)
                 .wrapping_add(1);
-            reconnect_permit.send(generation);
+            match self.reconnect_tx.try_send(generation) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    response = Some(Ok(status.clone()));
+                    return false;
+                }
+                Err(TrySendError::Closed(_)) => {
+                    response = Some(Err(RemoteControlReconnectUnavailable::WorkerUnavailable));
+                    return false;
+                }
+            }
 
             let next_status = remote_control_status_with_connection_status(
                 status,

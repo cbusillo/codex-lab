@@ -383,19 +383,27 @@ impl RemoteControlStatusPublisher {
         }
     }
 
-    fn publish_status_if_no_pending_reconnect(
+    fn publish_status_if_enabled_and_no_pending_reconnect(
         &self,
+        desired_state_rx: &watch::Receiver<RemoteControlDesiredState>,
         reconnect_rx: &mpsc::Receiver<u64>,
-        connection_status: RemoteControlConnectionStatus,
+        enabled_status: RemoteControlConnectionStatus,
     ) -> bool {
-        let mut no_pending_reconnect = false;
+        let mut enabled_without_pending_reconnect = false;
         let mut status_change = None;
         self.tx.send_if_modified(|status| {
-            no_pending_reconnect = reconnect_rx.is_empty();
-            if !no_pending_reconnect {
+            let enabled = desired_state_rx.borrow().is_enabled();
+            let no_pending_reconnect = reconnect_rx.is_empty();
+            enabled_without_pending_reconnect = enabled && no_pending_reconnect;
+            if enabled && !no_pending_reconnect {
                 return false;
             }
 
+            let connection_status = if enabled {
+                enabled_status
+            } else {
+                RemoteControlConnectionStatus::Disabled
+            };
             let next_status =
                 remote_control_status_with_connection_status(status, connection_status);
             if *status == next_status {
@@ -417,7 +425,7 @@ impl RemoteControlStatusPublisher {
                 "remote control websocket status changed"
             );
         }
-        no_pending_reconnect
+        enabled_without_pending_reconnect
     }
 
     fn publish_status_if_enabled(
@@ -951,7 +959,8 @@ impl RemoteControlWebsocket {
                     self.auth_recovery = self.auth_manager.unauthorized_recovery();
                     if !self
                         .status_publisher
-                        .publish_status_if_no_pending_reconnect(
+                        .publish_status_if_enabled_and_no_pending_reconnect(
+                            &self.desired_state_rx,
                             &self.reconnect_rx,
                             RemoteControlConnectionStatus::Connected,
                         )
@@ -988,7 +997,8 @@ impl RemoteControlWebsocket {
                     } else {
                         if !self
                             .status_publisher
-                            .publish_status_if_no_pending_reconnect(
+                            .publish_status_if_enabled_and_no_pending_reconnect(
+                                &self.desired_state_rx,
                                 &self.reconnect_rx,
                                 RemoteControlConnectionStatus::Errored,
                             )
@@ -3358,18 +3368,43 @@ mod tests {
     #[test]
     fn pending_reconnect_prevents_stale_connected_status() {
         let (status_publisher, status_rx) = remote_control_status_channel();
+        let desired_state_tx = enabled_desired_state_sender();
+        let desired_state_rx = desired_state_tx.subscribe();
         let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
         reconnect_tx
             .try_send(1)
             .expect("reconnect command should queue");
 
-        assert!(!status_publisher.publish_status_if_no_pending_reconnect(
-            &reconnect_rx,
-            RemoteControlConnectionStatus::Connected,
-        ));
+        assert!(
+            !status_publisher.publish_status_if_enabled_and_no_pending_reconnect(
+                &desired_state_rx,
+                &reconnect_rx,
+                RemoteControlConnectionStatus::Connected,
+            )
+        );
         assert_eq!(
             status_rx.borrow().status,
             RemoteControlConnectionStatus::Connecting
+        );
+    }
+
+    #[test]
+    fn disabled_state_prevents_stale_connected_status() {
+        let (status_publisher, status_rx) = remote_control_status_channel();
+        let (_desired_state_tx, desired_state_rx) =
+            watch::channel(RemoteControlDesiredState::Disabled);
+        let (_reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
+
+        assert!(
+            !status_publisher.publish_status_if_enabled_and_no_pending_reconnect(
+                &desired_state_rx,
+                &reconnect_rx,
+                RemoteControlConnectionStatus::Connected,
+            )
+        );
+        assert_eq!(
+            status_rx.borrow().status,
+            RemoteControlConnectionStatus::Disabled
         );
     }
 
