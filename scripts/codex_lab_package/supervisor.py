@@ -31,6 +31,8 @@ LEGACY_LABEL = "dev.everycode.codex-lab.daemon-supervisor"
 DEFAULT_LISTEN_HOST = APP_SERVER_LISTEN_HOST
 DEFAULT_LISTEN_PORT = APP_SERVER_LISTEN_PORT
 MANAGED_CLI_RELATIVE_PATH = Path("packages/standalone/current/codex")
+ALLOW_JIT_ENTITLEMENT = "com.apple.security.cs.allow-jit"
+ALLOW_JIT_ENTITLEMENT_PLUTIL_KEY_PATH = r"com\.apple\.security\.cs\.allow-jit"
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,14 @@ def inspect_engine(
     team_identifier = _signature_field(signature_output, "TeamIdentifier")
     if not signing_identifier or not team_identifier or team_identifier == "not set":
         raise ValueError("managed Codex Lab engine lacks a stable signing identity")
+    code_signing_entitlements = _code_signing_entitlements(
+        managed_cli,
+        codesign_path=codesign_path,
+    )
+    if ALLOW_JIT_ENTITLEMENT not in code_signing_entitlements:
+        raise ValueError(
+            "managed Codex Lab engine lacks the required V8 JIT entitlement"
+        )
     return EngineIdentity(
         build_channel=provenance["build_channel"],
         build_profile=provenance["build_profile"],
@@ -182,6 +192,7 @@ EXPECTED_SOURCE_COMMIT={quote(identity.source_commit)}
 EXPECTED_VERSION={quote(identity.version)}
 EXPECTED_SIGNING_IDENTIFIER={quote(identity.signing_identifier)}
 EXPECTED_TEAM_IDENTIFIER={quote(identity.team_identifier)}
+ALLOW_JIT_ENTITLEMENT_KEY_PATH={quote(ALLOW_JIT_ENTITLEMENT_PLUTIL_KEY_PATH)}
 CODESIGN={quote(tools.codesign)}
 PLUTIL={quote(tools.plutil)}
 SHASUM={quote(tools.shasum)}
@@ -190,14 +201,20 @@ MAX_PROVENANCE_BYTES={MAX_PROVENANCE_BYTES}
 UPDATER_PID_FILE="$LAB_HOME/app-server-daemon/app-server-updater.pid"
 DAEMON_PID_FILE="$LAB_HOME/app-server-daemon/app-server.pid"
 PROVENANCE_FILE=
+ENTITLEMENTS_FILE=
 LAST_STATE=
 
 cleanup() {{
   [ -z "$PROVENANCE_FILE" ] || /bin/rm -f "$PROVENANCE_FILE"
+  [ -z "$ENTITLEMENTS_FILE" ] || /bin/rm -f "$ENTITLEMENTS_FILE"
 }}
 discard_provenance() {{
   cleanup
   PROVENANCE_FILE=
+}}
+discard_entitlements() {{
+  [ -z "$ENTITLEMENTS_FILE" ] || /bin/rm -f "$ENTITLEMENTS_FILE"
+  ENTITLEMENTS_FILE=
 }}
 log_state() {{
   [ "$1" = "$LAST_STATE" ] && return
@@ -239,6 +256,14 @@ verify_engine() {{
   team_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "TeamIdentifier" {{ print substr($0, index($0, "=") + 1); exit }}')
   [ "$signing_identifier" = "$EXPECTED_SIGNING_IDENTIFIER" ] || return 1
   [ "$team_identifier" = "$EXPECTED_TEAM_IDENTIFIER" ] || return 1
+  ENTITLEMENTS_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-entitlements.XXXXXX")
+  if ! "$CODESIGN" -d --entitlements :- "$MANAGED_CLI" >"$ENTITLEMENTS_FILE" 2>/dev/null; then
+    discard_entitlements
+    return 1
+  fi
+  allow_jit=$("$PLUTIL" -extract "$ALLOW_JIT_ENTITLEMENT_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
+  discard_entitlements
+  [ "$allow_jit" = true ] || return 1
   PROVENANCE_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-supervisor.XXXXXX")
   if ! "$MANAGED_CLI" debug provenance --json >"$PROVENANCE_FILE"; then
     discard_provenance
@@ -451,6 +476,28 @@ def _signature_field(output: str, name: str) -> str:
         ),
         "",
     )
+
+
+def _code_signing_entitlements(
+    path: Path,
+    *,
+    codesign_path: Path,
+) -> tuple[str, ...]:
+    completed = subprocess.run(
+        [str(codesign_path), "-d", "--entitlements", ":-", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if not completed.stdout.strip():
+        return ()
+    try:
+        entitlements = plistlib.loads(completed.stdout.encode())
+    except plistlib.InvalidFileException as exc:
+        raise ValueError("managed Codex Lab engine has invalid entitlements") from exc
+    if not isinstance(entitlements, dict):
+        raise ValueError("managed Codex Lab engine has invalid entitlements")
+    return tuple(sorted(key for key, value in entitlements.items() if value is True))
 
 
 def _require_expected_identity(
