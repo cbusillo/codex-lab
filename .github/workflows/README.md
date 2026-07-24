@@ -19,8 +19,8 @@ The workflows in this directory are split so that pull requests get fast, review
 ## Post-Merge On `main`
 
 - `bazel.yml` runs the full Bazel test, clippy, and release-build verification
-  on trusted persistent Linux and macOS runners. The Intel-only macOS test row
-  remains on a hosted Intel runner.
+  on the trusted persistent Linux runner plus hosted macOS runners. Keeping the
+  full macOS Bazel graph hosted protects the app/release runner's local disk.
 - `rust-ci-full.yml` is the full Cargo-native verification workflow.
   It keeps the heavier checks off the PR path while still validating them after merge:
   - the full Cargo `clippy` matrix

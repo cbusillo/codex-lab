@@ -16,16 +16,17 @@ concurrency:
 jobs:
   test:
     # Full Bazel verification runs only in trusted postmerge/manual contexts.
-    # Persistent Codex Lab runners keep the cold V8/ICU graph out of public PR
-    # CI, while the Intel-only macOS row remains on a hosted Intel runner.
+    # The persistent Codex Lab Linux runner keeps the cold V8/ICU graph out of
+    # public PR CI. macOS stays hosted so full Bazel builds do not consume the
+    # app/release runner's local disk.
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
           # macOS
-          - runner: macos-codex-lab
-            runs_on: [self-hosted, macos-codex-lab]
+          - runner: macos-26
+            runs_on: [macos-26]
             target: aarch64-apple-darwin
           - runner: macos-26-intel
             runs_on: [macos-26-intel]
@@ -143,8 +144,8 @@ jobs:
           - runner: codex-lab-linux
             runs_on: [self-hosted, codex-lab-linux]
             target: x86_64-unknown-linux-gnu
-          - runner: macos-codex-lab
-            runs_on: [self-hosted, macos-codex-lab]
+          - runner: macos-26
+            runs_on: [macos-26]
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runs_on }}
     name: Bazel clippy on ${{ matrix.runner }} for ${{ matrix.target }}
@@ -222,8 +223,8 @@ jobs:
           - runner: codex-lab-linux
             runs_on: [self-hosted, codex-lab-linux]
             target: x86_64-unknown-linux-gnu
-          - runner: macos-codex-lab
-            runs_on: [self-hosted, macos-codex-lab]
+          - runner: macos-26
+            runs_on: [macos-26]
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runs_on }}
     name: Verify release build on ${{ matrix.runner }} for ${{ matrix.target }}
