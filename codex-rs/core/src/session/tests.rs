@@ -2831,7 +2831,7 @@ async fn session_configured_reports_permission_profile_for_external_sandbox() ->
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_permission_profile_rebinds_runtime_workspace_roots() -> anyhow::Result<()> {
+async fn session_permission_profile_rebinds_exact_runtime_workspace_roots() -> anyhow::Result<()> {
     let codex_home = tempfile::TempDir::new()?;
     let cwd = tempfile::TempDir::new()?;
     let old_root = test_path_buf("/workspace/old").abs();
@@ -2841,11 +2841,12 @@ async fn session_permission_profile_rebinds_runtime_workspace_roots() -> anyhow:
         .harness_overrides(crate::config::ConfigOverrides {
             cwd: Some(cwd.path().to_path_buf()),
             default_permissions: Some(BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
-            additional_writable_roots: vec![old_root.to_path_buf()],
+            workspace_roots: Some(vec![old_root.clone()]),
             ..Default::default()
         })
         .build()
         .await?;
+    assert_eq!(config.workspace_roots, vec![old_root.clone()]);
 
     let session_permission_profile_state = session_permission_profile_state_from_config(&config)?;
     let stored_file_system_policy = session_permission_profile_state
