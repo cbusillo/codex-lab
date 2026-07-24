@@ -85,6 +85,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewRequest;
@@ -268,6 +269,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         config_overrides,
     } = cli;
     let shared = shared.into_inner();
+    shared
+        .validate_workspace_root_mode()
+        .map_err(anyhow::Error::msg)?;
     let SharedCliOptions {
         images,
         model: model_cli_arg,
@@ -280,6 +284,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         bypass_hook_trust,
         cwd,
         add_dir,
+        workspace_root,
     } = shared;
 
     let (_stdout_with_ansi, stderr_with_ansi) = match color {
@@ -319,6 +324,20 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             AbsolutePathBuf::from_absolute_path(canonicalize_existing_preserving_symlinks(path)?)?
         }
         None => AbsolutePathBuf::current_dir()?,
+    };
+    let workspace_roots = (!workspace_root.is_empty()).then(|| {
+        workspace_root
+            .into_iter()
+            .map(|path| AbsolutePathBuf::resolve_path_against_base(path, config_cwd.as_path()))
+            .collect()
+    });
+    let exact_workspace_profile = workspace_roots
+        .as_ref()
+        .is_some_and(|_| sandbox_mode == Some(SandboxMode::WorkspaceWrite));
+    let sandbox_mode_override = if exact_workspace_profile {
+        None
+    } else {
+        sandbox_mode
     };
 
     // we load config.toml here to determine project state.
@@ -426,11 +445,12 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         // the fully resolved reviewer is AutoReview.
         approval_policy: Some(AskForApproval::Never),
         approvals_reviewer: None,
-        sandbox_mode,
+        sandbox_mode: sandbox_mode_override,
         permission_profile: None,
-        default_permissions: None,
+        default_permissions: exact_workspace_profile
+            .then(|| BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
         cwd: resolved_cwd,
-        workspace_roots: None,
+        workspace_roots,
         model_provider: model_provider.clone(),
         service_tier: None,
         codex_self_exe: arg0_paths.codex_self_exe.clone(),

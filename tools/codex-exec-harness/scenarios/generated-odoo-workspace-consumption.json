@@ -1,0 +1,138 @@
+{
+  "name": "generated-odoo-workspace-consumption",
+  "characterization": {
+    "issue": 360,
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.5",
+  "prompt": "Follow the canonical generated-workspace guide and prove the declared write boundary.",
+  "git_init": false,
+  "workspace_outside_git": true,
+  "sandbox": "workspace-write",
+  "workspace_roots": [
+    "{external}/tenant",
+    "{external}/devkit"
+  ],
+  "files": {
+    "AGENTS.md": "# Canonical generated Odoo workspace guide\n\nMarker: CANONICAL_ODOO_WORKSPACE_GUIDE\n\n- `sources/tenant` and `sources/devkit` are declared editable roots.\n- `sources/runtime`, generated surfaces, and paths outside the declared roots are read-only.\n- `workspace.local.md` is supplemental and must never replace this guide.\n- Preserve Launchplane ownership boundaries; do not perform shared or production mutations from this local workspace.\n",
+    "workspace.local.md": "Fixture-only supplemental note.\n",
+    "workspace.lock.toml": "schema_version = 1\nworkspace_path = \"{workspace}\"\n\n[agent_workspace]\ncontract_version = 1\nlocal_notes_path = \"workspace.local.md\"\nreserved_override_path = \"AGENTS.override.md\"\nreserved_override_semantics = \"full_replacement\"\n\n[repos.tenant]\nworkspace_relative_path = \"sources/tenant\"\nresolved_path = \"{external}/tenant\"\nmaterialization = \"linked_path\"\neditable = true\n\n[repos.devkit]\nworkspace_relative_path = \"sources/devkit\"\nresolved_path = \"{external}/devkit\"\nmaterialization = \"linked_path\"\neditable = true\n\n[repos.runtime]\nworkspace_relative_path = \"sources/runtime\"\nresolved_path = \"{workspace}/sources/runtime\"\nmaterialization = \"managed_checkout\"\neditable = false\n",
+    "sources/runtime/README.md": "managed runtime checkout\n"
+  },
+  "external_files": {
+    "tenant/README.md": "editable tenant source\n",
+    "devkit/README.md": "editable devkit source\n"
+  },
+  "symlinks": {
+    "sources/tenant": "{external}/tenant",
+    "sources/devkit": "{external}/devkit"
+  },
+  "config_toml": "approval_policy = \"never\"\nmodel_provider = \"harness\"\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-odoo-workspace-write-proof",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "shell_command",
+              "arguments": "{\"command\":\"printf 'tenant-write\\n' > sources/tenant/agent-write.txt && printf 'devkit-write\\n' > sources/devkit/agent-write.txt && if printf 'blocked\\n' > sources/runtime/blocked.txt 2>/dev/null; then managed=unexpected; else managed=denied; fi && if printf 'blocked\\n' > workspace-root-blocked.txt 2>/dev/null; then root=unexpected; else root=denied; fi && if printf 'blocked\\n' > ../outside-blocked.txt 2>/dev/null; then outside=unexpected; else outside=denied; fi && printf 'tenant=written devkit=written managed=%s root=%s outside=%s\\n' $managed $root $outside\"}",
+              "call_id": "call-odoo-workspace-write-proof"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-odoo-workspace-complete",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-odoo-workspace-complete",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Generated non-Git workspace boundary proof complete."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 2,
+    "turn_count": 1,
+    "thread_id": "required",
+    "workspace_git": {
+      "git_root": null,
+      "branch": null,
+      "head_sha": null
+    },
+    "launch_command": {
+      "contains_all": [
+        "--skip-git-repo-check",
+        "--workspace-root"
+      ],
+      "not_contains": "--add-dir",
+      "count": {
+        "--workspace-root": 2
+      }
+    },
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "contains_all": [
+          "CANONICAL_ODOO_WORKSPACE_GUIDE",
+          "workspace.local.md",
+          "Preserve Launchplane ownership boundaries"
+        ],
+        "not_contains": "# Codex Lab"
+      }
+    ],
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-odoo-workspace-write-proof",
+        "contains_all": [
+          "tenant=written",
+          "devkit=written",
+          "managed=denied",
+          "root=denied",
+          "outside=denied"
+        ]
+      }
+    ],
+    "workspace_paths": [
+      {
+        "path": ".git",
+        "exists": false
+      },
+      {
+        "path": "sources/tenant/agent-write.txt",
+        "type": "file",
+        "contains": "tenant-write"
+      },
+      {
+        "path": "sources/devkit/agent-write.txt",
+        "type": "file",
+        "contains": "devkit-write"
+      },
+      {
+        "path": "sources/runtime/blocked.txt",
+        "exists": false
+      },
+      {
+        "path": "workspace-root-blocked.txt",
+        "exists": false
+      }
+    ]
+  },
+  "timeout_seconds": 60
+}

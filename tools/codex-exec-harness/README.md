@@ -61,6 +61,13 @@ Scenarios are JSON files. Supported fields:
 - `turns`: ordered turn objects; turn 1 runs `codex exec`, later turns resume
   the captured thread id with `codex exec resume`
 - `files`: workspace files created before the run
+- `external_files`: files created under the run-local `external/` directory
+- `symlinks`: workspace-relative links to run-local fixture paths; targets may
+  use `{workspace}`, `{external}`, or `{run_dir}`
+- `add_dirs`: run-local directories passed to Codex with `--add-dir`
+- `workspace_roots`: exact run-local workspace roots passed to Codex with
+  repeatable `--workspace-root`; unlike `add_dirs`, these replace the implicit
+  writable launch CWD and require `sandbox: workspace-write`
 - `config_toml`: isolated `CODEX_LAB_HOME/config.toml` contents
 - `config_overrides`: `-c key=value` arguments passed to `codex exec`
 - `responses_api`: start a local fake Responses API and point Codex at it
@@ -70,9 +77,16 @@ Scenarios are JSON files. Supported fields:
   provider scenarios while keeping Codex Lab, shell, XDG config, and cache
   paths isolated; this lets provider CLIs reuse their existing authentication
 - `skip_run_all`: omit a scenario from `run_all.py` and CI's all-scenario sweep
+- `workspace_outside_git`: materialize the workspace under
+  `~/.codex-exec-harness-workspaces` or
+  `CODEX_EXEC_HARNESS_EXTERNAL_WORKSPACE_ROOT`, and fail unless Git reports no
+  containing worktree and no ancestor `AGENTS.md` or `AGENTS.override.md`
 - `expect`: assertions over return code, turn count, captured thread id, and
   fake Responses request bodies, captured agent messages and commands, and
-  optional durable Background Review target/currentness metadata
+  optional durable Background Review target/currentness metadata;
+  `launch_command` checks candidate argv and `workspace_paths` verifies
+  post-run file, directory, symlink, or absence evidence; `workspace_git`
+  checks recorded Git metadata such as `git_root`, `branch`, or `head_sha`
 - `timeout_seconds`: per-run timeout, defaulting to 90 seconds
 
 The fake Responses API is for request-shape proof only. Use direct scenario runs
@@ -84,6 +98,48 @@ Use `inherit_host_home` only for direct, opt-in live scenarios that launch a
 locally authenticated external provider. It intentionally gives spawned
 commands access to the caller's home directory, so it must remain excluded from
 `run_all.py` and CI.
+
+## Generated Odoo Workspaces
+
+`odoo_workspace.py` is the bounded consumer for a devkit-generated non-Git
+workspace. It does not parse `workspace.lock.toml` or Odoo markers. Instead it
+runs the provider-owned command below and fails closed unless the returned
+schema, guidance, source materialization, reserved override, and edit roots are
+all current:
+
+```sh
+uv --directory /path/to/odoo-devkit run platform workspace status \
+  --manifest /path/to/tenant/workspace.toml --check
+```
+
+Launch an exact Codex Lab candidate in editable mode:
+
+```sh
+python3 tools/codex-exec-harness/odoo_workspace.py \
+  --devkit /path/to/odoo-devkit \
+  --manifest /path/to/tenant/workspace.toml \
+  --codex-bin /absolute/path/to/codex-lab \
+  --source-repo /path/to/codex-lab \
+  --mode exec \
+  --access editable \
+  --prompt 'Inspect the generated workspace.' \
+  --evidence-file /path/to/evidence.json
+```
+
+Editable mode selects the built-in workspace-write sandbox and passes each
+status-declared editable linked path through repeatable `--workspace-root`.
+Those exact roots replace the implicit launch CWD, leaving the generated root
+and managed checkouts read-only. Passing the same paths through legacy
+`--add-dir` would also make the launch CWD writable, so the bounded adapter
+intentionally does not combine the two mechanisms. `--access read-only` uses
+the built-in read-only sandbox. Both modes require current candidate provenance
+from `scripts/local/codex_lab_provenance.py`; prompt text is hashed and redacted
+from evidence.
+
+`generated-odoo-workspace-consumption.json` is the deterministic exact-candidate
+proof. It keeps the root non-Git, loads the canonical root guide, permits writes
+through tenant/devkit links, and proves managed, generated-root, and outside
+writes remain denied.
 
 ## Auto-Validation Characterization
 

@@ -55,6 +55,7 @@ use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::SandboxMode;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_rollout::StateDbHandle;
 use codex_rollout::state_db;
 use codex_state::log_db;
@@ -915,6 +916,8 @@ pub async fn run_main(
     loader_overrides: LoaderOverrides,
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 ) -> std::io::Result<AppExitInfo> {
+    cli.validate_workspace_root_mode()
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
     let strict_config = cli.strict_config;
     let (sandbox_mode, approval_policy) = if cli.dangerously_bypass_approvals_and_sandbox {
         (
@@ -1107,11 +1110,37 @@ pub async fn run_main(
     };
 
     let additional_dirs = cli.add_dir.clone();
+    let workspace_roots = if cli.workspace_root.is_empty() {
+        None
+    } else {
+        let workspace_base = config_cwd.as_ref().ok_or_else(|| {
+            std::io::Error::other("--workspace-root is unavailable for remote workspaces")
+        })?;
+        Some(
+            cli.workspace_root
+                .iter()
+                .cloned()
+                .map(|path| {
+                    AbsolutePathBuf::resolve_path_against_base(path, workspace_base.as_path())
+                })
+                .collect(),
+        )
+    };
+    let exact_workspace_profile = workspace_roots
+        .as_ref()
+        .is_some_and(|_| sandbox_mode == Some(SandboxMode::WorkspaceWrite));
+    let sandbox_mode_override = if exact_workspace_profile {
+        None
+    } else {
+        sandbox_mode
+    };
 
     let overrides = ConfigOverrides {
         model,
         approval_policy,
-        sandbox_mode,
+        sandbox_mode: sandbox_mode_override,
+        default_permissions: exact_workspace_profile
+            .then(|| BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
         cwd: cwd_override,
         model_provider: model_provider_override.clone(),
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
@@ -1120,6 +1149,7 @@ pub async fn run_main(
         show_raw_agent_reasoning: cli.oss.then_some(true),
         bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
         additional_writable_roots: additional_dirs,
+        workspace_roots,
         ..Default::default()
     };
 

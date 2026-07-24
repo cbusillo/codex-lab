@@ -64,9 +64,36 @@ pub struct SharedCliOptions {
     /// Additional directories that should be writable alongside the primary workspace.
     #[arg(long = "add-dir", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     pub add_dir: Vec<PathBuf>,
+
+    /// Exact runtime workspace roots. Unlike --add-dir, this replaces the
+    /// implicit cwd root and is intended for split-root workspaces.
+    #[arg(
+        long = "workspace-root",
+        value_name = "DIR",
+        value_hint = clap::ValueHint::DirPath,
+        conflicts_with = "add_dir"
+    )]
+    pub workspace_root: Vec<PathBuf>,
 }
 
 impl SharedCliOptions {
+    pub fn validate_workspace_root_mode(&self) -> Result<(), &'static str> {
+        if !self.workspace_root.is_empty() && !self.add_dir.is_empty() {
+            return Err("--workspace-root cannot be combined with --add-dir");
+        }
+        if !self.workspace_root.is_empty() && self.dangerously_bypass_approvals_and_sandbox {
+            return Err(
+                "--workspace-root cannot be combined with --dangerously-bypass-approvals-and-sandbox",
+            );
+        }
+        if !self.workspace_root.is_empty()
+            && !matches!(self.sandbox_mode, Some(SandboxModeCliArg::WorkspaceWrite))
+        {
+            return Err("--workspace-root requires --sandbox workspace-write");
+        }
+        Ok(())
+    }
+
     pub fn inherit_exec_root_options(&mut self, root: &Self) {
         let self_selected_sandbox_mode =
             self.sandbox_mode.is_some() || self.dangerously_bypass_approvals_and_sandbox;
@@ -82,6 +109,7 @@ impl SharedCliOptions {
             bypass_hook_trust,
             cwd,
             add_dir,
+            workspace_root,
         } = self;
         let Self {
             images: root_images,
@@ -95,6 +123,7 @@ impl SharedCliOptions {
             bypass_hook_trust: root_bypass_hook_trust,
             cwd: root_cwd,
             add_dir: root_add_dir,
+            workspace_root: root_workspace_root,
         } = root;
 
         if model.is_none() {
@@ -135,6 +164,11 @@ impl SharedCliOptions {
             merged_add_dir.append(add_dir);
             *add_dir = merged_add_dir;
         }
+        if !root_workspace_root.is_empty() {
+            let mut merged_workspace_root = root_workspace_root.clone();
+            merged_workspace_root.append(workspace_root);
+            *workspace_root = merged_workspace_root;
+        }
     }
 
     pub fn apply_subcommand_overrides(&mut self, subcommand: Self) {
@@ -152,6 +186,7 @@ impl SharedCliOptions {
             bypass_hook_trust,
             cwd,
             add_dir,
+            workspace_root,
         } = subcommand;
 
         if let Some(model) = model {
@@ -186,5 +221,99 @@ impl SharedCliOptions {
         if !add_dir.is_empty() {
             self.add_dir.extend(add_dir);
         }
+        if !workspace_root.is_empty() {
+            self.workspace_root = workspace_root;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Debug, Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        shared: SharedCliOptions,
+    }
+
+    #[test]
+    fn workspace_root_is_repeatable() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "--sandbox",
+            "workspace-write",
+            "--workspace-root",
+            "tenant",
+            "--workspace-root",
+            "devkit",
+        ])
+        .expect("workspace roots should parse");
+
+        assert_eq!(
+            cli.shared.workspace_root,
+            vec![PathBuf::from("tenant"), PathBuf::from("devkit")]
+        );
+        assert!(cli.shared.validate_workspace_root_mode().is_ok());
+    }
+
+    #[test]
+    fn workspace_root_conflicts_with_add_dir() {
+        let error =
+            TestCli::try_parse_from(["test", "--workspace-root", "tenant", "--add-dir", "extra"])
+                .expect_err("workspace-root and add-dir should conflict");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn inherited_root_modes_cannot_be_mixed_across_exec_scopes() {
+        let mut subcommand = SharedCliOptions {
+            add_dir: vec![PathBuf::from("extra")],
+            ..Default::default()
+        };
+        let root = SharedCliOptions {
+            sandbox_mode: Some(SandboxModeCliArg::WorkspaceWrite),
+            workspace_root: vec![PathBuf::from("tenant")],
+            ..Default::default()
+        };
+
+        subcommand.inherit_exec_root_options(&root);
+
+        assert_eq!(
+            subcommand.validate_workspace_root_mode(),
+            Err("--workspace-root cannot be combined with --add-dir")
+        );
+    }
+
+    #[test]
+    fn workspace_root_requires_explicit_workspace_write() {
+        let shared = SharedCliOptions {
+            workspace_root: vec![PathBuf::from("tenant")],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            shared.validate_workspace_root_mode(),
+            Err("--workspace-root requires --sandbox workspace-write")
+        );
+    }
+
+    #[test]
+    fn workspace_root_rejects_dangerous_sandbox_bypass() {
+        let shared = SharedCliOptions {
+            sandbox_mode: Some(SandboxModeCliArg::WorkspaceWrite),
+            dangerously_bypass_approvals_and_sandbox: true,
+            workspace_root: vec![PathBuf::from("tenant")],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            shared.validate_workspace_root_mode(),
+            Err(
+                "--workspace-root cannot be combined with --dangerously-bypass-approvals-and-sandbox"
+            )
+        );
     }
 }

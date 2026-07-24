@@ -4683,6 +4683,47 @@ async fn add_dir_override_extends_workspace_writable_roots() -> std::io::Result<
 }
 
 #[tokio::test]
+async fn explicit_workspace_roots_replace_cwd_for_workspace_write() -> std::io::Result<()> {
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let workspace = temp_dir.path().join("workspace");
+    let tenant = temp_dir.path().join("tenant");
+    let devkit = temp_dir.path().join("devkit");
+    std::fs::create_dir_all(&workspace)?;
+    std::fs::create_dir_all(&tenant)?;
+    std::fs::create_dir_all(&devkit)?;
+
+    let tenant_abs = tenant.abs();
+    let devkit_abs = devkit.abs();
+    let overrides = ConfigOverrides {
+        cwd: Some(workspace.clone()),
+        default_permissions: Some(BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
+        workspace_roots: Some(vec![tenant_abs.clone(), devkit_abs.clone()]),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        overrides,
+        temp_dir.path().abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.workspace_roots,
+        vec![tenant_abs.clone(), devkit_abs.clone()]
+    );
+    let policy = config.permissions.file_system_sandbox_policy();
+    assert!(policy.can_write_path_with_cwd(tenant_abs.as_path(), &workspace));
+    assert!(policy.can_write_path_with_cwd(devkit_abs.as_path(), &workspace));
+    assert!(
+        !policy.can_write_path_with_cwd(&workspace, &workspace),
+        "workspace cwd should remain read-only: {policy:#?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn default_zsh_path_sets_runtime_zsh_path() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let default_zsh_path = codex_home.path().join("packaged-zsh");
