@@ -52,6 +52,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -65,6 +66,8 @@ pub struct RemoteControlStartConfig {
     pub installation_id: String,
 }
 
+const RECONNECT_CHANNEL_CAPACITY: usize = 1;
+
 pub(super) struct QueuedServerEnvelope {
     pub(super) event: ServerEvent,
     pub(super) client_id: ClientId,
@@ -75,7 +78,7 @@ pub(super) struct QueuedServerEnvelope {
 #[derive(Clone)]
 pub struct RemoteControlHandle {
     enabled_tx: Arc<watch::Sender<bool>>,
-    reconnect_tx: mpsc::UnboundedSender<u64>,
+    reconnect_tx: mpsc::Sender<u64>,
     next_reconnect_generation: Arc<AtomicU64>,
     status_tx: Arc<watch::Sender<RemoteControlStatusChangedNotification>>,
     state_db_available: bool,
@@ -263,33 +266,33 @@ impl RemoteControlHandle {
                 response = Some(Err(RemoteControlReconnectUnavailable::Disabled));
                 return false;
             }
-            if self.reconnect_tx.is_closed() {
-                response = Some(Err(RemoteControlReconnectUnavailable::WorkerUnavailable));
-                return false;
-            }
-            if status.status == RemoteControlConnectionStatus::Connecting {
-                response = Some(Ok(status.clone()));
-                return false;
-            }
-
+            let reconnect_permit = match self.reconnect_tx.try_reserve() {
+                Ok(reconnect_permit) => reconnect_permit,
+                Err(TrySendError::Full(())) => {
+                    response = Some(Ok(status.clone()));
+                    return false;
+                }
+                Err(TrySendError::Closed(())) => {
+                    response = Some(Err(RemoteControlReconnectUnavailable::WorkerUnavailable));
+                    return false;
+                }
+            };
             let generation = self
                 .next_reconnect_generation
                 .fetch_add(1, Ordering::Relaxed)
                 .wrapping_add(1);
-            if self.reconnect_tx.send(generation).is_err() {
-                response = Some(Err(RemoteControlReconnectUnavailable::WorkerUnavailable));
-                return false;
-            }
+            reconnect_permit.send(generation);
 
             let next_status = remote_control_status_with_connection_status(
                 status,
                 RemoteControlConnectionStatus::Connecting,
             );
+            let status_changed = next_status != *status;
             reconnect_generation = Some(generation);
             previous_status = Some(status.status);
             *status = next_status.clone();
             response = Some(Ok(next_status));
-            true
+            status_changed
         });
 
         let response = response.expect("remote control reconnect must produce a response");
@@ -321,7 +324,7 @@ impl RemoteControlHandle {
                 environment_id = ?status.environment_id,
                 installation_id = %status.installation_id,
                 server_name = %status.server_name,
-                "remote control reconnect coalesced with an existing connection attempt"
+                "remote control reconnect coalesced with a pending request"
             );
         }
         response
@@ -887,7 +890,7 @@ pub async fn start_remote_control(
     };
 
     let (enabled_tx, enabled_rx) = watch::channel(initial_enabled);
-    let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+    let (reconnect_tx, reconnect_rx) = mpsc::channel(RECONNECT_CHANNEL_CAPACITY);
     let current_enrollment = Arc::new(RemoteControlEnrollmentState::new(/*enrollment*/ None));
     let websocket_current_enrollment = current_enrollment.clone();
     let pairing_persistence_key_required = app_server_client_name_rx.is_some();

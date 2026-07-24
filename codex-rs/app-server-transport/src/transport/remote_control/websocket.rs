@@ -282,7 +282,7 @@ pub(crate) struct RemoteControlWebsocket {
     server_event_rx: Arc<Mutex<mpsc::Receiver<super::QueuedServerEnvelope>>>,
     used_rx: watch::Receiver<usize>,
     enabled_rx: watch::Receiver<bool>,
-    reconnect_rx: mpsc::UnboundedReceiver<u64>,
+    reconnect_rx: mpsc::Receiver<u64>,
 }
 
 pub(crate) struct RemoteControlWebsocketConfig {
@@ -368,6 +368,43 @@ impl RemoteControlStatusPublisher {
                 "remote control websocket status changed"
             );
         }
+    }
+
+    fn publish_status_if_no_pending_reconnect(
+        &self,
+        reconnect_rx: &mpsc::Receiver<u64>,
+        connection_status: RemoteControlConnectionStatus,
+    ) -> bool {
+        let mut no_pending_reconnect = false;
+        let mut status_change = None;
+        self.tx.send_if_modified(|status| {
+            no_pending_reconnect = reconnect_rx.is_empty();
+            if !no_pending_reconnect {
+                return false;
+            }
+
+            let next_status =
+                remote_control_status_with_connection_status(status, connection_status);
+            if *status == next_status {
+                return false;
+            }
+
+            status_change = Some((status.clone(), next_status.clone()));
+            *status = next_status;
+            true
+        });
+        if let Some((previous_status, next_status)) = status_change {
+            info!(
+                previous_status = ?previous_status.status,
+                next_status = ?next_status.status,
+                previous_environment_id = ?previous_status.environment_id,
+                next_environment_id = ?next_status.environment_id,
+                installation_id = %next_status.installation_id,
+                server_name = %next_status.server_name,
+                "remote control websocket status changed"
+            );
+        }
+        no_pending_reconnect
     }
 
     fn publish_status_if_enabled(
@@ -457,7 +494,7 @@ impl RemoteControlWebsocket {
         channels: RemoteControlChannels,
         shutdown_token: CancellationToken,
         enabled_rx: watch::Receiver<bool>,
-        reconnect_rx: mpsc::UnboundedReceiver<u64>,
+        reconnect_rx: mpsc::Receiver<u64>,
     ) -> Self {
         let shutdown_token = shutdown_token.child_token();
         let (server_event_tx, server_event_rx) = mpsc::channel(super::CHANNEL_CAPACITY);
@@ -778,6 +815,13 @@ impl RemoteControlWebsocket {
                     .await
                 } => connect_result,
             };
+            if let Ok(reconnect_generation) = self.reconnect_rx.try_recv() {
+                self.consume_reconnect_requests(
+                    reconnect_generation,
+                    "completed active connection attempt",
+                );
+                continue;
+            }
 
             match connect_result {
                 Ok((websocket_connection, response, active_control_auth)) => {
@@ -786,8 +830,18 @@ impl RemoteControlWebsocket {
                     }
                     self.reconnect_attempt = 0;
                     self.auth_recovery = self.auth_manager.unauthorized_recovery();
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Connected);
+                    if !self
+                        .status_publisher
+                        .publish_status_if_no_pending_reconnect(
+                            &self.reconnect_rx,
+                            RemoteControlConnectionStatus::Connected,
+                        )
+                    {
+                        self.consume_pending_reconnect_requests(
+                            "completed stale connection attempt",
+                        );
+                        continue;
+                    }
                     let enrollment = self.current_enrollment.snapshot();
                     info!(
                         websocket_url = %remote_control_target.websocket_url,
@@ -813,8 +867,18 @@ impl RemoteControlWebsocket {
                     let reconnect_delay = if err.kind() == ErrorKind::WouldBlock {
                         REMOTE_CONTROL_ACCOUNT_ID_RETRY_INTERVAL
                     } else {
-                        self.status_publisher
-                            .publish_status(RemoteControlConnectionStatus::Errored);
+                        if !self
+                            .status_publisher
+                            .publish_status_if_no_pending_reconnect(
+                                &self.reconnect_rx,
+                                RemoteControlConnectionStatus::Errored,
+                            )
+                        {
+                            self.consume_pending_reconnect_requests(
+                                "completed stale connection attempt",
+                            );
+                            continue;
+                        }
                         let reconnect_attempt = self.reconnect_attempt.saturating_add(1);
                         let (reconnect_delay, reconnect_backoff_reset) =
                             next_reconnect_delay(&mut self.reconnect_attempt);
@@ -2038,7 +2102,7 @@ mod tests {
         status_publisher: RemoteControlStatusPublisher,
         shutdown_token: CancellationToken,
         enabled_rx: watch::Receiver<bool>,
-        reconnect_rx: mpsc::UnboundedReceiver<u64>,
+        reconnect_rx: mpsc::Receiver<u64>,
     ) -> RemoteControlWebsocket {
         let remote_control_url = "http://localhost/backend-api/".to_string();
         let remote_control_target = normalize_remote_control_url(&remote_control_url)
@@ -2071,15 +2135,15 @@ mod tests {
         status_publisher.publish_status(RemoteControlConnectionStatus::Errored);
         let shutdown_token = CancellationToken::new();
         let (_enabled_tx, enabled_rx) = watch::channel(true);
-        let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 3);
         reconnect_tx
-            .send(7)
+            .try_send(7)
             .expect("reconnect command should queue");
         reconnect_tx
-            .send(8)
+            .try_send(8)
             .expect("second reconnect command should queue");
         reconnect_tx
-            .send(9)
+            .try_send(9)
             .expect("third reconnect command should queue");
         let mut websocket = test_remote_control_websocket(
             transport_event_tx,
@@ -2139,7 +2203,7 @@ mod tests {
         let state_db = remote_control_state_runtime(&codex_home).await;
         let shutdown_token = CancellationToken::new();
         let (_enabled_tx, enabled_rx) = watch::channel(true);
-        let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
         let mut enrollment = remote_control_enrollment(Some(TEST_REMOTE_CONTROL_SERVER_TOKEN));
         enrollment.remote_control_target = remote_control_target.clone();
         let auth_manager = remote_control_auth_manager();
@@ -2181,12 +2245,116 @@ mod tests {
         .expect("connection failure status should arrive")
         .expect("status channel should remain open");
         reconnect_tx
-            .send(10)
+            .try_send(10)
             .expect("reconnect command should send");
         timeout(TEST_RECONNECT_WAKE_TIMEOUT, second_connection_rx.recv())
             .await
             .expect("reconnect should bypass the retry backoff")
             .expect("replacement connection should be observed");
+
+        shutdown_token.cancel();
+        let outcome = connect_task.await.expect("connect task should join");
+        assert!(matches!(outcome, ConnectOutcome::Shutdown));
+        server_task.await.expect("server task should join");
+    }
+
+    #[tokio::test]
+    async fn reconnect_queues_during_active_connection_attempt() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let remote_control_url = remote_control_url_for_listener(&listener);
+        let remote_control_target =
+            normalize_remote_control_url(&remote_control_url).expect("target should normalize");
+        let (connection_tx, mut connection_rx) = mpsc::channel(2);
+        let (finish_first_connection_tx, finish_first_connection_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (first_stream, _) = accept_http_request(&listener).await;
+            connection_tx
+                .send(())
+                .await
+                .expect("first connection signal should send");
+            finish_first_connection_rx
+                .await
+                .expect("first connection completion signal should send");
+            respond_with_status_and_headers(
+                first_stream,
+                "503 Service Unavailable",
+                &[],
+                "retry later",
+            )
+            .await;
+
+            let (second_stream, _) = accept_http_request(&listener).await;
+            connection_tx
+                .send(())
+                .await
+                .expect("second connection signal should send");
+            respond_with_status_and_headers(
+                second_stream,
+                "503 Service Unavailable",
+                &[],
+                "retry later",
+            )
+            .await;
+        });
+
+        let (transport_event_tx, _transport_event_rx) = mpsc::channel(1);
+        let (status_publisher, _status_rx) = remote_control_status_channel();
+        let codex_home = TempDir::new().expect("temp dir should create");
+        let state_db = remote_control_state_runtime(&codex_home).await;
+        let shutdown_token = CancellationToken::new();
+        let (_enabled_tx, enabled_rx) = watch::channel(true);
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
+        let mut enrollment = remote_control_enrollment(Some(TEST_REMOTE_CONTROL_SERVER_TOKEN));
+        enrollment.remote_control_target = remote_control_target.clone();
+        let auth_manager = remote_control_auth_manager();
+        let mut websocket = RemoteControlWebsocket::new(
+            RemoteControlWebsocketConfig {
+                remote_control_url,
+                installation_id: TEST_INSTALLATION_ID.to_string(),
+                remote_control_target: Some(remote_control_target),
+                server_name: "test-server".to_string(),
+            },
+            Some(state_db),
+            auth_manager,
+            RemoteControlChannels {
+                transport_event_tx,
+                status_publisher,
+                current_enrollment: test_current_enrollment(Some(enrollment)),
+                pairing_persistence_key: watch::channel(None).0,
+            },
+            shutdown_token.clone(),
+            enabled_rx,
+            reconnect_rx,
+        );
+        let connect_shutdown_token = shutdown_token.child_token();
+        let connect_task = tokio::spawn(async move {
+            websocket
+                .connect(
+                    &connect_shutdown_token,
+                    /*app_server_client_name*/ None,
+                )
+                .await
+        });
+
+        timeout(TEST_HTTP_ACCEPT_TIMEOUT, connection_rx.recv())
+            .await
+            .expect("first connection should arrive")
+            .expect("first connection signal should exist");
+        reconnect_tx
+            .try_send(10)
+            .expect("reconnect command should send");
+        timeout(Duration::from_millis(100), connection_rx.recv())
+            .await
+            .expect_err("reconnect should not cancel the active connection attempt");
+        finish_first_connection_tx
+            .send(())
+            .expect("first connection should be allowed to finish");
+        timeout(TEST_RECONNECT_WAKE_TIMEOUT, connection_rx.recv())
+            .await
+            .expect("reconnect should bypass backoff after the active attempt finishes")
+            .expect("second connection signal should exist");
 
         shutdown_token.cancel();
         let outcome = connect_task.await.expect("connect task should join");
@@ -2201,9 +2369,9 @@ mod tests {
         status_publisher.publish_status(RemoteControlConnectionStatus::Disabled);
         let shutdown_token = CancellationToken::new();
         let (_enabled_tx, enabled_rx) = watch::channel(false);
-        let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
         reconnect_tx
-            .send(9)
+            .try_send(9)
             .expect("reconnect command should queue");
         let mut websocket = test_remote_control_websocket(
             transport_event_tx,
@@ -2244,9 +2412,9 @@ mod tests {
         status_publisher.publish_status(RemoteControlConnectionStatus::Connected);
         let shutdown_token = CancellationToken::new();
         let (_enabled_tx, enabled_rx) = watch::channel(false);
-        let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
         reconnect_tx
-            .send(8)
+            .try_send(8)
             .expect("reconnect command should queue");
         let mut websocket = test_remote_control_websocket(
             transport_event_tx,
@@ -2811,7 +2979,7 @@ mod tests {
         let (status_publisher, _status_rx) = remote_control_status_channel();
         let shutdown_token = CancellationToken::new();
         let (_enabled_tx, enabled_rx) = watch::channel(true);
-        let (_reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+        let (_reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
         let websocket_task = tokio::spawn({
             let shutdown_token = shutdown_token.clone();
             async move {
@@ -2932,6 +3100,24 @@ mod tests {
             timeout(Duration::from_millis(20), status_rx.changed())
                 .await
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn pending_reconnect_prevents_stale_connected_status() {
+        let (status_publisher, status_rx) = remote_control_status_channel();
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
+        reconnect_tx
+            .try_send(1)
+            .expect("reconnect command should queue");
+
+        assert!(!status_publisher.publish_status_if_no_pending_reconnect(
+            &reconnect_rx,
+            RemoteControlConnectionStatus::Connected,
+        ));
+        assert_eq!(
+            status_rx.borrow().status,
+            RemoteControlConnectionStatus::Connecting
         );
     }
 
