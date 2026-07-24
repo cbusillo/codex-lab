@@ -183,9 +183,6 @@ jobs:
           - name: macOS
             runner: macos-26
             timeout_minutes: 30
-          - name: Windows
-            runner: windows-latest
-            timeout_minutes: 30
     steps:
       - name: Check whether argument comment lint should run
         id: argument_comment_lint_gate

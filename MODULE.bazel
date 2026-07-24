@@ -96,7 +96,6 @@ single_version_override(
     patch_strip = 1,
     patches = [
         "//patches:rules_rs_build_script_deps_annotation.patch",
-        "//patches:rules_rs_windows_exec_linker.patch",
     ],
     version = "0.0.96",
 )
@@ -107,9 +106,6 @@ rules_rust.patch(
         # Carry the OpenAI setup fix that makes build-script tools available
         # through their runfiles after the rules_rs upgrade.
         "//patches:rules_rust_build_script_tools_transition.patch",
-        # Prefer rust-lld for MSVC exec helpers instead of mixing MSVC link
-        # arguments with the hermetic gnullvm clang++ driver.
-        "//patches:rules_rust_windows_bootstrap_process_wrapper_linker.patch",
         # Keep direct Windows/MSVC links compatible with hermetic LLVM's
         # non-.lib runtime artifacts.
         "//patches:rules_rust_windows_msvc_direct_link_args.patch",

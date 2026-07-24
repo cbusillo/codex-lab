@@ -11,7 +11,7 @@ The workflows in this directory are split so that pull requests get fast, review
 - `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
   - `cargo fmt --check`
   - `cargo shear`
-  - `argument-comment-lint` on Linux, macOS, and Windows
+  - `argument-comment-lint` on hosted Linux and macOS
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
 
 ## Post-Merge On `main`
@@ -33,6 +33,9 @@ The workflows in this directory are split so that pull requests get fast, review
   pull requests never execute on persistent Codex Lab machines.
 - Repository-scoped self-hosted runners are reserved for trusted app and release
   workflows that explicitly restrict which pull requests can reach them.
+- Upstream Windows Bazel jobs require authenticated RBE and custom Windows exec
+  toolchains, so they are not part of public-fork blocking CI. `rust-ci-full.yml`
+  retains Windows validation after merge on trusted repository-owned runners.
 - `.github/scripts/verify_blocking_ci_runner_routing.py` follows the reusable
   workflow graph from `blocking-ci.yml` and rejects organization runner groups,
   persistent self-hosted runners, billable macOS large runners, and unsupported
