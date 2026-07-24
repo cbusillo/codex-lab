@@ -280,7 +280,11 @@ mod tests {
         buffer
             .content
             .chunks(width as usize)
-            .map(|line| line.iter().map(|cell| cell.symbol()).collect::<String>())
+            .map(|line| {
+                line.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

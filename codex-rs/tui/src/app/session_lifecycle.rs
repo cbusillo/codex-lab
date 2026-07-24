@@ -140,6 +140,14 @@ pub(super) struct LoadedSubagentBackfill {
     pub(super) refreshed_thread_ids: HashSet<ThreadId>,
 }
 
+struct ReplacementAppServerThread {
+    session: AppServerSession,
+    started: AppServerStartedThread,
+    config: Config,
+    cloud_config_bundle: CloudConfigBundleLoader,
+    old_client_shutdown_warning: &'static str,
+}
+
 impl App {
     pub(super) async fn show_login_accounts_view(&mut self, app_server: &mut AppServerSession) {
         self.show_login_accounts_view_with_feedback(app_server, /*feedback*/ None)
@@ -178,12 +186,15 @@ impl App {
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
-        mut replacement_session: AppServerSession,
-        started: AppServerStartedThread,
-        config: Config,
-        cloud_config_bundle: CloudConfigBundleLoader,
-        old_client_shutdown_warning: &str,
+        replacement: ReplacementAppServerThread,
     ) -> Result<()> {
+        let ReplacementAppServerThread {
+            mut session,
+            started,
+            config,
+            cloud_config_bundle,
+            old_client_shutdown_warning,
+        } = replacement;
         let previous_config = std::mem::replace(&mut self.config, config);
         let previous_cloud_config_bundle =
             std::mem::replace(&mut self.cloud_config_bundle, cloud_config_bundle);
@@ -191,12 +202,12 @@ impl App {
             .replace_chat_widget_with_app_server_thread_preserving_previous_ui_on_error(
                 tui,
                 app_server,
-                &mut replacement_session,
+                &mut session,
                 started,
             )
             .await
         {
-            if let Err(shutdown_err) = replacement_session.shutdown().await {
+            if let Err(shutdown_err) = session.shutdown().await {
                 tracing::warn!(
                     "failed to shut down replacement app server after attach failure: {shutdown_err}"
                 );
@@ -206,7 +217,7 @@ impl App {
             return Err(err);
         }
 
-        let old_client = app_server.swap_client(replacement_session.into_client());
+        let old_client = app_server.swap_client(session.into_client());
         drop(previous_config);
         drop(previous_cloud_config_bundle);
         if let Err(err) = old_client.shutdown().await {
@@ -1292,11 +1303,14 @@ impl App {
             .commit_replacement_app_server_thread(
                 tui,
                 app_server,
-                replacement_session,
-                started,
-                config.clone(),
-                replacement_cloud_config_bundle,
-                "failed to shut down previous app server after auth profile switch",
+                ReplacementAppServerThread {
+                    session: replacement_session,
+                    started,
+                    config: config.clone(),
+                    cloud_config_bundle: replacement_cloud_config_bundle,
+                    old_client_shutdown_warning:
+                        "failed to shut down previous app server after auth profile switch",
+                },
             )
             .await
         {
@@ -1540,11 +1554,14 @@ impl App {
         self.commit_replacement_app_server_thread(
             tui,
             app_server,
-            replacement_session,
-            started,
-            config,
-            replacement_cloud_config_bundle,
-            "failed to shut down previous app server after account switch",
+            ReplacementAppServerThread {
+                session: replacement_session,
+                started,
+                config,
+                cloud_config_bundle: replacement_cloud_config_bundle,
+                old_client_shutdown_warning:
+                    "failed to shut down previous app server after account switch",
+            },
         )
         .await
         .map_err(|err| format!("Failed to attach to selected account session: {err}"))
@@ -1767,11 +1784,14 @@ impl App {
         self.commit_replacement_app_server_thread(
             tui,
             app_server,
-            replacement_session,
-            started,
-            config,
-            replacement_cloud_config_bundle,
-            "failed to shut down previous app server after account removal",
+            ReplacementAppServerThread {
+                session: replacement_session,
+                started,
+                config,
+                cloud_config_bundle: replacement_cloud_config_bundle,
+                old_client_shutdown_warning:
+                    "failed to shut down previous app server after account removal",
+            },
         )
         .await
         .map_err(|err| format!("Failed to attach after disconnecting {label}: {err}"))?;

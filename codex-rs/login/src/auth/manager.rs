@@ -15,7 +15,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -205,11 +204,20 @@ pub const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OV
 pub const REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REVOKE_TOKEN_URL_OVERRIDE";
 pub const CLIENT_ID_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_CLIENT_ID";
 static NEXT_DUMMY_AUTH_ID: AtomicU64 = AtomicU64::new(1);
-static MANAGED_AUTH_REFRESH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
+static MANAGED_AUTH_REFRESH_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 pub(crate) struct AuthRefreshFileGuard {
     lock_file: File,
+}
+
+async fn acquire_managed_auth_refresh_permit()
+-> Result<tokio::sync::SemaphorePermit<'static>, RefreshTokenError> {
+    MANAGED_AUTH_REFRESH_LOCK.acquire().await.map_err(|_| {
+        RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+            RefreshTokenFailedReason::Other,
+            REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
+        ))
+    })
 }
 
 impl Drop for AuthRefreshFileGuard {
@@ -297,39 +305,37 @@ impl From<RefreshTokenError> for std::io::Error {
     }
 }
 
+#[derive(Clone, Copy)]
+struct AuthLoadContext<'a> {
+    codex_home: &'a Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    chatgpt_base_url: Option<&'a str>,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    agent_identity_authapi_base_url: Option<&'a str>,
+    auth_route_config: &'a AuthRouteConfig,
+}
+
 impl CodexAuth {
     async fn from_auth_dot_json(
-        codex_home: &Path,
+        context: AuthLoadContext<'_>,
         auth_dot_json: AuthDotJson,
-        auth_credentials_store_mode: AuthCredentialsStoreMode,
-        chatgpt_base_url: Option<&str>,
-        keyring_backend_kind: AuthKeyringBackendKind,
-        agent_identity_authapi_base_url: Option<&str>,
-        auth_route_config: &AuthRouteConfig,
     ) -> std::io::Result<Self> {
-        Self::from_auth_dot_json_with_storage(
+        Self::from_auth_dot_json_with_storage(context, auth_dot_json, /*storage*/ None).await
+    }
+
+    async fn from_auth_dot_json_with_storage(
+        context: AuthLoadContext<'_>,
+        auth_dot_json: AuthDotJson,
+        storage: Option<Arc<dyn AuthStorageBackend>>,
+    ) -> std::io::Result<Self> {
+        let AuthLoadContext {
             codex_home,
-            auth_dot_json,
             auth_credentials_store_mode,
             chatgpt_base_url,
             keyring_backend_kind,
             agent_identity_authapi_base_url,
             auth_route_config,
-            /*storage*/ None,
-        )
-        .await
-    }
-
-    async fn from_auth_dot_json_with_storage(
-        codex_home: &Path,
-        auth_dot_json: AuthDotJson,
-        auth_credentials_store_mode: AuthCredentialsStoreMode,
-        chatgpt_base_url: Option<&str>,
-        keyring_backend_kind: AuthKeyringBackendKind,
-        agent_identity_authapi_base_url: Option<&str>,
-        auth_route_config: &AuthRouteConfig,
-        storage: Option<Arc<dyn AuthStorageBackend>>,
-    ) -> std::io::Result<Self> {
+        } = context;
         let auth_mode = auth_dot_json.resolved_mode();
         if auth_mode == AuthMode::ApiKey {
             let Some(api_key) = auth_dot_json.openai_api_key.as_deref() else {
@@ -1579,13 +1585,15 @@ async fn load_auth(
     );
     if let Some(auth_dot_json) = ephemeral_storage.load()? {
         let auth = CodexAuth::from_auth_dot_json(
-            codex_home,
+            AuthLoadContext {
+                codex_home,
+                auth_credentials_store_mode: AuthCredentialsStoreMode::Ephemeral,
+                chatgpt_base_url,
+                keyring_backend_kind,
+                agent_identity_authapi_base_url,
+                auth_route_config,
+            },
             auth_dot_json,
-            AuthCredentialsStoreMode::Ephemeral,
-            chatgpt_base_url,
-            keyring_backend_kind,
-            agent_identity_authapi_base_url,
-            auth_route_config,
         )
         .await?;
         if let CodexAuth::PersonalAccessToken(auth) = &auth {
@@ -1631,13 +1639,15 @@ async fn load_auth(
     };
 
     let auth = CodexAuth::from_auth_dot_json(
-        codex_home,
+        AuthLoadContext {
+            codex_home,
+            auth_credentials_store_mode,
+            chatgpt_base_url,
+            keyring_backend_kind,
+            agent_identity_authapi_base_url,
+            auth_route_config,
+        },
         auth_dot_json,
-        auth_credentials_store_mode,
-        chatgpt_base_url,
-        keyring_backend_kind,
-        agent_identity_authapi_base_url,
-        auth_route_config,
     )
     .await?;
     if let CodexAuth::PersonalAccessToken(auth) = &auth {
@@ -2832,7 +2842,7 @@ impl AuthManager {
             auth_before_reload.as_ref(),
             Some(CodexAuth::Chatgpt(_)) | Some(CodexAuth::ChatgptAuthTokens(_))
         ) {
-            let _managed_refresh_guard = MANAGED_AUTH_REFRESH_LOCK.lock().await;
+            let _managed_refresh_permit = acquire_managed_auth_refresh_permit().await?;
             let _managed_refresh_file_guard =
                 acquire_managed_auth_refresh_file_guard(&self.codex_home).await?;
             return self
@@ -2879,7 +2889,7 @@ impl AuthManager {
             Some(CodexAuth::Chatgpt(_)) | Some(CodexAuth::ChatgptAuthTokens(_))
         ) {
             let expected_account_id = auth.as_ref().and_then(CodexAuth::get_account_id);
-            let _managed_refresh_guard = MANAGED_AUTH_REFRESH_LOCK.lock().await;
+            let _managed_refresh_permit = acquire_managed_auth_refresh_permit().await?;
             let _managed_refresh_file_guard =
                 acquire_managed_auth_refresh_file_guard(&self.codex_home).await?;
             return self
@@ -3124,20 +3134,22 @@ async fn load_catalog_account_auth(
         auth_credentials_store_mode,
         catalog_account_id,
     )?;
-    let storage = CatalogAccountStorage::new(
+    let storage = CatalogAccountStorage::create_backend(
         codex_home.to_path_buf(),
         auth_credentials_store_mode,
         keyring_backend_kind,
         catalog_account_id.to_string(),
     );
     CodexAuth::from_auth_dot_json_with_storage(
-        codex_home,
+        AuthLoadContext {
+            codex_home,
+            auth_credentials_store_mode,
+            chatgpt_base_url,
+            keyring_backend_kind,
+            agent_identity_authapi_base_url,
+            auth_route_config,
+        },
         auth_dot_json,
-        auth_credentials_store_mode,
-        chatgpt_base_url,
-        keyring_backend_kind,
-        agent_identity_authapi_base_url,
-        auth_route_config,
         Some(storage),
     )
     .await

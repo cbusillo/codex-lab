@@ -17,7 +17,7 @@ pub(super) struct CatalogAccountStorage {
 }
 
 impl CatalogAccountStorage {
-    pub(super) fn new(
+    pub(super) fn create_backend(
         codex_home: PathBuf,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
         keyring_backend_kind: AuthKeyringBackendKind,

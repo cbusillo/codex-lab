@@ -233,9 +233,9 @@ fn has_unexpired_tried_marker(
     now: DateTime<Utc>,
 ) -> bool {
     state.has_tried(account_id)
-        && !state
+        && state
             .blocked_until(account_id)
-            .is_some_and(|blocked_until| blocked_until <= now)
+            .is_none_or(|blocked_until| blocked_until > now)
 }
 
 pub fn select_next_account_id(
@@ -342,7 +342,7 @@ fn select_account_id(
     Ok(api_key_accounts
         .into_iter()
         .find(|account| {
-            !current.is_some_and(|id| id == account.id)
+            current.is_none_or(|id| id != account.id)
                 && !has_unexpired_tried_marker(state, &account.id, now)
         })
         .map(|account| account.id.clone()))
@@ -528,7 +528,7 @@ mod tests {
         codex_login::set_active_account_id(
             temp.path(),
             AuthCredentialsStoreMode::File,
-            Some(current.clone()),
+            Some(current),
         )
         .expect("set active");
         account_usage::record_rate_limit_snapshot(

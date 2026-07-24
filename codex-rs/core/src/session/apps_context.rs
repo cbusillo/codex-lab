@@ -90,10 +90,6 @@ impl AppsContextChange {
 }
 
 impl Session {
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "MCP app context rendering reads through the session-owned manager guard"
-    )]
     async fn refresh_apps_context(&self, turn_context: &TurnContext) -> AppsContextChange {
         let availability =
             if turn_context.config.include_apps_instructions && turn_context.apps_enabled() {

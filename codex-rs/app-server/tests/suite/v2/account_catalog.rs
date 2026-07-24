@@ -308,9 +308,9 @@ async fn jsonrpc_error(
     params: Option<serde_json::Value>,
 ) -> Result<JSONRPCError> {
     let request_id = app_server.send_raw_request(method, params).await?;
-    Ok(timeout(
+    timeout(
         DEFAULT_TIMEOUT,
         app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
     )
-    .await??)
+    .await?
 }

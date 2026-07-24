@@ -488,14 +488,20 @@ async fn process_request(
                     )
                     .await
                     .ok();
+                    let redirect = compose_success_url(
+                        actual_port,
+                        &opts.issuer,
+                        &tokens.id_token,
+                        &tokens.access_token,
+                        opts.codex_streamlined_login,
+                        &opts.login_success_page,
+                    );
+                    let tokens = PersistedLoginTokens::from_exchanged(api_key, tokens);
                     let persist_result = match account_catalog_policy {
                         LoginAccountCatalogPolicy::Mirror => {
                             persist_tokens_async(
                                 &opts.codex_home,
-                                api_key.clone(),
-                                tokens.id_token.clone(),
-                                tokens.access_token.clone(),
-                                tokens.refresh_token.clone(),
+                                tokens,
                                 opts.cli_auth_credentials_store_mode,
                                 opts.previous_auth_handling,
                                 opts.auth_keyring_backend_kind,
@@ -506,10 +512,7 @@ async fn process_request(
                         LoginAccountCatalogPolicy::Isolated => {
                             persist_profile_tokens_async(
                                 &opts.codex_home,
-                                api_key.clone(),
-                                tokens.id_token.clone(),
-                                tokens.access_token.clone(),
-                                tokens.refresh_token.clone(),
+                                tokens,
                                 opts.cli_auth_credentials_store_mode,
                                 opts.auth_keyring_backend_kind,
                                 opts.auth_route_config.clone(),
@@ -527,14 +530,6 @@ async fn process_request(
                         );
                     }
 
-                    let redirect = compose_success_url(
-                        actual_port,
-                        &opts.issuer,
-                        &tokens.id_token,
-                        &tokens.access_token,
-                        opts.codex_streamlined_login,
-                        &opts.login_success_page,
-                    );
                     let url = match &redirect {
                         LoginSuccessRedirect::Local(url) | LoginSuccessRedirect::Hosted(url) => url,
                     };
@@ -772,6 +767,38 @@ pub(crate) struct ExchangedTokens {
     pub refresh_token: String,
 }
 
+pub(crate) struct PersistedLoginTokens {
+    api_key: Option<String>,
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+}
+
+impl PersistedLoginTokens {
+    pub(crate) fn new(
+        api_key: Option<String>,
+        id_token: String,
+        access_token: String,
+        refresh_token: String,
+    ) -> Self {
+        Self {
+            api_key,
+            id_token,
+            access_token,
+            refresh_token,
+        }
+    }
+
+    pub(crate) fn from_exchanged(api_key: Option<String>, tokens: ExchangedTokens) -> Self {
+        Self::new(
+            api_key,
+            tokens.id_token,
+            tokens.access_token,
+            tokens.refresh_token,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TokenEndpointErrorDetail {
     error_code: Option<String>,
@@ -956,10 +983,7 @@ pub(crate) async fn exchange_code_for_tokens(
 /// Persists exchanged credentials using the configured local auth store.
 pub(crate) async fn persist_tokens_async(
     codex_home: &Path,
-    api_key: Option<String>,
-    id_token: String,
-    access_token: String,
-    refresh_token: String,
+    tokens: PersistedLoginTokens,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     previous_auth_handling: PreviousAuthHandling,
     keyring_backend_kind: AuthKeyringBackendKind,
@@ -967,10 +991,7 @@ pub(crate) async fn persist_tokens_async(
 ) -> io::Result<()> {
     persist_tokens_async_with_policy(
         codex_home,
-        api_key,
-        id_token,
-        access_token,
-        refresh_token,
+        tokens,
         auth_credentials_store_mode,
         keyring_backend_kind,
         auth_route_config,
@@ -981,20 +1002,14 @@ pub(crate) async fn persist_tokens_async(
 
 pub(crate) async fn persist_profile_tokens_async(
     codex_home: &Path,
-    api_key: Option<String>,
-    id_token: String,
-    access_token: String,
-    refresh_token: String,
+    tokens: PersistedLoginTokens,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
     auth_route_config: AuthRouteConfig,
 ) -> io::Result<()> {
     persist_tokens_async_with_policy(
         codex_home,
-        api_key,
-        id_token,
-        access_token,
-        refresh_token,
+        tokens,
         auth_credentials_store_mode,
         keyring_backend_kind,
         auth_route_config,
@@ -1005,10 +1020,7 @@ pub(crate) async fn persist_profile_tokens_async(
 
 async fn persist_tokens_async_with_policy(
     codex_home: &Path,
-    api_key: Option<String>,
-    id_token: String,
-    access_token: String,
-    refresh_token: String,
+    tokens: PersistedLoginTokens,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
     auth_route_config: AuthRouteConfig,
@@ -1017,6 +1029,12 @@ async fn persist_tokens_async_with_policy(
     // Reuse existing synchronous logic but run it off the async runtime.
     let codex_home = codex_home.to_path_buf();
     let persist_codex_home = codex_home.clone();
+    let PersistedLoginTokens {
+        api_key,
+        id_token,
+        access_token,
+        refresh_token,
+    } = tokens;
     let (previous_auth, auth) = tokio::task::spawn_blocking(move || {
         let previous_auth = match load_auth_dot_json(
             &persist_codex_home,
@@ -1375,6 +1393,7 @@ mod tests {
     use core_test_support::skip_if_no_network;
     use pretty_assertions::assert_eq;
 
+    use super::PersistedLoginTokens;
     use super::PreviousAuthHandling;
     use super::TokenEndpointErrorDetail;
     use super::html_escape;
@@ -1421,10 +1440,7 @@ mod tests {
     ) -> io::Result<()> {
         persist_profile_tokens_async_with_backend(
             codex_home,
-            api_key,
-            id_token,
-            access_token,
-            refresh_token,
+            PersistedLoginTokens::new(api_key, id_token, access_token, refresh_token),
             auth_credentials_store_mode,
             AuthKeyringBackendKind::default(),
             transport_default_auth_route_config(),
@@ -1443,10 +1459,7 @@ mod tests {
     ) -> io::Result<()> {
         persist_tokens_async_with_backend(
             codex_home,
-            api_key,
-            id_token,
-            access_token,
-            refresh_token,
+            PersistedLoginTokens::new(api_key, id_token, access_token, refresh_token),
             auth_credentials_store_mode,
             previous_auth_handling,
             AuthKeyringBackendKind::default(),

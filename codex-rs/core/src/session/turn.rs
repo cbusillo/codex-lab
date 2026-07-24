@@ -1106,7 +1106,7 @@ async fn run_auto_compact(
         );
         run_inline_auto_compact_task(
             Arc::clone(sess),
-            Arc::clone(&turn_context),
+            Arc::clone(turn_context),
             initial_context_injection,
             reason,
             phase,
@@ -1314,9 +1314,7 @@ async fn maybe_switch_account_after_usage_limit(
         return None;
     }
     let current_identity = sess.services.execution_account.identity();
-    let Some(current_account_id) = current_identity.stored_account_id.as_deref() else {
-        return None;
-    };
+    let current_account_id = current_identity.stored_account_id.as_deref()?;
     let failover = Box::pin(
         sess.services
             .execution_account
@@ -1372,10 +1370,6 @@ async fn maybe_switch_account_after_usage_limit(
     }
 }
 
-#[expect(
-    clippy::await_holding_invalid_type,
-    reason = "tool router construction reads through the session-owned manager guard"
-)]
 #[instrument(level = "trace",
     skip_all,
     fields(

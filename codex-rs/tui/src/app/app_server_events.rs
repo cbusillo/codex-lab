@@ -258,8 +258,9 @@ impl App {
         if pending.login_id != login_id {
             return;
         }
-        if !notification.success {
-            let pending = self.pending_auth_profile_login.take().unwrap();
+        if !notification.success
+            && let Some(pending) = self.pending_auth_profile_login.take()
+        {
             self.chat_widget.add_error_message(format!(
                 "Login for auth profile {} failed.",
                 pending.profile_label

@@ -100,10 +100,10 @@ async fn accept_enroll_request(listener: &TcpListener) -> (TcpStream, String) {
             break;
         }
         let line = line.trim_end_matches("\r\n");
-        if let Some((name, value)) = line.split_once(':') {
-            if name.to_ascii_lowercase() == REMOTE_CONTROL_ACCOUNT_ID_HEADER {
-                account_id_header = value.trim().to_string();
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case(REMOTE_CONTROL_ACCOUNT_ID_HEADER)
+        {
+            account_id_header = value.trim().to_string();
         }
     }
     (reader.into_inner(), account_id_header)

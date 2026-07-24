@@ -92,7 +92,7 @@ impl AutoReviewStatusCount {
             "{}/{}/{}/{}",
             source_label(&self.source),
             status_label(&self.status),
-            freshness_label(&self.freshness),
+            freshness_label(self.freshness),
             target,
         )
     }
@@ -305,7 +305,7 @@ fn status_count_order_key(
     (
         source_label(&count.source),
         status_label(&count.status),
-        freshness_label(&count.freshness),
+        freshness_label(count.freshness),
         if count.target_matches {
             "target_current"
         } else {
@@ -337,7 +337,7 @@ fn status_label(status: &AutoReviewRunStatus) -> &'static str {
     }
 }
 
-fn freshness_label(freshness: &AutoReviewFreshness) -> &'static str {
+fn freshness_label(freshness: AutoReviewFreshness) -> &'static str {
     match freshness {
         AutoReviewFreshness::Current => "current",
         AutoReviewFreshness::Stale => "stale",
@@ -581,7 +581,7 @@ impl AutoReviewStore {
     pub fn save_run_state(&self, state: &AutoReviewRunState) -> Result<PathBuf> {
         let _guard = AUTO_REVIEW_RUN_STATE_WRITE_LOCK
             .lock()
-            .unwrap_or_else(|err| err.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.save_run_state_unlocked(state)
     }
 
@@ -592,7 +592,7 @@ impl AutoReviewStore {
         validate_safe_id(run_id).context("auto review run_id")?;
         let _guard = AUTO_REVIEW_RUN_STATE_WRITE_LOCK
             .lock()
-            .unwrap_or_else(|err| err.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self
             .load_run_state_unlocked(run_id)?
             .unwrap_or_else(|| AutoReviewRunState::new(run_id));

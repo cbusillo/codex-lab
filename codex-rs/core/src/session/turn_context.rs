@@ -215,7 +215,7 @@ impl TurnContext {
             realtime_active: self.realtime_active,
             config: Arc::new(config),
             auth_manager: Some(Arc::clone(&auth_manager)),
-            model_info: model_info.clone(),
+            model_info,
             session_telemetry,
             provider: create_model_provider(self.provider.info().clone(), Some(auth_manager)),
             reasoning_effort,

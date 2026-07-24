@@ -168,6 +168,7 @@ where
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&path)?;
     file.lock_exclusive()?;
     let mut data = read_locked_usage_file(&mut file, account_id)?;
@@ -202,7 +203,7 @@ pub fn record_rate_limit_snapshot(
     record_rate_limit_snapshot_with_plan(
         codex_home,
         account_id,
-        snapshot.plan_type.clone(),
+        snapshot.plan_type,
         snapshot,
         observed_at,
     )

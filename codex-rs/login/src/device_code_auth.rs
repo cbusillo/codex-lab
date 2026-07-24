@@ -247,14 +247,12 @@ async fn complete_device_code_login_with_catalog_policy(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
     }
 
+    let tokens = crate::server::PersistedLoginTokens::from_exchanged(/*api_key*/ None, tokens);
     match account_catalog_policy {
         LoginAccountCatalogPolicy::Mirror => {
             crate::server::persist_tokens_async(
                 &opts.codex_home,
-                /*api_key*/ None,
-                tokens.id_token,
-                tokens.access_token,
-                tokens.refresh_token,
+                tokens,
                 opts.cli_auth_credentials_store_mode,
                 opts.previous_auth_handling,
                 opts.auth_keyring_backend_kind,
@@ -265,10 +263,7 @@ async fn complete_device_code_login_with_catalog_policy(
         LoginAccountCatalogPolicy::Isolated => {
             crate::server::persist_profile_tokens_async(
                 &opts.codex_home,
-                /*api_key*/ None,
-                tokens.id_token,
-                tokens.access_token,
-                tokens.refresh_token,
+                tokens,
                 opts.cli_auth_credentials_store_mode,
                 opts.auth_keyring_backend_kind,
                 opts.auth_route_config.clone(),

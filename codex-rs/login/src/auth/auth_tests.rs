@@ -1064,14 +1064,17 @@ async fn refresh_failure_is_scoped_to_the_matching_auth_snapshot() {
         .expect("tokens should exist");
     updated_tokens.access_token = "new-access-token".to_string();
     updated_tokens.refresh_token = "new-refresh-token".to_string();
+    let auth_route_config = crate::test_support::transport_default_auth_route_config();
     let updated_auth = CodexAuth::from_auth_dot_json(
-        codex_home.path(),
+        AuthLoadContext {
+            codex_home: codex_home.path(),
+            auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+            chatgpt_base_url: None,
+            keyring_backend_kind: AuthKeyringBackendKind::Direct,
+            agent_identity_authapi_base_url: None,
+            auth_route_config: &auth_route_config,
+        },
         updated_auth_dot_json,
-        AuthCredentialsStoreMode::File,
-        /*chatgpt_base_url*/ None,
-        AuthKeyringBackendKind::Direct,
-        /*agent_identity_authapi_base_url*/ None,
-        &crate::test_support::transport_default_auth_route_config(),
     )
     .await
     .expect("updated auth should parse");

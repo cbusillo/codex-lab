@@ -174,16 +174,22 @@ pub fn requested_model_headers(model: &str) -> HeaderMap {
     let user_agent = get_codex_user_agent_for_model(model);
     let mut headers = HeaderMap::new();
 
-    headers.insert(
-        "version",
-        HeaderValue::from_str(&requested_version)
-            .expect("requested model version should be a valid header value"),
-    );
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_str(&user_agent)
-            .expect("requested model user-agent should be a valid header value"),
-    );
+    match HeaderValue::from_str(&requested_version) {
+        Ok(value) => {
+            headers.insert("version", value);
+        }
+        Err(error) => {
+            tracing::warn!(%error, "ignoring invalid requested model version header");
+        }
+    }
+    match HeaderValue::from_str(&user_agent) {
+        Ok(value) => {
+            headers.insert(USER_AGENT, value);
+        }
+        Err(error) => {
+            tracing::warn!(%error, "ignoring invalid requested model user-agent header");
+        }
+    }
     headers
 }
 

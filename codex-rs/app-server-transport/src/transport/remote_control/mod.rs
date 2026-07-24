@@ -451,7 +451,10 @@ impl RemoteControlHandle {
             true
         });
 
-        let response = response.expect("remote control reconnect must produce a response");
+        let response = response.unwrap_or_else(|| {
+            warn!("remote control reconnect did not produce a response");
+            Err(RemoteControlReconnectUnavailable::WorkerUnavailable)
+        });
         let Ok(status) = &response else {
             match &response {
                 Err(RemoteControlReconnectUnavailable::Disabled) => {
