@@ -729,13 +729,18 @@ impl MessageProcessor {
         self.thread_processor.shutdown_threads().await;
     }
 
+    pub(crate) async fn connection_closing(&self, connection_id: ConnectionId) {
+        self.outgoing.connection_closed(connection_id).await;
+        self.thread_processor.connection_closed(connection_id).await;
+    }
+
     pub(crate) async fn connection_closed(
         &self,
         connection_id: ConnectionId,
         session_state: &ConnectionSessionState,
     ) {
+        tracing::debug!(?connection_id, "connection cleanup started");
         session_state.rpc_gate.shutdown().await;
-        self.outgoing.connection_closed(connection_id).await;
         self.fs_processor.connection_closed(connection_id).await;
         self.command_exec_processor
             .connection_closed(connection_id)
@@ -743,7 +748,7 @@ impl MessageProcessor {
         self.process_exec_processor
             .connection_closed(connection_id)
             .await;
-        self.thread_processor.connection_closed(connection_id).await;
+        tracing::debug!(?connection_id, "connection cleanup completed");
     }
 
     pub(crate) fn subscribe_running_assistant_turn_count(&self) -> watch::Receiver<usize> {
