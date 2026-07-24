@@ -5,6 +5,7 @@ codex_rust_crate(
     compile_data = [
         "//:announcement_tip.toml",
         "//codex-rs/models-manager:models.json",
+        "build.rs",
     ],
     crate_name = "codex_version",
 )

@@ -5,6 +5,7 @@ set -euo pipefail
 print_failed_bazel_test_logs=0
 print_failed_bazel_action_summary=0
 remote_download_toplevel=0
+windows_gnullvm_host_platform=0
 windows_msvc_host_platform=0
 windows_cross_compile=0
 
@@ -90,9 +91,8 @@ print_bazel_test_log_tails() {
   local -a bazel_info_args=(info)
   if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
     # `bazel info` needs the same CI config as the failed test invocation so
-    # platform-specific output roots match. On Windows, omitting `ci-windows`
-    # would point at `local_windows-fastbuild` even when the test ran with the
-    # MSVC host platform under `local_windows_msvc-fastbuild`.
+    # platform-specific output roots match. On Windows, the selected host
+    # platform can otherwise point `bazel info` at a different output tree.
     bazel_info_args+=("--config=${ci_config}")
   fi
 
@@ -257,13 +257,13 @@ fi
 
 if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
   # Windows cross-compilation depends on authenticated RBE. Preserve the local
-  # Windows build shape when credentials are unavailable.
+  # Windows gnullvm build shape when credentials are unavailable.
   ci_config=ci-windows
-  windows_msvc_host_platform=1
+  windows_gnullvm_host_platform=1
 fi
 
 post_config_bazel_args=()
-if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; then
+if [[ "${RUNNER_OS:-}" == "Windows" && ( $windows_gnullvm_host_platform -eq 1 || $windows_msvc_host_platform -eq 1 ) ]]; then
   has_host_platform_override=0
   for arg in "${bazel_args[@]}"; do
     if [[ "$arg" == --host_platform=* ]]; then
@@ -273,11 +273,11 @@ if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; the
   done
 
   if [[ $has_host_platform_override -eq 0 ]]; then
-    # Use the MSVC Windows platform for jobs that need helper binaries like
-    # Rust test wrappers and V8 generators to resolve a compatible toolchain.
-    # Callers that need a different Windows target platform should pass an
-    # explicit `--platforms=...` flag.
-    post_config_bazel_args+=("--host_platform=//:local_windows_msvc")
+    windows_host_platform=//:local_windows
+    if [[ $windows_msvc_host_platform -eq 1 ]]; then
+      windows_host_platform=//:local_windows_msvc
+    fi
+    post_config_bazel_args+=("--host_platform=${windows_host_platform}")
   fi
 fi
 

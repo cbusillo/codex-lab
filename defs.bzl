@@ -224,7 +224,7 @@ def codex_rust_crate(
             You probably don't want this, it's only here for a single caller.
         proc_macro: Whether this crate builds a proc-macro library.
         build_script_data: Data files exposed to the build script at runtime.
-        compile_data: Non-Rust compile-time data for the library target.
+        compile_data: Non-Rust compile-time data for the library and unit-test targets.
         lib_data_extra: Extra runtime data for the library target.
         rustc_env: Extra rustc_env entries to merge with defaults.
         deps_extra: Extra normal deps beyond @crates resolution.
@@ -331,6 +331,7 @@ def codex_rust_crate(
             name = unit_test_binary,
             crate = name,
             crate_features = crate_features,
+            compile_data = compile_data,
             deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
             # Unit tests also compile to standalone Windows executables, so
             # keep their stack reserve aligned with binaries and integration
