@@ -14,42 +14,23 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
-  test:
-    # Full Bazel verification runs only in trusted postmerge/manual contexts.
-    # The persistent Codex Lab Linux runner keeps the cold V8/ICU graph out of
-    # public PR CI. macOS stays hosted so full Bazel builds do not consume the
-    # app/release runner's local disk.
-    timeout-minutes: 120
+  build:
+    # Bazel compilation runs only in trusted postmerge/manual contexts. Runtime
+    # tests are owned by rust-ci-full, where each platform has the dependencies
+    # and isolation its test suite expects.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS
-          - runner: macos-26
-            runs_on: [macos-26]
-            target: aarch64-apple-darwin
-          - runner: macos-26-intel
-            runs_on: [macos-26-intel]
-            target: x86_64-apple-darwin
-
-          # Linux
           - runner: codex-lab-linux
             runs_on: [self-hosted, codex-lab-linux]
             target: x86_64-unknown-linux-gnu
-          - runner: codex-lab-linux
-            runs_on: [self-hosted, codex-lab-linux]
-            target: x86_64-unknown-linux-musl
-          # 2026-02-27 Bazel tests have been flaky on arm in CI.
-          # Disable until we can investigate and stabilize them.
-          # - os: ubuntu-24.04-arm
-          #   target: aarch64-unknown-linux-musl
-          # - os: ubuntu-24.04-arm
-          #   target: aarch64-unknown-linux-gnu
 
     runs-on: ${{ matrix.runs_on }}
 
     # Configure a human readable name for each job
-    name: Bazel test on ${{ matrix.runner }} for ${{ matrix.target }}
+    name: Bazel build on ${{ matrix.runner }} for ${{ matrix.target }}
     environment:
       name: bazel
       deployment: false
@@ -79,7 +60,7 @@ jobs:
         shell: bash
         run: ./scripts/check-module-bazel-lock.sh
 
-      - name: bazel test //...
+      - name: bazel build //...
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         shell: bash
@@ -95,18 +76,16 @@ jobs:
 
           bazel_wrapper_args=(
             --print-failed-action-summary
-            --print-failed-test-logs
           )
-          bazel_test_args=(
-            test
-            --test_tag_filters=-argument-comment-lint
-            --test_verbose_timeout_warnings
+          bazel_build_args=(
+            build
+            --keep_going
             "--build_metadata=COMMIT_SHA=${GITHUB_SHA}"
           )
           ./.github/scripts/run-bazel-ci.sh \
             "${bazel_wrapper_args[@]}" \
             -- \
-            "${bazel_test_args[@]}" \
+            "${bazel_build_args[@]}" \
             -- \
             "${bazel_targets[@]}"
 
@@ -115,7 +94,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: bazel-execution-logs-test-${{ matrix.target }}
+          name: bazel-execution-logs-build-${{ matrix.target }}
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
 
@@ -134,19 +113,14 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   clippy:
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Keep Linux lint coverage on x64 and add the arm64 macOS path that
-          # the Bazel test job already exercises.
           - runner: codex-lab-linux
             runs_on: [self-hosted, codex-lab-linux]
             target: x86_64-unknown-linux-gnu
-          - runner: macos-26
-            runs_on: [macos-26]
-            target: aarch64-apple-darwin
     runs-on: ${{ matrix.runs_on }}
     name: Bazel clippy on ${{ matrix.runner }} for ${{ matrix.target }}
     environment:
@@ -215,7 +189,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   verify-release-build:
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -223,9 +197,6 @@ jobs:
           - runner: codex-lab-linux
             runs_on: [self-hosted, codex-lab-linux]
             target: x86_64-unknown-linux-gnu
-          - runner: macos-26
-            runs_on: [macos-26]
-            target: aarch64-apple-darwin
     runs-on: ${{ matrix.runs_on }}
     name: Verify release build on ${{ matrix.runner }} for ${{ matrix.target }}
     environment:

@@ -6,23 +6,7 @@ on:
       runner:
         required: true
         type: string
-      runner_group:
-        required: false
-        default: ""
-        type: string
-      runner_labels:
-        required: false
-        default: ""
-        type: string
       archive_runner:
-        required: false
-        default: ""
-        type: string
-      archive_runner_group:
-        required: false
-        default: ""
-        type: string
-      archive_runner_labels:
         required: false
         default: ""
         type: string
@@ -51,7 +35,7 @@ on:
 jobs:
   archive:
     name: Build nextest archive
-    runs-on: ${{ inputs.archive_runner_group != '' && fromJSON(format('{{"group":"{0}","labels":"{1}"}}', inputs.archive_runner_group, inputs.archive_runner_labels)) || inputs.archive_runner != '' && inputs.archive_runner || inputs.runner_group != '' && fromJSON(format('{{"group":"{0}","labels":"{1}"}}', inputs.runner_group, inputs.runner_labels)) || inputs.runner }}
+    runs-on: ${{ inputs.archive_runner != '' && inputs.archive_runner || inputs.runner }}
     timeout-minutes: 60
     defaults:
       run:
@@ -79,8 +63,16 @@ jobs:
         run: |
           set -euo pipefail
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
+            if [[ "$(id -u)" -eq 0 ]]; then
+              apt_prefix=()
+            elif sudo -n true 2>/dev/null; then
+              apt_prefix=(sudo)
+            else
+              echo "No passwordless sudo; assuming Linux runner dependencies are preinstalled."
+              exit 0
+            fi
+            "${apt_prefix[@]}" apt-get update -y
+            "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
           fi
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -165,10 +157,20 @@ jobs:
 
       - name: Enable unprivileged user namespaces (Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
-          sudo sysctl -w kernel.unprivileged_userns_clone=1
-          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          set -euo pipefail
+          if [[ "$(id -u)" -eq 0 ]]; then
+            sysctl_prefix=()
+          elif sudo -n true 2>/dev/null; then
+            sysctl_prefix=(sudo)
+          else
+            echo "No passwordless sudo; leaving runner user-namespace settings unchanged."
+            exit 0
+          fi
+          "${sysctl_prefix[@]}" sysctl -w kernel.unprivileged_userns_clone=1
+          if "${sysctl_prefix[@]}" sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            "${sysctl_prefix[@]}" sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
       - name: Build nextest archive
@@ -274,7 +276,7 @@ jobs:
   shard:
     name: Tests shard ${{ matrix.shard }}/4
     needs: archive
-    runs-on: ${{ inputs.runner_group != '' && fromJSON(format('{{"group":"{0}","labels":"{1}"}}', inputs.runner_group, inputs.runner_labels)) || inputs.runner }}
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 60
     defaults:
       run:
@@ -299,8 +301,16 @@ jobs:
         run: |
           set -euo pipefail
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
+            if [[ "$(id -u)" -eq 0 ]]; then
+              apt_prefix=()
+            elif sudo -n true 2>/dev/null; then
+              apt_prefix=(sudo)
+            else
+              echo "No passwordless sudo; assuming Linux runner dependencies are preinstalled."
+              exit 0
+            fi
+            "${apt_prefix[@]}" apt-get update -y
+            "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
           fi
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -314,10 +324,20 @@ jobs:
 
       - name: Enable unprivileged user namespaces (Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
-          sudo sysctl -w kernel.unprivileged_userns_clone=1
-          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          set -euo pipefail
+          if [[ "$(id -u)" -eq 0 ]]; then
+            sysctl_prefix=()
+          elif sudo -n true 2>/dev/null; then
+            sysctl_prefix=(sudo)
+          else
+            echo "No passwordless sudo; leaving runner user-namespace settings unchanged."
+            exit 0
+          fi
+          "${sysctl_prefix[@]}" sysctl -w kernel.unprivileged_userns_clone=1
+          if "${sysctl_prefix[@]}" sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            "${sysctl_prefix[@]}" sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
       - name: Set up remote test env (Docker)

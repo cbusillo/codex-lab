@@ -41,6 +41,8 @@ class VerifyBlockingCiRunnerRoutingTest(unittest.TestCase):
             "      labels: ${{ github.event.repository.name }}-linux-x64\n"
             "  local:\n"
             "    runs-on: [self-hosted, Linux, X64, codex-lab-linux]\n"
+            "  local_alias:\n"
+            "    runs-on: macos-codex-lab\n"
             "  macos:\n"
             "    runs-on: macos-15-xlarge\n"
             "  windows:\n"
@@ -93,6 +95,43 @@ class VerifyBlockingCiRunnerRoutingTest(unittest.TestCase):
         )
 
         self.assertEqual(routing.find_violations(self.workflows_dir), [])
+        self.assertEqual(
+            routing.find_repository_selector_violations(self.workflows_dir), []
+        )
+
+    def test_rejects_upstream_selectors_outside_blocking_graph(self) -> None:
+        self.write_workflow(
+            "blocking-ci.yml",
+            "jobs:\n  hosted:\n    runs-on: ubuntu-24.04\n",
+        )
+        self.write_workflow(
+            "release.yml",
+            "jobs:\n"
+            "  grouped:\n"
+            "    runs-on:\n"
+            "      group: codex-runners\n"
+            "      labels: ${{ github.event.repository.name }}-windows-x64\n"
+            "  macos:\n"
+            "    runs-on: macos-15-xlarge\n"
+            "  windows:\n"
+            "    runs-on: windows-arm64\n",
+        )
+
+        reasons = {
+            violation.reason
+            for violation in routing.find_repository_selector_violations(
+                self.workflows_dir
+            )
+        }
+        self.assertEqual(
+            reasons,
+            {
+                "runner group selector",
+                "repository-derived runner selector",
+                "billable macOS large runner",
+                "unsupported platform runner alias",
+            },
+        )
 
     def test_reports_missing_reusable_workflow(self) -> None:
         self.write_workflow(

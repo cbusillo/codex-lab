@@ -22,7 +22,17 @@ runs:
     - name: Configure CI build root (Unix)
       if: runner.os != 'Windows'
       shell: bash
-      run: echo "CI_BUILD_ROOT=$HOME/.cache/codex-ci" >> "$GITHUB_ENV"
+      env:
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        RUNNER_OS_NAME: ${{ runner.os }}
+      run: |
+        if [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" && "${RUNNER_OS_NAME}" == "macOS" ]]; then
+          ci_build_root="${RUNNER_TEMP}/codex-ci"
+        else
+          ci_build_root="$HOME/.cache/codex-ci"
+        fi
+        mkdir -p "${ci_build_root}"
+        echo "CI_BUILD_ROOT=${ci_build_root}" >> "$GITHUB_ENV"
 
     - name: Configure CI build paths
       id: configure_ci_build_paths

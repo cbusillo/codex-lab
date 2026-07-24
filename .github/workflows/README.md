@@ -18,9 +18,10 @@ The workflows in this directory are split so that pull requests get fast, review
 
 ## Post-Merge On `main`
 
-- `bazel.yml` runs the full Bazel test, clippy, and release-build verification
-  on the trusted persistent Linux runner plus hosted macOS runners. Keeping the
-  full macOS Bazel graph hosted protects the app/release runner's local disk.
+- `bazel.yml` compiles the full Bazel graph and runs Bazel clippy plus
+  release-build verification on the trusted persistent Linux runner. Runtime
+  tests stay in `rust-ci-full.yml`, where each platform has the dependencies
+  and isolation expected by the test suite.
 - `rust-ci-full.yml` is the full Cargo-native verification workflow.
   It keeps the heavier checks off the PR path while still validating them after merge:
   - the full Cargo `clippy` matrix
@@ -44,7 +45,7 @@ The workflows in this directory are split so that pull requests get fast, review
   upstream organization runner groups.
 - Upstream Windows Bazel jobs require authenticated RBE and custom Windows exec
   toolchains, so they are not part of public-fork blocking CI. `rust-ci-full.yml`
-  retains Windows validation after merge on trusted repository-owned runners.
+  retains Windows validation after merge on GitHub-hosted Windows runners.
 - `.github/scripts/verify_blocking_ci_runner_routing.py` follows the reusable
   workflow graph from `blocking-ci.yml` and rejects organization runner groups,
   persistent self-hosted runners, billable macOS large runners, and unsupported
