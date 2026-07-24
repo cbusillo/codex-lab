@@ -79,11 +79,16 @@ runs:
     - name: Make DotSlash available in PATH (Unix)
       if: runner.os != 'Windows'
       shell: bash
+      env:
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
       run: |
+        dotslash_path="$(command -v dotslash)"
         if [[ -w /usr/local/bin ]]; then
-          cp "$(which dotslash)" /usr/local/bin
+          cp "${dotslash_path}" /usr/local/bin
+        elif [[ "${RUNNER_ENVIRONMENT}" == "github-hosted" ]]; then
+          sudo cp "${dotslash_path}" /usr/local/bin
         else
-          sudo cp "$(which dotslash)" /usr/local/bin
+          echo "::notice::Skipping /usr/local/bin DotSlash copy on self-hosted runner without passwordless sudo"
         fi
 
     - name: Make DotSlash available in PATH (Windows)

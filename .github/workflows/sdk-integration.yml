@@ -20,10 +20,21 @@ jobs:
 
       - name: Install Linux bwrap build dependencies
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+          if [[ "${RUNNER_ENVIRONMENT}" == "github-hosted" ]]; then
+            sudo apt-get update -y
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+            exit 0
+          fi
+
+          command -v pkg-config >/dev/null
+          if ! pkg-config --exists libcap; then
+            echo "::error::Self-hosted Linux runner requires the libcap development package"
+            exit 1
+          fi
 
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
