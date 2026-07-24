@@ -1,0 +1,20 @@
+# What: prefer the Rust toolchain's direct linker for Windows MSVC targets.
+# Why: the C++ toolchain can otherwise supply gnullvm clang++ while rustc emits
+# MSVC arguments for bootstrap helpers and proc-macro host dependencies.
+
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -436,7 +436,12 @@ def get_linker_and_args(
+         ld_is_direct_driver = False
+ 
+     use_bpf_linker = toolchain.target_arch in ("bpfeb", "bpfel") and toolchain.linker
+-    if not ld or toolchain.linker_preference == "rust" or use_bpf_linker:
++    use_windows_rust_linker = (
++        toolchain.target_os == "windows" and
++        toolchain.target_abi == "msvc" and
++        toolchain.linker != None
++    )
++    if not ld or toolchain.linker_preference == "rust" or use_bpf_linker or use_windows_rust_linker:
+         ld = toolchain.linker.path
+         ld_is_direct_driver = toolchain.linker_type == "direct"
+ 

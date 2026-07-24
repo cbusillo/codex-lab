@@ -12,7 +12,7 @@ RUN_BAZEL_CI = REPO_ROOT / ".github" / "scripts" / "run-bazel-ci.sh"
 
 
 class RunBazelCiTest(unittest.TestCase):
-    def test_keyless_windows_cross_compile_uses_gnullvm_host(self) -> None:
+    def test_keyless_windows_cross_compile_splits_target_and_exec_platforms(self) -> None:
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             fake_bazel = temp_path / "fake-bazel"
@@ -51,8 +51,16 @@ class RunBazelCiTest(unittest.TestCase):
             )
 
             bazel_args = args_path.read_text(encoding="utf-8").splitlines()
-            self.assertIn("--host_platform=//:local_windows", bazel_args)
-            self.assertNotIn("--host_platform=//:local_windows_msvc", bazel_args)
+            self.assertIn("--platforms=//:windows_x86_64_gnullvm", bazel_args)
+            self.assertIn("--host_platform=//:local_windows_msvc", bazel_args)
+            self.assertIn(
+                "--extra_execution_platforms=//:windows_x86_64_msvc", bazel_args
+            )
+            self.assertIn(
+                "--extra_toolchains=//:windows_gnullvm_tests_on_msvc_host_toolchain",
+                bazel_args,
+            )
+            self.assertNotIn("--host_platform=//:local_windows", bazel_args)
 
 
 if __name__ == "__main__":
