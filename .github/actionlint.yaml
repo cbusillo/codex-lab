@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels:
+    - codex-lab-app
+    - codex-lab-linux
+    - macos-codex-lab
+
+config-variables: null

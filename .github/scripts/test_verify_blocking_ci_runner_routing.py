@@ -80,6 +80,20 @@ class VerifyBlockingCiRunnerRoutingTest(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertEqual(violations[0].path.name, "second.yml")
 
+    def test_ignores_self_hosted_runners_outside_blocking_graph(self) -> None:
+        self.write_workflow(
+            "blocking-ci.yml",
+            "jobs:\n  hosted:\n    runs-on: ubuntu-24.04\n",
+        )
+        self.write_workflow(
+            "postmerge-ci.yml",
+            "jobs:\n"
+            "  trusted:\n"
+            "    runs-on: [self-hosted, codex-lab-linux]\n",
+        )
+
+        self.assertEqual(routing.find_violations(self.workflows_dir), [])
+
     def test_reports_missing_reusable_workflow(self) -> None:
         self.write_workflow(
             "blocking-ci.yml",

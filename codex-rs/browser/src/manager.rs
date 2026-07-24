@@ -34,6 +34,19 @@ struct JsonVersion {
 
 static INTERNAL_BROWSER_LAUNCH_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+type NavigationCallback = Box<dyn Fn(String) + Send + Sync>;
+type NavigationCallbackState = Arc<RwLock<Option<NavigationCallback>>>;
+
+struct DeviceMetricsSnapshot {
+    width: i64,
+    height: i64,
+    device_scale_factor: f64,
+    mobile: bool,
+    applied_at: Instant,
+}
+
+type LastAppliedDeviceMetrics = Arc<Mutex<Option<DeviceMetricsSnapshot>>>;
+
 struct BrowserLaunchLockFile {
     file: std::fs::File,
 }
@@ -344,13 +357,13 @@ pub struct BrowserManager {
     assets: Arc<Mutex<Option<Arc<crate::assets::AssetManager>>>>,
     user_data_dir: Arc<Mutex<Option<String>>>,
     cleanup_profile_on_drop: Arc<Mutex<bool>>,
-    navigation_callback: Arc<tokio::sync::RwLock<Option<Box<dyn Fn(String) + Send + Sync>>>>,
+    navigation_callback: NavigationCallbackState,
     navigation_monitor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     viewport_monitor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Gate to temporarily disable all automatic viewport corrections (post-initial set)
     auto_viewport_correction_enabled: Arc<tokio::sync::RwLock<bool>>,
     /// Track last applied device metrics to avoid redundant overrides
-    last_metrics_applied: Arc<Mutex<Option<(i64, i64, f64, bool, std::time::Instant)>>>,
+    last_metrics_applied: LastAppliedDeviceMetrics,
 }
 
 #[derive(Debug)]
@@ -1532,9 +1545,12 @@ impl BrowserManager {
             // Skip redundant overrides within a short window to prevent flash
             {
                 let guard = self.last_metrics_applied.lock().await;
-                if let Some((lw, lh, ldpr, lmob, ts)) = *guard {
-                    let same = lw == w && lh == h && (ldpr - dpr).abs() < 0.001 && lmob == mob;
-                    let recent = ts.elapsed() < std::time::Duration::from_secs(30);
+                if let Some(last_metrics) = guard.as_ref() {
+                    let same = last_metrics.width == w
+                        && last_metrics.height == h
+                        && (last_metrics.device_scale_factor - dpr).abs() < 0.001
+                        && last_metrics.mobile == mob;
+                    let recent = last_metrics.applied_at.elapsed() < Duration::from_secs(30);
                     if same && recent {
                         debug!("Skipping redundant device metrics override (external, recent)");
                         return Ok(());
@@ -1555,7 +1571,13 @@ impl BrowserManager {
             );
             page.execute(viewport_params).await?;
             let mut guard = self.last_metrics_applied.lock().await;
-            *guard = Some((w, h, dpr, mob, std::time::Instant::now()));
+            *guard = Some(DeviceMetricsSnapshot {
+                width: w,
+                height: h,
+                device_scale_factor: dpr,
+                mobile: mob,
+                applied_at: Instant::now(),
+            });
         } else {
             // Internal (launched) Chrome: apply human settings; avoid CDP viewport override here
             if let Some(ua) = &config.user_agent {

@@ -4,20 +4,23 @@ The workflows in this directory are split so that pull requests get fast, review
 
 ## Pull Requests
 
-- `bazel.yml` is the main pre-merge verification path for Rust code.
-  It runs Bazel `test` and Bazel `clippy` on the supported Bazel targets,
-  including the generated Rust test binaries needed to lint inline `#[cfg(test)]`
-  code.
+- `blocking-ci.yml` is a bounded, public-fork-safe merge gate. Everything in
+  its reusable-workflow graph runs on standard GitHub-hosted runners.
 - `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
   - `cargo fmt --check`
   - `cargo shear`
-  - `argument-comment-lint` on hosted Linux and macOS
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
+- `sdk.yml` runs the Python SDK suite plus TypeScript SDK build and lint checks.
+  The TypeScript tests that spawn a real Codex binary run after merge instead
+  of compiling the full Bazel/V8 graph on an ephemeral PR runner.
+- Repository policy, spelling, dependency, and workflow-routing checks remain
+  merge-blocking through their dedicated reusable workflows.
 
 ## Post-Merge On `main`
 
-- `bazel.yml` also runs on pushes to `main`.
-  This re-verifies the merged Bazel path and helps keep the BuildBuddy caches warm.
+- `bazel.yml` runs the full Bazel test, clippy, and release-build verification
+  on trusted persistent Linux and macOS runners. The Intel-only macOS test row
+  remains on a hosted Intel runner.
 - `rust-ci-full.yml` is the full Cargo-native verification workflow.
   It keeps the heavier checks off the PR path while still validating them after merge:
   - the full Cargo `clippy` matrix
@@ -26,13 +29,19 @@ The workflows in this directory are split so that pull requests get fast, review
   - release-profile Cargo builds
   - cross-platform `argument-comment-lint`
   - Linux remote-env tests
+- `sdk-integration.yml` builds Codex with Bazel and runs the TypeScript SDK
+  integration tests against that real binary on the trusted Linux runner.
+- `v8-canary.yml` keeps the upstream V8 artifact and source-build matrix visible
+  after merge.
 
 ## Runner Ownership
 
 - Merge-blocking workflows use standard GitHub-hosted runners so public fork
   pull requests never execute on persistent Codex Lab machines.
-- Repository-scoped self-hosted runners are reserved for trusted app and release
-  workflows that explicitly restrict which pull requests can reach them.
+- Trusted postmerge, app, and release workflows may use the repository-scoped
+  `[self-hosted, codex-lab-linux]` and `[self-hosted, macos-codex-lab]` labels.
+  These fork-owned labels are intentionally explicit instead of imitating
+  upstream organization runner groups.
 - Upstream Windows Bazel jobs require authenticated RBE and custom Windows exec
   toolchains, so they are not part of public-fork blocking CI. `rust-ci-full.yml`
   retains Windows validation after merge on trusted repository-owned runners.
@@ -43,6 +52,8 @@ The workflows in this directory are split so that pull requests get fast, review
 
 ## Rule Of Thumb
 
-- If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
-- Keep `rust-ci.yml` fast enough that it usually does not dominate PR latency.
-- Reserve `rust-ci-full.yml` for heavyweight Cargo-native coverage that Bazel does not replace yet.
+- Keep the hosted PR graph cold-start bounded; a check that requires the full
+  Bazel/V8 graph belongs in trusted postmerge CI.
+- Keep `rust-ci.yml` and `sdk.yml` fast enough that they do not dominate PR latency.
+- Preserve heavy Bazel, Cargo matrix, and real-binary SDK coverage in the
+  postmerge workflows rather than deleting it.
