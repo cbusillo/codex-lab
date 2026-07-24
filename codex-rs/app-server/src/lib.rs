@@ -969,6 +969,7 @@ pub async fn run_main_with_transport_options(
                                     .send(OutboundControlEvent::Closed { connection_id })
                                     .await
                                     .is_ok();
+                                processor.connection_closing(connection_id).await;
                                 let processor = Arc::clone(&processor);
                                 connection_cleanup_tasks.spawn(async move {
                                     processor
