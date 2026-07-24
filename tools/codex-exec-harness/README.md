@@ -17,6 +17,10 @@ Run the full harness suite against a freshly built local Codex binary:
 just exec-harness-test
 ```
 
+On Linux, this recipe also builds and stages the bundled
+`codex-resources/bwrap` helper required to enforce writable roots outside the
+launch working directory.
+
 The full runner verifies the binary once before any scenario starts. Its
 aggregate report records the exact executable path, source commit, dirty state,
 build profile/channel, and binary digest under `provenance`. A stale or
