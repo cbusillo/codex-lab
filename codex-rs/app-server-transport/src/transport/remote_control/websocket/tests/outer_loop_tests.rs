@@ -22,7 +22,7 @@ struct WorkerHandles {
     _enabled_tx: watch::Sender<bool>,
     // Must be kept alive: dropping it closes the reconnect channel and makes
     // the backoff select return Shutdown immediately.
-    _reconnect_tx: mpsc::UnboundedSender<u64>,
+    _reconnect_tx: mpsc::Sender<u64>,
     transport_event_rx: mpsc::Receiver<TransportEvent>,
 }
 
@@ -43,7 +43,7 @@ async fn worker_with_listener(
     let (status_publisher, _status_rx) = remote_control_status_channel();
     let shutdown_token = CancellationToken::new();
     let (enabled_tx, enabled_rx) = watch::channel(/*init*/ true);
-    let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+    let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
     let initial_enrollment = pre_seeded_account.map(|(account_id, server_token)| {
         let mut enrollment = remote_control_enrollment(Some(server_token));
         enrollment.remote_control_target = remote_control_target.clone();

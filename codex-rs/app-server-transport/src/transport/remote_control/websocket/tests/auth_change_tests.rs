@@ -35,7 +35,7 @@ async fn active_remote_control_websocket(
     RemoteControlWebsocket,
     CancellationToken,
     watch::Sender<bool>,
-    mpsc::UnboundedSender<u64>,
+    mpsc::Sender<u64>,
 ) {
     let remote_control_url = remote_control_url_for_listener(listener);
     let remote_control_target =
@@ -47,7 +47,7 @@ async fn active_remote_control_websocket(
     let (status_publisher, _status_rx) = remote_control_status_channel();
     let shutdown_token = CancellationToken::new();
     let (enabled_tx, enabled_rx) = watch::channel(/*init*/ true);
-    let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel();
+    let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
     let websocket = RemoteControlWebsocket::new(
         RemoteControlWebsocketConfig {
             remote_control_url,
