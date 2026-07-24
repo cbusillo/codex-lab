@@ -36,6 +36,7 @@ use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
 use codex_tui::UpdateAction;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::ProfileV2Name;
 use codex_utils_cli::SharedCliOptions;
@@ -83,6 +84,7 @@ use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
@@ -1854,6 +1856,9 @@ async fn run_debug_prompt_input_command(
 ) -> anyhow::Result<()> {
     let loader_overrides = loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
     let shared = interactive.shared.into_inner();
+    shared
+        .validate_workspace_root_mode()
+        .map_err(anyhow::Error::msg)?;
     let mut cli_kv_overrides = root_config_overrides
         .parse_overrides()
         .map_err(anyhow::Error::msg)?;
@@ -1874,10 +1879,34 @@ async fn run_debug_prompt_input_command(
     } else {
         shared.sandbox_mode.map(Into::into)
     };
+    let workspace_base = match shared.cwd.as_deref() {
+        Some(path) => {
+            AbsolutePathBuf::from_absolute_path(canonicalize_existing_preserving_symlinks(path)?)?
+        }
+        None => AbsolutePathBuf::current_dir()?,
+    };
+    let workspace_roots = (!shared.workspace_root.is_empty()).then(|| {
+        shared
+            .workspace_root
+            .iter()
+            .cloned()
+            .map(|path| AbsolutePathBuf::resolve_path_against_base(path, workspace_base.as_path()))
+            .collect()
+    });
+    let exact_workspace_profile = workspace_roots.as_ref().is_some_and(|_| {
+        sandbox_mode == Some(codex_protocol::config_types::SandboxMode::WorkspaceWrite)
+    });
+    let sandbox_mode_override = if exact_workspace_profile {
+        None
+    } else {
+        sandbox_mode
+    };
     let overrides = ConfigOverrides {
         model: shared.model,
         approval_policy,
-        sandbox_mode,
+        sandbox_mode: sandbox_mode_override,
+        default_permissions: exact_workspace_profile
+            .then(|| BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
         cwd: shared.cwd,
         codex_self_exe: arg0_paths.codex_self_exe,
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe,
@@ -1886,6 +1915,7 @@ async fn run_debug_prompt_input_command(
         ephemeral: Some(true),
         bypass_hook_trust: shared.bypass_hook_trust.then_some(true),
         additional_writable_roots: shared.add_dir,
+        workspace_roots,
         ..Default::default()
     };
     let config = ConfigBuilder::default()

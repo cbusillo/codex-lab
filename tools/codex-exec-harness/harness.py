@@ -23,6 +23,7 @@ AUTO_REVIEW_SUMMARY_MAX_FINDINGS = 20
 AUTO_REVIEW_SUMMARY_MAX_FIELD_BYTES = 240
 AUTO_REVIEW_SUMMARY_MAX_BYTES = 4096
 AUTO_REVIEW_SUMMARY_OMITTED_TEMPLATE = "... {count} more finding(s) omitted"
+ANCESTOR_GUIDANCE_FILENAMES = ("AGENTS.override.md", "AGENTS.md")
 
 
 class HarnessError(Exception):
@@ -364,6 +365,7 @@ def collect_workspace_git_state(workspace: Path) -> dict[str, Any]:
     status = git_text("status", "--porcelain")
     return {
         "branch": git_text("branch", "--show-current"),
+        "git_root": git_text("rev-parse", "--show-toplevel"),
         "head_sha": git_text("rev-parse", "HEAD"),
         "worktree_path": str(workspace.resolve()),
         "clean": status == "" if status is not None else None,
@@ -460,25 +462,71 @@ class FakeResponsesServer:
         return f"http://{host}:{port}/v1"
 
 
-def make_paths(output_root: Path, scenario_name: str) -> RunPaths:
+def make_paths(
+    output_root: Path, scenario_name: str, workspace_outside_git: bool = False
+) -> RunPaths:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe_name = safe_path_component(scenario_name)
-    run_dir = output_root / f"{stamp}-{safe_name}"
+    run_name = f"{stamp}-{safe_name}"
+    run_dir = output_root / run_name
+    external_workspace_root = Path(
+        os.environ.get(
+            "CODEX_EXEC_HARNESS_EXTERNAL_WORKSPACE_ROOT",
+            Path.home() / ".codex-exec-harness-workspaces",
+        )
+    ).expanduser().resolve()
+    workspace = (
+        external_workspace_root / run_name
+        if workspace_outside_git
+        else run_dir / "workspace"
+    )
     suffix = 1
-    while run_dir.exists():
+    while run_dir.exists() or workspace.exists():
         suffix += 1
-        run_dir = output_root / f"{stamp}-{safe_name}-{suffix}"
+        run_name = f"{stamp}-{safe_name}-{suffix}"
+        run_dir = output_root / run_name
+        workspace = (
+            external_workspace_root / run_name
+            if workspace_outside_git
+            else run_dir / "workspace"
+        )
     return RunPaths(
         run_dir=run_dir,
-        workspace=run_dir / "workspace",
+        workspace=workspace,
         codex_home=run_dir / "codex-home",
         home=run_dir / "home",
         artifacts=run_dir / "artifacts",
     )
 
 
+def workspace_lexical_path(root: Path, rel_path: str, label: str) -> Path:
+    relative = Path(rel_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HarnessError(f"{label} escapes workspace: {rel_path}")
+    return root / relative
+
+
+def ancestor_guidance_paths(workspace: Path) -> list[Path]:
+    return [
+        candidate
+        for ancestor in workspace.parents
+        for filename in ANCESTOR_GUIDANCE_FILENAMES
+        if (candidate := ancestor / filename).exists() or candidate.is_symlink()
+    ]
+
+
 def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
     paths.workspace.mkdir(parents=True, exist_ok=True)
+    external_root = paths.run_dir / "external"
+    external_files = scenario.get("external_files", {})
+    if not isinstance(external_files, dict):
+        raise HarnessError("external_files must be an object")
+    for rel_path, content in external_files.items():
+        if not isinstance(rel_path, str):
+            raise HarnessError("external file paths must be strings")
+        file_text = str(content).replace("{workspace}", str(paths.workspace))
+        save_text(resolve_under(external_root, rel_path, "external file path"), file_text)
+
     files = scenario.get("files", {})
     if not isinstance(files, dict):
         raise HarnessError("files must be an object")
@@ -487,6 +535,28 @@ def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
             raise HarnessError("file paths must be strings")
         file_text = str(content).replace("{workspace}", str(paths.workspace))
         save_text(resolve_under(paths.workspace, rel_path, "file path"), file_text)
+
+    symlinks = scenario.get("symlinks", {})
+    if not isinstance(symlinks, dict):
+        raise HarnessError("symlinks must be an object")
+    for rel_path, target_template in symlinks.items():
+        if not isinstance(rel_path, str) or not isinstance(target_template, str):
+            raise HarnessError("symlink paths and targets must be strings")
+        link_path = workspace_lexical_path(paths.workspace, rel_path, "symlink path")
+        target_text = (
+            target_template.replace("{workspace}", str(paths.workspace))
+            .replace("{external}", str(external_root))
+            .replace("{run_dir}", str(paths.run_dir))
+        )
+        target_path = Path(target_text)
+        if not target_path.is_absolute():
+            target_path = paths.run_dir / target_path
+        target_path = target_path.resolve(strict=True)
+        run_root = paths.run_dir.resolve(strict=True)
+        if not target_path.is_relative_to(run_root):
+            raise HarnessError(f"symlink target escapes run directory: {target_path}")
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        link_path.symlink_to(target_path, target_is_directory=target_path.is_dir())
 
     executable_home_files = scenario.get("executable_home_files", {})
     if not isinstance(executable_home_files, dict):
@@ -524,6 +594,9 @@ def save_config(scenario: dict[str, Any], paths: RunPaths, base_url: str | None)
     config = str(scenario.get("config_toml", ""))
     config = config.replace("{workspace}", str(paths.workspace)).replace(
         "{home}", str(paths.home)
+    )
+    config = config.replace("{external}", str(paths.run_dir / "external")).replace(
+        "{run_dir}", str(paths.run_dir)
     )
     uses_responses_base_url = "{responses_base_url}" in config
     if uses_responses_base_url:
@@ -587,28 +660,48 @@ def build_command(
         raise HarnessError("prompt must be a string")
 
     resume = session_id is not None
-    sandbox = str(scenario.get("sandbox", "danger-full-access"))
+    sandbox_value = scenario.get("sandbox", "danger-full-access")
+    sandbox = str(sandbox_value) if sandbox_value is not None else None
+    command = [
+        codex_bin,
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "-C",
+        str(paths.workspace),
+    ]
+    if sandbox is not None:
+        command.extend(["--sandbox", sandbox])
+    add_dirs = scenario.get("add_dirs", [])
+    if not isinstance(add_dirs, list):
+        raise HarnessError("add_dirs must be a list")
+    for add_dir in add_dirs:
+        if not isinstance(add_dir, str):
+            raise HarnessError("add_dirs entries must be strings")
+        add_dir_path = Path(
+            add_dir.replace("{workspace}", str(paths.workspace))
+            .replace("{external}", str(paths.run_dir / "external"))
+            .replace("{run_dir}", str(paths.run_dir))
+        ).resolve(strict=True)
+        command.extend(["--add-dir", str(add_dir_path)])
+    workspace_roots = scenario.get("workspace_roots", [])
+    if not isinstance(workspace_roots, list):
+        raise HarnessError("workspace_roots must be a list")
+    if add_dirs and workspace_roots:
+        raise HarnessError("workspace_roots cannot be combined with add_dirs")
+    if workspace_roots and sandbox != "workspace-write":
+        raise HarnessError("workspace_roots require sandbox=workspace-write")
+    for workspace_root in workspace_roots:
+        if not isinstance(workspace_root, str):
+            raise HarnessError("workspace_roots entries must be strings")
+        workspace_root_path = Path(
+            workspace_root.replace("{workspace}", str(paths.workspace))
+            .replace("{external}", str(paths.run_dir / "external"))
+            .replace("{run_dir}", str(paths.run_dir))
+        ).resolve(strict=True)
+        command.extend(["--workspace-root", str(workspace_root_path)])
     if resume:
-        command = [
-            codex_bin,
-            "exec",
-            "--json",
-            "--skip-git-repo-check",
-            "--sandbox",
-            sandbox,
-            "resume",
-        ]
-    else:
-        command = [
-            codex_bin,
-            "exec",
-            "--json",
-            "--skip-git-repo-check",
-            "-C",
-            str(paths.workspace),
-            "--sandbox",
-            sandbox,
-        ]
+        command.append("resume")
     model = scenario.get("model")
     if isinstance(model, str) and model:
         command.extend(["-m", model])
@@ -616,10 +709,16 @@ def build_command(
     if not isinstance(config_overrides, list):
         raise HarnessError("config_overrides must be a list")
     for override in config_overrides:
-        command.extend(["-c", str(override)])
+        rendered_override = (
+            str(override)
+            .replace("{workspace}", str(paths.workspace))
+            .replace("{external}", str(paths.run_dir / "external"))
+            .replace("{run_dir}", str(paths.run_dir))
+        )
+        command.extend(["-c", rendered_override])
     if resume and session_id is not None:
         command.append(session_id)
-    command.append(prompt)
+    command.extend(["--", prompt])
     return command
 
 
@@ -833,6 +932,7 @@ def run_turns(
                 "token_usage": token_usage_delta,
                 "token_usage_snapshot": token_usage_snapshot,
                 "artifact_dir": str(artifact_dir),
+                "command": command,
             }
         )
         if result["returncode"] != 0:
@@ -847,6 +947,8 @@ def run_turns(
         "turns": turn_results,
         "thread_id": thread_id,
         "token_usage": previous_token_usage,
+        "workspace": str(paths.workspace),
+        "run_dir": str(paths.run_dir),
     }
 
 
@@ -1172,6 +1274,55 @@ def add_input_prefix_assertion_failures(
         )
 
 
+def add_workspace_path_assertion_failures(
+    failures: list[str], run: dict[str, Any], assertions: Any
+) -> None:
+    if assertions is None:
+        return
+    if not isinstance(assertions, list):
+        raise HarnessError("expect.workspace_paths must be a list")
+    workspace_value = run.get("workspace")
+    if not isinstance(workspace_value, str):
+        raise HarnessError("run workspace is unavailable for path assertions")
+    workspace = Path(workspace_value)
+    for index, assertion in enumerate(assertions):
+        label = f"workspace_paths[{index}]"
+        if not isinstance(assertion, dict):
+            raise HarnessError(f"expect.{label} must be an object")
+        rel_path = assertion.get("path")
+        if not isinstance(rel_path, str):
+            raise HarnessError(f"expect.{label}.path must be a string")
+        path = workspace_lexical_path(workspace, rel_path, label)
+        exists = path.exists() or path.is_symlink()
+        expected_exists = assertion.get("exists", True)
+        if type(expected_exists) is not bool:
+            raise HarnessError(f"expect.{label}.exists must be boolean")
+        if exists != expected_exists:
+            failures.append(f"{label}: expected exists={expected_exists}, found {exists}")
+            continue
+        if not exists:
+            continue
+        expected_type = assertion.get("type")
+        if expected_type == "file" and not path.is_file():
+            failures.append(f"{label}: expected file")
+        elif expected_type == "directory" and not path.is_dir():
+            failures.append(f"{label}: expected directory")
+        elif expected_type == "symlink" and not path.is_symlink():
+            failures.append(f"{label}: expected symlink")
+        elif expected_type not in {None, "file", "directory", "symlink"}:
+            raise HarnessError(f"expect.{label}.type is unsupported")
+        if "contains" in assertion:
+            if not path.is_file():
+                failures.append(f"{label}: cannot inspect content of non-file")
+                continue
+            add_text_assertion_failures(
+                failures,
+                path.read_text(encoding="utf-8"),
+                assertion,
+                label,
+            )
+
+
 def evaluate_expectations(
     scenario: dict[str, Any], run: dict[str, Any], requests: list[dict[str, Any]]
 ) -> list[str]:
@@ -1203,6 +1354,21 @@ def evaluate_expectations(
     if expect.get("thread_id") == "required" and not run.get("thread_id"):
         failures.append("expected a captured thread_id")
 
+    workspace_git_assertion = expect.get("workspace_git")
+    if workspace_git_assertion is not None:
+        if not isinstance(workspace_git_assertion, dict):
+            raise HarnessError("expect.workspace_git must be an object")
+        workspace_git = run.get("workspace_git")
+        if not isinstance(workspace_git, dict):
+            failures.append("workspace_git: missing workspace Git evidence")
+        else:
+            for field, expected_value in workspace_git_assertion.items():
+                if workspace_git.get(field) != expected_value:
+                    failures.append(
+                        f"workspace_git.{field}: expected {expected_value!r}, "
+                        f"found {workspace_git.get(field)!r}"
+                    )
+
     add_list_text_assertion_failures(
         failures,
         run.get("agent_messages"),
@@ -1215,6 +1381,18 @@ def evaluate_expectations(
         expect.get("commands"),
         "commands",
     )
+    launch_command_assertion = expect.get("launch_command")
+    if launch_command_assertion is not None:
+        if not isinstance(launch_command_assertion, dict):
+            raise HarnessError("expect.launch_command must be an object")
+        first_command = run.get("turns", [{}])[0].get("command", [])
+        add_text_assertion_failures(
+            failures,
+            first_command,
+            launch_command_assertion,
+            "launch_command",
+        )
+    add_workspace_path_assertion_failures(failures, run, expect.get("workspace_paths"))
     add_background_review_assertion_failures(
         failures, run, expect.get("background_review")
     )
@@ -1426,9 +1604,29 @@ def run_scenario(args: argparse.Namespace) -> int:
     if not codex_bin:
         raise HarnessError("codex binary not found; pass --codex-bin")
 
-    paths = make_paths(Path(args.output_root).resolve(), name)
+    workspace_outside_git = scenario.get("workspace_outside_git", False)
+    if type(workspace_outside_git) is not bool:
+        raise HarnessError("workspace_outside_git must be boolean")
+    paths = make_paths(
+        Path(args.output_root).resolve(),
+        name,
+        workspace_outside_git=workspace_outside_git,
+    )
     paths.artifacts.mkdir(parents=True, exist_ok=True)
     materialize_workspace(scenario, paths)
+    if workspace_outside_git:
+        initial_git_state = collect_workspace_git_state(paths.workspace)
+        if initial_git_state.get("git_root") is not None:
+            raise HarnessError(
+                "workspace_outside_git resolved inside a Git work tree: "
+                f"{initial_git_state['git_root']}"
+            )
+        ancestor_guidance = ancestor_guidance_paths(paths.workspace)
+        if ancestor_guidance:
+            raise HarnessError(
+                "workspace_outside_git resolved below ancestor guidance: "
+                + ", ".join(str(path) for path in ancestor_guidance)
+            )
 
     responses_api = scenario.get("responses_api")
     if responses_api is not None and not isinstance(responses_api, dict):

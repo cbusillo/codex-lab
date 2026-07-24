@@ -4,6 +4,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -341,7 +342,7 @@ class HarnessSafetyTest(unittest.TestCase):
         sandbox_index = command.index("--sandbox")
         self.assertLess(sandbox_index, resume_index)
         self.assertEqual(command[sandbox_index + 1], "read-only")
-        self.assertEqual(command[-2:], ["session-1", "next"])
+        self.assertEqual(command[-3:], ["session-1", "--", "next"])
 
     def test_materialize_workspace_rejects_escaping_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,6 +519,175 @@ class HarnessSafetyTest(unittest.TestCase):
         )
 
         self.assertEqual([], failures)
+
+
+class GeneratedWorkspaceFixtureTest(unittest.TestCase):
+    def test_make_paths_can_materialize_workspace_outside_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repo"
+            output_root = repository / ".tmp"
+            external_root = root / "external"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+
+            with unittest.mock.patch.dict(
+                os.environ,
+                {"CODEX_EXEC_HARNESS_EXTERNAL_WORKSPACE_ROOT": str(external_root)},
+            ):
+                paths = HARNESS.make_paths(
+                    output_root,
+                    "generated-workspace",
+                    workspace_outside_git=True,
+                )
+            paths.workspace.mkdir(parents=True)
+
+            self.assertFalse(paths.workspace.is_relative_to(repository))
+            self.assertIsNone(HARNESS.collect_workspace_git_state(paths.workspace)["git_root"])
+
+            (external_root / "AGENTS.md").write_text(
+                "# Ancestor guidance\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                HARNESS.ancestor_guidance_paths(paths.workspace),
+                [external_root.resolve() / "AGENTS.md"],
+            )
+
+    def test_materializes_external_sources_and_workspace_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            paths = HARNESS.make_paths(Path(temporary_directory), "generated-workspace")
+
+            HARNESS.materialize_workspace(
+                {
+                    "git_init": False,
+                    "files": {"AGENTS.md": "canonical guide\n"},
+                    "external_files": {"tenant/README.md": "tenant source\n"},
+                    "symlinks": {"sources/tenant": "{external}/tenant"},
+                },
+                paths,
+            )
+
+            source_link = paths.workspace / "sources" / "tenant"
+            self.assertTrue(source_link.is_symlink())
+            self.assertEqual(
+                source_link.resolve(strict=True),
+                (paths.run_dir / "external" / "tenant").resolve(strict=True),
+            )
+            self.assertFalse((paths.workspace / ".git").exists())
+
+    def test_build_command_supports_exact_workspace_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            paths = HARNESS.make_paths(Path(temporary_directory), "generated-workspace")
+            tenant_root = paths.run_dir / "external" / "tenant"
+            tenant_root.mkdir(parents=True)
+
+            command = HARNESS.build_command(
+                {
+                    "sandbox": "workspace-write",
+                    "workspace_roots": ["{external}/tenant"],
+                    "config_overrides": ["fixture_root={external}/tenant"],
+                },
+                {"prompt": "inspect"},
+                "/tmp/codex-lab",
+                paths,
+                None,
+            )
+
+            self.assertIn("--sandbox", command)
+            self.assertIn("workspace-write", command)
+            self.assertIn("--workspace-root", command)
+            self.assertIn(str(tenant_root.resolve(strict=True)), command)
+            self.assertIn(f"fixture_root={tenant_root}", command)
+
+    def test_build_command_rejects_mixed_or_unrestricted_workspace_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            paths = HARNESS.make_paths(Path(temporary_directory), "generated-workspace")
+            tenant_root = paths.run_dir / "external" / "tenant"
+            tenant_root.mkdir(parents=True)
+
+            with self.assertRaisesRegex(HARNESS.HarnessError, "sandbox=workspace-write"):
+                HARNESS.build_command(
+                    {"sandbox": None, "workspace_roots": ["{external}/tenant"]},
+                    {"prompt": "inspect"},
+                    "/tmp/codex-lab",
+                    paths,
+                    None,
+                )
+
+            with self.assertRaisesRegex(HARNESS.HarnessError, "cannot be combined"):
+                HARNESS.build_command(
+                    {
+                        "sandbox": "workspace-write",
+                        "add_dirs": ["{external}/tenant"],
+                        "workspace_roots": ["{external}/tenant"],
+                    },
+                    {"prompt": "inspect"},
+                    "/tmp/codex-lab",
+                    paths,
+                    None,
+                )
+
+    def test_resume_command_preserves_exact_workspace_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            paths = HARNESS.make_paths(Path(temporary_directory), "generated-workspace")
+            tenant_root = paths.run_dir / "external" / "tenant"
+            tenant_root.mkdir(parents=True)
+
+            command = HARNESS.build_command(
+                {
+                    "sandbox": "workspace-write",
+                    "workspace_roots": ["{external}/tenant"],
+                },
+                {"prompt": "continue"},
+                "/tmp/codex-lab",
+                paths,
+                "thread-123",
+            )
+
+            self.assertIn("-C", command)
+            self.assertIn(str(paths.workspace), command)
+            self.assertIn("--workspace-root", command)
+            self.assertIn(str(tenant_root.resolve(strict=True)), command)
+            self.assertLess(command.index("--workspace-root"), command.index("resume"))
+            self.assertEqual(command[-3:], ["thread-123", "--", "continue"])
+
+    def test_build_command_separates_option_like_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            paths = HARNESS.make_paths(Path(temporary_directory), "option-like-prompt")
+
+            command = HARNESS.build_command(
+                {"sandbox": "read-only"},
+                {"prompt": "--dangerously-bypass-approvals-and-sandbox"},
+                "/tmp/codex-lab",
+                paths,
+                None,
+            )
+
+            self.assertEqual(
+                command[-2:],
+                ["--", "--dangerously-bypass-approvals-and-sandbox"],
+            )
+
+    def test_workspace_path_assertions_follow_declared_links_without_escaping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "workspace"
+            external = Path(temporary_directory) / "external"
+            workspace.mkdir()
+            external.mkdir()
+            (external / "proof.txt").write_text("written\n", encoding="utf-8")
+            (workspace / "tenant").symlink_to(external, target_is_directory=True)
+            failures: list[str] = []
+
+            HARNESS.add_workspace_path_assertion_failures(
+                failures,
+                {"workspace": str(workspace)},
+                [
+                    {"path": "tenant/proof.txt", "type": "file", "contains": "written"},
+                    {"path": "blocked.txt", "exists": False},
+                ],
+            )
+
+            self.assertEqual([], failures)
 
     def test_token_usage_expectations_report_prompt_bloat_and_cache_miss(self) -> None:
         failures = HARNESS.evaluate_expectations(

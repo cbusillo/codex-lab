@@ -14,7 +14,7 @@ use std::path::PathBuf;
 fn renders_sandbox_mode_text() {
     assert_eq!(
         sandbox_text(SandboxMode::WorkspaceWrite, NetworkAccess::Restricted),
-        "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is restricted."
+        "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files and editing files only within the writable roots listed below. Editing files in other directories requires approval. Network access is restricted."
     );
 
     assert_eq!(
