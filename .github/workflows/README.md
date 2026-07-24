@@ -27,6 +27,17 @@ The workflows in this directory are split so that pull requests get fast, review
   - cross-platform `argument-comment-lint`
   - Linux remote-env tests
 
+## Runner Ownership
+
+- Merge-blocking workflows use standard GitHub-hosted runners so public fork
+  pull requests never execute on persistent Codex Lab machines.
+- Repository-scoped self-hosted runners are reserved for trusted app and release
+  workflows that explicitly restrict which pull requests can reach them.
+- `.github/scripts/verify_blocking_ci_runner_routing.py` follows the reusable
+  workflow graph from `blocking-ci.yml` and rejects organization runner groups,
+  persistent self-hosted runners, billable macOS large runners, and unsupported
+  platform aliases.
+
 ## Rule Of Thumb
 
 - If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
