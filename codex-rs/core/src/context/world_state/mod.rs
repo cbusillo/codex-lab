@@ -27,6 +27,14 @@ use sha1::Sha1;
 use std::collections::BTreeMap;
 use std::fmt;
 
+const MAX_WORLD_STATE_SECTION_BYTES: usize = 9 * 1024;
+const MAX_WORLD_STATE_TOTAL_BYTES: usize = 64 * 1024;
+const MIN_WORLD_STATE_SECTION_BYTES: usize = 256;
+const MAX_WORLD_STATE_SECTION_COUNT: usize = 128;
+const MAX_EXTENSION_WORLD_STATE_SECTION_COUNT: usize = 64;
+const BOUNDED_WORLD_STATE_CLOSE_TAG: &str = "</bounded_world_state_section>";
+const WORLD_STATE_TRUNCATION_NOTICE: &str = "\n…world-state content truncated…\n";
+
 pub(crate) use agents_md::AgentsMdState;
 pub(crate) use apps_instructions::AppsInstructionsState;
 pub(crate) use collaboration_mode::CollaborationModeState;
@@ -177,6 +185,250 @@ impl ContextualUserFragment for WorldStateContextFragment {
     }
 }
 
+struct PendingWorldStateFragment {
+    id: &'static str,
+    state_hash: String,
+    role: &'static str,
+    markers: (&'static str, &'static str),
+    body: String,
+}
+
+impl PendingWorldStateFragment {
+    fn new(
+        id: &'static str,
+        state_hash: Option<String>,
+        fragment: Box<dyn ContextualUserFragment>,
+    ) -> Self {
+        let role = fragment.role();
+        let markers = fragment.markers();
+        let body = fragment.body();
+        let rendered = format!("{}{body}{}", markers.0, markers.1);
+        Self {
+            id,
+            state_hash: state_hash
+                .unwrap_or_else(|| bounded_world_state_hash("rendered", &rendered)),
+            role,
+            markers,
+            body,
+        }
+    }
+
+    fn rendered_byte_count(&self) -> usize {
+        self.markers
+            .0
+            .len()
+            .saturating_add(self.body.len())
+            .saturating_add(self.markers.1.len())
+    }
+
+    fn render(&self) -> String {
+        format!("{}{}{}", self.markers.0, self.body, self.markers.1)
+    }
+}
+
+struct BoundedWorldStateFragment {
+    role: &'static str,
+    markers: (&'static str, &'static str),
+    body: String,
+    original_byte_count: usize,
+    rendered_byte_count: usize,
+}
+
+impl BoundedWorldStateFragment {
+    fn new(fragment: PendingWorldStateFragment, max_bytes: usize) -> Self {
+        let original_byte_count = fragment.rendered_byte_count();
+        if original_byte_count <= max_bytes {
+            return Self {
+                role: fragment.role,
+                markers: fragment.markers,
+                body: fragment.body,
+                original_byte_count,
+                rendered_byte_count: original_byte_count,
+            };
+        }
+
+        let rendered = fragment.render();
+        let open_tag =
+            bounded_world_state_open_tag(fragment.id, fragment.role, &fragment.state_hash);
+        let generic_envelope_byte_count = open_tag
+            .len()
+            .saturating_add(BOUNDED_WORLD_STATE_CLOSE_TAG.len());
+        assert!(
+            generic_envelope_byte_count < MIN_WORLD_STATE_SECTION_BYTES,
+            "bounded world-state envelope exceeds the minimum section budget"
+        );
+        let marked_envelope_byte_count = generic_envelope_byte_count
+            .saturating_add(fragment.markers.0.len())
+            .saturating_add(fragment.markers.1.len());
+        let (markers, content, content_byte_budget) = if marked_envelope_byte_count < max_bytes {
+            (
+                fragment.markers,
+                fragment.body.as_str(),
+                max_bytes.saturating_sub(marked_envelope_byte_count),
+            )
+        } else {
+            (
+                ("", ""),
+                rendered.as_str(),
+                max_bytes.saturating_sub(generic_envelope_byte_count),
+            )
+        };
+        let body = truncate_middle_to_byte_budget(content, content_byte_budget);
+        let body = format!("{open_tag}{body}{BOUNDED_WORLD_STATE_CLOSE_TAG}");
+        let rendered_byte_count = markers
+            .0
+            .len()
+            .saturating_add(body.len())
+            .saturating_add(markers.1.len());
+        debug_assert!(rendered_byte_count <= max_bytes);
+        Self {
+            role: fragment.role,
+            markers,
+            body,
+            original_byte_count,
+            rendered_byte_count,
+        }
+    }
+
+    fn was_truncated(&self) -> bool {
+        self.rendered_byte_count < self.original_byte_count
+    }
+}
+
+impl ContextualUserFragment for BoundedWorldStateFragment {
+    fn role(&self) -> &'static str {
+        self.role
+    }
+
+    fn markers(&self) -> (&'static str, &'static str) {
+        self.markers
+    }
+
+    fn body(&self) -> String {
+        self.body.clone()
+    }
+
+    fn type_markers() -> (&'static str, &'static str) {
+        ("", "")
+    }
+}
+
+fn allocate_world_state_budgets(fragment_byte_counts: &[usize]) -> Vec<usize> {
+    let capped_byte_counts = fragment_byte_counts
+        .iter()
+        .map(|byte_count| (*byte_count).min(MAX_WORLD_STATE_SECTION_BYTES))
+        .collect::<Vec<_>>();
+    if capped_byte_counts.iter().sum::<usize>() <= MAX_WORLD_STATE_TOTAL_BYTES {
+        return capped_byte_counts;
+    }
+
+    let mut budgets = capped_byte_counts
+        .iter()
+        .map(|byte_count| (*byte_count).min(MIN_WORLD_STATE_SECTION_BYTES))
+        .collect::<Vec<_>>();
+    let mut remaining_bytes =
+        MAX_WORLD_STATE_TOTAL_BYTES.saturating_sub(budgets.iter().sum::<usize>());
+
+    while remaining_bytes > 0 {
+        let active_indices = budgets
+            .iter()
+            .zip(&capped_byte_counts)
+            .enumerate()
+            .filter_map(|(index, (budget, byte_count))| (budget < byte_count).then_some(index))
+            .collect::<Vec<_>>();
+        if active_indices.is_empty() {
+            break;
+        }
+        let share = (remaining_bytes / active_indices.len()).max(1);
+        let mut distributed_bytes = 0usize;
+        for index in active_indices {
+            let available_bytes = capped_byte_counts[index].saturating_sub(budgets[index]);
+            let allocated_bytes = available_bytes.min(share).min(remaining_bytes);
+            budgets[index] = budgets[index].saturating_add(allocated_bytes);
+            remaining_bytes = remaining_bytes.saturating_sub(allocated_bytes);
+            distributed_bytes = distributed_bytes.saturating_add(allocated_bytes);
+            if remaining_bytes == 0 {
+                break;
+            }
+        }
+        if distributed_bytes == 0 {
+            break;
+        }
+    }
+
+    budgets
+}
+
+fn truncate_middle_to_byte_budget(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    if max_bytes <= WORLD_STATE_TRUNCATION_NOTICE.len() {
+        let end = floor_char_boundary(WORLD_STATE_TRUNCATION_NOTICE, max_bytes);
+        return WORLD_STATE_TRUNCATION_NOTICE[..end].to_string();
+    }
+
+    let retained_byte_count = max_bytes.saturating_sub(WORLD_STATE_TRUNCATION_NOTICE.len());
+    let prefix_end = floor_char_boundary(text, retained_byte_count / 2);
+    let suffix_start = ceil_char_boundary(
+        text,
+        text.len()
+            .saturating_sub(retained_byte_count.saturating_sub(prefix_end)),
+    );
+    format!(
+        "{}{}{}",
+        &text[..prefix_end],
+        WORLD_STATE_TRUNCATION_NOTICE,
+        &text[suffix_start..]
+    )
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index = index.saturating_sub(1);
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index = index.saturating_add(1);
+    }
+    index
+}
+
+fn bounded_world_state_open_tag(section_id: &str, role: &str, state_hash: &str) -> String {
+    let section_hash = bounded_world_state_hash("section", section_id);
+    format!(
+        "<bounded_world_state_section section=\"{section_hash}\" role=\"{role}\" state=\"{state_hash}\">"
+    )
+}
+
+fn bounded_world_state_hash(domain: &str, value: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(b"codex-bounded-world-state-v1\0");
+    hash_component(&mut hasher, domain);
+    hash_component(&mut hasher, value);
+    format!("{:x}", hasher.finalize())
+}
+
+fn bounded_world_state_state_hash(state: &Value) -> String {
+    bounded_world_state_hash("state", &state.to_string())
+}
+
+fn matches_bounded_world_state_fragment(
+    section_id: &str,
+    state: &Value,
+    role: &str,
+    text: &str,
+) -> bool {
+    let state_hash = bounded_world_state_state_hash(state);
+    let open_tag = bounded_world_state_open_tag(section_id, role, &state_hash);
+    text.contains(&open_tag) && text.contains(BOUNDED_WORLD_STATE_CLOSE_TAG)
+}
+
 /// What is known about a section's previously model-visible state.
 pub(crate) enum PreviousSectionState<'a, T> {
     /// No persisted snapshot or matching fragment exists in retained history.
@@ -252,6 +504,7 @@ fn hash_component(hasher: &mut Sha1, value: &str) {
 #[derive(Default)]
 pub(crate) struct WorldState {
     sections: IndexMap<&'static str, Box<dyn ErasedWorldStateSection>>,
+    extension_section_count: usize,
 }
 
 /// Compact comparison state for each model-visible world-state section.
@@ -285,6 +538,7 @@ impl fmt::Debug for WorldState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WorldState")
             .field("section_count", &self.sections.len())
+            .field("extension_section_count", &self.extension_section_count)
             .finish()
     }
 }
@@ -296,6 +550,10 @@ impl WorldState {
             !self.sections.contains_key(id),
             "duplicate world-state section ID: {id}"
         );
+        assert!(
+            self.sections.len() < MAX_WORLD_STATE_SECTION_COUNT,
+            "world-state section count exceeds {MAX_WORLD_STATE_SECTION_COUNT}"
+        );
         self.sections.insert(id, Box::new(section));
     }
 
@@ -305,8 +563,19 @@ impl WorldState {
             !self.sections.contains_key(id),
             "duplicate world-state section ID: {id}"
         );
+        if self.extension_section_count >= MAX_EXTENSION_WORLD_STATE_SECTION_COUNT
+            || self.sections.len() >= MAX_WORLD_STATE_SECTION_COUNT
+        {
+            tracing::warn!(
+                section_id = id,
+                extension_section_count = self.extension_section_count,
+                "ignored extension world-state section after reaching the section-count limit"
+            );
+            return;
+        }
         self.sections
             .insert(id, Box::new(ExtensionWorldStateSection(section)));
+        self.extension_section_count = self.extension_section_count.saturating_add(1);
     }
 
     pub(crate) fn snapshot(&self) -> WorldStateSnapshot {
@@ -347,7 +616,8 @@ impl WorldState {
     ) -> Vec<Box<dyn ContextualUserFragment>> {
         self.render_with(|id, section| {
             if let Some(previous) = previous.and_then(|previous| previous.sections.get(id)) {
-                if section.has_retained_fragment_matcher() && !has_retained_fragment(items, section)
+                if section.has_retained_fragment_matcher()
+                    && !has_retained_fragment(items, id, previous, section)
                 {
                     PreviousSectionState::Absent
                 } else {
@@ -365,14 +635,64 @@ impl WorldState {
         &self,
         mut previous: impl FnMut(&str, &dyn ErasedWorldStateSection) -> PreviousSectionState<'a, Value>,
     ) -> Vec<Box<dyn ContextualUserFragment>> {
-        self.sections
+        let fragments = self
+            .sections
             .iter()
-            .filter_map(|(id, section)| section.render_diff(previous(id, section.as_ref())))
+            .filter_map(|(id, section)| {
+                let previous = previous(id, section.as_ref());
+                section.render_diff(previous).map(|fragment| {
+                    PendingWorldStateFragment::new(
+                        *id,
+                        section
+                            .snapshot()
+                            .as_ref()
+                            .map(bounded_world_state_state_hash),
+                        fragment,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            fragments.len() <= MAX_WORLD_STATE_SECTION_COUNT,
+            "rendered world-state section count exceeds {MAX_WORLD_STATE_SECTION_COUNT}"
+        );
+        let budgets = allocate_world_state_budgets(
+            &fragments
+                .iter()
+                .map(PendingWorldStateFragment::rendered_byte_count)
+                .collect::<Vec<_>>(),
+        );
+
+        fragments
+            .into_iter()
+            .zip(budgets)
+            .map(|(fragment, section_byte_budget)| {
+                let section_id = fragment.id;
+                let fragment = BoundedWorldStateFragment::new(fragment, section_byte_budget);
+                if fragment.was_truncated() {
+                    tracing::warn!(
+                        section_id,
+                        original_byte_count = fragment.original_byte_count,
+                        rendered_byte_count = fragment.rendered_byte_count,
+                        section_byte_budget,
+                        "truncated world-state section to its model-context budget"
+                    );
+                }
+                Box::new(fragment) as Box<dyn ContextualUserFragment>
+            })
             .collect()
     }
 }
 
-fn has_retained_fragment(items: &[ResponseItem], section: &dyn ErasedWorldStateSection) -> bool {
+fn has_retained_fragment(
+    items: &[ResponseItem],
+    section_id: &str,
+    state: &Value,
+    section: &dyn ErasedWorldStateSection,
+) -> bool {
+    let bounded_role = section
+        .render_diff(PreviousSectionState::Absent)
+        .map(|fragment| fragment.role());
     items.iter().any(|item| {
         matches!(
             item,
@@ -381,7 +701,16 @@ fn has_retained_fragment(items: &[ResponseItem], section: &dyn ErasedWorldStateS
                     matches!(
                         content,
                         ContentItem::InputText { text }
-                            if section.matches_retained_fragment(role, text)
+                            if bounded_role.is_some_and(|bounded_role| {
+                                role == bounded_role
+                                    && matches_bounded_world_state_fragment(
+                                        section_id,
+                                        state,
+                                        bounded_role,
+                                        text,
+                                    )
+                            })
+                                || section.matches_retained_fragment(role, text)
                     )
                 })
         )
