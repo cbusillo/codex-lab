@@ -106,6 +106,7 @@ impl McpManager {
     }
 
     #[tracing::instrument(name = "mcp.runtime_config.project_for_step", skip_all)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn runtime_config_for_step(
         &self,
         config: &Config,
