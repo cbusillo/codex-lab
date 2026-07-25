@@ -56,6 +56,22 @@ The workflows in this directory are split so that pull requests get fast, review
   persistent self-hosted runners, billable macOS large runners, and unsupported
   platform aliases.
 
+## Inherited Upstream Release Publishing
+
+- `r2-release.yml` mirrors `openai/codex` release assets into the upstream
+  Cloudflare R2 `releases` bucket. It downloads from a hard-coded upstream
+  repository and uploads with whatever R2 credentials the calling repository
+  holds, so running it in this fork would republish upstream assets under
+  Codex Lab credentials.
+- Both the `publish-r2` caller in `rust-release.yml` and the reusable workflow
+  itself are pinned to `github.repository == 'openai/codex'`, and
+  `.github/scripts/publish_r2_release.py` fails closed on `GITHUB_REPOSITORY`
+  before it reads any credential.
+- `.github/scripts/verify_upstream_only_release_publishing.py` keeps those
+  guards in place as upstream snapshots land.
+- Codex Lab's own releases go through `codex-lab-release.yml`, which builds
+  packed `.dSYM` sidecars and strips the managed engine before signing.
+
 ## Rule Of Thumb
 
 - Keep the hosted PR graph cold-start bounded; a check that requires the full

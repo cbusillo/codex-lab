@@ -6,7 +6,7 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
@@ -33,8 +33,29 @@ jobs:
       - name: Test blocking CI runner routing verifier
         run: python3 -m unittest discover -s .github/scripts -p 'test_verify_blocking_ci_runner_routing.py'
 
+      - name: Verify upstream-only release publishing stays fork-guarded
+        run: python3 .github/scripts/verify_upstream_only_release_publishing.py
+
+      - name: Test upstream-only release publishing verifier
+        run: python3 -m unittest discover -s .github/scripts -p 'test_verify_upstream_only_release_publishing.py'
+
+      - name: Test Codex Lab release symbol and strip ordering
+        run: python3 -m unittest discover -s .github/scripts -p 'test_codex_lab_release_symbols.py'
+
       - name: Test Codex package builder
         run: python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
+
+      # The Codex Lab packaging suite stubs every macOS tool it needs, so the
+      # host-independent coverage runs here. Tests that require a real macOS
+      # host keep their own skips and stay covered by the Codex Lab app and
+      # release workflows.
+      - name: Test Codex Lab packaging helpers
+        env:
+          PYTHONPATH: scripts
+        run: python3 -m unittest discover -s scripts/codex_lab_package -p 'test_*.py'
+
+      - name: Test Codex Lab Cargo cache helper
+        run: python3 -m unittest discover -s scripts/github -p 'test_configure_codex_lab_cargo_cache.py'
 
       - name: Test standalone installer
         run: python3 -m unittest discover -s scripts/install -p 'test_*.py'
