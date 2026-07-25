@@ -628,8 +628,8 @@ impl PluginsManager {
         auth_context: PluginAuthContext,
     ) -> PluginLoadOutcome {
         self.plugin_snapshot_for_config_with_auth_context(config, auth_context)
-        .await
-        .outcome
+            .await
+            .outcome
     }
 
     pub async fn plugin_snapshot_for_config_with_auth_context(
@@ -697,8 +697,7 @@ impl PluginsManager {
             };
         }
 
-        let remote_global_catalog_active =
-            self.remote_global_catalog_active(config, auth_context);
+        let remote_global_catalog_active = self.remote_global_catalog_active(config, auth_context);
         let cache_key = PluginLoadCacheKey::from_config(
             config,
             self.codex_home.as_path(),

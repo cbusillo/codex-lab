@@ -872,8 +872,7 @@ impl Session {
                 &plugin_snapshot.outcome,
                 per_turn_config.codex_home.as_path(),
             );
-            let effective_skill_roots =
-                plugin_snapshot.outcome.effective_plugin_skill_roots();
+            let effective_skill_roots = plugin_snapshot.outcome.effective_plugin_skill_roots();
             let skills_input =
                 skills_load_input_from_config(&per_turn_config, effective_skill_roots)
                     .with_plugin_skill_snapshots(plugin_snapshot.skill_snapshots);
@@ -982,8 +981,7 @@ impl Session {
                 &plugin_snapshot.outcome,
                 turn_context.config.codex_home.as_path(),
             );
-            let effective_skill_roots =
-                plugin_snapshot.outcome.effective_plugin_skill_roots();
+            let effective_skill_roots = plugin_snapshot.outcome.effective_plugin_skill_roots();
             let skills_input =
                 skills_load_input_from_config(&turn_context.config, effective_skill_roots)
                     .with_plugin_skill_snapshots(plugin_snapshot.skill_snapshots);

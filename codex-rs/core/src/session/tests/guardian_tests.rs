@@ -715,7 +715,10 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         config.model_provider.clone(),
         Some(Arc::clone(&auth_manager)),
     )
-    .models_manager(config.codex_home.to_path_buf(), config.model_catalog.clone());
+    .models_manager(
+        config.codex_home.to_path_buf(),
+        config.model_catalog.clone(),
+    );
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let skills_service = Arc::new(SkillsService::new(
         config.codex_home.clone(),

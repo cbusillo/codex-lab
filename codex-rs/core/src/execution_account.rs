@@ -495,10 +495,7 @@ impl ExecutionAccountLease {
             auth_manager: Arc::clone(&account.auth_manager),
             auth,
             auth_provider,
-            revision: self.revision_for(
-                account.generation,
-                account.auth_manager.auth_revision(),
-            ),
+            revision: self.revision_for(account.generation, account.auth_manager.auth_revision()),
         }
     }
 

@@ -8225,7 +8225,10 @@ async fn mcp_refresh_uses_execution_auth_without_mutating_shared_plugin_mode() {
 
     session.refresh_mcp_if_dirty().await;
 
-    assert_eq!(session.services.plugins_manager.auth_mode(), shared_auth_mode);
+    assert_eq!(
+        session.services.plugins_manager.auth_mode(),
+        shared_auth_mode
+    );
     assert!(
         session
             .services
@@ -8249,7 +8252,10 @@ async fn mcp_refresh_uses_execution_auth_without_mutating_shared_plugin_mode() {
             .and_then(|auth| auth.get_token().ok()),
         Some("new-api-key".to_string())
     );
-    assert_eq!(session.services.plugins_manager.auth_mode(), shared_auth_mode);
+    assert_eq!(
+        session.services.plugins_manager.auth_mode(),
+        shared_auth_mode
+    );
     session.mcp_refresh.claim();
 
     session.refresh_mcp_if_dirty().await;
@@ -8260,7 +8266,10 @@ async fn mcp_refresh_uses_execution_auth_without_mutating_shared_plugin_mode() {
             .mcp_runtime
             .current_auth_matches(execution_auth_manager.auth_cached().as_ref())
     );
-    assert_eq!(session.services.plugins_manager.auth_mode(), shared_auth_mode);
+    assert_eq!(
+        session.services.plugins_manager.auth_mode(),
+        shared_auth_mode
+    );
 }
 
 struct PendingNoiseConnectProvider;
