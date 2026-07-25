@@ -90,3 +90,17 @@ fn caps_rendered_tools_fragment_after_xml_escaping() {
     assert!(rendered.len() <= MAX_RENDERED_FRAGMENT_BYTES);
     assert!(rendered.contains(" additional namespaces omitted.\n"));
 }
+
+#[test]
+fn retained_matcher_recognizes_rendered_tools() {
+    let state = ToolsState::new([("app".to_string(), "control the Codex App".to_string())]);
+    let fragment = state
+        .render_diff(PreviousSectionState::Absent)
+        .expect("tools state should render");
+
+    assert!(ToolsState::has_retained_fragment_matcher());
+    assert!(ToolsState::matches_retained_fragment(
+        fragment.role(),
+        &fragment.render()
+    ));
+}

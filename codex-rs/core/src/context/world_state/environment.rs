@@ -99,6 +99,18 @@ impl WorldStateSection for EnvironmentsState {
         }
     }
 
+    fn matches_legacy_fragment(role: &str, text: &str) -> bool {
+        role == "user" && EnvironmentsState::matches_text(text)
+    }
+
+    fn has_retained_fragment_matcher() -> bool {
+        true
+    }
+
+    fn matches_retained_fragment(role: &str, text: &str) -> bool {
+        Self::matches_legacy_fragment(role, text)
+    }
+
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,

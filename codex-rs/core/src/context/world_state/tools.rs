@@ -52,6 +52,19 @@ impl WorldStateSection for ToolsState {
         !self.deferred_namespaces.is_empty()
     }
 
+    fn matches_legacy_fragment(role: &str, text: &str) -> bool {
+        let text = text.trim();
+        role == "developer" && text.starts_with(TOOLS_OPEN_TAG) && text.ends_with(TOOLS_CLOSE_TAG)
+    }
+
+    fn has_retained_fragment_matcher() -> bool {
+        true
+    }
+
+    fn matches_retained_fragment(role: &str, text: &str) -> bool {
+        Self::matches_legacy_fragment(role, text)
+    }
+
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
