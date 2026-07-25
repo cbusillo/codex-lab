@@ -1,0 +1,81 @@
+name: exec-harness
+
+# Black-box `codex exec` proof for the Every Code contracts the #428 candidate
+# owns: project validation, Background Review, provider routing, and external
+# integration.
+#
+# This workflow is dispatch-only on the integration candidate. The scenarios
+# describe runtime behavior that anchor merge `9d2eea2238` dropped, so a
+# scheduled or pull-request run would report red for known, waived debt tracked
+# in `upstream/convergence-waivers.json`. The harness unit tests do run on every
+# pull request through `repo-checks.yml`, so the harness itself stays covered.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codex-exec-harness:
+    name: Codex exec harness
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - codex-lab-linux
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CODEX_EXEC_HARNESS_OUTPUT_ROOT: ${{ github.workspace }}/.tmp/codex-exec-harness-ci
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Use persistent target cache
+        shell: bash
+        env:
+          CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT: ${{ vars.CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT }}
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_ENVIRONMENT:-}" = "self-hosted" ]; then
+            if [ -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ] && [ -d "$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT" ]; then
+              target_dir="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT%/}/github-actions/cache/${GITHUB_REPOSITORY}/exec-harness/cargo-target"
+            else
+              target_dir="$HOME/.cache/codex/exec-harness-target"
+            fi
+            mkdir -p "$target_dir"
+            echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
+            echo "Using persistent self-hosted target cache: $target_dir"
+          fi
+
+      - name: Ensure just is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v just >/dev/null 2>&1; then
+            just --version
+          else
+            cargo install just --locked
+          fi
+
+      - name: Run exec harness unit tests
+        shell: bash
+        run: python3 -m unittest discover -s tools/codex-exec-harness -p 'test_*.py'
+
+      - name: Run exec harness scenarios
+        shell: bash
+        run: just exec-harness-test
+
+      - name: Upload exec harness artifacts
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-exec-harness-artifacts
+          path: ${{ env.CODEX_EXEC_HARNESS_OUTPUT_ROOT }}
+          if-no-files-found: ignore

@@ -16,11 +16,23 @@ for current status and open product decisions.
 - Real `ort` inventory: 295 unresolved paths (279 content, 9 add/add,
   7 modify/delete) and 773 touched paths before aborting the trial merge.
 - The deterministic merge-tree inventory also identifies 478 non-conflicting
-  paths where a normal merge would silently retain local influence.
+  residual paths where a normal merge would silently retain local influence.
+  `upstream/openai-codex/<snapshot>/residuals.json` lists each one with its lane.
 
 The anchor has the upstream snapshot as its first parent, the local baseline as
 its second parent, and a tree identical to the upstream snapshot. Product-owned
 behavior is restored only through contract-tagged follow-up commits.
+
+## Refresh guard
+
+The ours-tree anchor deleted every owned path upstream did not carry, silently
+and unrecoverably. `upstream/convergence-guard.json` pins the pre-anchor local
+baseline as the ownership record, and `repo-checks.yml` fails any candidate
+where an `intentionally_owned` or `red_manual_review` path is absent or
+byte-identical to the recorded upstream blob. Only
+`upstream/convergence-waivers.json` can clear one, and each waiver must name a
+violation, a disposition, the deciding issue, and a reason. See
+`upstream/README.md` for the full procedure.
 
 ## Lanes
 

@@ -1,0 +1,129 @@
+{
+  "name": "third-party-agent-current-binary-lifecycle",
+  "characterization": {
+    "issue": 312,
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.6-sol",
+  "prompt": "Spawn the fixture_external agent as task fixture_agent, wait for it, list its terminal status, close it, and finish.",
+  "files": {
+    "fixture-agent.sh": "sleep 1\nprintf 'FIXTURE_EXTERNAL_AGENT_COMPLETED cwd=%s prompt=%s\\n' \"$PWD\" \"$1\"\n"
+  },
+  "config_toml": "model_provider = \"harness\"\n\n[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = false\n\n[agents.fixture_external]\ndescription = \"Deterministic external-command agent used only by the exec harness.\"\n\n[agents.fixture_external.backend]\ntype = \"external_command\"\ncommand = \"/bin/sh\"\nprotocol = \"raw_cli\"\nargs = [\"fixture-agent.sh\"]\ntimeout_ms = 5000\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-third-party-agent-spawn",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "arguments": "{\"message\":\"Return the fixture completion marker and workspace provenance.\",\"task_name\":\"fixture_agent\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external\",\"fork_turns\":\"none\"}",
+              "call_id": "call-third-party-agent-spawn"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-third-party-agent-wait",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "wait_agent",
+              "arguments": "{\"timeout_ms\":10000}",
+              "call_id": "call-third-party-agent-wait"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-third-party-agent-list",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "list_agents",
+              "arguments": "{}",
+              "call_id": "call-third-party-agent-list"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-third-party-agent-close",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "close_agent",
+              "arguments": "{\"target\":\"fixture_agent\"}",
+              "call_id": "call-third-party-agent-close"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-third-party-agent-complete",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-third-party-agent-complete",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Third-party agent lifecycle completed."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 5,
+    "turn_count": 1,
+    "thread_id": "required",
+    "responses": [
+      {
+        "request": 0,
+        "scope": "tools",
+        "contains_all": ["fixture_external", "spawn_agent"]
+      },
+      {
+        "request": 2,
+        "scope": "input",
+        "contains_all": ["FIXTURE_EXTERNAL_AGENT_COMPLETED", "fixture_agent"]
+      }
+    ],
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-third-party-agent-spawn",
+        "contains": "fixture_agent"
+      },
+      {
+        "request": 2,
+        "call_id": "call-third-party-agent-wait",
+        "contains": "\"timed_out\":false"
+      },
+      {
+        "request": 3,
+        "call_id": "call-third-party-agent-list",
+        "contains_all": ["fixture_agent", "FIXTURE_EXTERNAL_AGENT_COMPLETED"]
+      },
+      {
+        "request": 4,
+        "call_id": "call-third-party-agent-close",
+        "contains": "FIXTURE_EXTERNAL_AGENT_COMPLETED"
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}
