@@ -245,7 +245,6 @@ deny = [
         "codex-code-bridge-client",
         "codex-code-bridge-service",
         "codex-core",
-        "codex-exec-server",
         "codex-ollama",
         "codex-otel",
         "codex-protocol",

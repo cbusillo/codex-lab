@@ -1,0 +1,435 @@
+name: codex-lab-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Codex Lab release tag, for example codex-lab-v0.1.0-lab.1"
+        required: true
+        type: string
+      publish:
+        description: "Create a public GitHub prerelease when true; otherwise validate artifacts and release preconditions."
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-metadata:
+    name: Resolve Codex Lab release metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag
+        id: release
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="$RELEASE_TAG_INPUT"
+          [[ "$release_tag" =~ ^codex-lab-v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]] || {
+            echo "Invalid Codex Lab release tag: $release_tag" >&2
+            exit 1
+          }
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+  build-macos-aarch64:
+    name: Build macOS ARM64 Codex Lab release artifacts
+    needs: release-metadata
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - codex-lab-app
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ needs.release-metadata.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Configure build cache
+        shell: bash
+        env:
+          CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT: ${{ vars.CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT }}
+        run: scripts/github/configure-codex-lab-cargo-cache.sh codex-lab-release
+
+      - name: Report Cargo cache before build
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir="${CARGO_TARGET_DIR:-codex-rs/target}"
+          target_size="missing"
+          if [[ -d "$target_dir" ]]; then
+            target_size="$(du -sh "$target_dir" | awk '{ print $1 }')"
+          fi
+          {
+            echo "### Codex Lab release build diagnostics"
+            echo
+            echo "- Cargo cache mode: \`${CODEX_LAB_CARGO_CACHE_MODE:-unknown}\`"
+            echo "- Cargo host: \`${CODEX_LAB_CARGO_HOST:-unknown}\`"
+            echo "- Cargo profile: \`${CODEX_LAB_CARGO_PROFILE:-release}\`"
+            echo "- Cargo target dir kind: \`absolute\`"
+            echo "- Target size before build: \`$target_size\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build Codex Lab CLI
+        working-directory: codex-rs
+        shell: bash
+        run: cargo build --timings --release -p codex-cli --bin codex-lab
+
+      - name: Report Cargo cache after build
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir="${CARGO_TARGET_DIR:-codex-rs/target}"
+          timings_dir="${RUNNER_TEMP}/codex-lab-release-cargo-timings"
+          rm -rf "$timings_dir"
+          mkdir -p "$timings_dir"
+          target_size="missing"
+          timing_count="0"
+          if [[ -d "$target_dir" ]]; then
+            target_size="$(du -sh "$target_dir" | awk '{ print $1 }')"
+            if [[ -d "$target_dir/cargo-timings" ]]; then
+              find "$target_dir/cargo-timings" -type f -name '*.html' -exec cp {} "$timings_dir" \;
+            fi
+            timing_count="$(find "$timings_dir" -type f -name '*.html' | wc -l | tr -d '[:space:]')"
+          fi
+          {
+            echo "- Target size after build: \`$target_size\`"
+            echo "- Cargo timing reports: \`$timing_count\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Cargo timing reports
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-lab-release-cargo-timings
+          path: ${{ runner.temp }}/codex-lab-release-cargo-timings/*.html
+          if-no-files-found: ignore
+
+      - name: Build Codex Lab app bundle
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_root="${RUNNER_TEMP}/codex-lab-app"
+          app_dir="${output_root}/Codex Lab.app"
+          shim_dir="${output_root}/bin"
+          lab_version="$(PYTHONPATH=scripts python3 -c 'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
+          mkdir -p "$output_root"
+          start=$SECONDS
+          python3 scripts/build_codex_lab_app.py \
+            --codex-bin "$CODEX_LAB_BIN" \
+            --app-dir "$app_dir" \
+            --shim-dir "$shim_dir" \
+            --short-version "$lab_version" \
+            --bundle-version "$GITHUB_RUN_NUMBER" \
+            --source-commit "$(git rev-parse HEAD)" \
+            --force
+          bundle_seconds=$((SECONDS - start))
+          start=$SECONDS
+          python3 scripts/codex_lab_package/smoke.py \
+            "$app_dir" \
+            --shim-path "${shim_dir}/codex-lab" \
+            --expected-source-commit "$(git rev-parse HEAD)"
+          smoke_seconds=$((SECONDS - start))
+          {
+            echo "- Bundle build seconds: \`$bundle_seconds\`"
+            echo "- Bundle smoke seconds: \`$smoke_seconds\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "output_root=$output_root" >> "$GITHUB_OUTPUT"
+
+      - name: Sign and verify managed Codex Lab engine
+        id: engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine_dir="${RUNNER_TEMP}/codex-lab-signed-engine"
+          engine_path="${engine_dir}/codex"
+          engine_identifier="$(PYTHONPATH=scripts python3 -c 'from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER; print(ENGINE_SIGNING_IDENTIFIER)')"
+          engine_team_identifier="$(PYTHONPATH=scripts python3 -c 'from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER; print(ENGINE_TEAM_IDENTIFIER)')"
+          signing_identity="Developer ID Application: Shiny Computers Leasing LLC (${engine_team_identifier})"
+          signing_keychain="$HOME/Library/Keychains/login.keychain-db"
+          rm -rf "$engine_dir"
+          mkdir -p "$engine_dir"
+          cp "$CODEX_LAB_BIN" "$engine_path"
+          chmod 0755 "$engine_path"
+          security unlock-keychain -p "" "$signing_keychain"
+          security set-keychain-settings -lut 21600 "$signing_keychain"
+          security find-identity -v -p codesigning | grep -F "$signing_identity"
+          .github/scripts/macos-signing/sign_macos_code.sh \
+            --target "$engine_path" \
+            --identity "$signing_identity" \
+            --deep false \
+            --identifier "$engine_identifier" \
+            --options runtime \
+            --timestamp true \
+            --entitlements .github/scripts/macos-signing/codex.entitlements.plist
+          PYTHONPATH=scripts python3 - "$engine_path" "$(git rev-parse HEAD)" <<'PY'
+          from pathlib import Path
+          import sys
+
+          from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
+          from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
+          from codex_lab_package.supervisor import inspect_engine
+          from codex_package.version import read_workspace_version
+
+          identity = inspect_engine(Path(sys.argv[1]))
+          expected_source_commit = sys.argv[2]
+          expected_version = read_workspace_version()
+          if identity.signing_identifier != ENGINE_SIGNING_IDENTIFIER:
+              raise ValueError(f"unexpected engine signing identifier: {identity}")
+          if identity.team_identifier != ENGINE_TEAM_IDENTIFIER:
+              raise ValueError(f"unexpected engine TeamIdentifier: {identity}")
+          if identity.source_commit != expected_source_commit:
+              raise ValueError(f"unexpected engine source commit: {identity}")
+          if identity.version != expected_version:
+              raise ValueError(f"unexpected engine version: {identity}")
+          print(identity)
+          PY
+          echo "engine_path=$engine_path" >> "$GITHUB_OUTPUT"
+
+      - name: Archive Codex Lab release artifacts
+        id: archive
+        env:
+          RELEASE_TAG: ${{ needs.release-metadata.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_root="${{ steps.package.outputs.output_root }}"
+          signed_engine="${{ steps.engine.outputs.engine_path }}"
+          release_tag="${RELEASE_TAG:?missing release tag}"
+          dist_dir="${RUNNER_TEMP}/codex-lab-dist"
+          engine_dir="${RUNNER_TEMP}/codex-lab-engine-archive"
+          mkdir -p "$dist_dir"
+          app_zip="${dist_dir}/codex-lab-app-aarch64-apple-darwin.zip"
+          shim_zip="${dist_dir}/codex-lab-shim-aarch64-apple-darwin.zip"
+          engine_zip="${dist_dir}/codex-lab-engine-aarch64-apple-darwin.zip"
+          source_commit="$(git rev-parse HEAD)"
+          download_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_tag}"
+          rm -rf "$engine_dir"
+          mkdir -p "$engine_dir"
+          cp "$signed_engine" "${engine_dir}/codex"
+          start=$SECONDS
+          ditto -c -k --norsrc --keepParent "${output_root}/Codex Lab.app" "$app_zip"
+          app_zip_seconds=$((SECONDS - start))
+          start=$SECONDS
+          ditto -c -k --norsrc --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
+          shim_zip_seconds=$((SECONDS - start))
+          start=$SECONDS
+          ditto -c -k --norsrc "${engine_dir}/codex" "$engine_zip"
+          engine_zip_seconds=$((SECONDS - start))
+          app_zip_bytes="$(wc -c < "$app_zip" | tr -d '[:space:]')"
+          shim_zip_bytes="$(wc -c < "$shim_zip" | tr -d '[:space:]')"
+          engine_zip_bytes="$(wc -c < "$engine_zip" | tr -d '[:space:]')"
+          unzip -l "$app_zip" | grep -F "Codex Lab.app/Contents/Resources/codex-lab"
+          unzip -l "$shim_zip" | grep -F "bin/codex-lab"
+          unzip -l "$engine_zip" | grep -F "codex"
+          if { unzip -l "$app_zip"; unzip -l "$shim_zip"; unzip -l "$engine_zip"; } | grep -E '/\._|(^|[[:space:]])\._'; then
+            echo "unexpected AppleDouble file in archive" >&2
+            exit 1
+          fi
+          engine_validation_dir="${RUNNER_TEMP}/codex-lab-engine-archive-validation"
+          rm -rf "$engine_validation_dir"
+          mkdir -p "$engine_validation_dir"
+          ditto -x -k "$engine_zip" "$engine_validation_dir"
+          PYTHONPATH=scripts python3 -c \
+            'from pathlib import Path; import sys; from codex_lab_package.supervisor import inspect_engine; print(inspect_engine(Path(sys.argv[1])))' \
+            "${engine_validation_dir}/codex"
+          start=$SECONDS
+          (cd "$dist_dir" && shasum -a 256 -- *.zip > SHA256SUMS)
+          python3 scripts/build_codex_lab_distribution_manifest.py generate \
+            --dist-dir "$dist_dir" \
+            --output "${dist_dir}/codex-lab-distribution.json" \
+            --bundle-version "$GITHUB_RUN_NUMBER" \
+            --commit "$source_commit" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --release-tag "$release_tag" \
+            --download-base-url "$download_base_url" \
+            --engine-signed
+          python3 scripts/build_codex_lab_distribution_manifest.py validate \
+            "${dist_dir}/codex-lab-distribution.json" \
+            --dist-dir "$dist_dir" \
+            --sha256sums "${dist_dir}/SHA256SUMS"
+          manifest_seconds=$((SECONDS - start))
+          cat "${dist_dir}/SHA256SUMS"
+          cat "${dist_dir}/codex-lab-distribution.json"
+          {
+            echo "- App zip seconds: \`$app_zip_seconds\`"
+            echo "- Shim zip seconds: \`$shim_zip_seconds\`"
+            echo "- Engine zip seconds: \`$engine_zip_seconds\`"
+            echo "- Manifest/SHA seconds: \`$manifest_seconds\`"
+            echo "- App zip bytes: \`$app_zip_bytes\`"
+            echo "- Shim zip bytes: \`$shim_zip_bytes\`"
+            echo "- Engine zip bytes: \`$engine_zip_bytes\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "dist_dir=$dist_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Codex Lab release staging artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-lab-release-aarch64-apple-darwin
+          path: ${{ steps.archive.outputs.dist_dir }}/*
+          if-no-files-found: error
+
+  validate-release-artifacts:
+    name: Validate staged release artifacts
+    needs: build-macos-aarch64
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-lab-release-aarch64-apple-darwin
+          path: dist
+
+      - name: Validate release artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/codex-lab-app-aarch64-apple-darwin.zip
+          test -f dist/codex-lab-shim-aarch64-apple-darwin.zip
+          test -f dist/codex-lab-engine-aarch64-apple-darwin.zip
+          test -f dist/SHA256SUMS
+          test -f dist/codex-lab-distribution.json
+          (cd dist && sha256sum -c SHA256SUMS)
+          jq -e \
+            --arg tag "${{ needs.build-macos-aarch64.outputs.release_tag }}" \
+            '.release.tag == $tag
+              and .artifacts.appZip.downloadUrl
+              and .artifacts.shimZip.downloadUrl
+              and .artifacts.engineZip.downloadUrl
+              and .artifacts.engineZip.signed == true
+              and .managedEngine.sha256' \
+            dist/codex-lab-distribution.json
+
+      - name: Verify release tag is available
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build-macos-aarch64.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${RELEASE_TAG:?missing release tag}"
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release already exists for $release_tag" >&2
+            exit 1
+          fi
+          set +e
+          git ls-remote --exit-code --tags \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/${release_tag}" > /dev/null
+          tag_status=$?
+          set -e
+          if [[ "$tag_status" -eq 0 ]]; then
+            echo "Git tag already exists for $release_tag" >&2
+            exit 1
+          fi
+          if [[ "$tag_status" -ne 2 ]]; then
+            echo "Unable to verify whether git tag exists for $release_tag" >&2
+            exit "$tag_status"
+          fi
+
+  publish-prerelease:
+    name: Publish GitHub prerelease
+    needs:
+      - build-macos-aarch64
+      - validate-release-artifacts
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-lab-release-aarch64-apple-darwin
+          path: dist
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          Codex Lab macOS ARM64 distribution artifact.
+
+          The managed Codex Lab engine is individually Developer ID signed and
+          carries the required V8 JIT entitlement. The app and companion shim
+          remain unsigned Lab launch surfaces.
+
+          Assets:
+          - codex-lab-app-aarch64-apple-darwin.zip
+          - codex-lab-shim-aarch64-apple-darwin.zip
+          - codex-lab-engine-aarch64-apple-darwin.zip
+          - codex-lab-distribution.json
+          - SHA256SUMS
+          EOF
+
+      - name: Publish prerelease
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build-macos-aarch64.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          default_branch="${DEFAULT_BRANCH:?missing default branch}"
+          release_tag="${RELEASE_TAG:?missing release tag}"
+          if [[ "$GITHUB_REF_NAME" != "$default_branch" ]]; then
+            echo "Codex Lab releases must be published from $default_branch, got $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release already exists for $release_tag" >&2
+            exit 1
+          fi
+          set +e
+          git ls-remote --exit-code --tags \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/${release_tag}" > /dev/null
+          tag_status=$?
+          set -e
+          if [[ "$tag_status" -eq 0 ]]; then
+            echo "Git tag already exists for $release_tag" >&2
+            exit 1
+          fi
+          if [[ "$tag_status" -ne 2 ]]; then
+            echo "Unable to verify whether git tag exists for $release_tag" >&2
+            exit "$tag_status"
+          fi
+          gh release create "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$release_tag" \
+            --notes-file release-notes.md \
+            --prerelease \
+            --latest=false \
+            dist/codex-lab-app-aarch64-apple-darwin.zip \
+            dist/codex-lab-shim-aarch64-apple-darwin.zip \
+            dist/codex-lab-engine-aarch64-apple-darwin.zip \
+            dist/codex-lab-distribution.json \
+            dist/SHA256SUMS

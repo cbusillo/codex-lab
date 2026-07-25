@@ -29,6 +29,7 @@ use codex_config::types::ApprovalsReviewer;
 use codex_connectors::AppToolPolicy;
 use codex_connectors::AppToolPolicyEvaluator;
 use codex_connectors::AppToolPolicyInput;
+use codex_core_plugins::PluginAuthContext;
 use codex_features::Feature;
 use codex_hooks::PermissionRequestDecision;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -1133,9 +1134,13 @@ async fn custom_mcp_tool_approval_mode(
         return user_configured_mode;
     }
 
+    let auth = turn_context.auth().await;
     sess.services
         .plugins_manager
-        .plugins_for_config(&turn_context.config.plugins_config_input())
+        .plugins_for_config_with_auth_context(
+            &turn_context.config.plugins_config_input(),
+            PluginAuthContext::from_auth(auth.as_ref()),
+        )
         .await
         .plugins()
         .iter()
@@ -1982,7 +1987,7 @@ async fn maybe_persist_mcp_tool_approval(
         };
         persist_codex_app_tool_approval(&turn_context.config, &connector_id, &tool_name).await
     } else {
-        persist_non_app_mcp_tool_approval(sess, &turn_context.config, &key.server, &tool_name).await
+        persist_non_app_mcp_tool_approval(sess, turn_context, &key.server, &tool_name).await
     };
 
     if let Err(err) = persist_result {
@@ -2036,19 +2041,24 @@ async fn persist_custom_mcp_tool_approval(
 
 async fn persist_non_app_mcp_tool_approval(
     sess: &Session,
-    config: &Config,
+    turn_context: &TurnContext,
     server: &str,
     tool_name: &str,
 ) -> anyhow::Result<()> {
+    let config = turn_context.config.as_ref();
     if let Some(config_edits_builder) = custom_mcp_tool_approval_config_builder(config, server)? {
         return persist_custom_mcp_tool_approval_with(config_edits_builder, server, tool_name)
             .await;
     }
 
+    let auth = turn_context.auth().await;
     let plugin_config_name = sess
         .services
         .plugins_manager
-        .plugins_for_config(&config.plugins_config_input())
+        .plugins_for_config_with_auth_context(
+            &config.plugins_config_input(),
+            PluginAuthContext::from_auth(auth.as_ref()),
+        )
         .await
         .plugins()
         .iter()

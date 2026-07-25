@@ -30,32 +30,47 @@ struct LeaseAwareModelsManager {
     provider: ModelProviderInfo,
     codex_home: PathBuf,
     config_model_catalog: Option<ModelsResponse>,
+    control_models_manager: SharedModelsManager,
     state: Mutex<(u64, SharedModelsManager)>,
 }
 
 pub(crate) fn models_manager_for_execution_account(
     config: &Config,
     lease: ExecutionAccountLease,
+    control_models_manager: SharedModelsManager,
 ) -> SharedModelsManager {
-    Arc::new(LeaseAwareModelsManager::new(config, lease))
+    Arc::new(LeaseAwareModelsManager::new(
+        config,
+        lease,
+        control_models_manager,
+    ))
 }
 
 impl LeaseAwareModelsManager {
-    fn new(config: &Config, lease: ExecutionAccountLease) -> Self {
+    fn new(
+        config: &Config,
+        lease: ExecutionAccountLease,
+        control_models_manager: SharedModelsManager,
+    ) -> Self {
         let models_context = lease.models_context();
-        let manager = Self::build_manager(
-            config.codex_home.as_path(),
-            &config.model_provider_id,
-            &config.model_provider,
-            config.model_catalog.clone(),
-            &models_context,
-        );
+        let manager = if lease.models_manager_auth_matches(control_models_manager.auth_manager()) {
+            Arc::clone(&control_models_manager)
+        } else {
+            Self::build_manager(
+                config.codex_home.as_path(),
+                &config.model_provider_id,
+                &config.model_provider,
+                config.model_catalog.clone(),
+                &models_context,
+            )
+        };
         Self {
             lease,
             provider_id: config.model_provider_id.clone(),
             provider: config.model_provider.clone(),
             codex_home: config.codex_home.to_path_buf(),
             config_model_catalog: config.model_catalog.clone(),
+            control_models_manager,
             state: Mutex::new((models_context.generation, manager)),
         }
     }
@@ -67,13 +82,20 @@ impl LeaseAwareModelsManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.0 != models_context.generation {
-            state.1 = Self::build_manager(
-                &self.codex_home,
-                &self.provider_id,
-                &self.provider,
-                self.config_model_catalog.clone(),
-                &models_context,
-            );
+            state.1 = if self
+                .lease
+                .models_manager_auth_matches(self.control_models_manager.auth_manager())
+            {
+                Arc::clone(&self.control_models_manager)
+            } else {
+                Self::build_manager(
+                    &self.codex_home,
+                    &self.provider_id,
+                    &self.provider,
+                    self.config_model_catalog.clone(),
+                    &models_context,
+                )
+            };
             state.0 = models_context.generation;
         }
         Arc::clone(&state.1)
@@ -103,6 +125,26 @@ impl LeaseAwareModelsManager {
 }
 
 impl ModelsManager for LeaseAwareModelsManager {
+    fn get_default_model<'a>(
+        &'a self,
+        model: &'a Option<String>,
+        allow_provider_model_fallback: bool,
+        refresh_strategy: RefreshStrategy,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'a, String> {
+        let manager = self.current_manager();
+        Box::pin(async move {
+            manager
+                .get_default_model(
+                    model,
+                    allow_provider_model_fallback,
+                    refresh_strategy,
+                    http_client_factory,
+                )
+                .await
+        })
+    }
+
     fn raw_model_catalog(
         &self,
         refresh_strategy: RefreshStrategy,

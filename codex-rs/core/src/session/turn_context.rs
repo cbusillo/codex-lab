@@ -1,6 +1,8 @@
 use super::*;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::shell_snapshot::ShellSnapshotFile;
+use codex_core_plugins::PluginCommandAttribution;
+use codex_core_plugins::TrustedPluginRoots;
 use codex_core_skills::HostSkillsSnapshot;
 use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
@@ -156,6 +158,7 @@ pub struct TurnContext {
     pub(crate) model_verification_emitted: AtomicBool,
 }
 
+#[derive(Clone, Copy)]
 enum TurnMultiAgentRuntime {
     ResolveAndStore,
     Preview,
@@ -178,6 +181,8 @@ impl TurnContext {
         model_info: ModelInfo,
         models_manager: &SharedModelsManager,
         auth_manager: Arc<AuthManager>,
+        skills_snapshot: HostSkillsSnapshot,
+        trusted_plugin_roots: TrustedPluginRoots,
     ) -> Self {
         let mut config = self.config.as_ref().clone();
         config.model = Some(model_info.slug.clone());
@@ -209,6 +214,8 @@ impl TurnContext {
             .session_telemetry
             .clone()
             .with_model(self.model_info.slug.as_str(), model_info.slug.as_str());
+        self.extension_data.insert(skills_snapshot.clone());
+        self.extension_data.insert(trusted_plugin_roots);
         Self {
             sub_id: self.sub_id.clone(),
             trace_id: self.trace_id.clone(),
@@ -247,7 +254,7 @@ impl TurnContext {
             dynamic_tools: self.dynamic_tools.clone(),
             turn_metadata_state: Arc::clone(&self.turn_metadata_state),
             extension_data: Arc::clone(&self.extension_data),
-            turn_skills: self.turn_skills.clone(),
+            turn_skills: TurnSkillsContext::new(skills_snapshot),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
             terminal_error: Arc::clone(&self.terminal_error),
             server_model_warning_emitted: AtomicBool::new(
@@ -257,6 +264,16 @@ impl TurnContext {
                 self.model_verification_emitted.load(Ordering::Relaxed),
             ),
         }
+    }
+
+    pub(crate) fn plugin_attribution_for_command(
+        &self,
+        command: &[String],
+        cwd: &AbsolutePathBuf,
+    ) -> Option<PluginCommandAttribution> {
+        self.extension_data
+            .get::<TrustedPluginRoots>()?
+            .resolve_attribution(command, cwd)
     }
 
     pub(crate) fn permission_profile(&self) -> PermissionProfile {
@@ -441,6 +458,7 @@ impl TurnContext {
                 .config
                 .permissions
                 .windows_sandbox_private_desktop,
+            windows_sandbox_proxy_settings_mode: None,
             use_legacy_landlock: self.config.features.use_legacy_landlock(),
         }
     }
@@ -718,6 +736,7 @@ impl Session {
                     state.session_configuration = next.clone();
                     Ok((
                         next,
+                        mcp_inputs_changed,
                         permission_profile_changed,
                         previous_config,
                         new_config,
@@ -727,23 +746,31 @@ impl Session {
             }
         };
 
-        let (session_configuration, permission_profile_changed, previous_config, new_config) =
-            match update_result {
-                Ok(update) => update,
-                Err(err) => {
-                    let message = err.to_string();
-                    self.send_event_raw(Event {
-                        id: sub_id.clone(),
-                        msg: EventMsg::Error(ErrorEvent {
-                            message: message.clone(),
-                            codex_error_info: Some(CodexErrorInfo::BadRequest),
-                        }),
-                    })
-                    .await;
-                    return Err(CodexErr::InvalidRequest(message));
-                }
-            };
+        let (
+            session_configuration,
+            mcp_inputs_changed,
+            permission_profile_changed,
+            previous_config,
+            new_config,
+        ) = match update_result {
+            Ok(update) => update,
+            Err(err) => {
+                let message = err.to_string();
+                self.send_event_raw(Event {
+                    id: sub_id.clone(),
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: message.clone(),
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+                return Err(CodexErr::InvalidRequest(message));
+            }
+        };
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
+        if mcp_inputs_changed {
+            self.schedule_mcp_prewarm();
+        }
 
         if permission_profile_changed {
             self.refresh_managed_network_proxy_for_current_permission_profile()
@@ -807,52 +834,78 @@ impl Session {
             .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let per_turn_config = Self::build_per_turn_config(&session_configuration, cwd.clone());
-
-        let model_info = self
-            .services
-            .models_manager
-            .get_model_info(
-                session_configuration.collaboration_mode.model(),
-                &per_turn_config.to_models_manager_config(),
-            )
-            .await;
+        let (
+            execution_snapshot,
+            model_info,
+            multi_agent_version,
+            trusted_plugin_roots,
+            skills_snapshot,
+        ) = loop {
+            let execution_snapshot = self.services.execution_account.snapshot().await;
+            let model_info = self
+                .services
+                .models_manager
+                .get_model_info(
+                    session_configuration.collaboration_mode.model(),
+                    &per_turn_config.to_models_manager_config(),
+                )
+                .await;
+            let multi_agent_version = match multi_agent_runtime {
+                TurnMultiAgentRuntime::ResolveAndStore => {
+                    self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
+                }
+                TurnMultiAgentRuntime::Preview => per_turn_config.multi_agent_version_for_model(
+                    self.multi_agent_version()
+                        .or(model_info.multi_agent_version),
+                ),
+            };
+            let plugins_input = per_turn_config.plugins_config_input();
+            let plugin_snapshot = self
+                .services
+                .plugins_manager
+                .plugin_snapshot_for_config_with_auth_context(
+                    &plugins_input,
+                    PluginAuthContext::from_auth(execution_snapshot.auth.as_ref()),
+                )
+                .await;
+            let trusted_plugin_roots = TrustedPluginRoots::from_plugin_load_outcome(
+                &plugin_snapshot.outcome,
+                per_turn_config.codex_home.as_path(),
+            );
+            let effective_skill_roots =
+                plugin_snapshot.outcome.effective_plugin_skill_roots();
+            let skills_input =
+                skills_load_input_from_config(&per_turn_config, effective_skill_roots)
+                    .with_plugin_skill_snapshots(plugin_snapshot.skill_snapshots);
+            let fs = primary_turn_environment
+                .as_ref()
+                .map(|turn_environment| turn_environment.environment.get_filesystem());
+            let skills_snapshot = self
+                .services
+                .skills_service
+                .snapshot_for_config(&skills_input, fs)
+                .await;
+            if self
+                .services
+                .execution_account
+                .snapshot_is_current(&execution_snapshot)
+            {
+                break (
+                    execution_snapshot,
+                    model_info,
+                    multi_agent_version,
+                    trusted_plugin_roots,
+                    skills_snapshot,
+                );
+            }
+        };
         self.services
             .thread_extension_data
             .insert(model_info.clone());
-
-        let multi_agent_version = match multi_agent_runtime {
-            TurnMultiAgentRuntime::ResolveAndStore => {
-                self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
-            }
-            TurnMultiAgentRuntime::Preview => per_turn_config.multi_agent_version_for_model(
-                self.multi_agent_version()
-                    .or(model_info.multi_agent_version),
-            ),
-        };
-        let plugins_input = per_turn_config.plugins_config_input();
-        let plugin_outcome = self
-            .services
-            .plugins_manager
-            .plugins_for_config(&plugins_input)
-            .await;
-        let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
-        let plugin_skill_snapshots = self
-            .services
-            .plugins_manager
-            .plugin_skill_snapshots_for_config(&plugins_input);
-        let skills_input = skills_load_input_from_config(&per_turn_config, effective_skill_roots)
-            .with_plugin_skill_snapshots(plugin_skill_snapshots);
-        let fs = primary_turn_environment
-            .map(|turn_environment| turn_environment.environment.get_filesystem());
-        let skills_snapshot = self
-            .services
-            .skills_service
-            .snapshot_for_config(&skills_input, fs)
-            .await;
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
-            Some(self.services.execution_account.auth_manager()),
+            Some(execution_snapshot.auth_manager),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,
@@ -878,6 +931,7 @@ impl Session {
             sub_id,
             skills_snapshot,
         );
+        turn_context.extension_data.insert(trusted_plugin_roots);
         turn_context.realtime_active = self.conversation.running_state().await.is_some();
 
         if let Some(final_schema) = final_output_json_schema {
@@ -899,31 +953,78 @@ impl Session {
         self: &Arc<Self>,
         turn_context: &Arc<TurnContext>,
     ) -> Arc<TurnContext> {
-        let _ = self
-            .services
-            .models_manager
-            .list_models(
-                RefreshStrategy::OnlineIfUncached,
-                turn_context.config.http_client_factory(),
+        let model_slug = turn_context.model_info.slug.clone();
+        let (refreshed, hooks) = loop {
+            let execution_snapshot = self.services.execution_account.snapshot().await;
+            let _ = self
+                .services
+                .models_manager
+                .list_models(
+                    RefreshStrategy::OnlineIfUncached,
+                    turn_context.config.http_client_factory(),
+                )
+                .await;
+            let model_info = self
+                .services
+                .models_manager
+                .get_model_info(&model_slug, &turn_context.config.to_models_manager_config())
+                .await;
+            let plugins_input = turn_context.config.plugins_config_input();
+            let plugin_snapshot = self
+                .services
+                .plugins_manager
+                .plugin_snapshot_for_config_with_auth_context(
+                    &plugins_input,
+                    PluginAuthContext::from_auth(execution_snapshot.auth.as_ref()),
+                )
+                .await;
+            let trusted_plugin_roots = TrustedPluginRoots::from_plugin_load_outcome(
+                &plugin_snapshot.outcome,
+                turn_context.config.codex_home.as_path(),
+            );
+            let effective_skill_roots =
+                plugin_snapshot.outcome.effective_plugin_skill_roots();
+            let skills_input =
+                skills_load_input_from_config(&turn_context.config, effective_skill_roots)
+                    .with_plugin_skill_snapshots(plugin_snapshot.skill_snapshots);
+            let fs = turn_context
+                .environments
+                .primary()
+                .map(|turn_environment| turn_environment.environment.get_filesystem());
+            let skills_snapshot = self
+                .services
+                .skills_service
+                .snapshot_for_config(&skills_input, fs)
+                .await;
+            let hooks = build_hooks_for_config(
+                turn_context.config.as_ref(),
+                self.services.plugins_manager.as_ref(),
+                PluginAuthContext::from_auth(execution_snapshot.auth.as_ref()),
+                turn_context.environments.single_local_environment(),
             )
             .await;
-        let model_slug = turn_context.model_info.slug.clone();
-        let model_info = self
-            .services
-            .models_manager
-            .get_model_info(&model_slug, &turn_context.config.to_models_manager_config())
+            let refreshed = Arc::new(turn_context.with_refreshed_execution_account(
+                model_info,
+                &self.services.models_manager,
+                Arc::clone(&execution_snapshot.auth_manager),
+                skills_snapshot,
+                trusted_plugin_roots,
+            ));
+            self.refresh_mcp_servers_now(
+                refreshed.as_ref(),
+                refreshed.config.as_ref(),
+                Some(self.mcp_elicitation_reviewer()),
+            )
             .await;
-        let refreshed = Arc::new(turn_context.with_refreshed_execution_account(
-            model_info,
-            &self.services.models_manager,
-            self.services.execution_account.auth_manager(),
-        ));
-        self.refresh_mcp_servers_now(
-            refreshed.as_ref(),
-            refreshed.config.as_ref(),
-            Some(self.mcp_elicitation_reviewer()),
-        )
-        .await;
+            if self
+                .services
+                .execution_account
+                .snapshot_is_current(&execution_snapshot)
+            {
+                break (refreshed, hooks);
+            }
+        };
+        self.services.hooks.store(Arc::new(hooks));
         let mut active_turn = self.active_turn.lock().await;
         if let Some(running_task) = active_turn
             .as_mut()

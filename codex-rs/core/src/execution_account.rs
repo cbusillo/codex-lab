@@ -164,10 +164,13 @@ pub(crate) struct ExecutionAccountModelsContext {
     pub(crate) cache_key: String,
 }
 
-pub(crate) struct ExecutionAccountCodexAppsContext {
+#[derive(Clone)]
+pub(crate) struct ExecutionAccountSnapshot {
     pub(crate) cache_identity: ExecutionAccountCacheIdentity,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) auth: Option<CodexAuth>,
     pub(crate) auth_provider: SharedAuthProvider,
+    revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -479,18 +482,28 @@ impl ExecutionAccountLease {
         })
     }
 
-    pub(crate) fn codex_apps_context(&self) -> ExecutionAccountCodexAppsContext {
+    pub(crate) async fn snapshot(&self) -> ExecutionAccountSnapshot {
         let account = self.inner.current.load_full();
+        let auth = account.auth_manager.auth().await;
         let cache_identity = ExecutionAccountCacheIdentity(account.cache_identity.clone());
         let auth_provider = Arc::new(ExecutionAccountCodexAppsAuthProvider {
             lease: self.clone(),
             expected_cache_identity: cache_identity.clone(),
         });
-        ExecutionAccountCodexAppsContext {
+        ExecutionAccountSnapshot {
             cache_identity,
             auth_manager: Arc::clone(&account.auth_manager),
+            auth,
             auth_provider,
+            revision: self.revision_for(
+                account.generation,
+                account.auth_manager.auth_revision(),
+            ),
         }
+    }
+
+    pub(crate) fn snapshot_is_current(&self, snapshot: &ExecutionAccountSnapshot) -> bool {
+        self.auth_revision() == snapshot.revision
     }
 
     pub(crate) fn models_context(&self) -> ExecutionAccountModelsContext {
@@ -500,6 +513,14 @@ impl ExecutionAccountLease {
             auth_manager: Arc::clone(&account.auth_manager),
             cache_key: account.models_cache_key(),
         }
+    }
+
+    pub(crate) fn models_manager_auth_matches(&self, auth_manager: Option<&AuthManager>) -> bool {
+        let Some(auth_manager) = auth_manager else {
+            return false;
+        };
+        let account = self.inner.current.load();
+        auth_managers_share_model_catalog(&account.auth_manager, auth_manager)
     }
 
     pub(crate) fn auth_revision(&self) -> u64 {
@@ -875,6 +896,28 @@ fn auth_matches_account(auth: &CodexAuth, account: &StoredAccount) -> bool {
         }
         _ => false,
     }
+}
+
+fn auth_managers_share_model_catalog(left: &AuthManager, right: &AuthManager) -> bool {
+    if std::ptr::eq(left, right) {
+        return true;
+    }
+
+    let cache_identity = |auth_manager: &AuthManager| {
+        let auth = auth_manager.auth_cached();
+        let mode = auth
+            .as_ref()
+            .map(CodexAuth::auth_mode)
+            .or_else(|| auth_manager.auth_mode())?;
+        Some(ExecutionAccount::cache_identity_for(
+            /*stored_account_id*/ None,
+            auth.as_ref(),
+            mode,
+        ))
+    };
+    cache_identity(left)
+        .zip(cache_identity(right))
+        .is_some_and(|(left, right)| left == right)
 }
 
 #[cfg(test)]

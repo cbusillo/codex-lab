@@ -861,6 +861,7 @@ async fn load_plugins_loads_default_skills_and_mcp_servers() {
         outcome.plugins(),
         vec![LoadedPlugin {
             config_name: "sample@test".to_string(),
+            remote_plugin_id: None,
             manifest_name: Some("sample".to_string()),
             plugin_namespace: Some("sample".to_string()),
             manifest_description: Some(
@@ -1139,6 +1140,26 @@ async fn installed_plugin_telemetry_metadata_resolves_persisted_remote_identity(
     );
 }
 
+#[test]
+fn plugin_telemetry_ignores_local_marketplace_sidecars() {
+    let codex_home = TempDir::new().unwrap();
+    write_cached_plugin(codex_home.path(), "test", "sample");
+    let plugin_id = PluginId::parse("sample@test").expect("plugin id should parse");
+    PluginStore::new(codex_home.path().to_path_buf())
+        .write_remote_plugin_id(&plugin_id, "plugins~Plugin_sample")
+        .expect("persist remote plugin id");
+    let manager = PluginsManager::new(codex_home.path().to_path_buf());
+
+    assert_eq!(
+        manager.telemetry_metadata_for_plugin_id(&plugin_id),
+        PluginTelemetryMetadata {
+            plugin_id: Some(plugin_id),
+            remote_plugin_id: None,
+            capability_summary: None,
+        }
+    );
+}
+
 #[tokio::test]
 async fn installed_plugin_telemetry_metadata_prefers_remote_snapshot_identity() {
     let codex_home = TempDir::new().unwrap();
@@ -1342,6 +1363,45 @@ enabled = true
             "remote-only@openai-curated-remote".to_string(),
         ]
     );
+}
+
+#[tokio::test]
+async fn explicit_auth_context_isolates_concurrent_plugin_loads() {
+    let codex_home = TempDir::new().unwrap();
+    write_auth_projection_plugin(codex_home.path(), "sample", /*include_app*/ true);
+    write_auth_projection_plugin(codex_home.path(), "docs", /*include_app*/ false);
+    let config = auth_projection_config(codex_home.path()).await;
+    let manager = PluginsManager::new_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
+
+    let (chatgpt_outcome, api_key_outcome) = tokio::join!(
+        manager.plugins_for_config_with_auth_context(
+            &config,
+            PluginAuthContext::from_auth_mode(Some(AuthMode::Chatgpt)),
+        ),
+        manager.plugins_for_config_with_auth_context(
+            &config,
+            PluginAuthContext::from_auth_mode(Some(AuthMode::ApiKey)),
+        ),
+    );
+
+    assert_eq!(
+        sorted_effective_mcp_server_names(&chatgpt_outcome),
+        vec!["docs".to_string()]
+    );
+    assert_eq!(
+        chatgpt_outcome.effective_apps(),
+        vec![AppConnectorId("connector_sample".to_string())]
+    );
+    assert_eq!(
+        sorted_effective_mcp_server_names(&api_key_outcome),
+        vec!["docs".to_string(), "sample".to_string()]
+    );
+    assert!(api_key_outcome.effective_apps().is_empty());
+    assert_eq!(manager.auth_mode(), Some(AuthMode::Chatgpt));
 }
 
 #[tokio::test]
@@ -2292,6 +2352,7 @@ async fn load_plugins_preserves_disabled_plugins_without_effective_contributions
         outcome.plugins(),
         vec![LoadedPlugin {
             config_name: "sample@test".to_string(),
+            remote_plugin_id: None,
             manifest_name: None,
             plugin_namespace: None,
             manifest_description: None,
@@ -2462,6 +2523,7 @@ fn capability_index_filters_inactive_and_zero_capability_plugins() {
     };
     let plugin = |config_name: &str, dir_name: &str, manifest_name: &str| LoadedPlugin {
         config_name: config_name.to_string(),
+        remote_plugin_id: None,
         manifest_name: Some(manifest_name.to_string()),
         plugin_namespace: Some(
             config_name
@@ -2693,6 +2755,104 @@ async fn skills_service_reuses_skills_parsed_during_plugin_load() {
         .collect::<Vec<_>>();
     assert!(descriptions.contains(&"first"));
     assert!(!descriptions.contains(&"second"));
+}
+
+#[tokio::test]
+async fn skill_snapshots_resolve_remote_plugin_identity_from_authoritative_source() {
+    let mut duplicate_plugin = remote_installed_plugin("sample");
+    duplicate_plugin.id = "plugins~Plugin_duplicate".to_string();
+
+    for (installed_plugins, expected_remote_plugin_id) in [
+        (None, Some("plugins~Plugin_persisted")),
+        (Some(Vec::new()), None),
+        (
+            Some(vec![remote_installed_plugin("sample"), duplicate_plugin]),
+            Some("plugins~Plugin_sample"),
+        ),
+    ] {
+        let codex_home = TempDir::new().unwrap();
+        let codex_home_abs = codex_home.path().to_path_buf().abs();
+        let plugin_root = codex_home
+            .path()
+            .join("plugins/cache/openai-curated-remote/sample/local");
+        write_plugin(
+            codex_home
+                .path()
+                .join("plugins/cache/openai-curated-remote")
+                .as_path(),
+            "sample/local",
+            "sample",
+        );
+        let skill_path = plugin_root.join("skills/SKILL.md");
+        write_file(&skill_path, "---\nname: search\ndescription: first\n---\n");
+        write_file(
+            &codex_home.path().join(CONFIG_TOML_FILE),
+            r#"[features]
+plugins = true
+remote_plugin = true
+
+[plugins."sample@openai-curated-remote"]
+enabled = true
+"#,
+        );
+
+        let plugin_id =
+            PluginId::parse("sample@openai-curated-remote").expect("remote plugin id should parse");
+        PluginStore::new(codex_home.path().to_path_buf())
+            .write_remote_plugin_id(&plugin_id, "plugins~Plugin_persisted")
+            .expect("persist remote plugin id");
+        let config = load_config(codex_home.path(), codex_home.path()).await;
+        let manager = PluginsManager::new(codex_home.path().to_path_buf());
+        if let Some(installed_plugins) = installed_plugins {
+            manager.write_remote_installed_plugins_cache(installed_plugins);
+        }
+
+        let plugin_outcome = manager.plugins_for_config(&config).await;
+        assert_eq!(
+            manager
+                .telemetry_metadata_for_plugin_id(&plugin_id)
+                .remote_plugin_id
+                .as_deref(),
+            expected_remote_plugin_id
+        );
+        write_file(&skill_path, "---\nname: search\ndescription: second\n---\n");
+
+        let skills_input = SkillsLoadInput::new(
+            codex_home_abs.clone(),
+            plugin_outcome.effective_plugin_skill_roots(),
+            config.config_layer_stack.clone(),
+            /*bundled_skills_enabled*/ false,
+        )
+        .with_plugin_skill_snapshots(manager.plugin_skill_snapshots_for_config(&config));
+        let skills_service =
+            SkillsService::new(codex_home_abs, /*bundled_skills_enabled*/ false);
+        let snapshot = skills_service
+            .snapshot_for_config(&skills_input, /*fs*/ None)
+            .await;
+
+        assert_eq!(
+            snapshot
+                .outcome()
+                .skills
+                .iter()
+                .filter(|skill| {
+                    skill.plugin_id.as_deref() == Some("sample@openai-curated-remote")
+                })
+                .map(|skill| {
+                    (
+                        skill.description.as_str(),
+                        skill.plugin_id.as_deref(),
+                        skill.remote_plugin_id.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![(
+                "first",
+                Some("sample@openai-curated-remote"),
+                expected_remote_plugin_id,
+            )]
+        );
+    }
 }
 
 #[test]
@@ -6029,7 +6189,7 @@ async fn load_plugins_ignores_project_config_files() {
 
     let plugins = load_plugins_from_layer_stack(
         &stack,
-        std::collections::HashMap::new(),
+        crate::remote_plugin_id_resolver::RemoteInstalledPluginsSnapshot::default(),
         &PluginStore::new(codex_home.path().to_path_buf()),
         /*plugin_skill_snapshots*/ None,
         Some(Product::Codex),

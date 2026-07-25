@@ -12,6 +12,7 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 
 pub(super) struct McpDesiredState {
     pub(super) config: Arc<Config>,
+    pub(super) execution_context: crate::execution_account::ExecutionAccountSnapshot,
     pub(super) submit_id: String,
     pub(super) originator: String,
     pub(super) environments: TurnEnvironmentSnapshot,
@@ -43,6 +44,7 @@ impl Session {
 
         McpDesiredState {
             config: Arc::new(config),
+            execution_context: self.services.execution_account.snapshot().await,
             submit_id: self.next_internal_sub_id(),
             originator: session_configuration.originator.clone(),
             environments,
@@ -52,6 +54,7 @@ impl Session {
     pub(super) async fn install_initial_mcp_runtime(
         self: &Arc<Self>,
         session_configuration: &SessionConfiguration,
+        execution_context: crate::execution_account::ExecutionAccountSnapshot,
         mcp_projection: McpRuntimeProjection,
         resolved_environments: &TurnEnvironmentSnapshot,
         local_stdio_fallback_cwd: PathBuf,
@@ -62,6 +65,7 @@ impl Session {
         config.permissions.approval_policy = session_configuration.approval_policy.clone();
         let desired = McpDesiredState {
             config: Arc::new(config),
+            execution_context,
             submit_id: INITIAL_SUBMIT_ID.to_owned(),
             originator: session_configuration.originator.clone(),
             environments: resolved_environments.clone(),
@@ -89,23 +93,25 @@ impl Session {
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
     ) {
-        let (input, cache_identity) = self
-            .build_mcp_runtime_input(
-                desired,
-                mcp_projection,
-                ready_selected_capability_roots,
-                elicitation_reviewer,
-            )
-            .await;
+        let (input, cache_identity) = self.build_mcp_runtime_input(
+            desired,
+            mcp_projection,
+            ready_selected_capability_roots,
+            elicitation_reviewer,
+        );
         self.services.mcp_runtime.replace(input).await;
         self.apps_context
             .set_mcp_cache_identity(cache_identity.clone());
-        if self.services.execution_account.cache_identity() != cache_identity {
+        if !self
+            .services
+            .execution_account
+            .snapshot_is_current(&desired.execution_context)
+        {
             self.mark_mcp_runtime_dirty();
         }
     }
 
-    async fn build_mcp_runtime_input(
+    pub(super) fn build_mcp_runtime_input(
         &self,
         desired: &McpDesiredState,
         mcp_projection: McpRuntimeProjection,
@@ -115,8 +121,7 @@ impl Session {
         McpRuntimeInput,
         crate::execution_account::ExecutionAccountCacheIdentity,
     ) {
-        let execution_context = self.services.execution_account.codex_apps_context();
-        let auth = execution_context.auth_manager.auth().await;
+        let auth = desired.execution_context.auth.clone();
         let supports_openai_form_elicitation = self
             .services
             .supports_openai_form_elicitation
@@ -152,8 +157,11 @@ impl Session {
         let codex_apps_auth = codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
             .then(|| {
                 codex_mcp::CodexAppsAuthContext::new(
-                    execution_context.auth_provider,
-                    execution_context.cache_identity.connection_discriminator(),
+                    Arc::clone(&desired.execution_context.auth_provider),
+                    desired
+                        .execution_context
+                        .cache_identity
+                        .connection_discriminator(),
                 )
             });
 
@@ -176,7 +184,7 @@ impl Session {
                 elicitation_reviewer,
                 elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
             },
-            execution_context.cache_identity,
+            desired.execution_context.cache_identity.clone(),
         )
     }
 }

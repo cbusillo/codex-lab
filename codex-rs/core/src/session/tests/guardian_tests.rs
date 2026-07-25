@@ -711,6 +711,11 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
     );
 
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let control_models_manager = create_model_provider(
+        config.model_provider.clone(),
+        Some(Arc::clone(&auth_manager)),
+    )
+    .models_manager(config.codex_home.to_path_buf(), config.model_catalog.clone());
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let skills_service = Arc::new(SkillsService::new(
         config.codex_home.clone(),
@@ -728,6 +733,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         user_instructions: Default::default(),
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
+        control_models_manager,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         skills_service,
         plugins_manager,
@@ -736,6 +742,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         extensions: codex_extension_api::empty_extension_registry(),
         conversation_history: InitialHistory::New,
         requested_history_mode: None,
+        fork_persistence: ForkPersistence::Copied,
         session_source: SessionSource::SubAgent(SubAgentSource::Other(
             GUARDIAN_REVIEWER_NAME.to_string(),
         )),
@@ -760,6 +767,8 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         external_time_provider: None,
         inherited_multi_agent_version: None,
         git_enrichment_policy: GitEnrichmentPolicy::Skip,
+        windows_sandbox_proxy_settings_mode:
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve,
     })
     .await
     .expect("spawn guardian subagent");

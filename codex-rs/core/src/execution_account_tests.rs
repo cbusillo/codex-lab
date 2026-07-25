@@ -60,6 +60,16 @@ fn rate_limit_snapshot(resets_at: DateTime<Utc>, used_percent: f64) -> RateLimit
     }
 }
 
+#[test]
+fn model_catalog_auth_identity_matches_equivalent_credentials() {
+    let first = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("same-key"));
+    let second = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("same-key"));
+    let different = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("different-key"));
+
+    assert!(auth_managers_share_model_catalog(&first, &second));
+    assert!(!auth_managers_share_model_catalog(&first, &different));
+}
+
 async fn test_accounts() -> (
     tempfile::TempDir,
     Arc<AuthManager>,
@@ -648,6 +658,33 @@ async fn execution_auth_revision_is_strictly_monotonic_across_replacements() {
 
     assert!(initial_revision < first_replacement_revision);
     assert!(first_replacement_revision < second_replacement_revision);
+}
+
+#[tokio::test]
+async fn execution_account_snapshot_detects_auth_replacement() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let control_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-control"));
+    let lease = ExecutionAccountLease::resolve(
+        ThreadId::new(),
+        control_manager,
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Disabled,
+            ExecutionAccountStart::New,
+        ),
+    )
+    .await;
+    let initial_snapshot = lease.snapshot().await;
+
+    assert!(lease.snapshot_is_current(&initial_snapshot));
+    lease.replace_with_detached_auth_manager_for_testing(
+        "replacement".to_string(),
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-replacement")),
+    );
+    assert!(!lease.snapshot_is_current(&initial_snapshot));
+
+    let replacement_snapshot = lease.snapshot().await;
+    assert!(lease.snapshot_is_current(&replacement_snapshot));
 }
 
 #[test]

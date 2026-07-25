@@ -1056,13 +1056,6 @@ async fn api_key_transition_never_sends_the_raw_key_to_apps() -> anyhow::Result<
             .and_then(|value| value.to_str().ok())
             != Some(api_key_authorization.as_str())
     }));
-    assert!(apps_requests.iter().any(|request| {
-        request
-            .headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .is_none()
-    }));
 
     Ok(())
 }

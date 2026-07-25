@@ -17,6 +17,7 @@ use toml::Table;
 mod feature_configs;
 mod legacy;
 pub use feature_configs::CodeModeConfigToml;
+pub use feature_configs::CodeModeHostConfigToml;
 pub use feature_configs::CurrentTimeReminderConfigToml;
 pub use feature_configs::CurrentTimeReminderDeliveryMode;
 pub use feature_configs::CurrentTimeSource;
@@ -169,6 +170,8 @@ pub enum Feature {
     ToolSearch,
     /// Removed compatibility flag. MCP tools are always deferred when tool_search is available.
     ToolSearchAlwaysDeferMcpTools,
+    /// Describe deferred tool namespaces in the model-visible world state.
+    DeferredToolWorldState,
     /// Expose MCP model-visible namespaces without the legacy `mcp__` prefix.
     NonPrefixedMcpToolNames,
     /// Enable discoverable tool suggestions for apps.
@@ -225,6 +228,8 @@ pub enum Feature {
     DefaultModeRequestUserInput,
     /// Enable automatic review for approval prompts.
     GuardianApproval,
+    /// Enable Guardian V2 automatic approval reviews.
+    GuardianV2,
     /// Enable persisted thread goals and automatic goal continuation.
     Goals,
     /// Add current context-window metadata to model-visible context.
@@ -648,6 +653,8 @@ pub struct FeaturesToml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_mode: Option<FeatureToml<CodeModeConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_mode_host: Option<FeatureToml<CodeModeHostConfigToml>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_prefixed_mcp_tool_names: Option<FeatureToml<NonPrefixedMcpToolNamesConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_v2: Option<FeatureToml<MultiAgentV2ConfigToml>>,
@@ -686,6 +693,9 @@ impl FeaturesToml {
         if let Some(enabled) = self.code_mode.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::CodeMode.key().to_string(), enabled);
         }
+        if let Some(enabled) = self.code_mode_host.as_ref().and_then(FeatureToml::enabled) {
+            entries.insert(Feature::CodeModeHost.key().to_string(), enabled);
+        }
         if let Some(enabled) = self
             .non_prefixed_mcp_tool_names
             .as_ref()
@@ -719,6 +729,7 @@ impl FeaturesToml {
         self.clear_removed_compatibility_entries();
         let Self {
             code_mode,
+            code_mode_host,
             non_prefixed_mcp_tool_names,
             multi_agent_v2,
             token_budget,
@@ -735,6 +746,8 @@ impl FeaturesToml {
             let enabled = features.enabled(spec.id);
             if spec.id == Feature::CodeMode {
                 materialize_resolved_feature_enabled(code_mode, enabled);
+            } else if spec.id == Feature::CodeModeHost {
+                materialize_resolved_feature_enabled(code_mode_host, enabled);
             } else if spec.id == Feature::NonPrefixedMcpToolNames {
                 materialize_resolved_feature_enabled(non_prefixed_mcp_tool_names, enabled);
             } else if spec.id == Feature::MultiAgentV2 {
@@ -1121,6 +1134,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::DeferredToolWorldState,
+        key: "deferred_tool_world_state",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::NonPrefixedMcpToolNames,
         key: "non_prefixed_mcp_tool_names",
         stage: Stage::UnderDevelopment,
@@ -1275,6 +1294,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "guardian_approval",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::GuardianV2,
+        key: "guardianv2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::Goals,

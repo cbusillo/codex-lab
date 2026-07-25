@@ -53,6 +53,7 @@ use crate::stream_events_utils::handle_output_item_done;
 use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
 use crate::stream_events_utils::raw_assistant_output_text_from_item;
+use codex_core_plugins::PluginAuthContext;
 use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
 use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
@@ -77,6 +78,7 @@ use codex_analytics::build_track_events_context;
 use codex_async_utils::OrCancelExt;
 use codex_core_plugins::RecommendedPluginCandidatesInput;
 use codex_core_skills::injection::InjectedHostSkillPrompts;
+use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
@@ -622,10 +624,14 @@ async fn build_skills_and_plugins(
         turn_context.sub_id.clone(),
         turn_context.originator.clone(),
     );
+    let auth = turn_context.auth().await;
     let loaded_plugins = sess
         .services
         .plugins_manager
-        .plugins_for_config(&turn_context.config.plugins_config_input())
+        .plugins_for_config_with_auth_context(
+            &turn_context.config.plugins_config_input(),
+            PluginAuthContext::from_auth(auth.as_ref()),
+        )
         .await;
     // Structured plugin:// mentions are resolved from the current session's
     // enabled plugins, then converted into turn-scoped guidance below.
@@ -1383,12 +1389,17 @@ pub(crate) async fn built_tools(
     turn_context: &TurnContext,
     environments: &TurnEnvironmentSnapshot,
     mcp: &codex_mcp::McpBinding,
+    step_store: &ExtensionData,
 ) -> (Vec<ToolInfo>, Arc<ToolRouter>) {
     let all_mcp_tools = mcp.tools().to_vec();
+    let auth = turn_context.auth().await;
     let loaded_plugins = sess
         .services
         .plugins_manager
-        .plugins_for_config(&turn_context.config.plugins_config_input())
+        .plugins_for_config_with_auth_context(
+            &turn_context.config.plugins_config_input(),
+            PluginAuthContext::from_auth(auth.as_ref()),
+        )
         .instrument(trace_span!("built_tools.load_plugins"))
         .await;
     let connector_snapshot = mcp.config().connector_snapshot.clone();
@@ -1500,7 +1511,11 @@ pub(crate) async fn built_tools(
         ToolRouterParams {
             tool_runtimes: mcp_tool_runtimes,
             tool_suggest_candidates,
-            extension_tool_executors: extension_tool_executors(sess),
+            extension_tool_executors: extension_tool_executors(sess, step_store),
+            wait_for_environment_tool_config: sess
+                .services
+                .thread_extension_data
+                .get::<crate::WaitForEnvironmentToolConfig>(),
             dynamic_tools: turn_context.dynamic_tools.as_slice(),
         },
         &sess.services.tool_search_handler_cache,

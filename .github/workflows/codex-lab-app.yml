@@ -1,0 +1,207 @@
+name: codex-lab-app
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/extended-checks.json"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/codex-lab-app.yml"
+      - ".github/workflows/codex-lab-release.yml"
+      - "scripts/github/decide_extended_checks.py"
+      - "scripts/github/test_decide_extended_checks.py"
+      - "scripts/github/configure-codex-lab-cargo-cache.sh"
+      - "scripts/github/test_configure_codex_lab_cargo_cache.py"
+      - "scripts/build_codex_lab_app.py"
+      - "scripts/build_codex_lab_distribution_manifest.py"
+      - "scripts/codex_lab_package/**"
+      - "scripts/codex_package/**"
+      - "codex-rs/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-aarch64:
+    name: Build macOS ARM64 Codex Lab app
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - codex-lab-app
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Configure build cache
+        shell: bash
+        env:
+          CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT: ${{ vars.CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT }}
+        run: scripts/github/configure-codex-lab-cargo-cache.sh codex-lab-app codex-lab ci-app
+
+      - name: Report Cargo cache before build
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir="${CARGO_TARGET_DIR:-codex-rs/target}"
+          target_size="missing"
+          if [[ -d "$target_dir" ]]; then
+            target_size="$(du -sh "$target_dir" | awk '{ print $1 }')"
+          fi
+          {
+            echo "### Codex Lab app build diagnostics"
+            echo
+            echo "- Cargo cache mode: \`${CODEX_LAB_CARGO_CACHE_MODE:-unknown}\`"
+            echo "- Cargo host: \`${CODEX_LAB_CARGO_HOST:-unknown}\`"
+            echo "- Cargo profile: \`${CODEX_LAB_CARGO_PROFILE:-release}\`"
+            echo "- Cargo target dir kind: \`absolute\`"
+            echo "- Target size before build: \`$target_size\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build Codex Lab CLI
+        working-directory: codex-rs
+        shell: bash
+        run: cargo build --timings --profile ci-app -p codex-cli --bin codex-lab
+
+      - name: Report Cargo cache after build
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir="${CARGO_TARGET_DIR:-codex-rs/target}"
+          timings_dir="${RUNNER_TEMP}/codex-lab-app-cargo-timings"
+          rm -rf "$timings_dir"
+          mkdir -p "$timings_dir"
+          target_size="missing"
+          timing_count="0"
+          if [[ -d "$target_dir" ]]; then
+            target_size="$(du -sh "$target_dir" | awk '{ print $1 }')"
+            if [[ -d "$target_dir/cargo-timings" ]]; then
+              find "$target_dir/cargo-timings" -type f -name '*.html' -exec cp {} "$timings_dir" \;
+            fi
+            timing_count="$(find "$timings_dir" -type f -name '*.html' | wc -l | tr -d '[:space:]')"
+          fi
+          {
+            echo "- Target size after build: \`$target_size\`"
+            echo "- Cargo timing reports: \`$timing_count\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Cargo timing reports
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-lab-app-cargo-timings
+          path: ${{ runner.temp }}/codex-lab-app-cargo-timings/*.html
+          if-no-files-found: ignore
+
+      - name: Build Codex Lab app bundle
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_root="${RUNNER_TEMP}/codex-lab-app"
+          app_dir="${output_root}/Codex Lab.app"
+          shim_dir="${output_root}/bin"
+          lab_version="$(PYTHONPATH=scripts python3 -c 'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
+          mkdir -p "$output_root"
+          start=$SECONDS
+          python3 scripts/build_codex_lab_app.py \
+            --codex-bin "$CODEX_LAB_BIN" \
+            --app-dir "$app_dir" \
+            --shim-dir "$shim_dir" \
+            --short-version "$lab_version" \
+            --bundle-version "$GITHUB_RUN_NUMBER" \
+            --source-commit "$(git rev-parse HEAD)" \
+            --force
+          bundle_seconds=$((SECONDS - start))
+          start=$SECONDS
+          python3 scripts/codex_lab_package/smoke.py \
+            "$app_dir" \
+            --shim-path "${shim_dir}/codex-lab" \
+            --expected-source-commit "$(git rev-parse HEAD)"
+          smoke_seconds=$((SECONDS - start))
+          {
+            echo "- Bundle build seconds: \`$bundle_seconds\`"
+            echo "- Bundle smoke seconds: \`$smoke_seconds\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "output_root=$output_root" >> "$GITHUB_OUTPUT"
+
+      - name: Archive Codex Lab app artifact
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_root="${{ steps.package.outputs.output_root }}"
+          dist_dir="${RUNNER_TEMP}/codex-lab-dist"
+          mkdir -p "$dist_dir"
+          app_zip="${dist_dir}/codex-lab-app-aarch64-apple-darwin.zip"
+          shim_zip="${dist_dir}/codex-lab-shim-aarch64-apple-darwin.zip"
+          engine_zip="${dist_dir}/codex-lab-engine-aarch64-apple-darwin.zip"
+          engine_dir="${output_root}/engine"
+          source_commit="$(git rev-parse HEAD)"
+          mkdir -p "$engine_dir"
+          cp "$CODEX_LAB_BIN" "${engine_dir}/codex"
+          chmod 0755 "${engine_dir}/codex"
+          start=$SECONDS
+          ditto -c -k --norsrc --keepParent "${output_root}/Codex Lab.app" "$app_zip"
+          app_zip_seconds=$((SECONDS - start))
+          start=$SECONDS
+          ditto -c -k --norsrc --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
+          shim_zip_seconds=$((SECONDS - start))
+          start=$SECONDS
+          ditto -c -k --norsrc "${engine_dir}/codex" "$engine_zip"
+          engine_zip_seconds=$((SECONDS - start))
+          app_zip_bytes="$(wc -c < "$app_zip" | tr -d '[:space:]')"
+          shim_zip_bytes="$(wc -c < "$shim_zip" | tr -d '[:space:]')"
+          engine_zip_bytes="$(wc -c < "$engine_zip" | tr -d '[:space:]')"
+          unzip -l "$app_zip" | grep -F "Codex Lab.app/Contents/Resources/codex-lab"
+          unzip -l "$shim_zip" | grep -F "bin/codex-lab"
+          unzip -l "$engine_zip" | grep -F "codex"
+          if { unzip -l "$app_zip"; unzip -l "$shim_zip"; unzip -l "$engine_zip"; } | grep -E '/\._|(^|[[:space:]])\._'; then
+            echo "unexpected AppleDouble file in archive" >&2
+            exit 1
+          fi
+          start=$SECONDS
+          (cd "$dist_dir" && shasum -a 256 -- *.zip > SHA256SUMS)
+          python3 scripts/build_codex_lab_distribution_manifest.py generate \
+            --dist-dir "$dist_dir" \
+            --output "${dist_dir}/codex-lab-distribution.json" \
+            --bundle-version "$GITHUB_RUN_NUMBER" \
+            --commit "$source_commit" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+          python3 scripts/build_codex_lab_distribution_manifest.py validate \
+            "${dist_dir}/codex-lab-distribution.json" \
+            --dist-dir "$dist_dir" \
+            --sha256sums "${dist_dir}/SHA256SUMS"
+          manifest_seconds=$((SECONDS - start))
+          cat "${dist_dir}/SHA256SUMS"
+          cat "${dist_dir}/codex-lab-distribution.json"
+          {
+            echo "- App zip seconds: \`$app_zip_seconds\`"
+            echo "- Shim zip seconds: \`$shim_zip_seconds\`"
+            echo "- Engine zip seconds: \`$engine_zip_seconds\`"
+            echo "- Manifest/SHA seconds: \`$manifest_seconds\`"
+            echo "- App zip bytes: \`$app_zip_bytes\`"
+            echo "- Shim zip bytes: \`$shim_zip_bytes\`"
+            echo "- Engine zip bytes: \`$engine_zip_bytes\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "dist_dir=$dist_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Codex Lab app artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-lab-app-aarch64-apple-darwin
+          path: ${{ steps.archive.outputs.dist_dir }}/*
+          if-no-files-found: error

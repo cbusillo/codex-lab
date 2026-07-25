@@ -13,6 +13,10 @@ The workflows in this directory are split so that pull requests get fast, review
 - `sdk.yml` runs the Python SDK suite plus TypeScript SDK build and lint checks.
   The TypeScript tests that spawn a real Codex binary run after merge instead
   of compiling the full Bazel/V8 graph on an ephemeral PR runner.
+- `codex-lab-app.yml` builds the macOS ARM64 `Codex Lab.app` distribution when
+  fork-owned packaging, workflow, or Rust CLI paths change. Pull-request builds
+  use the `ci-app` Cargo profile and run only for branches in this repository;
+  release builds retain the full release profile.
 - Repository policy, spelling, dependency, and workflow-routing checks remain
   merge-blocking through their dedicated reusable workflows.
 
@@ -40,9 +44,10 @@ The workflows in this directory are split so that pull requests get fast, review
 - Merge-blocking workflows use standard GitHub-hosted runners so public fork
   pull requests never execute on persistent Codex Lab machines.
 - Trusted postmerge, app, and release workflows may use the repository-scoped
-  `[self-hosted, codex-lab-linux]` and `[self-hosted, macos-codex-lab]` labels.
-  These fork-owned labels are intentionally explicit instead of imitating
-  upstream organization runner groups.
+  `[self-hosted, codex-lab-linux]`, `macos-codex-lab`, or
+  `[self-hosted, macOS, ARM64, codex-lab-app]` labels. These fork-owned labels
+  are intentionally explicit instead of imitating upstream organization runner
+  groups or renaming a persistent runner to an upstream alias.
 - Upstream Windows Bazel jobs require authenticated RBE and custom Windows exec
   toolchains, so they are not part of public-fork blocking CI. `rust-ci-full.yml`
   retains Windows validation after merge on GitHub-hosted Windows runners.
@@ -58,3 +63,55 @@ The workflows in this directory are split so that pull requests get fast, review
 - Keep `rust-ci.yml` and `sdk.yml` fast enough that they do not dominate PR latency.
 - Preserve heavy Bazel, Cargo matrix, and real-binary SDK coverage in the
   postmerge workflows rather than deleting it.
+
+## Developer Artifacts
+
+High-churn self-hosted runner data can live under a host-managed artifact root
+configured through `CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT`:
+
+- `github-actions/runners/` contains self-hosted runner installations.
+- `github-actions/cache/` contains reusable caches that survive checkout
+  cleanup.
+- `github-actions/tmp/` contains disposable workflow scratch data.
+
+Workflow-specific caches add owner, repository, and workflow leaves under the
+cache directory. `codex-lab-app.yml`, for example, uses
+`github-actions/cache/<owner>/<repo>/codex-lab-app/` as its Cargo target cache
+when the artifact root is configured and available.
+
+## Distribution Contract
+
+`codex-lab-app.yml` uploads one artifact containing:
+
+- `codex-lab-app-aarch64-apple-darwin.zip`
+- `codex-lab-shim-aarch64-apple-darwin.zip`
+- `codex-lab-engine-aarch64-apple-darwin.zip`
+- `SHA256SUMS`
+- `codex-lab-distribution.json`
+
+The manifest is the installer and updater contract. It identifies the app zip
+as the canonical app update, the shim as its companion launcher, and the engine
+as the managed supervisor execution unit. It also records extracted sibling,
+`CODEX_LAB_APP_PATH`, and `/Applications` layouts. Pull-request artifacts remain
+unsigned and are packaging-validation inputs, not publishable releases.
+
+## Release Publication
+
+`codex-lab-release.yml` is the Codex Lab-owned release authority. It builds the
+macOS ARM64 app, shim, and engine, signs and verifies the engine on the trusted
+macOS runner, validates the staged distribution on `ubuntu-latest`, and grants
+`contents: write` only to the separate publication job.
+
+The signed engine contract pins the executable digest, source commit, version,
+stable identifier, TeamIdentifier, hardened runtime, and required V8
+entitlements. Manual dispatch with `publish: false` performs a complete signed
+dry run without creating a release. Publishing is restricted to explicit manual
+dispatches from the default branch and creates a public GitHub prerelease; it
+does not use upstream R2, package identities, release domains, or credentials.
+
+Release tags use the isolated namespace:
+
+```shell
+codex-lab-vX.Y.Z
+codex-lab-vX.Y.Z-lab.N
+```

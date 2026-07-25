@@ -2049,6 +2049,7 @@ dependencies = [
  "codex-code-bridge-client",
  "codex-code-bridge-protocol",
  "codex-code-bridge-service",
+ "codex-code-mode",
  "codex-config",
  "codex-connectors",
  "codex-core",
@@ -2484,6 +2485,7 @@ dependencies = [
  "codex-utils-cargo-bin",
  "codex-utils-cli",
  "codex-utils-path",
+ "codex-version",
  "codex-windows-sandbox",
  "crossterm",
  "http 1.4.0",
@@ -2660,12 +2662,15 @@ name = "codex-code-mode"
 version = "0.0.0"
 dependencies = [
  "codex-code-mode-protocol",
+ "codex-http-client",
  "codex-protocol",
+ "codex-websocket-client",
  "deno_core_icudata",
  "futures",
  "pretty_assertions",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "v8",
@@ -2676,15 +2681,21 @@ name = "codex-code-mode-host"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "clap",
  "codex-code-mode",
  "codex-code-mode-protocol",
  "codex-protocol",
  "codex-utils-cargo-bin",
+ "futures",
  "pretty_assertions",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3105,6 +3116,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-pty",
  "codex-utils-rustls-provider",
+ "codex-websocket-client",
  "ctor 0.6.3",
  "futures",
  "http 1.4.0",
@@ -3114,7 +3126,6 @@ dependencies = [
  "pretty_assertions",
  "prost",
  "rcgen",
- "reqwest 0.12.28",
  "rustls",
  "serde",
  "serde_json",
@@ -3129,6 +3140,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
  "uuid",
  "windows-sys 0.52.0",
  "wiremock",
@@ -4030,6 +4042,7 @@ dependencies = [
  "codex-api",
  "codex-config",
  "codex-exec-server",
+ "codex-http-client",
  "codex-keyring-store",
  "codex-protocol",
  "codex-secrets",
@@ -4216,6 +4229,7 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
  "codex-utils-string",
+ "futures",
  "pretty_assertions",
  "schemars 0.8.22",
  "serde",
@@ -4315,6 +4329,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

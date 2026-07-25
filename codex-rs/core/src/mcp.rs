@@ -6,6 +6,7 @@ use codex_config::McpServerConfig;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
 use codex_connectors::PluginConnectorSource;
+use codex_core_plugins::PluginAuthContext;
 use codex_core_plugins::PluginsManager;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_extension_api::ExtensionData;
@@ -98,6 +99,7 @@ impl McpManager {
             // originator; active-thread tool calls use runtime_config_for_step below.
             /*originator*/
             None,
+            PluginAuthContext::from_auth_mode(self.plugins_manager.auth_mode()),
         )
         .await
         .config
@@ -110,6 +112,7 @@ impl McpManager {
         thread_init: &ExtensionDataInit,
         thread_store: &ExtensionData,
         originator: &str,
+        plugin_auth_context: PluginAuthContext,
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         executor_capability_discovery: Option<&ExecutorCapabilityDiscoverySnapshot>,
     ) -> McpRuntimeProjection {
@@ -123,6 +126,7 @@ impl McpManager {
                 executor_capability_discovery,
             ),
             Some(originator),
+            plugin_auth_context,
         )
         .await
     }
@@ -131,6 +135,7 @@ impl McpManager {
         &self,
         context: McpServerContributionContext<'_, Config>,
         originator: Option<&str>,
+        plugin_auth_context: PluginAuthContext,
     ) -> McpRuntimeProjection {
         let config = context.config();
         let mut selected_plugin_available = false;
@@ -195,7 +200,10 @@ impl McpManager {
 
         let loaded_plugins = self
             .plugins_manager
-            .plugins_for_config(&config.plugins_config_input())
+            .plugins_for_config_with_auth_context(
+                &config.plugins_config_input(),
+                plugin_auth_context,
+            )
             .await;
         let plugins_available =
             selected_plugin_available || !loaded_plugins.capability_summaries().is_empty();
