@@ -225,7 +225,7 @@ impl AccountRequestProcessor {
         }
     }
 
-    async fn sync_auth_after_account_change(&self) {
+    async fn reload_active_auth_state(&self) {
         self.thread_manager.reload_auth_for_loaded_threads().await;
         self.config_manager.replace_cloud_config_bundle_loader(
             self.auth_manager.clone(),
@@ -235,6 +235,10 @@ impl AccountRequestProcessor {
         self.config_manager
             .sync_default_client_residency_requirement()
             .await;
+    }
+
+    async fn sync_auth_after_account_change(&self) {
+        self.reload_active_auth_state().await;
         Self::maybe_refresh_plugin_caches_for_current_config(
             &self.config_manager,
             &self.thread_manager,
@@ -443,7 +447,7 @@ impl AccountRequestProcessor {
         };
         match login_result {
             Ok(()) => {
-                self.auth_manager.reload().await;
+                self.reload_active_auth_state().await;
                 Ok(())
             }
             Err(err) => Err(internal_error(format!("failed to save api key: {err}"))),
@@ -510,7 +514,7 @@ impl AccountRequestProcessor {
                 self.config.auth_keyring_backend_kind(),
             )
             .map_err(|err| internal_error(format!("failed to save Amazon Bedrock auth: {err}")))?;
-            self.auth_manager.reload().await;
+            self.reload_active_auth_state().await;
             Ok(LoginAccountResponse::AmazonBedrock {})
         }
         .await;
@@ -1059,14 +1063,7 @@ impl AccountRequestProcessor {
             )))
             .await
             .map_err(|err| internal_error(format!("failed to set external auth: {err}")))?;
-        self.config_manager.replace_cloud_config_bundle_loader(
-            self.auth_manager.clone(),
-            self.config.chatgpt_base_url.clone(),
-            self.config.http_client_factory(),
-        );
-        self.config_manager
-            .sync_default_client_residency_requirement()
-            .await;
+        self.reload_active_auth_state().await;
 
         Ok(LoginAccountResponse::ChatgptAuthTokens {})
     }
@@ -1117,7 +1114,7 @@ impl AccountRequestProcessor {
 
         if success {
             let auth_manager = thread_manager.auth_manager();
-            auth_manager.reload().await;
+            thread_manager.reload_auth_for_loaded_threads().await;
             config_manager.replace_cloud_config_bundle_loader(
                 auth_manager.clone(),
                 config.chatgpt_base_url.clone(),
@@ -1177,6 +1174,8 @@ impl AccountRequestProcessor {
         if managed_bedrock_auth {
             clear_user_model_provider_if_bedrock(&self.config_manager).await?;
         }
+
+        self.reload_active_auth_state().await;
 
         Self::maybe_refresh_plugin_caches_for_current_config(
             &self.config_manager,
