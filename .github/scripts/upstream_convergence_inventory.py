@@ -77,6 +77,15 @@ RULES = (
     ),
     Rule(
         patterns=(
+            "codex-rs/tui/Cargo.toml",
+            "codex-rs/tui/src/debug_config.rs",
+        ),
+        lane="red_manual_review",
+        contracts=("RELEASE-1",),
+        reason="local build provenance diagnostics",
+    ),
+    Rule(
+        patterns=(
             "codex-rs/login/**",
             "codex-rs/secrets/**",
             "codex-rs/core/src/account_switching*",
@@ -164,6 +173,9 @@ RULES = (
             "codex-rs/version/**",
             "scripts/codex_lab_package/**",
             "scripts/*codex_lab*",
+            "scripts/local/cargo-build-env.sh",
+            "scripts/local/install-codex-lab-dev.sh",
+            "scripts/local/test_install_codex_lab_dev.py",
         ),
         lane="intentionally_owned",
         contracts=("RELEASE-1",),

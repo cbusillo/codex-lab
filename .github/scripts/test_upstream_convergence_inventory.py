@@ -66,6 +66,28 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
         self.assertEqual(classified["lane"], "intentionally_owned")
         self.assertEqual(classified["contracts"], ["AGENT-1", "INTEGRATION-1"])
 
+    def test_tui_provenance_diagnostics_require_manual_review(self) -> None:
+        self.assertEqual(
+            inventory.classify_path("codex-rs/tui/src/debug_config.rs"),
+            {
+                "path": "codex-rs/tui/src/debug_config.rs",
+                "lane": "red_manual_review",
+                "contracts": ["RELEASE-1"],
+                "reason": "local build provenance diagnostics",
+            },
+        )
+
+    def test_dogfood_launcher_is_intentionally_owned(self) -> None:
+        self.assertEqual(
+            inventory.classify_path("scripts/local/install-codex-lab-dev.sh"),
+            {
+                "path": "scripts/local/install-codex-lab-dev.sh",
+                "lane": "intentionally_owned",
+                "contracts": ["RELEASE-1"],
+                "reason": "Every Code distribution authority",
+            },
+        )
+
     def test_classify_path_omits_conflict_type(self) -> None:
         self.assertNotIn(
             "conflictType", inventory.classify_path("codex-rs/core/src/lib.rs")

@@ -755,19 +755,19 @@ interrupt_message = false
             executable_path: "/opt/codex-lab/bin/codex-lab".to_string(),
         };
 
-        assert_eq!(
+        insta::assert_snapshot!(
             render_to_text(&render_build_provenance_lines(&provenance)),
-            concat!(
-                "\n",
-                "Build provenance:\n",
-                "  - schema_version = 1\n",
-                "  - version = 1.2.3\n",
-                "  - source_commit = 0123456789abcdef0123456789abcdef01234567\n",
-                "  - dirty_state = clean\n",
-                "  - build_profile = release\n",
-                "  - build_channel = codex-lab\n",
-                "  - executable_path = /opt/codex-lab/bin/codex-lab",
-            )
+            @r###"
+
+Build provenance:
+  - schema_version = 1
+  - version = 1.2.3
+  - source_commit = 0123456789abcdef0123456789abcdef01234567
+  - dirty_state = clean
+  - build_profile = release
+  - build_channel = codex-lab
+  - executable_path = /opt/codex-lab/bin/codex-lab
+"###
         );
     }
 

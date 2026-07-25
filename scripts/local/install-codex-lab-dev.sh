@@ -126,10 +126,12 @@ if ! command -v cargo >/dev/null 2>&1 && [ -f "\$HOME/.cargo/env" ]; then
 fi
 
 export CODEX_LAB_CARGO_TARGET_SCOPE="\${CODEX_LAB_CARGO_TARGET_SCOPE:-worktree}"
-cargo_env="\$("\$REPO_ROOT/scripts/local/cargo-build-env.sh")"
-eval "\$cargo_env"
-unset cargo_env
-cargo build -p codex-cli --bin codex-lab ${cargo_profile_args[*]-} --manifest-path "\$REPO_ROOT/codex-rs/Cargo.toml" >/dev/null
+CARGO_TARGET_DIR="\$("\$REPO_ROOT/scripts/local/cargo-build-env.sh")"
+export CARGO_TARGET_DIR
+(
+  cd "\$REPO_ROOT/codex-rs"
+  cargo build -p codex-cli --bin codex-lab ${cargo_profile_args[*]-} --manifest-path Cargo.toml >/dev/null
+)
 TARGET_ROOT="\${CARGO_TARGET_DIR:-\$REPO_ROOT/codex-rs/target}"
 candidate="\$("\$PYTHON_BIN" "\$REPO_ROOT/scripts/local/codex_lab_provenance.py" \\
   --repo-root "\$REPO_ROOT" \\
