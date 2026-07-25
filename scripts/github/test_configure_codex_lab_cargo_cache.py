@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -124,6 +125,7 @@ class ConfigureCodexLabCargoCacheTest(unittest.TestCase):
             self.assertIn("invalid Cargo profile", completed.stderr)
             self.assertFalse(env_file.exists())
 
+    @unittest.skipUnless(shutil.which("rustc"), "needs the real rustc host triple")
     def test_falls_back_to_default_target_dir_without_artifact_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "github-env"
