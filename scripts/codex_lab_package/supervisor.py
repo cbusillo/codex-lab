@@ -179,7 +179,10 @@ def build_supervisor_runner(
 ) -> str:
     if blocked_retry_seconds <= 0:
         raise ValueError("supervisor retry interval must be greater than zero")
-    quote = lambda value: shlex.quote(str(value))
+
+    def quote(value: object) -> str:
+        return shlex.quote(str(value))
+
     return f"""#!/bin/sh
 set -u
 LAB_HOME={quote(paths.lab_home)}
