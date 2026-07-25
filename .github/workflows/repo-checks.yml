@@ -33,6 +33,34 @@ jobs:
       - name: Test blocking CI runner routing verifier
         run: python3 -m unittest discover -s .github/scripts -p 'test_verify_blocking_ci_runner_routing.py'
 
+      - name: Verify owned convergence paths survived the refresh
+        run: python3 .github/scripts/upstream_convergence_guard.py
+
+      - name: Test upstream convergence inventory and guard
+        run: |
+          python3 -m unittest discover -s .github/scripts \
+            -p 'test_upstream_convergence_*.py'
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Lint convergence guard workflows and shell
+        # Fail instead of skipping when a linter is missing from the image.
+        env:
+          CONVERGENCE_LINT_REQUIRED: "1"
+        run: |
+          python3 -m unittest discover -s .github/scripts \
+            -p 'test_convergence_guard_workflows.py'
+
+      - name: Test Codex exec harness
+        run: python3 -m unittest discover -s tools/codex-exec-harness -p 'test_*.py'
+
+      - name: Test Codex Lab provenance helper
+        run: python3 -m unittest discover -s scripts/local -p 'test_*.py'
+
       - name: Test Codex package builder
         run: python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
 

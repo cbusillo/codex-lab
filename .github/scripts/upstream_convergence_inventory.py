@@ -17,6 +17,13 @@ LANE_PRIORITY = {
     "red_manual_review": 3,
 }
 
+SCHEMA_VERSION = 2
+GUARD_SCHEMA_VERSION = 1
+
+# Lanes whose local content may not silently disappear or silently revert to the
+# upstream blob during a refresh. `upstream_convergence_guard.py` enforces this.
+GUARDED_LANES = ("intentionally_owned", "red_manual_review")
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -162,6 +169,12 @@ RULES = (
         contracts=("RELEASE-1",),
         reason="Every Code distribution authority",
     ),
+    Rule(
+        patterns=("tools/codex-exec-harness/**",),
+        lane="intentionally_owned",
+        contracts=("AGENT-1", "INTEGRATION-1"),
+        reason="executable proof harness for owned product contracts",
+    ),
 )
 
 
@@ -251,7 +264,7 @@ def merge_conflicts(
     return result_tree, classified
 
 
-def classify(path: str, conflict_type: str) -> dict[str, object]:
+def classify_path(path: str) -> dict[str, object]:
     lane = "green_bulk_adopt"
     contracts: set[str] = set()
     reasons: list[str] = []
@@ -267,10 +280,20 @@ def classify(path: str, conflict_type: str) -> dict[str, object]:
         reasons.append("upstream-owned surface with no named local contract")
     return {
         "path": path,
-        "conflictType": conflict_type,
         "lane": lane,
         "contracts": sorted(contracts),
         "reason": "; ".join(reasons),
+    }
+
+
+def classify(path: str, conflict_type: str) -> dict[str, object]:
+    classified = classify_path(path)
+    return {
+        "path": classified["path"],
+        "conflictType": conflict_type,
+        "lane": classified["lane"],
+        "contracts": classified["contracts"],
+        "reason": classified["reason"],
     }
 
 
@@ -296,14 +319,18 @@ def build_inventory(repo: Path, base_ref: str, upstream_ref: str, local_ref: str
         if upstream_objects.get(path) == local_objects.get(path)
     }
     mergeable_divergent_paths = shared_paths - conflict_paths - identical_paths
-    silent_local_influence_paths = {
+    # Paths where the non-conflicting merge result keeps local content instead of
+    # the upstream blob. The merge *retains* this local influence silently; it
+    # does not reject it, which is why every path here needs a contract lane.
+    residual_paths = sorted(
         path
         for path in local_paths - conflict_paths
         if result_objects.get(path) != upstream_objects.get(path)
-    }
+    )
+    residuals = [classify_path(path) for path in residual_paths]
 
     return {
-        "schemaVersion": 1,
+        "schemaVersion": SCHEMA_VERSION,
         "repository": "openai/codex",
         "refs": {
             "base": base,
@@ -319,29 +346,58 @@ def build_inventory(repo: Path, base_ref: str, upstream_ref: str, local_ref: str
             "localChangedOnly": len(local_paths - upstream_paths),
             "sharedIdentical": len(identical_paths),
             "sharedMergeableDivergent": len(mergeable_divergent_paths),
-            "silentLocalInfluence": len(silent_local_influence_paths),
+            "residualLocalInfluence": len(residuals),
         },
         "conflictTypeCounts": dict(
             sorted(Counter(entry["conflictType"] for entry in conflicts).items())
         ),
         "laneCounts": dict(sorted(Counter(entry["lane"] for entry in conflicts).items())),
+        "residualLaneCounts": dict(
+            sorted(Counter(entry["lane"] for entry in residuals).items())
+        ),
         "conflicts": conflicts,
+        "residuals": residuals,
     }
 
 
-def render_json(inventory: dict[str, object]) -> str:
-    conflicts = inventory["conflicts"]
-    header = {key: value for key, value in inventory.items() if key != "conflicts"}
+def render_records(header: dict[str, object], key: str, records: list[object]) -> str:
     lines = ["{"]
-    items = list(header.items())
-    for key, value in items:
-        lines.append(f"  {json.dumps(key)}: {json.dumps(value, sort_keys=True)},")
-    lines.append('  "conflicts": [')
-    for index, conflict in enumerate(conflicts):
-        comma = "," if index + 1 < len(conflicts) else ""
-        lines.append(f"    {json.dumps(conflict, sort_keys=True)}{comma}")
+    for header_key, value in header.items():
+        lines.append(f"  {json.dumps(header_key)}: {json.dumps(value, sort_keys=True)},")
+    lines.append(f"  {json.dumps(key)}: [")
+    for index, record in enumerate(records):
+        comma = "," if index + 1 < len(records) else ""
+        lines.append(f"    {json.dumps(record, sort_keys=True)}{comma}")
     lines.extend(("  ]", "}"))
     return "\n".join(lines) + "\n"
+
+
+def render_json(inventory: dict[str, object]) -> str:
+    header = {
+        key: value
+        for key, value in inventory.items()
+        if key not in ("conflicts", "residuals")
+    }
+    return render_records(header, "conflicts", inventory["conflicts"])
+
+
+def render_residuals(inventory: dict[str, object]) -> str:
+    """Machine-readable list of paths a refresh would silently keep from local."""
+
+    header = {
+        "schemaVersion": inventory["schemaVersion"],
+        "repository": inventory["repository"],
+        "refs": inventory["refs"],
+        "policy": {
+            "rule": (
+                "A residual path is a non-conflicting path whose merge result "
+                "differs from upstream, so local content survives without review."
+            ),
+        },
+        "summary": {"residualLocalInfluence": inventory["summary"]["residualLocalInfluence"]},
+        "residualLaneCounts": inventory["residualLaneCounts"],
+    }
+    return render_records(header, "residuals", inventory["residuals"])
 
 
 def render_markdown(inventory: dict[str, object]) -> str:
@@ -356,7 +412,11 @@ def render_markdown(inventory: dict[str, object]) -> str:
         f"- Upstream snapshot: `{refs['upstream']}`",
         f"- Local baseline: `{refs['local']}`",
         f"- Conflicts: {summary['conflicts']}",
-        f"- Silent local-influence paths rejected by an upstream-first merge: {summary['silentLocalInfluence']}",
+        f"- Residual local-influence paths retained by an upstream-first merge: {summary['residualLocalInfluence']}",
+        "",
+        "Residual paths merge cleanly, so no reviewer sees them. The merge keeps",
+        "local content there instead of upstream content; it does not reject it.",
+        "`residuals.json` lists every one with its contract lane.",
         "",
         "## Counts",
         "",
@@ -367,6 +427,8 @@ def render_markdown(inventory: dict[str, object]) -> str:
         lines.append(f"| Conflict `{key}` | {value} |")
     for key, value in lane_counts.items():
         lines.append(f"| Lane `{key}` | {value} |")
+    for key, value in inventory["residualLaneCounts"].items():
+        lines.append(f"| Residual lane `{key}` | {value} |")
     lines.extend(
         (
             "",
@@ -389,9 +451,73 @@ def render_markdown(inventory: dict[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def build_guard_manifest(
+    repo: Path, base_ref: str, upstream_ref: str, local_ref: str
+) -> dict[str, object]:
+    """Record the owned paths a later refresh must not silently drop or revert.
+
+    Only paths whose local blob already differs from upstream are guarded: a path
+    that is byte-identical at the ownership baseline has no local delta to lose.
+    """
+
+    base = resolve_commit(repo, base_ref)
+    upstream = resolve_commit(repo, upstream_ref)
+    local = resolve_commit(repo, local_ref)
+    upstream_objects = tree_objects(repo, upstream)
+    local_objects = tree_objects(repo, local)
+
+    guarded: list[dict[str, object]] = []
+    for path, baseline_blob in sorted(local_objects.items()):
+        classified = classify_path(path)
+        if classified["lane"] not in GUARDED_LANES:
+            continue
+        upstream_blob = upstream_objects.get(path)
+        if upstream_blob == baseline_blob:
+            continue
+        guarded.append(
+            {
+                "path": path,
+                "lane": classified["lane"],
+                "contracts": classified["contracts"],
+                "reason": classified["reason"],
+                "baselineBlob": baseline_blob,
+                "upstreamBlob": upstream_blob,
+            }
+        )
+
+    header = {
+        "schemaVersion": GUARD_SCHEMA_VERSION,
+        "repository": "openai/codex",
+        "ownershipBaseline": {
+            "base": base,
+            "upstream": upstream,
+            "local": local,
+        },
+        "policy": {
+            "guardedLanes": list(GUARDED_LANES),
+            "rule": (
+                "An owned path may not be absent from the candidate, and may not "
+                "match the recorded upstream blob, without an explicit waiver."
+            ),
+        },
+        "summary": {
+            "guardedPaths": len(guarded),
+            "guardedLaneCounts": dict(
+                sorted(Counter(entry["lane"] for entry in guarded).items())
+            ),
+        },
+    }
+    return {**header, "guardedPaths": guarded}
+
+
+def render_guard(manifest: dict[str, object]) -> str:
+    header = {key: value for key, value in manifest.items() if key != "guardedPaths"}
+    return render_records(header, "guardedPaths", manifest["guardedPaths"])
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("format", choices=("json", "markdown"))
+    parser.add_argument("format", choices=("json", "markdown", "residuals", "guard"))
     parser.add_argument("base")
     parser.add_argument("upstream")
     parser.add_argument("local")
@@ -399,16 +525,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+RENDERERS = {
+    "json": render_json,
+    "markdown": render_markdown,
+    "residuals": render_residuals,
+}
+
+
 def main() -> None:
     args = parse_args()
-    inventory = build_inventory(
-        Path(args.repo).resolve(),
-        args.base,
-        args.upstream,
-        args.local,
-    )
-    renderer = render_json if args.format == "json" else render_markdown
-    print(renderer(inventory), end="")
+    repo = Path(args.repo).resolve()
+    if args.format == "guard":
+        manifest = build_guard_manifest(repo, args.base, args.upstream, args.local)
+        print(render_guard(manifest), end="")
+        return
+    inventory = build_inventory(repo, args.base, args.upstream, args.local)
+    print(RENDERERS[args.format](inventory), end="")
 
 
 if __name__ == "__main__":
