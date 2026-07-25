@@ -21,6 +21,7 @@ once_cell = { workspace = true }
 regex = "1"
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
 similar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

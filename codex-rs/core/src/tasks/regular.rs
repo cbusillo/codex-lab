@@ -2,7 +2,14 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::context::ContextualUserFragment;
+use crate::context::ProjectValidationFailure;
 use crate::session::TurnInput;
+use crate::session::project_validation::ProjectValidationAttempt;
+use crate::session::project_validation::ProjectValidationRun;
+use crate::session::project_validation::project_validation_worktree_fingerprint;
+use crate::session::project_validation::run_project_validation;
+use crate::session::turn::ProjectValidationEligibility;
 use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
@@ -19,6 +26,15 @@ use super::SessionTaskResult;
 
 #[derive(Default)]
 pub(crate) struct RegularTask;
+
+/// Tracks where a turn sits in the bounded validate -> correct -> revalidate
+/// cycle. Each root turn runs the project command at most twice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectValidationPhase {
+    Initial,
+    Correcting,
+    Complete,
+}
 
 impl RegularTask {
     pub(crate) fn new() -> Self {
@@ -74,8 +90,16 @@ impl SessionTask for RegularTask {
         };
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
+        let mut project_validation_phase = ProjectValidationPhase::Initial;
+        // Capture worktree state before any model work so validation can tell
+        // turn-authored changes from pre-existing ones.
+        let project_validation_worktree_at_turn_start = tokio::select! {
+            _ = cancellation_token.cancelled() => return Ok(None),
+            fingerprint = project_validation_worktree_fingerprint(&ctx) => fingerprint,
+        };
+        let mut project_validation_model_used_tools = false;
         loop {
-            let last_agent_message = run_turn(
+            let turn_result = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
                 Arc::clone(&turn_extension_data),
@@ -85,10 +109,82 @@ impl SessionTask for RegularTask {
             )
             .instrument(run_turn_span.clone())
             .await?;
-            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
-                return Ok(last_agent_message);
+            let last_agent_message = turn_result.last_agent_message.clone();
+            let validation_eligible = turn_result.project_validation_eligibility
+                == ProjectValidationEligibility::Eligible;
+            project_validation_model_used_tools |= turn_result.model_used_tools;
+            if sess.input_queue.has_pending_input(&sess.active_turn).await {
+                next_input = Vec::new();
+                continue;
             }
-            next_input = Vec::new();
+            if validation_eligible {
+                match project_validation_phase {
+                    ProjectValidationPhase::Initial => {
+                        match run_project_validation(
+                            &sess,
+                            &ctx,
+                            ProjectValidationAttempt::Initial {
+                                worktree_at_turn_start: project_validation_worktree_at_turn_start
+                                    .clone(),
+                                model_used_tools: project_validation_model_used_tools,
+                            },
+                            cancellation_token.child_token(),
+                        )
+                        .await
+                        {
+                            ProjectValidationRun::Skipped => {}
+                            ProjectValidationRun::Completed(event) => {
+                                project_validation_phase = ProjectValidationPhase::Complete;
+                                let correction = ProjectValidationFailure::from_event(&event);
+                                sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
+                                    .await;
+                                if let Some(correction) = correction {
+                                    if cancellation_token.is_cancelled() {
+                                        return Ok(None);
+                                    }
+                                    let correction_item = ContextualUserFragment::into(correction);
+                                    sess.record_conversation_items(
+                                        &ctx,
+                                        std::slice::from_ref(&correction_item),
+                                    )
+                                    .await;
+                                    project_validation_phase = ProjectValidationPhase::Correcting;
+                                    next_input = Vec::new();
+                                    continue;
+                                }
+                            }
+                            ProjectValidationRun::Cancelled => return Ok(None),
+                        }
+                    }
+                    ProjectValidationPhase::Correcting => {
+                        project_validation_phase = ProjectValidationPhase::Complete;
+                        match run_project_validation(
+                            &sess,
+                            &ctx,
+                            ProjectValidationAttempt::CorrectionRerun {
+                                worktree_at_turn_start: project_validation_worktree_at_turn_start
+                                    .clone(),
+                            },
+                            cancellation_token.child_token(),
+                        )
+                        .await
+                        {
+                            ProjectValidationRun::Skipped => {}
+                            ProjectValidationRun::Completed(event) => {
+                                sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
+                                    .await;
+                            }
+                            ProjectValidationRun::Cancelled => return Ok(None),
+                        }
+                    }
+                    ProjectValidationPhase::Complete => {}
+                }
+                if sess.input_queue.has_pending_input(&sess.active_turn).await {
+                    next_input = Vec::new();
+                    continue;
+                }
+            }
+            return Ok(last_agent_message);
         }
     }
 }

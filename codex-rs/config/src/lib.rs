@@ -32,6 +32,7 @@ pub mod test_support;
 mod thread_config;
 mod tui_keymap;
 pub mod types;
+mod validation;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -171,3 +172,12 @@ pub use thread_config::ThreadConfigLoaderFuture;
 pub use thread_config::ThreadConfigSource;
 pub use thread_config::UserThreadConfig;
 pub use toml::Value as TomlValue;
+pub use validation::DEFAULT_PROJECT_VALIDATION_TIMEOUT_MS;
+pub use validation::DEFAULT_VALIDATION_PROVIDER_TIMEOUT_MS;
+pub use validation::MAX_PROJECT_VALIDATION_TIMEOUT_MS;
+pub use validation::MAX_VALIDATION_PROVIDER_TIMEOUT_MS;
+pub use validation::ProjectValidationCommand;
+pub use validation::ShellcheckValidationProviderConfig;
+pub use validation::ValidationConfig;
+pub use validation::ValidationGroups;
+pub use validation::ValidationProviders;

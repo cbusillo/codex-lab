@@ -158,7 +158,7 @@ pub(crate) async fn run_turn(
     input: Vec<TurnInput>,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
-) -> CodexResult<Option<String>> {
+) -> CodexResult<TurnRunResult> {
     turn_context = sess
         .ensure_mcp_manager_for_execution_account(&turn_context)
         .await;
@@ -184,7 +184,7 @@ pub(crate) async fn run_turn(
         sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
             .await;
         error!("Failed to run pre-sampling compact");
-        return Ok(None);
+        return Ok(TurnRunResult::ineligible(false));
     }
 
     // run_turn owns the step used to seed context and make the first sampling request.
@@ -213,15 +213,15 @@ pub(crate) async fn run_turn(
     )
     .await
     else {
-        return Ok(None);
+        return Ok(TurnRunResult::ineligible(false));
     };
 
     if run_pending_session_start_hooks(&sess, &turn_context).await {
-        return Ok(None);
+        return Ok(TurnRunResult::ineligible(false));
     }
     let mut can_drain_pending_input = input.is_empty();
     if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
-        return Ok(None);
+        return Ok(TurnRunResult::ineligible(false));
     }
 
     sess.merge_connector_selection(explicitly_enabled_connectors.clone())
@@ -240,6 +240,8 @@ pub(crate) async fn run_turn(
     track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
 
     let mut last_agent_message: Option<String> = None;
+    let mut model_used_tools = false;
+    let mut project_validation_eligibility = ProjectValidationEligibility::Ineligible;
     let mut stop_hook_active = false;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
@@ -330,7 +332,9 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    model_used_tools: sampling_request_model_used_tools,
                 } = sampling_request_output;
+                model_used_tools |= sampling_request_model_used_tools;
                 if model_needs_follow_up {
                     sess.input_queue
                         .accept_mailbox_delivery_for_current_turn(
@@ -420,10 +424,10 @@ pub(crate) async fn run_turn(
                         let error = err.to_codex_protocol_error();
                         sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
                             .await;
-                        return Ok(None);
+                        return Ok(TurnRunResult::ineligible(model_used_tools));
                     }
                     if run_pending_session_start_hooks(&sess, &turn_context).await {
-                        return Ok(None);
+                        return Ok(TurnRunResult::ineligible(model_used_tools));
                     }
                     can_drain_pending_input = !model_needs_follow_up;
                     continue;
@@ -476,8 +480,14 @@ pub(crate) async fn run_turn(
                     )
                     .await
                     {
-                        return Ok(None);
+                        return Ok(TurnRunResult {
+                            last_agent_message: None,
+                            project_validation_eligibility:
+                                ProjectValidationEligibility::Ineligible,
+                            model_used_tools,
+                        });
                     }
+                    project_validation_eligibility = ProjectValidationEligibility::Eligible;
                     break;
                 }
                 continue;
@@ -540,7 +550,11 @@ pub(crate) async fn run_turn(
         }
     }
 
-    Ok(last_agent_message)
+    Ok(TurnRunResult {
+        last_agent_message,
+        project_validation_eligibility,
+        model_used_tools,
+    })
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -1527,6 +1541,46 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    model_used_tools: bool,
+}
+
+fn response_item_is_model_tool_activity(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::LocalShellCall { .. }
+            | ResponseItem::FunctionCall { .. }
+            | ResponseItem::ToolSearchCall { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::WebSearchCall { .. }
+            | ResponseItem::ImageGenerationCall { .. }
+    )
+}
+
+/// Whether a completed turn may trigger project validation. Turns that exit
+/// through an error or abort path stay ineligible so validation only follows a
+/// normally completed root turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectValidationEligibility {
+    Eligible,
+    Ineligible,
+}
+
+pub(crate) struct TurnRunResult {
+    pub(crate) last_agent_message: Option<String>,
+    pub(crate) project_validation_eligibility: ProjectValidationEligibility,
+    pub(crate) model_used_tools: bool,
+}
+
+impl TurnRunResult {
+    /// A turn that exited early without completing normally; project
+    /// validation must not run for it.
+    fn ineligible(model_used_tools: bool) -> Self {
+        Self {
+            last_agent_message: None,
+            project_validation_eligibility: ProjectValidationEligibility::Ineligible,
+            model_used_tools,
+        }
+    }
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -1764,6 +1818,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::TurnAborted(_)
         | EventMsg::ShutdownComplete
         | EventMsg::EnteredReviewMode(_)
+        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::RawResponseCompleted(_)
@@ -2163,6 +2218,7 @@ async fn try_run_sampling_request(
         FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
+    let mut model_used_tools = false;
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
@@ -2225,6 +2281,7 @@ async fn try_run_sampling_request(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                model_used_tools |= response_item_is_model_tool_activity(&item);
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
@@ -2315,6 +2372,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        model_used_tools,
                     });
                 }
             }
@@ -2485,6 +2543,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    model_used_tools,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {

@@ -1447,6 +1447,10 @@ pub enum EventMsg {
     /// Exited review mode with an optional final result to apply.
     ExitedReviewMode(ExitedReviewModeEvent),
 
+    /// A configured project validation command execution completed. An actionable first attempt
+    /// may be followed by one bounded correction cycle and one final completion event.
+    ProjectValidationCompleted(ProjectValidationCompletedEvent),
+
     RawResponseItem(RawResponseItemEvent),
     RawResponseCompleted(RawResponseCompletedEvent),
 
@@ -1914,6 +1918,32 @@ pub struct ExitedReviewModeEvent {
     #[ts(optional)]
     pub item_id: Option<String>,
     pub review_output: Option<ReviewOutputEvent>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectValidationStatus {
+    Passed,
+    ActionableFailure,
+    ConfigurationError,
+    TimedOut,
+    InfrastructureFailure,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ProjectValidationCompletedEvent {
+    pub turn_id: String,
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<AbsolutePathBuf>,
+    pub status: ProjectValidationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_code: Option<i32>,
+    pub output: String,
+    pub output_truncated: bool,
+    pub duration_ms: u64,
 }
 
 // Individual event payload types matching each `EventMsg` variant.
