@@ -8,6 +8,33 @@ use std::borrow::Cow;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
 use super::repair_legacy_recency_migration_version;
+use super::runtime_state_migrator;
+
+/// Ledger rows recorded by released Codex Lab builds, taken from a production
+/// `state_5.sqlite`. A shipped database sits at version 38 with exactly these
+/// checksums, so renumbering or editing 36-38 breaks every upgrade with
+/// `VersionMismatch`.
+const SHIPPED_STATE_LEDGER: [(i64, &str, &str); 3] = [
+    (
+        36,
+        "threads session provenance",
+        "b38744bf3efe7b3a4e2e4b0c0c4f02fee8e86f52737d292861c6b3e743862071d455035212574cdd94ac2960569038f0",
+    ),
+    (
+        37,
+        "threads history mode",
+        "a7a99674f90a43184e43d66595c4f1da50ae8715a5bfcb1579a2b7b10668335d7f7ab6b6f2d7a7a379272773d803a914",
+    ),
+    (
+        38,
+        "threads visible sort indexes",
+        "1db0d894de7b47b979b02e5a77aa241eba5150007c9a4de75e2754814af8a841dd837874173996d87532ba4e35d06387",
+    ),
+];
+
+fn checksum_hex(checksum: &[u8]) -> String {
+    checksum.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
@@ -42,7 +69,7 @@ async fn pinned_threads_migration_defaults_existing_and_legacy_rows_to_unpinned(
         .open_read_write_pool(&state_path)
         .await
         .expect("sqlite database should open");
-    migrator_through(/*version*/ 42)
+    migrator_through(/*version*/ 43)
         .run(&pool)
         .await
         .expect("pre-pin migrations should apply");
@@ -278,7 +305,7 @@ async fn recency_migration_backfills_and_seeds_old_binary_inserts() {
         .open_read_write_pool(&state_path)
         .await
         .expect("sqlite database should open");
-    migrator_through(/*version*/ 37)
+    migrator_through(/*version*/ 40)
         .run(&pool)
         .await
         .expect("pre-recency migrations should apply");
@@ -377,8 +404,7 @@ INSERT INTO threads (
     pool.close().await;
 }
 
-#[tokio::test]
-async fn repairs_recency_migration_that_was_applied_as_version_38() {
+async fn assert_recency_repair_from_legacy_version(legacy_version: i64) {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
         .await
@@ -392,7 +418,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .open_read_write_pool(&state_path)
         .await
         .expect("sqlite database should open");
-    migrator_through(/*version*/ 37)
+    migrator_through(legacy_version - 1)
         .run(&pool)
         .await
         .expect("pre-recency migrations should apply");
@@ -400,16 +426,16 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
     let recency_migration = STATE_MIGRATOR
         .migrations
         .iter()
-        .find(|migration| migration.version == 39)
+        .find(|migration| migration.description == "threads recency at")
         .expect("recency migration should exist");
     let mut legacy_migrations = STATE_MIGRATOR
         .migrations
         .iter()
-        .filter(|migration| migration.version <= 37)
+        .filter(|migration| migration.version < legacy_version)
         .cloned()
         .collect::<Vec<_>>();
     legacy_migrations.push(Migration::new(
-        38,
+        legacy_version,
         recency_migration.description.clone(),
         recency_migration.migration_type,
         recency_migration.sql.clone(),
@@ -419,7 +445,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
     legacy_recency_migrator
         .run(&pool)
         .await
-        .expect("legacy recency migration should apply as version 38");
+        .expect("legacy recency migration should apply under its legacy version");
 
     repair_legacy_recency_migration_version(&pool, &STATE_MIGRATOR)
         .await
@@ -430,8 +456,9 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .expect("current migrations should apply after repair");
 
     let applied = sqlx::query(
-        "SELECT version, checksum FROM _sqlx_migrations WHERE version >= 38 ORDER BY version",
+        "SELECT version, checksum FROM _sqlx_migrations WHERE version >= ? ORDER BY version",
     )
+    .bind(legacy_version)
     .fetch_all(&pool)
     .await
     .expect("applied migrations should load")
@@ -446,12 +473,22 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
     let expected = STATE_MIGRATOR
         .migrations
         .iter()
-        .filter(|migration| migration.version >= 38)
+        .filter(|migration| migration.version >= legacy_version)
         .map(|migration| (migration.version, migration.checksum.to_vec()))
         .collect::<Vec<_>>();
     assert_eq!(applied, expected);
 
     pool.close().await;
+}
+
+#[tokio::test]
+async fn repairs_recency_migration_that_was_applied_as_version_38() {
+    assert_recency_repair_from_legacy_version(/*legacy_version*/ 38).await;
+}
+
+#[tokio::test]
+async fn repairs_recency_migration_that_was_applied_as_version_39() {
+    assert_recency_repair_from_legacy_version(/*legacy_version*/ 39).await;
 }
 
 #[tokio::test]
@@ -493,4 +530,173 @@ async fn repair_recency_migration_succeeds_while_another_connection_holds_writer
     read_pool.close().await;
     pool.close().await;
     repair_result.expect("current migration history should not need the writer slot");
+}
+
+#[test]
+fn shipped_state_ledger_versions_stay_frozen() {
+    for (version, description, checksum) in SHIPPED_STATE_LEDGER {
+        let migration = STATE_MIGRATOR
+            .migrations
+            .iter()
+            .find(|migration| migration.version == version)
+            .unwrap_or_else(|| panic!("state migration {version} should exist"));
+        assert_eq!(
+            (
+                migration.description.as_ref(),
+                checksum_hex(&migration.checksum).as_str()
+            ),
+            (description, checksum),
+            "state migration {version} must stay byte-for-byte identical to the shipped release"
+        );
+    }
+}
+
+#[tokio::test]
+async fn upgrades_database_shipped_at_state_version_38() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 38)
+        .run(&pool)
+        .await
+        .expect("shipped migrations should apply");
+
+    let shipped_ledger = sqlx::query(
+        "SELECT version, description, checksum FROM _sqlx_migrations WHERE version >= 36 ORDER BY version",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("shipped ledger should load")
+    .into_iter()
+    .map(|row| {
+        (
+            row.get::<i64, _>("version"),
+            row.get::<String, _>("description"),
+            checksum_hex(&row.get::<Vec<u8>, _>("checksum")),
+        )
+    })
+    .collect::<Vec<_>>();
+    let expected_ledger = SHIPPED_STATE_LEDGER
+        .into_iter()
+        .map(|(version, description, checksum)| {
+            (version, description.to_string(), checksum.to_string())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shipped_ledger, expected_ledger,
+        "fixture should reproduce the ledger of a released Codex Lab database"
+    );
+
+    sqlx::query(
+        r#"
+INSERT INTO threads (
+    id,
+    rollout_path,
+    created_at,
+    updated_at,
+    created_at_ms,
+    updated_at_ms,
+    source,
+    model_provider,
+    cwd,
+    title,
+    preview,
+    sandbox_policy,
+    approval_mode
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("00000000-0000-0000-0000-000000000038")
+    .bind("/tmp/shipped.jsonl")
+    .bind(1_700_000_000_i64)
+    .bind(1_700_000_000_i64)
+    .bind(1_700_000_000_000_i64)
+    .bind(1_700_000_000_000_i64)
+    .bind("cli")
+    .bind("openai")
+    .bind("/tmp")
+    .bind("")
+    .bind("shipped preview")
+    .bind("read-only")
+    .bind("on-request")
+    .execute(&pool)
+    .await
+    .expect("shipped thread insert should succeed");
+
+    let migrator = runtime_state_migrator();
+    repair_legacy_recency_migration_version(&pool, &migrator)
+        .await
+        .expect("shipped migration history should need no repair");
+    migrator
+        .run(&pool)
+        .await
+        .expect("shipped database should upgrade without a version mismatch");
+
+    let applied = sqlx::query_scalar::<_, i64>("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .expect("ledger head should load");
+    let head = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .expect("state migrator should have migrations");
+    assert_eq!(applied, head);
+
+    let upgraded = sqlx::query(
+        r#"
+SELECT session_provenance, history_mode, recency_at_ms, is_pinned, name
+FROM threads
+WHERE id = ?
+        "#,
+    )
+    .bind("00000000-0000-0000-0000-000000000038")
+    .fetch_one(&pool)
+    .await
+    .expect("shipped thread should survive the upgrade");
+    assert_eq!(
+        upgraded.get::<Option<String>, _>("session_provenance"),
+        None
+    );
+    assert_eq!(upgraded.get::<String, _>("history_mode"), "legacy");
+    assert_eq!(
+        upgraded.get::<i64, _>("recency_at_ms"),
+        1_700_000_000_000_i64
+    );
+    assert!(!upgraded.get::<bool, _>("is_pinned"));
+    assert_eq!(upgraded.get::<Option<String>, _>("name"), None);
+
+    let visible_indexes = sqlx::query_scalar::<_, String>(
+        r#"
+SELECT name
+FROM sqlite_master
+WHERE type = 'index' AND name IN (?, ?)
+ORDER BY name
+        "#,
+    )
+    .bind("idx_threads_visible_created_at_ms")
+    .bind("idx_threads_visible_updated_at_ms")
+    .fetch_all(&pool)
+    .await
+    .expect("visible sort indexes should load");
+    assert_eq!(
+        visible_indexes,
+        vec![
+            "idx_threads_visible_created_at_ms".to_string(),
+            "idx_threads_visible_updated_at_ms".to_string(),
+        ]
+    );
+
+    pool.close().await;
 }
