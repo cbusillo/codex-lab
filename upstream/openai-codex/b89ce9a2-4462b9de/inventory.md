@@ -4,7 +4,11 @@
 - Upstream snapshot: `4462b9deef211723b781b426f5e5d36a5777115f`
 - Local baseline: `8add494682f7c0674672e8dc5b38a4565cd7629b`
 - Conflicts: 295
-- Silent local-influence paths rejected by an upstream-first merge: 478
+- Residual local-influence paths retained by an upstream-first merge: 478
+
+Residual paths merge cleanly, so no reviewer sees them. The merge keeps
+local content there instead of upstream content; it does not reject it.
+`residuals.json` lists every one with its contract lane.
 
 ## Counts
 
@@ -17,6 +21,10 @@
 | Lane `green_bulk_adopt` | 166 |
 | Lane `intentionally_owned` | 12 |
 | Lane `red_manual_review` | 7 |
+| Residual lane `amber_contract_adapt` | 147 |
+| Residual lane `green_bulk_adopt` | 213 |
+| Residual lane `intentionally_owned` | 115 |
+| Residual lane `red_manual_review` | 3 |
 
 ## Contract-reviewed conflicts
 

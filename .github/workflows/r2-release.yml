@@ -22,6 +22,11 @@ jobs:
     environment: codex-r2-publisher
     permissions:
       contents: read
+    # Assets are downloaded from openai/codex and uploaded to the upstream R2
+    # `releases` bucket. Callers already gate on this; guarding here too keeps
+    # the reusable workflow fork-safe for any future caller. publish_r2_release
+    # repeats the check at runtime before it reads a credential.
+    if: ${{ github.repository == 'openai/codex' }}
 
     steps:
       - name: Checkout

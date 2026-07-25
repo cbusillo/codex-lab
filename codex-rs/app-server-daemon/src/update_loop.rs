@@ -16,9 +16,13 @@ use codex_http_client::HttpClientFactory;
 #[cfg(unix)]
 use codex_http_client::RouteAwareClientPool;
 #[cfg(unix)]
+use codex_utils_home_dir::find_codex_home;
+#[cfg(unix)]
 use futures::FutureExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::path::Path;
 #[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
@@ -167,13 +171,33 @@ pub(crate) fn reexec_managed_updater(managed_codex_bin: &std::path::Path) -> Res
 
 #[cfg(unix)]
 async fn install_latest_standalone(http: &RouteAwareClientPool) -> Result<()> {
+    let codex_lab_home = find_codex_home().context("failed to resolve CODEX_LAB_HOME")?;
     let script = fetch_installer_script(http).await?;
+    run_installer_script(installer_shell_command(codex_lab_home.as_path()), &script).await
+}
 
-    let mut child = Command::new("/bin/sh")
+/// Builds the shell invocation that runs the standalone installer script.
+///
+/// The upstream standalone installer only understands `CODEX_HOME`. Scope the translation to this
+/// child process so Codex Lab still uses `CODEX_LAB_HOME` as its public home selector everywhere
+/// else, and drop the legacy `CODE_HOME` selector so an inherited value cannot redirect the
+/// install.
+#[cfg(unix)]
+fn installer_shell_command(codex_lab_home: &Path) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-s")
+        .env("CODEX_HOME", codex_lab_home)
+        .env_remove("CODE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[cfg(unix)]
+async fn run_installer_script(mut command: Command, script: &[u8]) -> Result<()> {
+    let mut child = command
         .spawn()
         .context("failed to invoke standalone Codex updater")?;
     let mut stdin = child
@@ -181,7 +205,7 @@ async fn install_latest_standalone(http: &RouteAwareClientPool) -> Result<()> {
         .take()
         .context("standalone Codex updater stdin was unavailable")?;
     stdin
-        .write_all(&script)
+        .write_all(script)
         .await
         .context("failed to pass standalone Codex updater to shell")?;
     drop(stdin);
