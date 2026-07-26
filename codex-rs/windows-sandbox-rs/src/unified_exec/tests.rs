@@ -615,13 +615,25 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
         .expect("sandbox descendant did not exit after release");
 }
 
+/// Named outcome so a failure reports which containment expectation broke
+/// instead of diffing an anonymous tuple.
+#[derive(Debug, PartialEq, Eq)]
+struct LegacyDeleteOutcome {
+    exit_code: i32,
+    workspace_file_exists: bool,
+    temp_file_exists: bool,
+    tmp_file_exists: bool,
+    outside_file_contents: Option<String>,
+    protected_git_dir_exists: bool,
+}
+
 #[test]
 fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
     runtime.block_on(async move {
-        let user_profile = std::env::var_os("USERPROFILE").expect("USERPROFILE should be set");
-        let test_root = TempDir::new_in(user_profile).expect("create legacy delete test root");
+        // Keep writable roots out of USERPROFILE exclusions such as AppData.
+        let test_root = TempDir::new_in(sandbox_cwd()).expect("create legacy delete test root");
         let codex_home = sandbox_home("legacy-delete-writable-roots");
         let workspace = test_root.path().join("workspace");
         let temp_root = test_root.path().join("temp");
@@ -710,16 +722,25 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         let stdout = String::from_utf8_lossy(&stdout);
 
         assert_eq!(
-            (
+            LegacyDeleteOutcome {
                 exit_code,
-                workspace_file.exists(),
-                temp_file.exists(),
-                tmp_file.exists(),
-                fs::read_to_string(&outside_file).ok(),
-                protected_git_dir.is_dir(),
-            ),
-            (0, false, false, false, Some("outside".to_string()), true),
-            "stdout={stdout:?}\n{}",
+                workspace_file_exists: workspace_file.exists(),
+                temp_file_exists: temp_file.exists(),
+                tmp_file_exists: tmp_file.exists(),
+                outside_file_contents: fs::read_to_string(&outside_file).ok(),
+                protected_git_dir_exists: protected_git_dir.is_dir(),
+            },
+            LegacyDeleteOutcome {
+                exit_code: 0,
+                workspace_file_exists: false,
+                temp_file_exists: false,
+                tmp_file_exists: false,
+                outside_file_contents: Some("outside".to_string()),
+                protected_git_dir_exists: true,
+            },
+            "test_root={}\nworkspace={}\nstdout={stdout:?}\n{}",
+            test_root.path().display(),
+            workspace.display(),
             sandbox_log(codex_home.path())
         );
     });

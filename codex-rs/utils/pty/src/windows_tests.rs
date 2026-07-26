@@ -14,6 +14,17 @@ use std::time::Duration;
 const READY_MARKER: &str = "__CODEX_CHILD_READY__";
 const VALUE_MARKER: &str = "__CODEX_CHILD_VALUE__";
 
+/// How long the root process waits for its detached child to publish the ready
+/// marker. Loaded Windows CI workers regularly need more than a few seconds to
+/// start a second Python interpreter.
+const NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS: u64 = 30;
+
+/// How long the harness waits for the root process to exit. This must stay
+/// strictly larger than the child-readiness budget: if the two deadlines are
+/// equal, the harness can give up in the same instant the root is deciding its
+/// exit code, which reports a harness timeout instead of the real behavior.
+const NORMAL_EXIT_ROOT_TIMEOUT_MS: u64 = 45_000;
+
 struct WindowsShell {
     name: &'static str,
     program: String,
@@ -130,10 +141,24 @@ async fn assert_normal_exit_preserves_descendant(
         utf8_hex(&ready_marker.to_string_lossy()),
         utf8_hex(&survival_marker.to_string_lossy())
     );
+    // The root reports each stage on stdout so a failure says whether the
+    // detached child was never spawned, never became ready, or was ready and the
+    // root still failed to exit.
     let code = format!(
-        "import pathlib,subprocess,sys,time; code=bytes.fromhex('{}').decode(); ready=pathlib.Path(bytes.fromhex('{}').decode()); subprocess.Popen([sys.executable,'-u','-c',code],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP); deadline=time.time()+10\nwhile not ready.exists() and time.time()<deadline: time.sleep(.05)\nsys.exit(0 if ready.exists() else 2)",
-        utf8_hex(&child_code),
-        utf8_hex(&ready_marker.to_string_lossy())
+        "import pathlib,subprocess,sys,time\n\
+         code=bytes.fromhex('{child_code_hex}').decode()\n\
+         ready=pathlib.Path(bytes.fromhex('{ready_marker_hex}').decode())\n\
+         child=subprocess.Popen([sys.executable,'-u','-c',code],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP)\n\
+         print('ROOT_SPAWNED_CHILD pid='+str(child.pid),flush=True)\n\
+         deadline=time.time()+{NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS}\n\
+         while not ready.exists() and time.time()<deadline: time.sleep(.05)\n\
+         if not ready.exists():\n\
+         \x20   print('ROOT_CHILD_NOT_READY after {NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS}s',flush=True)\n\
+         \x20   sys.exit(2)\n\
+         print('ROOT_CHILD_READY',flush=True)\n\
+         sys.exit(0)\n",
+        child_code_hex = utf8_hex(&child_code),
+        ready_marker_hex = utf8_hex(&ready_marker.to_string_lossy())
     );
     let args = vec!["-u".to_string(), "-c".to_string(), code];
     let spawned = if backend == "pipe" {
@@ -151,14 +176,26 @@ async fn assert_normal_exit_preserves_descendant(
         .await?
     };
     let (session, output_rx, exit_rx) = combine_spawned_output(spawned);
-    let (_, exit_code) = collect_output_until_exit(output_rx, exit_rx, /*timeout_ms*/ 10_000).await;
-    assert_eq!(exit_code, 0, "{backend} root did not exit normally");
+    let (root_output, exit_code) = collect_output_until_exit(
+        output_rx,
+        exit_rx,
+        /*timeout_ms*/ NORMAL_EXIT_ROOT_TIMEOUT_MS,
+    )
+    .await;
+    let root_output = String::from_utf8_lossy(&root_output).into_owned();
+    assert_eq!(
+        exit_code, 0,
+        "{backend} root did not exit normally: root_output={root_output:?}"
+    );
     drop(session);
 
     let survived = wait_for_path(&survival_marker, Duration::from_secs(10)).await;
     let _ = std::fs::remove_file(ready_marker);
     let _ = std::fs::remove_file(survival_marker);
-    assert!(survived, "{backend} descendant did not survive normal exit");
+    assert!(
+        survived,
+        "{backend} descendant did not survive normal exit: root_output={root_output:?}"
+    );
     Ok(())
 }
 
