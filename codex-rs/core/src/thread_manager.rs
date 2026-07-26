@@ -53,6 +53,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
+use codex_protocol::protocol::MAX_TURN_ENVIRONMENT_SELECTIONS;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResumedHistory;
@@ -706,6 +707,12 @@ impl ThreadManager {
         &self,
         environments: &[TurnEnvironmentSelection],
     ) -> CodexResult<()> {
+        if environments.len() > MAX_TURN_ENVIRONMENT_SELECTIONS {
+            return Err(CodexErr::InvalidRequest(format!(
+                "too many turn environments: {} selected, at most {MAX_TURN_ENVIRONMENT_SELECTIONS} are allowed",
+                environments.len()
+            )));
+        }
         let mut environment_ids = HashSet::with_capacity(environments.len());
         for environment in environments {
             if !environment_ids.insert(environment.environment_id.as_str()) {

@@ -133,6 +133,14 @@ pub fn strip_user_message_prefix(text: &str) -> &str {
     }
 }
 
+/// Authoritative maximum number of environments a single thread/turn may select.
+///
+/// Every selected environment renders its own entry inside the model-visible
+/// `<environment_context>` fragment, so an unbounded selection list is an unbounded
+/// model-context item. This cap is enforced at the client validation boundary, at the
+/// live selection store, and again when the fragment is rendered.
+pub const MAX_TURN_ENVIRONMENT_SELECTIONS: usize = 8;
+
 // TODO(anp): Replace `TurnEnvironmentSelection` with `PathUri` once path URIs carry environment
 // identifiers.
 #[derive(Debug, Clone, PartialEq)]

@@ -2,6 +2,7 @@ mod agents_md;
 mod apps_instructions;
 mod collaboration_mode;
 mod environment;
+pub(crate) mod environment_limits;
 mod environments_instructions;
 mod multi_agent_mode;
 mod permissions;
@@ -158,6 +159,16 @@ impl ErasedWorldStateSection for ExtensionWorldStateSection {
     }
 }
 
+/// Hard byte cap the harness applies to every extension-contributed world-state fragment.
+///
+/// Extension bodies enter the permanent model-context prefix, so their size cannot be left to
+/// extension authors. At the repo's ~4-bytes-per-token approximation this stays well under the
+/// 10K-token per-item limit even for pathological single-byte-token content.
+pub(crate) const MAX_EXTENSION_FRAGMENT_BODY_BYTES: usize = 16_384;
+
+const EXTENSION_FRAGMENT_TRUNCATION_NOTICE: &str =
+    "\n[truncated: extension world-state fragment exceeded its size limit]\n";
+
 struct WorldStateContextFragment(RenderedWorldStateFragment);
 
 impl ContextualUserFragment for WorldStateContextFragment {
@@ -170,12 +181,29 @@ impl ContextualUserFragment for WorldStateContextFragment {
     }
 
     fn body(&self) -> String {
-        self.0.body().to_string()
+        bound_extension_fragment_body(self.0.body())
     }
 
     fn type_markers() -> (&'static str, &'static str) {
         ("", "")
     }
+}
+
+/// Truncate an extension-contributed fragment body to [`MAX_EXTENSION_FRAGMENT_BODY_BYTES`] on a
+/// UTF-8 boundary, appending a notice so the model is told the fragment is incomplete.
+pub(crate) fn bound_extension_fragment_body(body: &str) -> String {
+    if body.len() <= MAX_EXTENSION_FRAGMENT_BODY_BYTES {
+        return body.to_string();
+    }
+
+    let keep = MAX_EXTENSION_FRAGMENT_BODY_BYTES - EXTENSION_FRAGMENT_TRUNCATION_NOTICE.len();
+    let mut boundary = keep;
+    while boundary > 0 && !body.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let mut bounded = body[..boundary].to_string();
+    bounded.push_str(EXTENSION_FRAGMENT_TRUNCATION_NOTICE);
+    bounded
 }
 
 /// What is known about a section's previously model-visible state.

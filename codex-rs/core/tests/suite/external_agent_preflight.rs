@@ -4,6 +4,7 @@ use codex_core::config::AgentRoleConfig;
 use codex_core::config::ExternalCommandAgentBackendConfig;
 use codex_core::config::ExternalCommandProtocol;
 use codex_features::Feature;
+use codex_utils_output_truncation::approx_token_count;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -326,6 +327,156 @@ async fn external_command_agent_routes_through_spawn_agent_with_provider_provena
                 "workspace": workspace,
             },
         })
+    );
+
+    Ok(())
+}
+
+/// Hard cap for a whole completion envelope, mirrored from
+/// `codex_core::session_prefix::COMPLETION_MESSAGE_MAX_TOKENS`. The agent-authored payload is
+/// truncated to a 900-token budget; the shared truncator's marker can push the rendered result a
+/// few tokens past that, which is what the 100-token envelope reserve exists for.
+const COMPLETION_MESSAGE_MAX_TOKENS: usize = 1_000;
+
+fn completion_payload(agent_status: &Value) -> &str {
+    agent_status
+        .get("completed")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("expected a completed agent status: {agent_status}"))
+}
+
+/// An external agent's final message is process-authored and unbounded. It reaches the model
+/// through the `list_agents` status payload and through the inter-agent completion notification,
+/// so both paths carry the completion-payload budget. (The v2 `wait_agent` output is a fixed
+/// string and carries no payload; the v1 `wait_agent` output is bounded through the same
+/// `bounded_status` helper.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_external_agent_completion_is_bounded_in_wait_and_list_outputs() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    // ~200 KB of final message, far past any per-item model-context budget.
+    let backend = stub_cli(
+        &stub_dir,
+        "fake-verbose-provider.sh",
+        "i=0\nwhile [ $i -lt 20000 ]; do printf '0123456789'; i=$((i+1)); done\nprintf '\\n'\n",
+    );
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &spawn_agent_arguments()?,
+            ),
+            ev_completed("resp-spawn"),
+        ]),
+    )
+    .await;
+    let wait_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, SPAWN_CALL_ID) && !body_contains(request, WAIT_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-wait"),
+            ev_function_call_with_namespace(
+                WAIT_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "wait_agent",
+                &serde_json::to_string(&json!({ "timeout_ms": 5_000 }))?,
+            ),
+            ev_completed("resp-wait"),
+        ]),
+    )
+    .await;
+    let list_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, WAIT_CALL_ID) && !body_contains(request, LIST_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-list"),
+            ev_function_call_with_namespace(
+                LIST_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "list_agents",
+                "{}",
+            ),
+            ev_completed("resp-list"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, LIST_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_with_external_role(backend);
+    let test = Box::pin(builder.build(&server)).await?;
+
+    test.submit_turn(PROMPT).await?;
+
+    let wait_output: Value = serde_json::from_str(
+        list_response
+            .single_request()
+            .function_call_output(WAIT_CALL_ID)
+            .get("output")
+            .and_then(Value::as_str)
+            .expect("wait_agent output string"),
+    )?;
+    assert_eq!(
+        wait_output,
+        json!({ "message": "Wait completed.", "timed_out": false })
+    );
+
+    let listed: Value = serde_json::from_str(
+        final_response
+            .single_request()
+            .function_call_output(LIST_CALL_ID)
+            .get("output")
+            .and_then(Value::as_str)
+            .expect("list_agents output string"),
+    )?;
+    let listed_agent = listed
+        .get("agents")
+        .and_then(Value::as_array)
+        .and_then(|agents| {
+            agents
+                .iter()
+                .find(|agent| agent.get("agent_name") == Some(&json!("/root/external_probe")))
+        })
+        .unwrap_or_else(|| panic!("external agent should be listed: {listed}"));
+    let listed_payload = completion_payload(
+        listed_agent
+            .get("agent_status")
+            .expect("listed agent status"),
+    );
+    assert!(
+        approx_token_count(listed_payload) <= COMPLETION_MESSAGE_MAX_TOKENS,
+        "list_agents completion payload was {} tokens",
+        approx_token_count(listed_payload)
+    );
+
+    // The inter-agent notification path stays bounded too.
+    let notification_request = wait_response.single_request();
+    assert!(
+        !notification_request
+            .body_json()
+            .to_string()
+            .contains(&"0123456789".repeat(COMPLETION_MESSAGE_MAX_TOKENS)),
+        "the parent thread must not receive the full external agent output"
     );
 
     Ok(())

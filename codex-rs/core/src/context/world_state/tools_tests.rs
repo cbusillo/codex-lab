@@ -90,3 +90,26 @@ fn caps_rendered_tools_fragment_after_xml_escaping() {
     assert!(rendered.len() <= MAX_RENDERED_FRAGMENT_BYTES);
     assert!(rendered.contains(" additional namespaces omitted.\n"));
 }
+
+/// The `<tools>` fragment sits right at the >1K-token manual-review threshold. Pin the ceiling so
+/// a future change to `MAX_RENDERED_FRAGMENT_BYTES` cannot quietly cross it.
+#[test]
+fn tools_fragment_stays_within_the_manual_review_budget() {
+    let tools = ToolsState::new((0..100).map(|index| {
+        (
+            format!("namespace_{index}"),
+            "d".repeat(MAX_NAMESPACE_DESCRIPTION_CHARS),
+        )
+    }));
+
+    let rendered = tools
+        .render_diff(PreviousSectionState::Absent)
+        .expect("tools state should render")
+        .render();
+
+    assert!(
+        codex_utils_output_truncation::approx_token_count(&rendered) <= 1_024,
+        "tools fragment rendered {} tokens",
+        codex_utils_output_truncation::approx_token_count(&rendered)
+    );
+}
