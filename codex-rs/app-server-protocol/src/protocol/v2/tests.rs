@@ -2669,6 +2669,36 @@ fn network_requirements_serializes_canonical_and_legacy_fields() {
     );
 }
 
+/// `dynamicToolCall.error` is published from the persisted core item, so
+/// historical items that recorded a failure keep reporting it.
+#[test]
+fn dynamic_tool_call_error_is_published_from_persisted_items() {
+    let persisted = serde_json::from_value::<DynamicToolCallItem>(json!({
+        "id": "dynamic-2",
+        "tool": "lookup",
+        "arguments": {},
+        "status": "failed",
+        "success": false,
+        "error": "dynamic tool call was cancelled before receiving a response",
+    }))
+    .expect("persisted dynamic tool call item");
+
+    assert_eq!(
+        ThreadItem::from(TurnItem::DynamicToolCall(persisted)),
+        ThreadItem::DynamicToolCall {
+            id: "dynamic-2".to_string(),
+            namespace: None,
+            tool: "lookup".to_string(),
+            arguments: json!({}),
+            status: DynamicToolCallStatus::Failed,
+            content_items: None,
+            success: Some(false),
+            error: Some("dynamic tool call was cancelled before receiving a response".to_string()),
+            duration_ms: None,
+        }
+    );
+}
+
 #[test]
 fn core_turn_item_into_thread_item_converts_supported_variants() {
     let user_item = TurnItem::UserMessage(UserMessageItem {
@@ -2897,6 +2927,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                 },
             ]),
             success: Some(true),
+            error: None,
             duration_ms: Some(5),
         }
     );

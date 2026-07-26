@@ -756,6 +756,7 @@ impl ThreadHistoryBuilder {
             status: DynamicToolCallStatus::InProgress,
             content_items: None,
             success: None,
+            error: None,
             duration_ms: None,
         };
         if payload.turn_id.is_empty() {
@@ -780,6 +781,7 @@ impl ThreadHistoryBuilder {
             status,
             content_items: Some(convert_dynamic_tool_content_items(&payload.content_items)),
             success: Some(payload.success),
+            error: payload.error.clone(),
             duration_ms,
         };
         if payload.turn_id.is_empty() {
@@ -3015,6 +3017,7 @@ mod tests {
                     },
                 ]),
                 success: Some(true),
+                error: None,
                 duration_ms: Some(42),
             }
         );

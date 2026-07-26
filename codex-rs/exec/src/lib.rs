@@ -1306,6 +1306,9 @@ fn session_configured_from_thread_response(
         parent_thread_id,
         thread_source,
         thread_name,
+        // The app-server thread response does not expose the persisted history
+        // contract, so legacy consumers see the defaulted value here.
+        history_mode: codex_protocol::protocol::ThreadHistoryMode::default(),
         model,
         model_provider_id,
         service_tier,

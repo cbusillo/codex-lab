@@ -131,6 +131,58 @@ class InstallShTest(unittest.TestCase):
             )
             self.assertTrue(os.access(host_path, os.X_OK))
 
+    def test_macos_install_succeeds_without_code_mode_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, metadata_json = create_package_release(
+                root, include_code_mode_host=False
+            )
+
+            result, _requests = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata_json,
+                archive_path=archive_path,
+                checksum_path=checksum_path,
+                force_macos=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            install_bin = root / "install-bin"
+            current = root / "codex-home" / "packages" / "standalone" / "current"
+            self.assertEqual(
+                os.readlink(install_bin / "codex"), str(current / "bin" / "codex")
+            )
+            self.assertFalse((install_bin / "codex-code-mode-host").exists())
+
+    def test_reinstall_without_code_mode_host_reuses_existing_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, metadata_json = create_package_release(
+                root, include_code_mode_host=False
+            )
+
+            first_result, _first_requests = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata_json,
+                archive_path=archive_path,
+                checksum_path=checksum_path,
+                force_macos=True,
+            )
+            self.assertEqual(first_result.returncode, 0, first_result.stderr)
+
+            (root / "requests.log").unlink()
+            second_result, _second_requests = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata_json,
+                force_macos=True,
+            )
+
+            self.assertEqual(second_result.returncode, 0, second_result.stderr)
+            self.assertNotIn("Downloading Codex CLI", second_result.stdout)
+
     def test_releases_latest_installs_verified_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -443,6 +495,7 @@ def create_package_release(
     root: Path,
     *,
     metadata_version: str = VERSION,
+    include_code_mode_host: bool = True,
 ) -> tuple[Path, Path, str]:
     package_dir = root / "package"
     (package_dir / "bin").mkdir(parents=True)
@@ -452,10 +505,11 @@ def create_package_release(
         package_dir / "bin" / "codex",
         f"#!/bin/sh\nprintf 'codex-cli {VERSION}\\n'\n",
     )
-    write_executable(
-        package_dir / "bin" / "codex-code-mode-host",
-        "#!/bin/sh\nexit 0\n",
-    )
+    if include_code_mode_host:
+        write_executable(
+            package_dir / "bin" / "codex-code-mode-host",
+            "#!/bin/sh\nexit 0\n",
+        )
     write_executable(package_dir / "codex-path" / "rg", "#!/bin/sh\nexit 0\n")
 
     asset = "codex-package-aarch64-apple-darwin.tar.gz"

@@ -6,6 +6,7 @@ mod attestation;
 mod code_bridge;
 mod collaboration_mode;
 mod command_exec;
+mod command_output;
 mod config;
 mod current_time;
 mod environment;

@@ -440,7 +440,7 @@ type HostSandboxArgs = UnsupportedSandboxArgs;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Debug, Parser)]
 struct UnsupportedSandboxArgs {
-    /// Layer $CODEX_HOME/<name>.config.toml on top of the base user config.
+    /// Layer $CODEX_LAB_HOME/<name>.config.toml on top of the base user config.
     #[arg(long = "profile", short = 'p')]
     pub config_profile: Option<ProfileV2Name>,
 
@@ -2985,6 +2985,54 @@ mod tests {
         );
         assert_eq!(args.session_id.as_deref(), Some("session-123"));
         assert_eq!(args.prompt.as_deref(), Some("re-review"));
+    }
+
+    fn help_texts(command: &clap::Command, texts: &mut Vec<(String, String)>) {
+        texts.push((
+            command.get_name().to_string(),
+            command.clone().render_long_help().to_string(),
+        ));
+        for subcommand in command.get_subcommands() {
+            help_texts(subcommand, texts);
+        }
+    }
+
+    /// This binary resolves its home from `CODEX_LAB_HOME`, so help text must
+    /// not point users at the upstream `CODEX_HOME` variable or `~/.codex`.
+    #[test]
+    fn help_text_never_advertises_the_upstream_codex_home() {
+        let mut texts = Vec::new();
+        help_texts(&MultitoolCli::command(), &mut texts);
+
+        let offenders: Vec<&str> = texts
+            .iter()
+            .filter(|(_, help)| help.contains("CODEX_HOME") || help.contains("~/.codex/"))
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        assert_eq!(offenders, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn deprecated_on_failure_approval_alias_is_accepted() {
+        let cli = MultitoolCli::try_parse_from(["codex", "--ask-for-approval", "on-failure"])
+            .expect("deprecated approval alias should parse");
+
+        assert_matches!(
+            cli.interactive.approval_policy,
+            Some(codex_utils_cli::ApprovalModeCliArg::OnRequest)
+        );
+    }
+
+    #[test]
+    fn deprecated_on_failure_approval_alias_is_accepted_for_resume() {
+        let resumed =
+            finalize_resume_from_args(["codex", "resume", "sid", "-a", "on-failure"].as_ref());
+
+        assert_matches!(
+            resumed.approval_policy,
+            Some(codex_utils_cli::ApprovalModeCliArg::OnRequest)
+        );
     }
 
     #[test]

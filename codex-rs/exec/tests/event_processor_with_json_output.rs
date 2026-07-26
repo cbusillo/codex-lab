@@ -121,6 +121,7 @@ fn session_configured_produces_thread_started_event() {
         parent_thread_id: None,
         thread_source: None,
         thread_name: None,
+        history_mode: codex_protocol::protocol::ThreadHistoryMode::default(),
         model: "codex-mini-latest".to_string(),
         model_provider_id: "test-provider".to_string(),
         service_tier: None,

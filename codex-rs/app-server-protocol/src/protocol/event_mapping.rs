@@ -66,6 +66,7 @@ pub fn item_event_to_server_notification(
                         .collect(),
                 ),
                 success: Some(response.success),
+                error: response.error,
                 duration_ms,
             };
             ServerNotification::ItemCompleted(ItemCompletedNotification {
