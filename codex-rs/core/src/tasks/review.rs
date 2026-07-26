@@ -786,3 +786,7 @@ pub(crate) async fn exit_review_mode(
     // file creation + git metadata collection cannot delay client-facing items.
     session.ensure_rollout_materialized().await;
 }
+
+#[cfg(test)]
+#[path = "review_tests.rs"]
+mod review_tests;
