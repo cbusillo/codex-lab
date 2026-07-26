@@ -7,6 +7,8 @@ use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::effective_tool_mode;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::BrowserHandler;
+use crate::tools::handlers::CodeBridgeHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::CurrentTimeHandler;
@@ -31,6 +33,8 @@ use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WaitForEnvironmentHandler;
 use crate::tools::handlers::WriteStdinHandler;
+use crate::tools::handlers::browser_spec::BROWSER_TOOL_NAME;
+use crate::tools::handlers::code_bridge_spec::CODE_BRIDGE_TOOL_NAME;
 use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
@@ -737,6 +741,19 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
         planned_tools.add(PlanHandler);
     }
 
+    if !tool_name_owned_by_external_source(context, CODE_BRIDGE_TOOL_NAME) {
+        planned_tools.add(CodeBridgeHandler);
+    }
+
+    if features.enabled(Feature::InAppBrowser)
+        && features.enabled(Feature::BrowserUse)
+        && !tool_name_owned_by_external_source(context, BROWSER_TOOL_NAME)
+    {
+        planned_tools.add(BrowserHandler::new(
+            features.enabled(Feature::BrowserUseFullCdpAccess),
+        ));
+    }
+
     if features.enabled(Feature::DeferredExecutor) {
         planned_tools.add(
             context
@@ -819,6 +836,23 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
             include_environment_id,
         }));
     }
+}
+
+fn tool_name_owned_by_external_source(context: &CoreToolPlanContext<'_>, tool_name: &str) -> bool {
+    let tool_name = ToolName::plain(tool_name);
+    context
+        .extension_tool_executors
+        .iter()
+        .any(|executor| executor.tool_name() == tool_name)
+        || context.dynamic_tools.iter().any(|spec| match spec {
+            DynamicToolSpec::Function(tool) => DynamicToolHandler::new(tool)
+                .is_some_and(|handler| handler.tool_name() == tool_name),
+            DynamicToolSpec::Namespace(namespace) => namespace.tools.iter().any(|tool| {
+                let DynamicToolNamespaceTool::Function(tool) = tool;
+                DynamicToolHandler::new_in_namespace(namespace, tool)
+                    .is_some_and(|handler| handler.tool_name() == tool_name)
+            }),
+        })
 }
 
 #[instrument(level = "trace", skip_all)]

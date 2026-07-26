@@ -1,3 +1,4 @@
+use super::AgentRoleBackendConfig;
 use super::AgentRoleConfig;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
@@ -157,6 +158,7 @@ async fn read_declared_role(
         role_name = parsed_file.role_name;
         role.description = parsed_file.description.or(role.description);
         role.nickname_candidates = parsed_file.nickname_candidates.or(role.nickname_candidates);
+        role.backend = parsed_file.backend.or(role.backend);
     }
 
     Ok((role_name, role))
@@ -169,6 +171,7 @@ fn merge_missing_role_fields(role: &mut AgentRoleConfig, fallback: &AgentRoleCon
         .nickname_candidates
         .clone()
         .or(fallback.nickname_candidates.clone());
+    role.backend = role.backend.clone().or(fallback.backend.clone());
 }
 
 fn agents_toml_from_layer(
@@ -207,11 +210,17 @@ async fn agent_role_config_from_toml(
         &format!("agents.{role_name}.nickname_candidates"),
         role.nickname_candidates.as_deref(),
     )?;
+    let backend = role
+        .backend
+        .clone()
+        .map(normalize_agent_role_backend)
+        .transpose()?;
 
     Ok(AgentRoleConfig {
         description,
         config_file: config_file.map(AbsolutePathBuf::into_path_buf),
         nickname_candidates,
+        backend,
     })
 }
 
@@ -221,6 +230,7 @@ struct RawAgentRoleFileToml {
     name: Option<String>,
     description: Option<String>,
     nickname_candidates: Option<Vec<String>>,
+    backend: Option<codex_config::config_toml::AgentRoleBackendToml>,
     #[serde(flatten)]
     config: ConfigToml,
 }
@@ -230,6 +240,7 @@ pub(crate) struct ResolvedAgentRoleFile {
     pub(crate) role_name: String,
     pub(crate) description: Option<String>,
     pub(crate) nickname_candidates: Option<Vec<String>>,
+    pub(crate) backend: Option<AgentRoleBackendConfig>,
     pub(crate) config: TomlValue,
 }
 
@@ -292,6 +303,10 @@ pub(crate) fn parse_agent_role_file_contents(
         ),
         parsed.nickname_candidates.as_deref(),
     )?;
+    let backend = parsed
+        .backend
+        .map(normalize_agent_role_backend)
+        .transpose()?;
 
     let mut config = role_file_toml;
     let Some(config_table) = config.as_table_mut() else {
@@ -306,13 +321,38 @@ pub(crate) fn parse_agent_role_file_contents(
     config_table.remove("name");
     config_table.remove("description");
     config_table.remove("nickname_candidates");
+    config_table.remove("backend");
 
     Ok(ResolvedAgentRoleFile {
         role_name,
         description,
         nickname_candidates,
+        backend,
         config,
     })
+}
+
+fn normalize_agent_role_backend(
+    backend: codex_config::config_toml::AgentRoleBackendToml,
+) -> std::io::Result<AgentRoleBackendConfig> {
+    let backend = AgentRoleBackendConfig::from_toml(backend);
+    match &backend {
+        AgentRoleBackendConfig::ExternalCommand(command) => {
+            if command.command.trim().is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "external_command backend command must not be empty",
+                ));
+            }
+            if command.timeout_ms == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "external_command backend timeout_ms must be greater than 0",
+                ));
+            }
+        }
+    }
+    Ok(backend)
 }
 
 async fn read_resolved_agent_role_file(
@@ -511,6 +551,7 @@ async fn discover_agent_roles_in_dir(
                 description: parsed_file.description,
                 config_file: Some(agent_file.to_path_buf()),
                 nickname_candidates: parsed_file.nickname_candidates,
+                backend: parsed_file.backend,
             },
         );
     }

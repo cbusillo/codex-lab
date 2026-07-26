@@ -745,6 +745,46 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+
+    /// Optional non-Codex backend used to run agents spawned with this role.
+    pub backend: Option<AgentRoleBackendToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(deny_unknown_fields)]
+pub enum AgentRoleBackendToml {
+    ExternalCommand(ExternalCommandAgentBackendToml),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCommandProtocolToml {
+    #[default]
+    Json,
+    RawCli,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ExternalCommandAgentBackendToml {
+    /// Command to execute for each spawned external agent.
+    #[schemars(length(min = 1))]
+    pub command: String,
+    /// Protocol to communicate with the external agent.
+    #[serde(default)]
+    pub protocol: ExternalCommandProtocolToml,
+    /// Arguments passed to the command after the executable path.
+    pub args: Option<Vec<String>>,
+    /// Arguments appended when the agent is running in read-only mode.
+    pub args_read_only: Option<Vec<String>>,
+    /// Arguments appended when the agent is running in workspace-write mode.
+    pub args_write: Option<Vec<String>>,
+    /// Environment variables to set for the spawned agent.
+    pub env: Option<HashMap<String, String>>,
+    /// Maximum process runtime in milliseconds.
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
