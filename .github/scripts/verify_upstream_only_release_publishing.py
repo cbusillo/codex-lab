@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Keep inherited upstream publishing jobs from running in this fork.
 
-`r2-release.yml` mirrors `openai/codex` GitHub Release assets into the upstream
-Cloudflare R2 `releases` bucket. Nothing in that workflow is fork-aware: it
-downloads from a hard-coded upstream repository and uploads with whatever R2
-credentials the calling repository provides. Running it here would republish
-upstream assets under Codex Lab credentials, so every job that calls it -- and
-every job inside it -- must be pinned to the upstream repository.
+Two families of inherited jobs mutate OpenAI-owned state:
+
+* `r2-release.yml` mirrors `openai/codex` GitHub Release assets into the
+  upstream Cloudflare R2 `releases` bucket. Nothing in that workflow is
+  fork-aware: it downloads from a hard-coded upstream repository and uploads
+  with whatever R2 credentials the calling repository provides. Running it here
+  would republish upstream assets under Codex Lab credentials, so every job that
+  calls it -- and every job inside it -- must be pinned to the upstream
+  repository.
+* Jobs that publish to an OpenAI-owned external registry or endpoint: the
+  `@openai` npm scope, the `OpenAI.Codex` WinGet manifest via the
+  `openai-oss-forks` winget-pkgs fork, and the developers.openai.com Vercel
+  deploy hook. These are found by the fingerprints below rather than by job
+  name, so renaming or copying a job cannot drop its guard.
 """
 
 import re
@@ -20,6 +28,22 @@ UPSTREAM_REPOSITORY = "openai/codex"
 # Reusable workflows that only make sense in the repository that owns the
 # upstream release buckets and credentials.
 UPSTREAM_ONLY_WORKFLOWS = ("r2-release.yml",)
+# Fingerprints of an external mutation to something OpenAI owns. A job body that
+# matches any of these must be pinned to the upstream repository.
+UPSTREAM_OWNED_MUTATIONS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("the @openai npm scope", re.compile(r"""scope\s*:\s*["']?@openai\b""")),
+    ("the OpenAI.Codex WinGet manifest", re.compile(r"\bOpenAI\.Codex\b")),
+    ("the openai-oss-forks winget-pkgs fork", re.compile(r"\bopenai-oss-forks\b")),
+    ("the WinGet publish credential", re.compile(r"\bWINGET_PUBLISH_PAT\b")),
+    (
+        "the developers.openai.com deploy hook",
+        re.compile(r"\bDEV_WEBSITE_VERCEL_DEPLOY_HOOK_URL\b"),
+    ),
+    (
+        "the upstream R2 release bucket credential",
+        re.compile(r"\bR2_RELEASES_[A-Z0-9_]+\b"),
+    ),
+)
 JOBS_KEY = re.compile(r"^jobs\s*:\s*$")
 JOB_NAME = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*$")
 KEY = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:(?P<value>.*)$")
@@ -121,6 +145,17 @@ def has_upstream_repository_guard(job: Job) -> bool:
     )
 
 
+def upstream_owned_mutations(job: Job) -> list[str]:
+    """Return the OpenAI-owned mutations this job's body fingerprints as."""
+
+    body = "\n".join(job.lines)
+    return [
+        description
+        for description, pattern in UPSTREAM_OWNED_MUTATIONS
+        if pattern.search(body)
+    ]
+
+
 def called_local_workflows(job: Job) -> set[str]:
     uses = job_key_value(job, "uses")
     if uses is None:
@@ -150,22 +185,30 @@ def find_violations(workflows_dir: Path) -> list[Violation]:
 
     paths = sorted({*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")})
     for path in paths:
-        if path.name in upstream_only:
-            continue
         for job in parse_jobs(path.read_text()):
-            called = called_local_workflows(job) & upstream_only
-            if not called:
+            guarded = has_upstream_repository_guard(job)
+            if not guarded and path.name not in upstream_only:
+                called = called_local_workflows(job) & upstream_only
+                if called:
+                    violations.append(
+                        Violation(
+                            path,
+                            job.line,
+                            f"job '{job.name}' calls {sorted(called)[0]} without an "
+                            f"{UPSTREAM_REPOSITORY} guard",
+                        )
+                    )
+            if guarded:
                 continue
-            if has_upstream_repository_guard(job):
-                continue
-            violations.append(
-                Violation(
-                    path,
-                    job.line,
-                    f"job '{job.name}' calls {sorted(called)[0]} without an "
-                    f"{UPSTREAM_REPOSITORY} guard",
+            for mutation in upstream_owned_mutations(job):
+                violations.append(
+                    Violation(
+                        path,
+                        job.line,
+                        f"job '{job.name}' publishes to {mutation} without an "
+                        f"{UPSTREAM_REPOSITORY} guard",
+                    )
                 )
-            )
 
     return sorted(
         violations,

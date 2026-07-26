@@ -39,6 +39,24 @@ jobs:
       - name: Test upstream-only release publishing verifier
         run: python3 -m unittest discover -s .github/scripts -p 'test_verify_upstream_only_release_publishing.py'
 
+      - name: Verify release installers and Codex Lab assets stay fork-owned
+        run: python3 .github/scripts/verify_release_installer_provenance.py
+
+      - name: Test release installer provenance verifier
+        run: python3 -m unittest discover -s .github/scripts -p 'test_verify_release_installer_provenance.py'
+
+      - name: Test rusty_v8 artifact download
+        run: python3 -m unittest discover -s .github/scripts -p 'test_download_rusty_v8_artifacts.py'
+
+      - name: Test conditional apt installs
+        run: python3 -m unittest discover -s .github/scripts -p 'test_install_apt_packages.py'
+
+      - name: Test repo-checks npm staging inputs
+        run: python3 -m unittest discover -s .github/scripts -p 'test_repo_checks_npm_staging.py'
+
+      - name: Test Codex Lab signing exposure gate
+        run: python3 -m unittest discover -s .github/scripts -p 'test_codex_lab_signing_exposure.py'
+
       - name: Test Codex Lab release symbol and strip ordering
         run: python3 -m unittest discover -s .github/scripts -p 'test_codex_lab_release_symbols.py'
 
@@ -103,23 +121,29 @@ jobs:
 
       - name: Stage npm package
         id: stage_npm_package
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Use a recent successful rust-release run that published the full
-          # cross-platform native payload required by the npm package layout.
-          # Passing the workflow URL directly avoids relying on old rust-v*
-          # branches remaining discoverable via `gh run list --branch ...`.
-          CODEX_VERSION=0.133.0-alpha.4
-          WORKFLOW_URL="https://github.com/openai/codex/actions/runs/26201494185"
+          # Stage the root `codex` wrapper straight from this checkout. The
+          # wrapper carries no native payload (PACKAGE_NATIVE_COMPONENTS is
+          # empty for it), so `--no-expand-packages` keeps the platform packages
+          # -- the only part that needs release artifacts -- out of this check.
+          #
+          # This step previously downloaded ~GBs of artifacts from a pinned
+          # openai/codex Actions run, then threw all of them away and uploaded
+          # only this wrapper. GitHub expires Actions artifacts after 90 days,
+          # so that pin turned into a merge-blocking failure on a timer, and it
+          # depended on a cross-repo run staying readable. Building from the
+          # source tree is reproducible and cannot expire.
+          CODEX_VERSION="$(PYTHONPATH=scripts python3 -c \
+            'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
           OUTPUT_DIR="${RUNNER_TEMP}"
           python3 ./scripts/stage_npm_packages.py \
             --release-version "$CODEX_VERSION" \
-            --workflow-url "$WORKFLOW_URL" \
             --package codex \
+            --no-expand-packages \
             --output-dir "$OUTPUT_DIR"
           PACK_OUTPUT="${OUTPUT_DIR}/codex-npm-${CODEX_VERSION}.tgz"
+          test -f "$PACK_OUTPUT"
           echo "pack_output=$PACK_OUTPUT" >> "$GITHUB_OUTPUT"
 
       - name: Upload staged npm package artifact
