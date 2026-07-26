@@ -14,6 +14,7 @@ pub use runtime::CodexAppsAuthContext;
 pub use runtime::McpRuntime;
 pub use runtime::McpRuntimeContext;
 pub use runtime::McpRuntimeInput;
+pub use runtime::McpStartupReconnectPolicy;
 pub use runtime::SandboxState;
 pub use tool_catalog_cache::McpToolCatalogCache;
 pub use tools::ToolInfo;

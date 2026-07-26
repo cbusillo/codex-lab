@@ -27,6 +27,7 @@ use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginProvenance;
 use crate::openai_docs_source_attribution::maybe_with_openai_docs_source_attribution;
 use crate::runtime::McpRuntimeContext;
+use crate::runtime::McpStartupReconnectPolicy;
 use crate::runtime::emit_duration;
 use crate::server::EffectiveMcpServer;
 use crate::tool_catalog_cache::McpToolCatalogCacheContext;
@@ -415,6 +416,7 @@ impl AsyncManagedClient {
         runtime_auth_provider: Option<SharedAuthProvider>,
         client_elicitation_capability: ElicitationCapability,
         supports_openai_form_elicitation: bool,
+        startup_reconnect_policy: McpStartupReconnectPolicy,
     ) -> Self {
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
         let reconnect_server_name = server_name.clone();
@@ -445,7 +447,9 @@ impl AsyncManagedClient {
             startup_complete: Arc::clone(&startup_complete),
         });
         let client = startup.start();
-        let startup_reconnect = is_codex_apps_mcp_server.then(|| {
+        let startup_reconnect = (is_codex_apps_mcp_server
+            && startup_reconnect_policy.reconnects_codex_apps_in_background())
+        .then(|| {
             let startup = Arc::clone(&startup);
             Arc::new(
                 CodexAppsStartupReconnect::new(Arc::new(move || startup.start()))

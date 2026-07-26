@@ -164,6 +164,7 @@ impl McpConnectionSet {
     ) -> Self {
         let McpRuntimeInput {
             config,
+            startup_reconnect_policy,
             plugins_available: _,
             ready_selected_capability_roots: _,
             mcp_servers,
@@ -352,6 +353,7 @@ impl McpConnectionSet {
                 runtime_auth_provider,
                 client_elicitation_capability.clone(),
                 supports_openai_form_elicitation,
+                startup_reconnect_policy,
             );
             servers.insert(
                 server_name.clone(),

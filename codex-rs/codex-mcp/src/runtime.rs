@@ -68,9 +68,32 @@ impl CodexAppsAuthContext {
     }
 }
 
+/// Whether a runtime keeps retrying a Codex Apps server that failed to start.
+///
+/// Long-lived runtimes recover in the background so a transient Apps outage
+/// does not disable connectors for the rest of the thread. One-shot runtimes
+/// are shut down as soon as their caller has an answer, so a background retry
+/// would outlive the runtime that spawned it and publish into the shared Apps
+/// tools cache after the caller already reported the startup failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpStartupReconnectPolicy {
+    /// Retry a failed Codex Apps startup in the background.
+    ReconnectInBackground,
+    /// Treat a failed Codex Apps startup as this runtime's final outcome.
+    FailureIsFinal,
+}
+
+impl McpStartupReconnectPolicy {
+    /// Returns whether a Codex Apps connection may retry after failed startup.
+    pub(crate) fn reconnects_codex_apps_in_background(self) -> bool {
+        matches!(self, Self::ReconnectInBackground)
+    }
+}
+
 /// Everything needed to materialize one exact MCP configuration.
 pub struct McpRuntimeInput {
     pub config: Arc<McpConfig>,
+    pub startup_reconnect_policy: McpStartupReconnectPolicy,
     pub plugins_available: bool,
     pub ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
     pub mcp_servers: HashMap<String, EffectiveMcpServer>,
