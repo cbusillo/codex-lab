@@ -356,6 +356,7 @@ async fn missing_builtin_third_party_cli_reports_install_hint() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn antigravity_preflight_classifies_missing_authentication() {
     let temp_dir = TempDir::new().expect("tempdir");
@@ -395,6 +396,7 @@ exit 2
     assert!(err.to_string().contains("Authentication required"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn antigravity_preflight_records_cli_version() {
     let temp_dir = TempDir::new().expect("tempdir");
@@ -437,6 +439,7 @@ exit 2
     assert_eq!(provenance.provider_family.as_deref(), Some("antigravity"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn completed_preflight_is_not_repeated_during_launch() {
     let temp_dir = TempDir::new().expect("tempdir");
@@ -662,6 +665,7 @@ async fn non_github_copilot_command_is_rejected() {
     assert!(message.contains("Install GitHub Copilot CLI"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn raw_cli_auth_failure_is_classified() {
     let temp_dir = TempDir::new().expect("tempdir");
@@ -690,6 +694,7 @@ async fn raw_cli_auth_failure_is_classified() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn raw_cli_rate_limit_failure_is_classified() {
     let temp_dir = TempDir::new().expect("tempdir");
@@ -718,6 +723,7 @@ async fn raw_cli_rate_limit_failure_is_classified() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn raw_cli_empty_output_is_classified() {
     let temp_dir = TempDir::new().expect("tempdir");
@@ -739,6 +745,7 @@ async fn raw_cli_empty_output_is_classified() {
     assert_eq!(err.detail.kind, ExternalAgentFailureKind::EmptyOutput);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn malformed_json_output_is_classified() {
     let temp_dir = TempDir::new().expect("tempdir");
@@ -887,6 +894,7 @@ fn raw_cli_rejects_invalid_command_quoting() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn raw_cli_uses_argv_prompt_and_configured_env() {
     let temp_dir = TempDir::new().expect("tempdir");
