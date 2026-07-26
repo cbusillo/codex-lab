@@ -139,6 +139,27 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
         self.assertEqual("green_bulk_adopt", classified["lane"])
         self.assertEqual([], classified["contracts"])
 
+    def test_current_policy_preserves_product_classification(self) -> None:
+        for path in (
+            "AGENTS.md",
+            "README.md",
+            "codex-rs/cli/src/login.rs",
+            "codex-rs/models-manager/src/manager.rs",
+            "codex-rs/core/src/agent/control.rs",
+            "codex-rs/browser/src/manager.rs",
+            ".github/workflows/codex-lab-app.yml",
+            "tools/codex-exec-harness/scenarios/token-usage-report.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION),
+                    inventory.classify_path(path, inventory.POLICY_VERSION),
+                )
+
+    def test_rejects_unsupported_policy_version(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported policy version"):
+            inventory.rules_for_policy(999)
+
     def test_classify_path_omits_conflict_type(self) -> None:
         self.assertNotIn(
             "conflictType", inventory.classify_path("codex-rs/core/src/lib.rs")

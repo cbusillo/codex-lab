@@ -915,7 +915,7 @@ def build_guard_manifest(
     upstream_ref: str,
     local_ref: str,
     current_ref: str = "HEAD",
-    policy_version: int = POLICY_VERSION,
+    policy_version: int = LEGACY_POLICY_VERSION,
 ) -> dict[str, object]:
     """Record the owned paths a later refresh must not silently drop or revert.
 
@@ -1031,7 +1031,10 @@ def parse_args() -> argparse.Namespace:
         "--policy-version",
         type=int,
         choices=SUPPORTED_POLICY_VERSIONS,
-        default=POLICY_VERSION,
+        help=(
+            "Classifier policy version. Defaults to version 1 for guard manifests "
+            "and the current version for inventories."
+        ),
     )
     return parser.parse_args()
 
@@ -1046,6 +1049,11 @@ RENDERERS = {
 def main() -> None:
     args = parse_args()
     repo = Path(args.repo).resolve()
+    policy_version = args.policy_version
+    if policy_version is None:
+        policy_version = (
+            LEGACY_POLICY_VERSION if args.format == "guard" else POLICY_VERSION
+        )
     if args.format == "guard":
         manifest = build_guard_manifest(
             repo,
@@ -1053,7 +1061,7 @@ def main() -> None:
             args.upstream,
             args.local,
             args.current,
-            args.policy_version,
+            policy_version,
         )
         print(render_guard(manifest), end="")
         return
@@ -1062,7 +1070,7 @@ def main() -> None:
         args.base,
         args.upstream,
         args.local,
-        args.policy_version,
+        policy_version,
     )
     print(RENDERERS[args.format](inventory), end="")
 

@@ -194,7 +194,7 @@ def read_governance_text(path: Path, errors: list[str]) -> str | None:
         return None
 
 
-def guard_entry_without_current_blob(entry: dict[str, object]) -> dict[str, object]:
+def guard_entry_without_baseline_blob(entry: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in entry.items() if key != "baselineBlob"}
 
 
@@ -335,12 +335,12 @@ def verify(repo_root: Path, policy_path: Path) -> dict[str, object]:
                 if entry.get("source") == "ownership_baseline"
             ]
             checked_current = [
-                guard_entry_without_current_blob(entry)
+                guard_entry_without_baseline_blob(entry)
                 for entry in checked_entries
                 if entry.get("source") == "current_tree"
             ]
             expected_current = [
-                guard_entry_without_current_blob(entry)
+                guard_entry_without_baseline_blob(entry)
                 for entry in expected_entries
                 if entry.get("source") == "current_tree"
             ]

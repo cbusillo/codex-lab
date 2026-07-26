@@ -527,6 +527,7 @@ class CheckedInSnapshotTest(unittest.TestCase):
         self.assertEqual([], report["errors"])
         self.assertTrue(report["passed"])
         self.assertGreaterEqual(report["count"], 1)
+        self.assertEqual(report["count"], len(report["reproduced"]))
 
 
 if __name__ == "__main__":
