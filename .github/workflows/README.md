@@ -67,8 +67,25 @@ The workflows in this directory are split so that pull requests get fast, review
   itself are pinned to `github.repository == 'openai/codex'`, and
   `.github/scripts/publish_r2_release.py` fails closed on `GITHUB_REPOSITORY`
   before it reads any credential.
+- `publish-npm` (the `@openai` npm scope), `winget` (the `OpenAI.Codex` manifest
+  via the `openai-oss-forks` winget-pkgs fork), and `deploy-dev-website` (the
+  developers.openai.com Vercel deploy hook) are pinned to
+  `github.repository == 'openai/codex'` for the same reason: they mutate
+  OpenAI-owned external state, not this repository's.
 - `.github/scripts/verify_upstream_only_release_publishing.py` keeps those
-  guards in place as upstream snapshots land.
+  guards in place as upstream snapshots land. It finds upstream-owned mutations
+  by fingerprint (scope, manifest identifier, credential name) rather than by
+  job name, so renaming or copying a job cannot drop its guard.
+- `scripts/install/install.sh` and `install.ps1` resolve every download from
+  `openai/codex`, so `rust-release.yml` stages them as release assets only in
+  that repository. `.github/scripts/verify_release_installer_provenance.py`
+  enforces that and the matching rule for Codex Lab: `codex-lab-release.yml`
+  publishes only `codex-lab-*` assets plus `SHA256SUMS`.
+- `.github/actions/setup-rusty-v8` downloads its `rusty-v8-v*` artifacts from
+  `github.repository` by default, so a fork never links V8 blobs published by
+  another repository. Pass `artifact-repository` to opt into a different source;
+  `.github/scripts/download-rusty-v8-artifacts.sh` validates that input and
+  `GITHUB_SERVER_URL` before either reaches a URL.
 - Codex Lab's own releases go through `codex-lab-release.yml`, which builds
   packed `.dSYM` sidecars and strips the managed engine before signing.
 
@@ -131,3 +148,46 @@ Release tags use the isolated namespace:
 codex-lab-vX.Y.Z
 codex-lab-vX.Y.Z-lab.N
 ```
+
+## Signing Key Exposure: Open Operational Gate (#343)
+
+This is a known, unresolved exposure. It is documented here instead of being
+papered over with a code change that would not actually close it.
+
+`codex-lab-release.yml` signs the managed engine with
+
+```shell
+security unlock-keychain -p "" "$HOME/Library/Keychains/login.keychain-db"
+```
+
+The Developer ID Application key therefore lives in the runner user's login
+keychain behind an **empty password**. `codex-lab-app.yml` is pull-request
+triggered and runs on the *same* `[self-hosted, macOS, ARM64, codex-lab-app]`
+runner and the same user account. Every PR build executes repository-authored
+code on that host -- `build.rs`, `scripts/build_codex_lab_app.py`,
+`scripts/codex_lab_package/smoke.py`, Cargo build scripts of any dependency.
+Any of them can run the same one-line unlock and sign arbitrary bytes with the
+Codex Lab Developer ID.
+
+`codex-lab-app.yml` is restricted to branches in this repository
+(`github.event.pull_request.head.repo.full_name == github.repository`), so this
+is not open to public forks. It is still a full compromise path for anyone who
+can push a branch here, and it is not mitigated by anything in the workflows.
+
+No code-only fix closes it. The exposure comes from *one host, one user account,
+one unlocked keychain* shared between an untrusted-input build and a signing
+operation. Closing it requires an operator action, not a workflow edit:
+
+1. Move the Developer ID key out of the login keychain into a dedicated signing
+   keychain with a real password supplied as a repository secret, **and**
+2. Give the release signing job its own runner label so PR builds never execute
+   on the host that holds the signing keychain.
+
+Until both land, treat the Codex Lab signing identity as reachable by anyone
+with push access. Track this on
+[cbusillo/codex-lab#343](https://github.com/cbusillo/codex-lab/issues/343).
+
+`.github/scripts/test_codex_lab_signing_exposure.py` keeps the gate honest: it
+fails if signing spreads to a pull-request-triggered workflow, if the release
+workflow gains a pull-request trigger, or if this section disappears while the
+empty-password unlock is still in the tree.
