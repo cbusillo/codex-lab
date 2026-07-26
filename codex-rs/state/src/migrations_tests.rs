@@ -196,8 +196,12 @@ INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_
     pool.close().await;
 }
 
+/// The last version a released Codex Lab build recorded. Everything above it is
+/// still unshipped and may be rewritten; everything at or below it is frozen.
+const SHIPPED_STATE_LEDGER_HEAD: i64 = 38;
+
 #[tokio::test]
-async fn agent_job_tables_are_dropped_when_upgrading() {
+async fn agent_job_rows_survive_upgrade() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
         .await
@@ -285,9 +289,82 @@ ORDER BY name
     .fetch_all(&pool)
     .await
     .expect("remaining agent job tables should load");
-    assert_eq!(agent_job_tables, Vec::<String>::new());
+    assert_eq!(
+        agent_job_tables,
+        vec!["agent_job_items".to_string(), "agent_jobs".to_string()],
+        "agent-jobs is still pending_restore, so its tables must survive the upgrade"
+    );
+
+    let jobs = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT id, name, status, instruction FROM agent_jobs ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("agent jobs should load");
+    assert_eq!(
+        jobs,
+        vec![(
+            "job-1".to_string(),
+            "legacy job".to_string(),
+            "running".to_string(),
+            "process rows".to_string(),
+        )]
+    );
+
+    let job_items = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
+        "SELECT job_id, item_id, row_index, row_json, status, result_json FROM agent_job_items ORDER BY item_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("agent job items should load");
+    assert_eq!(
+        job_items,
+        vec![(
+            "job-1".to_string(),
+            "item-1".to_string(),
+            0,
+            r#"{"path":"secret.csv"}"#.to_string(),
+            "completed".to_string(),
+            r#"{"result":"legacy"}"#.to_string(),
+        )]
+    );
 
     pool.close().await;
+}
+
+/// Unshipped migrations are still editable, so a destructive statement that lands
+/// above the shipped head can be removed before anyone upgrades onto it. Shipped
+/// versions are excluded: 23, 31, 34, and 35 legitimately dropped tables and their
+/// SQL is frozen.
+#[test]
+fn unshipped_state_migrations_do_not_destroy_data() {
+    const DESTRUCTIVE_STATEMENTS: [&str; 3] = ["drop table", "drop column", "delete from"];
+
+    let destructive = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .filter(|migration| migration.version > SHIPPED_STATE_LEDGER_HEAD)
+        .filter_map(|migration| {
+            let sql = strip_sql_line_comments(migration.sql.as_ref()).to_lowercase();
+            DESTRUCTIVE_STATEMENTS
+                .iter()
+                .find(|statement| sql.contains(**statement))
+                .map(|statement| (migration.version, (*statement).to_string()))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        destructive,
+        Vec::new(),
+        "unshipped migrations must not destroy user data; drop the statement or gate it behind a restore"
+    );
+}
+
+fn strip_sql_line_comments(sql: &str) -> String {
+    sql.lines()
+        .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[tokio::test]

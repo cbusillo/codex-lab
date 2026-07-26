@@ -14,6 +14,11 @@ use sqlx::migrate::Migrator;
 /// are deliberately not repaired: no such build was released, and remapping
 /// them would require rewriting recorded checksums to values the ledger never
 /// produced.
+///
+/// Versions 39 and above are unshipped and may still be rewritten in place.
+/// They must not destroy user data: version 43 originally dropped the agent-job
+/// tables even though the agent-jobs handlers are still `pending_restore`, and
+/// it is now an inert placeholder that holds the slot without deleting rows.
 pub(crate) static STATE_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub(crate) static LOGS_MIGRATOR: Migrator = sqlx::migrate!("./logs_migrations");
 pub(crate) static GOALS_MIGRATOR: Migrator = sqlx::migrate!("./goals_migrations");
