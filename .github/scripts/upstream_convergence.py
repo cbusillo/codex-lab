@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -37,21 +38,15 @@ def run_git(
     repo: Path, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            capture_output=True,
-            text=True,
-            env=inventory.git_environment(),
-            timeout=inventory.GIT_TIMEOUT_SECONDS,
+        result = inventory.run_git_process(
+            repo,
+            *args,
+            max_output_bytes=MAX_GIT_OUTPUT_BYTES,
         )
-    except subprocess.TimeoutExpired as error:
-        raise ConvergenceError(
-            f"git {' '.join(args)} exceeded {inventory.GIT_TIMEOUT_SECONDS} seconds"
-        ) from error
-    if len(result.stdout.encode()) + len(result.stderr.encode()) > MAX_GIT_OUTPUT_BYTES:
-        raise ConvergenceError(
-            f"git {' '.join(args)} exceeded {MAX_GIT_OUTPUT_BYTES} output bytes"
-        )
+    except RuntimeError as error:
+        raise ConvergenceError(str(error)) from error
+    if not isinstance(result.stdout, str) or not isinstance(result.stderr, str):
+        raise ConvergenceError(f"git {' '.join(args)} returned binary output")
     if check and result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise ConvergenceError(f"git {' '.join(args)} failed: {detail}")
@@ -475,14 +470,14 @@ def record(
         refs["local"],
     )
     rendered = {
-        "inventory.json": inventory.render_json(result),
-        "inventory.md": inventory.render_markdown(result),
-        "residuals.json": inventory.render_residuals(result),
+        "inventory.json": inventory.render_json(result).encode("utf-8"),
+        "inventory.md": inventory.render_markdown(result).encode("utf-8"),
+        "residuals.json": inventory.render_residuals(result).encode("utf-8"),
     }
     oversized = sorted(
         name
         for name, contents in rendered.items()
-        if len(contents.encode("utf-8")) > MAX_SNAPSHOT_FILE_BYTES
+        if len(contents) > MAX_SNAPSHOT_FILE_BYTES
     )
     if oversized:
         raise ConvergenceError(
@@ -502,7 +497,7 @@ def record(
     temporary = Path(tempfile.mkdtemp(prefix=f".{snapshot_id}.", dir=evidence_root))
     try:
         for name, contents in rendered.items():
-            (temporary / name).write_text(contents, encoding="utf-8")
+            (temporary / name).write_bytes(contents)
         if run_git(repo, "rev-parse", "HEAD").stdout.strip() != head:
             raise ConvergenceError("HEAD changed while the snapshot was being recorded")
         temporary.rename(destination)
@@ -564,17 +559,43 @@ def read_snapshot_inventory(snapshot: Path) -> dict[str, object]:
     path = snapshot / "inventory.json"
     if path.is_symlink():
         raise ConvergenceError(f"snapshot inventory must not be a symlink: {path}")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     try:
-        if not path.is_file():
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ConvergenceError(f"cannot open snapshot inventory {path}: {error}") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
             raise ConvergenceError(f"snapshot inventory must be a file: {path}")
-        size = path.stat().st_size
-        if size > MAX_SNAPSHOT_FILE_BYTES:
+        if metadata.st_size > MAX_SNAPSHOT_FILE_BYTES:
             raise ConvergenceError(
                 f"snapshot inventory exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes: {path}"
             )
-        document = json.loads(path.read_text(encoding="utf-8"))
+        contents = bytearray()
+        while len(contents) <= MAX_SNAPSHOT_FILE_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, MAX_SNAPSHOT_FILE_BYTES + 1 - len(contents)),
+            )
+            if not chunk:
+                break
+            contents.extend(chunk)
+        if len(contents) > MAX_SNAPSHOT_FILE_BYTES:
+            raise ConvergenceError(
+                f"snapshot inventory exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes: {path}"
+            )
+        document = json.loads(contents.decode("utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeError) as error:
         raise ConvergenceError(f"cannot read snapshot inventory {path}: {error}") from error
+    finally:
+        os.close(descriptor)
     if not isinstance(document, dict):
         raise ConvergenceError(f"snapshot inventory must contain a JSON object: {path}")
     return document
@@ -763,18 +784,12 @@ def snapshot_document_at(
     relative = f"{policy.evidence_root}/{snapshot}/inventory.json"
     try:
         if commit is None:
-            path = repo / relative
-            if path.stat().st_size > MAX_SNAPSHOT_FILE_BYTES:
-                raise ConvergenceError(
-                    f"{relative} exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes"
-                )
-            contents = path.read_text(encoding="utf-8")
-        else:
-            contents = run_git(repo, "show", f"{commit}:{relative}").stdout
-            if len(contents.encode()) > MAX_SNAPSHOT_FILE_BYTES:
-                raise ConvergenceError(
-                    f"{relative} exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes"
-                )
+            return read_snapshot_inventory(repo / policy.evidence_root / snapshot)
+        contents = run_git(repo, "show", f"{commit}:{relative}").stdout
+        if len(contents.encode()) > MAX_SNAPSHOT_FILE_BYTES:
+            raise ConvergenceError(
+                f"{relative} exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes"
+            )
         document = json.loads(contents)
     except (json.JSONDecodeError, OSError, UnicodeError, ConvergenceError) as error:
         raise ConvergenceError(f"cannot read {relative}: {error}") from error

@@ -3,10 +3,14 @@
 import argparse
 import fnmatch
 import json
+import locale
 import os
+import queue
 import re
 import subprocess
 import tempfile
+import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -229,16 +233,127 @@ def git_environment(**updates: str) -> dict[str, str]:
     return env
 
 
-def checked_git_output(
-    result: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes],
+def run_process_bounded(
+    command: list[str],
+    *,
+    env: dict[str, str],
     operation: str,
-) -> None:
-    stdout = result.stdout.encode() if isinstance(result.stdout, str) else result.stdout
-    stderr = result.stderr.encode() if isinstance(result.stderr, str) else result.stderr
-    if len(stdout) + len(stderr) > MAX_GIT_OUTPUT_BYTES:
-        raise RuntimeError(
-            f"git {operation} exceeded {MAX_GIT_OUTPUT_BYTES} output bytes"
+    timeout_seconds: int,
+    max_output_bytes: int,
+    text: bool,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        raise RuntimeError(f"{operation} did not expose output pipes")
+
+    events: queue.Queue[tuple[str, bytes | OSError | None]] = queue.Queue(maxsize=8)
+
+    def drain(name: str, stream: object) -> None:
+        try:
+            with stream:
+                while chunk := stream.read(64 * 1024):
+                    events.put((name, chunk))
+        except OSError as error:
+            events.put((name, error))
+        finally:
+            events.put((name, None))
+
+    readers = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    stdout = bytearray()
+    stderr = bytearray()
+    active_readers = len(readers)
+    deadline = time.monotonic() + timeout_seconds
+    failure: RuntimeError | None = None
+    while active_readers:
+        if failure is None and time.monotonic() >= deadline:
+            failure = RuntimeError(f"{operation} exceeded {timeout_seconds} seconds")
+            if process.poll() is None:
+                process.kill()
+        try:
+            name, payload = events.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        if payload is None:
+            active_readers -= 1
+            continue
+        if isinstance(payload, OSError):
+            if failure is None:
+                failure = RuntimeError(f"cannot read {operation} output: {payload}")
+                if process.poll() is None:
+                    process.kill()
+            continue
+        if failure is not None:
+            continue
+        if len(stdout) + len(stderr) + len(payload) > max_output_bytes:
+            failure = RuntimeError(
+                f"{operation} exceeded {max_output_bytes} output bytes"
+            )
+            if process.poll() is None:
+                process.kill()
+            continue
+        target = stdout if name == "stdout" else stderr
+        target.extend(payload)
+
+    for reader in readers:
+        reader.join()
+    if process.poll() is None:
+        try:
+            returncode = process.wait(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+        except subprocess.TimeoutExpired:
+            if failure is None:
+                failure = RuntimeError(
+                    f"{operation} exceeded {timeout_seconds} seconds"
+                )
+            process.kill()
+            returncode = process.wait()
+    else:
+        returncode = process.wait()
+    if failure is not None:
+        raise failure
+
+    raw_stdout = bytes(stdout)
+    raw_stderr = bytes(stderr)
+    if text:
+        encoding = locale.getpreferredencoding(False)
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            raw_stdout.decode(encoding),
+            raw_stderr.decode(encoding),
         )
+    return subprocess.CompletedProcess(command, returncode, raw_stdout, raw_stderr)
+
+
+def run_git_process(
+    repo: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+    max_output_bytes: int = MAX_GIT_OUTPUT_BYTES,
+    text: bool = True,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    operation = f"git {' '.join(args)}"
+    return run_process_bounded(
+        ["git", "-C", str(repo), *args],
+        env=env or git_environment(),
+        operation=operation,
+        timeout_seconds=GIT_TIMEOUT_SECONDS,
+        max_output_bytes=max_output_bytes,
+        text=text,
+    )
 
 
 def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
@@ -253,15 +368,9 @@ def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
 
 
 def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=git_environment(),
-        timeout=GIT_TIMEOUT_SECONDS,
-    )
-    checked_git_output(result, " ".join(args))
+    result = run_git_process(repo, *args)
+    if not isinstance(result.stdout, str) or not isinstance(result.stderr, str):
+        raise RuntimeError(f"git {' '.join(args)} returned binary output")
     if check and result.returncode != 0:
         raise subprocess.CalledProcessError(
             result.returncode,
@@ -290,14 +399,9 @@ def changed_paths(repo: Path, base: str, tip: str) -> set[str]:
 def tree_objects(
     repo: Path, ref: str, env: dict[str, str] | None = None
 ) -> dict[str, str]:
-    result = subprocess.run(
-        ["git", "-C", str(repo), "ls-tree", "-r", "-z", ref],
-        check=False,
-        capture_output=True,
-        env=env or git_environment(),
-        timeout=GIT_TIMEOUT_SECONDS,
-    )
-    checked_git_output(result, f"ls-tree -r -z {ref}")
+    result = run_git_process(repo, "ls-tree", "-r", "-z", ref, env=env, text=False)
+    if not isinstance(result.stdout, bytes) or not isinstance(result.stderr, bytes):
+        raise RuntimeError(f"git ls-tree -r -z {ref} returned text output")
     if result.returncode != 0:
         raise subprocess.CalledProcessError(
             result.returncode,
@@ -339,24 +443,17 @@ def merge_conflicts(
             GIT_OBJECT_DIRECTORY=temporary,
             GIT_ALTERNATE_OBJECT_DIRECTORIES=str(objects),
         )
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "merge-tree",
-                "--write-tree",
-                "--messages",
-                upstream,
-                local,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
+        result = run_git_process(
+            repo,
+            "merge-tree",
+            "--write-tree",
+            "--messages",
+            upstream,
+            local,
             env=env,
-            timeout=GIT_TIMEOUT_SECONDS,
         )
-        checked_git_output(result, "merge-tree --write-tree --messages")
+        if not isinstance(result.stdout, str) or not isinstance(result.stderr, str):
+            raise RuntimeError("git merge-tree returned binary output")
         if result.returncode not in (0, 1):
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
         output_lines = result.stdout.splitlines()

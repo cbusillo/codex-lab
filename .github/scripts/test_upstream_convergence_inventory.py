@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +27,24 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
         self.assertNotIn("GIT_OBJECT_DIRECTORY", env)
         self.assertNotIn("GIT_CONFIG_COUNT", env)
         self.assertEqual("1", env["GIT_NO_REPLACE_OBJECTS"])
+
+    def test_bounded_process_stops_when_combined_output_exceeds_limit(self) -> None:
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'x' * 4096); "
+            "sys.stderr.buffer.write(b'y' * 4096)",
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "exceeded 1024 output bytes"):
+            inventory.run_process_bounded(
+                command,
+                env=os.environ.copy(),
+                operation="test process",
+                timeout_seconds=5,
+                max_output_bytes=1024,
+                text=False,
+            )
 
     def test_parses_content_conflict(self) -> None:
         self.assertEqual(

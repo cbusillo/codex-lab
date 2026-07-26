@@ -121,6 +121,28 @@ class SnapshotMutationTest(GitFixture):
             convergence.snapshot_change_errors(self.root, self.policy, base),
         )
 
+    def test_provenance_rejects_new_symlinked_inventory(self) -> None:
+        base = self.commit_file("README.md", "base\n", "base")
+        run(self.root, "switch", "-c", "task")
+        snapshot = self.root / self.policy.evidence_root / "aaaaaaaa-bbbbbbbb"
+        snapshot.mkdir(parents=True)
+        target = self.root / "outside-inventory.json"
+        target.write_text("{}\n", encoding="utf-8")
+        (snapshot / "inventory.json").symlink_to(target)
+        run(self.root, "add", "--all")
+        run(self.root, "commit", "-m", "add symlinked snapshot")
+
+        errors = convergence.validate_new_snapshot_provenance(
+            self.root,
+            self.policy,
+            base,
+            base,
+            {snapshot.name},
+            set(),
+        )
+
+        self.assertTrue(any("symlink" in error for error in errors), errors)
+
 
 class RecordedUpstreamTest(GitFixture):
     def write_snapshot(self, name: str, upstream: str) -> Path:
