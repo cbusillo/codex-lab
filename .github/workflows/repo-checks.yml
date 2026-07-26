@@ -77,8 +77,8 @@ jobs:
               "- Policy state at base: `\(.policyStateAtBase)`",
               "- Append-only checked: `\(.appendOnlyChecked)`",
               "- Provenance checked: `\(.provenanceChecked)`",
-              "- Bootstrap reason: \(.bootstrapReason // \"none\")",
-              "- New snapshots: `\((.newSnapshots // []) | join(\", \"))`"
+              "- Bootstrap reason: \(.bootstrapReason // "none")",
+              "- New snapshots: `\((.newSnapshots // []) | join(", "))`"
             ' "$report"
           } >> "$GITHUB_STEP_SUMMARY"
 
