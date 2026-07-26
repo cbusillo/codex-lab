@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -121,6 +122,63 @@ class RecordedUpstreamTest(GitFixture):
             older,
             convergence.require_forward_upstream(self.root, self.policy, newer),
         )
+
+
+class RecordIntegrationTest(GitFixture):
+    def make_linked_candidate(self) -> tuple[Path, str, str, str]:
+        base = self.commit_file("base.txt", "base\n", "base")
+        run(self.root, "switch", "-c", "local")
+        local = self.commit_file("local.txt", "local\n", "local")
+        run(self.root, "switch", "-c", "upstream", base)
+        upstream = self.commit_file("upstream.txt", "upstream\n", "upstream")
+        run(
+            self.root,
+            "remote",
+            "add",
+            "openai",
+            "https://github.com/openai/codex.git",
+        )
+        run(self.root, "update-ref", "refs/remotes/openai/main", upstream)
+
+        linked = Path(tempfile.mkdtemp(prefix="convergence-record-"))
+        linked.rmdir()
+
+        def cleanup() -> None:
+            subprocess.run(
+                ["git", "-C", str(self.root), "worktree", "remove", "--force", str(linked)],
+                capture_output=True,
+                text=True,
+            )
+            shutil.rmtree(linked, ignore_errors=True)
+
+        self.addCleanup(cleanup)
+        run(self.root, "worktree", "add", "-b", "task", str(linked), local)
+        run(linked, "merge", "--no-ff", "upstream", "-m", "merge upstream")
+        return linked, base, upstream, local
+
+    def test_records_atomically_and_refuses_overwrite(self) -> None:
+        linked, base, upstream, local = self.make_linked_candidate()
+
+        report = convergence.record(
+            linked,
+            self.policy,
+            base,
+            upstream,
+            local,
+        )
+
+        snapshot = linked / str(report["snapshot"])
+        self.assertEqual(
+            sorted(convergence.SNAPSHOT_FILES),
+            sorted(path.name for path in snapshot.iterdir()),
+        )
+        document = json.loads((snapshot / "inventory.json").read_text(encoding="utf-8"))
+        self.assertEqual(convergence.inventory.POLICY_VERSION, document["policy"]["version"])
+
+        run(linked, "add", str(snapshot.relative_to(linked)))
+        run(linked, "commit", "-m", "record snapshot")
+        with self.assertRaisesRegex(convergence.ConvergenceError, "snapshot already exists"):
+            convergence.record(linked, self.policy, base, upstream, local)
 
 
 class ExactRefTest(GitFixture):
