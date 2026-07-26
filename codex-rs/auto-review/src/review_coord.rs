@@ -348,7 +348,7 @@ fn platform_pid_alive(pid: u32) -> bool {
     let mut code = 0;
     let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
     unsafe { CloseHandle(handle) };
-    ok != 0 && code == STILL_ACTIVE
+    ok != 0 && code == STILL_ACTIVE as u32
 }
 
 #[cfg(not(any(unix, windows)))]
