@@ -5,7 +5,9 @@ tests bound themselves to the convergence-guard and exec-harness surfaces
 instead of pretending the whole tree is clean.
 """
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import unittest
@@ -70,6 +72,58 @@ class RepoCheckWiringTest(unittest.TestCase):
         self.assertIn(
             "python3 .github/scripts/upstream_convergence_guard.py", contents
         )
+
+    def test_repo_checks_runs_the_governance_bootstrap(self) -> None:
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 .github/scripts/verify_upstream_convergence_governance.py",
+            contents,
+        )
+
+    def test_repo_checks_runs_the_convergence_validator(self) -> None:
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 .github/scripts/upstream_convergence.py validate", contents
+        )
+        self.assertIn("fetch-depth: 0", contents)
+        self.assertIn("git remote add openai https://github.com/openai/codex.git", contents)
+        self.assertIn('--against "$CONVERGENCE_BASE_SHA"', contents)
+        self.assertIn('--json | tee "$report"', contents)
+        self.assertIn("Convergence comparison base:", contents)
+        self.assertIn("$GITHUB_STEP_SUMMARY", contents)
+
+    def test_convergence_summary_jq_program_executes(self) -> None:
+        require("jq", self)
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+        match = re.search(
+            r"jq -r '\n(?P<program>.*?)\n\s*' \"\$report\"",
+            contents,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        program = match.group("program")
+        result = subprocess.run(
+            ["jq", "-r", program],
+            cwd=ROOT,
+            input=json.dumps(
+                {
+                    "comparisonMode": "bootstrap",
+                    "policyStateAtBase": "absent",
+                    "appendOnlyChecked": False,
+                    "provenanceChecked": False,
+                    "bootstrapReason": None,
+                    "newSnapshots": ["one", "two"],
+                }
+            ),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Comparison mode: `bootstrap`", result.stdout)
+        self.assertIn("Bootstrap reason: none", result.stdout)
+        self.assertIn("New snapshots: `one, two`", result.stdout)
 
     def test_repo_checks_runs_the_guard_and_inventory_tests(self) -> None:
         # Asserted through the registration verifier rather than a literal

@@ -1,6 +1,9 @@
 import json
+import os
+import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import upstream_convergence_inventory as inventory
 
@@ -9,6 +12,44 @@ SNAPSHOT_ROOT = Path(__file__).resolve().parents[2] / "upstream" / "openai-codex
 
 
 class UpstreamConvergenceInventoryTest(unittest.TestCase):
+    def test_git_environment_removes_provenance_overrides(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "GIT_DIR": "/tmp/other.git",
+                "GIT_OBJECT_DIRECTORY": "/tmp/objects",
+                "GIT_CONFIG_COUNT": "1",
+            },
+        ):
+            env = inventory.git_environment()
+
+        self.assertNotIn("GIT_DIR", env)
+        self.assertNotIn("GIT_OBJECT_DIRECTORY", env)
+        self.assertNotIn("GIT_CONFIG_COUNT", env)
+        self.assertEqual("1", env["GIT_NO_REPLACE_OBJECTS"])
+        self.assertEqual(os.devnull, env["GIT_CONFIG_GLOBAL"])
+        self.assertEqual(os.devnull, env["GIT_CONFIG_SYSTEM"])
+        self.assertEqual("1", env["GIT_ATTR_NOSYSTEM"])
+        self.assertEqual("0", env["GIT_TERMINAL_PROMPT"])
+
+    def test_bounded_process_stops_when_combined_output_exceeds_limit(self) -> None:
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'x' * 4096); "
+            "sys.stderr.buffer.write(b'y' * 4096)",
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "exceeded 1024 output bytes"):
+            inventory.run_process_bounded(
+                command,
+                env=os.environ.copy(),
+                operation="test process",
+                timeout_seconds=5,
+                max_output_bytes=1024,
+                text=False,
+            )
+
     def test_parses_content_conflict(self) -> None:
         self.assertEqual(
             inventory.parse_conflict_message(
@@ -75,6 +116,49 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
         self.assertEqual(
             classified["contracts"], ["AGENT-1", "INTEGRATION-1", "VALIDATION-1"]
         )
+
+    def test_governance_files_are_intentionally_owned(self) -> None:
+        for path in (
+            "upstream/convergence-policy.json",
+            ".github/CODEOWNERS",
+            ".github/scripts/upstream_convergence.py",
+            ".github/scripts/verify_upstream_convergence_governance.py",
+            ".github/workflows/repo-checks.yml",
+        ):
+            with self.subTest(path=path):
+                classified = inventory.classify_path(path)
+                self.assertEqual("intentionally_owned", classified["lane"])
+                self.assertIn("GOVERNANCE-1", classified["contracts"])
+
+    def test_legacy_policy_preserves_historical_governance_classification(self) -> None:
+        classified = inventory.classify_path(
+            "upstream/convergence-guard.json",
+            inventory.LEGACY_POLICY_VERSION,
+        )
+
+        self.assertEqual("green_bulk_adopt", classified["lane"])
+        self.assertEqual([], classified["contracts"])
+
+    def test_current_policy_preserves_product_classification(self) -> None:
+        for path in (
+            "AGENTS.md",
+            "README.md",
+            "codex-rs/cli/src/login.rs",
+            "codex-rs/models-manager/src/manager.rs",
+            "codex-rs/core/src/agent/control.rs",
+            "codex-rs/browser/src/manager.rs",
+            ".github/workflows/codex-lab-app.yml",
+            "tools/codex-exec-harness/scenarios/token-usage-report.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION),
+                    inventory.classify_path(path, inventory.POLICY_VERSION),
+                )
+
+    def test_rejects_unsupported_policy_version(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported policy version"):
+            inventory.rules_for_policy(999)
 
     def test_classify_path_omits_conflict_type(self) -> None:
         self.assertNotIn(
@@ -318,7 +402,11 @@ class ResidualSemanticsTest(unittest.TestCase):
             "schemaVersion": inventory.SCHEMA_VERSION,
             "repository": "openai/codex",
             "refs": {"base": "a" * 40, "upstream": "b" * 40, "local": "c" * 40},
-            "policy": {"defaultLane": "green_bulk_adopt", "rule": "Upstream wins."},
+            "policy": {
+                "version": inventory.POLICY_VERSION,
+                "defaultLane": "green_bulk_adopt",
+                "rule": "Upstream wins.",
+            },
             "summary": {
                 "conflicts": 0,
                 "localChangedOnly": 1,
@@ -369,6 +457,11 @@ class ResidualSemanticsTest(unittest.TestCase):
 
         self.assertNotIn("residuals", document)
         self.assertEqual(1, document["summary"]["residualLocalInfluence"])
+
+    def test_current_policy_version_is_recorded(self) -> None:
+        document = json.loads(inventory.render_json(self.sample_inventory()))
+
+        self.assertEqual(inventory.POLICY_VERSION, document["policy"]["version"])
 
 
 class CheckedInSnapshotTest(unittest.TestCase):
