@@ -192,13 +192,14 @@ pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS: usize = 20;
 fn resolve_background_auto_review_budget(
     auto_review: Option<&AutoReviewToml>,
 ) -> std::io::Result<AutoReviewBudget> {
+    let defaults = Config::default_background_auto_review_budget();
     let max_elapsed_seconds = auto_review
         .and_then(|config| config.background_max_elapsed_seconds)
-        .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS / 1_000);
+        .unwrap_or(defaults.max_elapsed_ms / 1_000);
     let budget = AutoReviewBudget {
         max_scope_bytes: auto_review
             .and_then(|config| config.background_max_diff_bytes)
-            .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES),
+            .unwrap_or(defaults.max_scope_bytes),
         max_elapsed_ms: max_elapsed_seconds.checked_mul(1_000).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -207,13 +208,13 @@ fn resolve_background_auto_review_budget(
         })?,
         max_total_tokens: auto_review
             .and_then(|config| config.background_max_total_tokens)
-            .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS),
+            .unwrap_or(defaults.max_total_tokens),
         max_output_bytes: auto_review
             .and_then(|config| config.background_max_output_bytes)
-            .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES),
+            .unwrap_or(defaults.max_output_bytes),
         max_findings: auto_review
             .and_then(|config| config.background_max_findings)
-            .unwrap_or(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS),
+            .unwrap_or(defaults.max_findings),
     };
     budget.validate().map_err(|err| {
         std::io::Error::new(
@@ -1514,6 +1515,17 @@ impl ConfigBuilder {
 }
 
 impl Config {
+    /// Background auto-review limits used when `[auto_review]` supplies no overrides.
+    pub fn default_background_auto_review_budget() -> AutoReviewBudget {
+        AutoReviewBudget {
+            max_scope_bytes: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES,
+            max_elapsed_ms: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS,
+            max_total_tokens: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS,
+            max_output_bytes: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES,
+            max_findings: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS,
+        }
+    }
+
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
         &self.sqlite
     }
