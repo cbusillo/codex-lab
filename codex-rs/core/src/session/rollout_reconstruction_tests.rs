@@ -182,6 +182,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -229,6 +230,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -1292,6 +1294,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -1381,6 +1384,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
             turn_id: Some(turn_context.sub_id.clone()),
             #[allow(deprecated)]
             cwd: turn_context.cwd.clone(),
+            environments: None,
             workspace_roots: None,
             current_date: turn_context.current_date.clone(),
             timezone: turn_context.timezone.clone(),
@@ -1413,6 +1417,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -1543,6 +1548,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
         turn_id: Some(current_turn_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -1670,6 +1676,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -1840,6 +1847,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -1955,4 +1963,73 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
         })
     );
     assert!(session.reference_context_item().await.is_none());
+}
+
+#[tokio::test]
+async fn legacy_turn_context_environments_seed_the_world_state_baseline() {
+    let (session, turn_context) = make_session_and_context().await;
+    #[allow(deprecated)]
+    let cwd = turn_context.cwd.clone();
+    // Rollouts written by older builds carry the resolved environment
+    // selections on the turn context and have no `WorldState` items at all.
+    let previous_context_item = TurnContextItem {
+        environments: Some(vec![
+            codex_protocol::protocol::TurnContextEnvironmentItem {
+                environment_id: "local".to_string(),
+                cwd: cwd.clone(),
+                shell: Some("bash".to_string()),
+            },
+            codex_protocol::protocol::TurnContextEnvironmentItem {
+                environment_id: "remote".to_string(),
+                cwd: cwd.join("remote"),
+                shell: None,
+            },
+        ]),
+        ..turn_context.to_turn_context_item()
+    };
+    let rollout_items = vec![
+        RolloutItem::ResponseItem(user_message("turn 1 user")),
+        RolloutItem::TurnContext(previous_context_item),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    let baseline = serde_json::to_value(reconstructed.world_state_baseline)
+        .expect("serialize reconstructed world state");
+    assert_eq!(
+        baseline["environments"]["environments"],
+        json!({
+            "local": {
+                "cwd": cwd.to_string_lossy(),
+                "status": "available",
+                "shell": "bash",
+            },
+            "remote": {
+                "cwd": cwd.join("remote").to_string_lossy(),
+                "status": "available",
+                "shell": null,
+            },
+        })
+    );
+}
+
+#[tokio::test]
+async fn legacy_turn_context_without_environments_keeps_the_history_fallback() {
+    let (session, turn_context) = make_session_and_context().await;
+    let previous_context_item = TurnContextItem {
+        environments: None,
+        ..turn_context.to_turn_context_item()
+    };
+    let rollout_items = vec![
+        RolloutItem::ResponseItem(user_message("turn 1 user")),
+        RolloutItem::TurnContext(previous_context_item),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    assert_eq!(reconstructed.world_state_baseline, None);
 }

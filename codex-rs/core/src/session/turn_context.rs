@@ -14,6 +14,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TurnContextEnvironmentItem;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_sandboxing::compatibility_sandbox_policy_for_permission_profile;
 use codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy;
@@ -486,6 +487,7 @@ impl TurnContext {
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
             cwd,
+            environments: self.turn_context_environment_items(),
             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
@@ -505,6 +507,29 @@ impl TurnContext {
             effort: self.reasoning_effort.clone(),
             summary: ReasoningSummaryConfig::Auto,
         }
+    }
+
+    /// Persist the ready environment selections for this turn.
+    ///
+    /// Environments whose cwd has no native absolute path (remote URIs) are
+    /// skipped: the persisted record is a durable local baseline, and a partial
+    /// list is still better than none for the environments that do resolve.
+    fn turn_context_environment_items(&self) -> Option<Vec<TurnContextEnvironmentItem>> {
+        let environments: Vec<_> = self
+            .environments
+            .turn_environments()
+            .filter_map(|environment| {
+                Some(TurnContextEnvironmentItem {
+                    environment_id: environment.environment_id.clone(),
+                    cwd: environment.cwd().to_abs_path().ok()?,
+                    shell: environment
+                        .shell
+                        .as_ref()
+                        .map(|shell| shell.name().to_string()),
+                })
+            })
+            .collect();
+        (!environments.is_empty()).then_some(environments)
     }
 
     fn turn_context_network_item(&self) -> Option<TurnContextNetworkItem> {

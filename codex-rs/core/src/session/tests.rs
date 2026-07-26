@@ -1595,6 +1595,7 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
             group: codex_config::MatcherGroup {
                 matcher: None,
                 hooks: vec![codex_config::HookHandlerConfig::Command {
+                    id: None,
                     command: "python3 /tmp/user.py".to_string(),
                     command_windows: None,
                     timeout_sec: Some(600),
@@ -3285,6 +3286,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),

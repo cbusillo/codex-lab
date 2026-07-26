@@ -138,6 +138,8 @@ pub fn generate_ts_with_options(
         filter_experimental_ts(out_dir)?;
     }
 
+    write_ts_compatibility_aliases(out_dir)?;
+
     if options.generate_indices {
         generate_index_ts(out_dir)?;
         generate_index_ts(&v2_out_dir)?;
@@ -2040,6 +2042,48 @@ pub(crate) fn trim_trailing_line_whitespace(content: &str) -> String {
         }
     }
     trimmed
+}
+
+/// TypeScript type names that were renamed after shipping, listed as
+/// `(subdirectory, previous name, current name)`.
+///
+/// Renaming a type removes its generated module, which breaks every client that
+/// imported the old name even though the wire format is unchanged. Emitting a
+/// re-export module keeps the old import path resolving without duplicating the
+/// type in the JSON schemas.
+const TS_COMPATIBILITY_ALIASES: &[(&str, &str, &str)] =
+    &[("v2", "ReviewStartTarget", "ReviewTarget")];
+
+fn ts_compatibility_alias_content(previous_name: &str, current_name: &str) -> String {
+    format!("export type {{ {current_name} as {previous_name} }} from \"./{current_name}\";\n")
+}
+
+fn write_ts_compatibility_aliases(out_dir: &Path) -> Result<()> {
+    for (subdir, previous_name, current_name) in TS_COMPATIBILITY_ALIASES {
+        let dir = out_dir.join(subdir);
+        if !dir.join(format!("{current_name}.ts")).exists() {
+            continue;
+        }
+        let path = dir.join(format!("{previous_name}.ts"));
+        fs::write(
+            &path,
+            ts_compatibility_alias_content(previous_name, current_name),
+        )
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_ts_compatibility_alias_tree(tree: &mut BTreeMap<PathBuf, String>) {
+    for (subdir, previous_name, current_name) in TS_COMPATIBILITY_ALIASES {
+        if !tree.contains_key(&PathBuf::from(subdir).join(format!("{current_name}.ts"))) {
+            continue;
+        }
+        tree.insert(
+            PathBuf::from(subdir).join(format!("{previous_name}.ts")),
+            ts_compatibility_alias_content(previous_name, current_name),
+        );
+    }
 }
 
 /// Generate an index.ts file that re-exports all generated types.

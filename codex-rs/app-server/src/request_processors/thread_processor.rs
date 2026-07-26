@@ -212,6 +212,52 @@ fn normalize_thread_list_cwd_filters(
     Ok(Some(normalized_cwds))
 }
 
+/// Resolve the `thread/list` relationship filter from the mutually exclusive
+/// relationship parameters.
+///
+/// `descendantOfThreadId` is the stable spelling of `ancestorThreadId`: both
+/// return spawned descendants at any depth, excluding the root thread itself.
+/// It is kept as a separate parameter so clients that shipped against the
+/// stable name keep working without opting into the experimental API.
+fn thread_list_relation_filter(
+    descendant_of_thread_id: Option<String>,
+    parent_thread_id: Option<String>,
+    ancestor_thread_id: Option<String>,
+) -> Result<Option<StoreThreadRelationFilter>, JSONRPCErrorError> {
+    if descendant_of_thread_id.is_some() && parent_thread_id.is_some() {
+        return Err(invalid_request(
+            "descendantOfThreadId and parentThreadId are mutually exclusive",
+        ));
+    }
+    if descendant_of_thread_id.is_some() && ancestor_thread_id.is_some() {
+        return Err(invalid_request(
+            "descendantOfThreadId and ancestorThreadId are mutually exclusive",
+        ));
+    }
+    if parent_thread_id.is_some() && ancestor_thread_id.is_some() {
+        return Err(invalid_request(
+            "parentThreadId and ancestorThreadId are mutually exclusive",
+        ));
+    }
+
+    if let Some(descendant_of_thread_id) = descendant_of_thread_id {
+        let thread_id = ThreadId::from_string(&descendant_of_thread_id)
+            .map_err(|err| invalid_request(format!("invalid descendantOfThreadId: {err}")))?;
+        return Ok(Some(StoreThreadRelationFilter::DescendantsOf(thread_id)));
+    }
+    if let Some(parent_thread_id) = parent_thread_id {
+        let thread_id = ThreadId::from_string(&parent_thread_id)
+            .map_err(|err| invalid_request(format!("invalid parent thread id: {err}")))?;
+        return Ok(Some(StoreThreadRelationFilter::DirectChildrenOf(thread_id)));
+    }
+    if let Some(ancestor_thread_id) = ancestor_thread_id {
+        let thread_id = ThreadId::from_string(&ancestor_thread_id)
+            .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?;
+        return Ok(Some(StoreThreadRelationFilter::DescendantsOf(thread_id)));
+    }
+    Ok(None)
+}
+
 fn has_model_resume_override(
     request_overrides: Option<&HashMap<String, serde_json::Value>>,
     typesafe_overrides: &ConfigOverrides,
@@ -1997,26 +2043,16 @@ impl ThreadRequestProcessor {
             cwd,
             use_state_db_only,
             search_term,
+            descendant_of_thread_id,
             parent_thread_id,
             ancestor_thread_id,
         } = params;
         let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
-        let relation_filter = match (parent_thread_id, ancestor_thread_id) {
-            (Some(_), Some(_)) => {
-                return Err(invalid_request(
-                    "parentThreadId and ancestorThreadId are mutually exclusive",
-                ));
-            }
-            (Some(parent_thread_id), None) => Some(StoreThreadRelationFilter::DirectChildrenOf(
-                ThreadId::from_string(&parent_thread_id)
-                    .map_err(|err| invalid_request(format!("invalid parent thread id: {err}")))?,
-            )),
-            (None, Some(ancestor_thread_id)) => Some(StoreThreadRelationFilter::DescendantsOf(
-                ThreadId::from_string(&ancestor_thread_id)
-                    .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?,
-            )),
-            (None, None) => None,
-        };
+        let relation_filter = thread_list_relation_filter(
+            descendant_of_thread_id,
+            parent_thread_id,
+            ancestor_thread_id,
+        )?;
 
         let requested_page_size = limit
             .map(|value| value as usize)

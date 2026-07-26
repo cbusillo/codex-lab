@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use codex_plugin::PluginHookSource;
 use codex_protocol::protocol::HookEventName;
 
@@ -18,12 +20,28 @@ pub fn plugin_hook_declarations(hook_sources: &[PluginHookSource]) -> Vec<Plugin
             source.source_relative_path.as_str(),
         );
         for (event_name, groups) in source.hooks.clone().into_matcher_groups() {
+            let mut seen_keys = HashSet::new();
             for (group_index, group) in groups.iter().enumerate() {
-                for (handler_index, _) in group.hooks.iter().enumerate() {
-                    declarations.push(PluginHookDeclaration {
-                        key: crate::hook_key(&key_source, event_name, group_index, handler_index),
+                for (handler_index, handler) in group.hooks.iter().enumerate() {
+                    let requested_key = crate::hook_key(
+                        &key_source,
                         event_name,
-                    });
+                        group_index,
+                        handler_index,
+                        hook_handler_id(handler),
+                    );
+                    let key = if seen_keys.insert(requested_key.clone()) {
+                        requested_key
+                    } else {
+                        crate::hook_key(
+                            &key_source,
+                            event_name,
+                            group_index,
+                            handler_index,
+                            /*id*/ None,
+                        )
+                    };
+                    declarations.push(PluginHookDeclaration { key, event_name });
                 }
             }
         }
@@ -34,6 +52,20 @@ pub fn plugin_hook_declarations(hook_sources: &[PluginHookSource]) -> Vec<Plugin
 
 pub(crate) fn plugin_hook_key_source(plugin_id: &str, source_relative_path: &str) -> String {
     format!("{plugin_id}:{source_relative_path}")
+}
+
+/// The declared hook id, but only for handlers that discovery will actually
+/// register. Skipped handlers must not claim an id-based key that a later
+/// runnable handler with the same id would then be denied.
+pub(crate) fn hook_handler_id(handler: &codex_config::HookHandlerConfig) -> Option<&str> {
+    match handler {
+        codex_config::HookHandlerConfig::Command { id, command, .. } => {
+            id.as_deref().filter(|_| !command.trim().is_empty())
+        }
+        codex_config::HookHandlerConfig::Prompt {} | codex_config::HookHandlerConfig::Agent {} => {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -64,6 +96,7 @@ mod tests {
                     hooks: vec![
                         HookHandlerConfig::Prompt {},
                         HookHandlerConfig::Command {
+                            id: None,
                             command: "echo hi".to_string(),
                             command_windows: None,
                             timeout_sec: None,

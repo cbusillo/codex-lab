@@ -1141,6 +1141,14 @@ pub struct ThreadListParams {
     /// Optional substring filter for the extracted thread title.
     #[ts(optional = nullable)]
     pub search_term: Option<String>,
+    /// Optional root thread id; when set, only persisted spawned descendants
+    /// of this thread are returned.
+    ///
+    /// Stable alias for `ancestorThreadId`, retained for clients that shipped
+    /// against it. Mutually exclusive with `parentThreadId` and
+    /// `ancestorThreadId`.
+    #[ts(optional = nullable)]
+    pub descendant_of_thread_id: Option<String>,
     /// Optional direct parent thread filter. Mutually exclusive with `ancestorThreadId`.
     #[experimental("thread/list.parentThreadId")]
     #[ts(optional = nullable)]
