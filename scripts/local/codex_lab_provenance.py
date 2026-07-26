@@ -313,6 +313,21 @@ def staged_candidate_directories(candidate_root: Path) -> list[Path]:
     return candidates
 
 
+def remove_staging_directory(staging_dir: Path) -> None:
+    if staging_dir.is_symlink() or not staging_dir.is_dir():
+        raise ProvenanceError(
+            f"staging path must be an owner-controlled directory: {staging_dir}"
+        )
+    staging_dir.chmod(0o700)
+    shutil.rmtree(staging_dir)
+
+
+def reap_orphaned_staging_directories(candidate_root: Path) -> None:
+    for staging_dir in candidate_root.iterdir():
+        if staging_dir.name.startswith(".staging-"):
+            remove_staging_directory(staging_dir)
+
+
 def prune_staged_candidates(candidate_root: Path, active_candidate: Path) -> None:
     candidates = staged_candidate_directories(candidate_root)
     if len(candidates) <= MAX_STAGED_CANDIDATES:
@@ -375,6 +390,7 @@ def stage_candidate(
         ensure_private_directory(directory)
     with (candidate_root / ".stage.lock").open("a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        reap_orphaned_staging_directories(candidate_root)
         return stage_candidate_locked(repo_root, source, candidate_root, expected)
 
 
@@ -423,8 +439,7 @@ def stage_candidate_locked(
         )
     finally:
         if staging_dir is not None:
-            staging_dir.chmod(0o700)
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            remove_staging_directory(staging_dir)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

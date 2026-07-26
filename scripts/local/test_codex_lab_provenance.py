@@ -82,10 +82,14 @@ class CodexLabProvenanceTest(unittest.TestCase):
             repo, commit = self.make_repo(root)
             source = root / "source-codex-lab"
             write_fake_binary(source, commit, "clean")
+            orphan = root / "artifacts" / "dogfood" / "candidates" / ".staging-old"
+            orphan.mkdir(parents=True)
+            (orphan / "partial").write_text("partial\n", encoding="utf-8")
             report = PROVENANCE.stage_candidate(repo, source, root / "artifacts")
             candidate = Path(report["binary_path"])
 
             self.assertEqual("current", report["status"])
+            self.assertFalse(orphan.exists())
             os.utime(candidate.parent, ns=(1, 1))
             cached = PROVENANCE.stage_candidate(repo, source, root / "artifacts")
             self.assertEqual(candidate, Path(cached["binary_path"]))
@@ -138,6 +142,24 @@ class CodexLabProvenanceTest(unittest.TestCase):
             self.assertTrue(all(candidate.exists() for candidate in candidates[3:]))
             self.assertTrue(unknown.is_dir())
             self.assertTrue(linked.is_symlink())
+
+    def test_rejects_symlinked_orphaned_staging_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            candidate_root = root / "candidates"
+            candidate_root.mkdir()
+            escaped = root / "escaped"
+            escaped.mkdir()
+            staging_link = candidate_root / ".staging-link"
+            staging_link.symlink_to(escaped, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                PROVENANCE.ProvenanceError,
+                "staging path must be an owner-controlled directory",
+            ):
+                PROVENANCE.reap_orphaned_staging_directories(candidate_root)
+            self.assertTrue(escaped.is_dir())
+            self.assertTrue(staging_link.is_symlink())
 
     def test_verifier_distinguishes_stale_and_unverifiable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

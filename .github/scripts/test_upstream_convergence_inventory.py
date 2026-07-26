@@ -1,5 +1,6 @@
 import json
 import unittest
+from collections import Counter
 from pathlib import Path
 
 import upstream_convergence_inventory as inventory
@@ -176,6 +177,20 @@ class CheckedInSnapshotTest(unittest.TestCase):
                     summary["summary"]["residualLocalInfluence"],
                     len(residuals["residuals"]),
                 )
+                residual_lane_counts = dict(
+                    sorted(Counter(item["lane"] for item in residuals["residuals"]).items())
+                )
+                self.assertEqual(
+                    residual_lane_counts,
+                    summary["residualLaneCounts"],
+                )
+                self.assertEqual(
+                    residual_lane_counts,
+                    residuals["residualLaneCounts"],
+                )
+                markdown = (snapshot / "inventory.md").read_text(encoding="utf-8")
+                for lane, count in residual_lane_counts.items():
+                    self.assertIn(f"| Residual lane `{lane}` | {count} |", markdown)
 
     def test_no_snapshot_claims_residual_paths_were_rejected(self) -> None:
         for snapshot in self.snapshots():

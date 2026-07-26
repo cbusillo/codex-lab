@@ -22,9 +22,9 @@ local content there instead of upstream content; it does not reject it.
 | Lane `intentionally_owned` | 12 |
 | Lane `red_manual_review` | 7 |
 | Residual lane `amber_contract_adapt` | 147 |
-| Residual lane `green_bulk_adopt` | 213 |
-| Residual lane `intentionally_owned` | 115 |
-| Residual lane `red_manual_review` | 3 |
+| Residual lane `green_bulk_adopt` | 210 |
+| Residual lane `intentionally_owned` | 117 |
+| Residual lane `red_manual_review` | 4 |
 
 ## Contract-reviewed conflicts
 
