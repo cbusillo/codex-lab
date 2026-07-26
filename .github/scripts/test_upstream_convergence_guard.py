@@ -38,6 +38,28 @@ NEW_OWNED_PROOFS = (
     ("codex-rs/config/src/hooks_tests.rs", "HOOKS-1"),
     ("codex-rs/hooks/src/engine/mod_tests.rs", "HOOKS-1"),
     ("codex-rs/exec/tests/suite/shared_cli_options.rs", "AUTH-1"),
+    # The restored Background Review engine and the durable session state it
+    # reads back, plus their dedicated tests.
+    ("codex-rs/core/src/tasks/review.rs", "AGENT-1"),
+    ("codex-rs/core/src/tasks/review_tests.rs", "AGENT-1"),
+    ("codex-rs/core/src/state/session.rs", "AGENT-1"),
+    ("codex-rs/core/src/state/session_tests.rs", "AGENT-1"),
+    # Restored proofs and implementations the stem convention could not reach.
+    ("codex-rs/core/tests/suite/invalid_image_recovery.rs", "CONTEXT-1"),
+    ("codex-rs/core/src/browser.rs", "INTEGRATION-1"),
+    ("codex-rs/core/src/browser_tests.rs", "INTEGRATION-1"),
+    ("codex-rs/core/src/context/world_state/environment_limits.rs", "HISTORY-1"),
+    ("codex-rs/tui/src/agent_session_env.rs", "AGENT-1"),
+    ("codex-rs/mcp-server/src/approval_response_compat_tests.rs", "SANDBOX-1"),
+    ("codex-rs/protocol/src/review_decision_compat.rs", "SANDBOX-1"),
+    ("codex-rs/utils/cli/src/approval_mode_cli_arg_tests.rs", "SANDBOX-1"),
+)
+
+# Crate-level test binaries. They declare `mod suite;` and carry upstream's
+# content, so only their existence is guarded.
+PRESENCE_ONLY_REGISTRIES = (
+    "codex-rs/core/tests/all.rs",
+    "codex-rs/exec/tests/all.rs",
 )
 
 
@@ -385,6 +407,34 @@ class CheckedInLedgerTest(unittest.TestCase):
         for path, _ in NEW_OWNED_PROOFS:
             with self.subTest(path=path):
                 self.assertNotIn(path, waived)
+
+    def test_deleting_a_crate_test_binary_is_detected(self) -> None:
+        """Losing `all.rs` stops every owned suite in that crate from running.
+
+        These files never diverged from upstream, so the ordinary "reverted to
+        upstream" signal cannot apply to them. They are guarded for absence
+        alone, which is the failure mode that actually silences the proofs.
+        """
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            empty_root = Path(temp_dir)
+            for path in PRESENCE_ONLY_REGISTRIES:
+                with self.subTest(path=path):
+                    entry = guarded_entry(self, path)
+                    self.assertEqual("intentionally_owned", entry["lane"])
+                    self.assertEqual(guard.PRESENCE_ONLY_GUARD, entry["guard"])
+                    self.assertEqual(guard.ABSENT, guard.evaluate(entry, empty_root)[0])
+
+    def test_presence_only_registry_carrying_upstream_content_is_intact(self) -> None:
+        # These files hold upstream's content by design, so the reversion check
+        # would fire on the intact tree if it were applied to them.
+        for path in PRESENCE_ONLY_REGISTRIES:
+            with self.subTest(path=path):
+                entry = guarded_entry(self, path)
+                contents = (guard.REPO_ROOT / path).read_bytes()
+
+                self.assertEqual(guard.blob_id(contents), entry["upstreamBlob"])
+                self.assertIsNone(guard.evaluate(entry, guard.REPO_ROOT))
 
     def test_every_waiver_names_a_guarded_path(self) -> None:
         guarded = {entry["path"] for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)}

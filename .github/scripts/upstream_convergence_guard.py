@@ -32,6 +32,9 @@ ABSENT = "absent"
 REVERTED = "reverted_to_upstream"
 VIOLATIONS = (ABSENT, REVERTED)
 
+# Manifest rows carrying upstream content that is guarded for existence alone.
+PRESENCE_ONLY_GUARD = "presence_only"
+
 DISPOSITIONS = (
     # Upstream deleted the path and Codex Lab accepted the deletion.
     "upstream_deletion_adopted",
@@ -140,6 +143,12 @@ def evaluate(
     candidate = repo_root / path
     if not candidate.is_file():
         return ABSENT, "owned path is missing from the candidate tree"
+    # A presence-only row records a path whose content is upstream's. It is
+    # guarded because deleting it unregisters the owned suites it declares, not
+    # because its bytes are locally owned, so comparing them would only produce
+    # a violation for the intact state.
+    if entry.get("guard") == PRESENCE_ONLY_GUARD:
+        return None
     upstream_blob = entry.get("upstreamBlob")
     if not isinstance(upstream_blob, str):
         return None

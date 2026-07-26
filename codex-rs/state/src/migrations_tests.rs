@@ -1,12 +1,14 @@
 use codex_utils_absolute_path::test_support::PathExt;
 use sqlx::Connection;
 use sqlx::Row;
+use sqlx::SqlStr;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 use std::borrow::Cow;
 
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
+use super::repair_legacy_agent_jobs_migration_checksum;
 use super::repair_legacy_recency_migration_version;
 use super::runtime_state_migrator;
 
@@ -477,6 +479,158 @@ INSERT INTO threads (
         .expect("old-binary row should load");
     assert_eq!(seeded.get::<i64, _>("recency_at"), 1_700_000_300);
     assert_eq!(seeded.get::<i64, _>("recency_at_ms"), 1_700_000_300_456);
+
+    pool.close().await;
+}
+
+/// Version 43 was rewritten in place from `drop agent jobs` to an inert placeholder. A candidate
+/// or development database that already applied the destructive version recorded its checksum, so
+/// without a repair every later `Migrator::run` fails with `VersionMismatch(43)` and the database
+/// never opens again.
+#[tokio::test]
+async fn repairs_agent_jobs_migration_that_was_applied_before_the_rewrite() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("sqlite database should open");
+
+    let placeholder = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.description == "retain agent jobs")
+        .expect("agent-jobs placeholder migration should exist");
+    let mut legacy_migrations = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .filter(|migration| migration.version < placeholder.version)
+        .cloned()
+        .collect::<Vec<_>>();
+    legacy_migrations.push(Migration::new(
+        placeholder.version,
+        Cow::Borrowed("drop agent jobs"),
+        placeholder.migration_type,
+        SqlStr::from_static(
+            "DROP TABLE IF EXISTS agent_job_items;\nDROP TABLE IF EXISTS agent_jobs;\n",
+        ),
+        placeholder.no_tx,
+    ));
+    Migrator::with_migrations(legacy_migrations)
+        .run(&pool)
+        .await
+        .expect("the pre-rewrite ledger should apply");
+
+    // The rewrite is exactly what an unrepaired upgrade cannot get past.
+    let unrepaired = STATE_MIGRATOR.run(&pool).await;
+    assert!(
+        matches!(
+            unrepaired,
+            Err(sqlx::migrate::MigrateError::VersionMismatch(version)) if version == placeholder.version
+        ),
+        "expected VersionMismatch({}), got {unrepaired:?}",
+        placeholder.version
+    );
+
+    repair_legacy_agent_jobs_migration_checksum(&pool, &STATE_MIGRATOR)
+        .await
+        .expect("legacy agent-jobs checksum should be repaired");
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("current migrations should apply after repair");
+
+    let repaired =
+        sqlx::query("SELECT description, checksum FROM _sqlx_migrations WHERE version = ?")
+            .bind(placeholder.version)
+            .fetch_one(&pool)
+            .await
+            .expect("the repaired row should load");
+    assert_eq!(
+        (
+            repaired.get::<String, _>("description"),
+            repaired.get::<Vec<u8>, _>("checksum"),
+        ),
+        (
+            placeholder.description.to_string(),
+            placeholder.checksum.to_vec(),
+        )
+    );
+
+    pool.close().await;
+}
+
+/// The repair is gated on the one checksum the destructive version produced, so a row recorded by
+/// any other migration at that version is left for `Migrator::run` to reject.
+#[tokio::test]
+async fn leaves_an_unrelated_version_43_checksum_untouched() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("sqlite database should open");
+
+    let placeholder = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.description == "retain agent jobs")
+        .expect("agent-jobs placeholder migration should exist");
+    let mut legacy_migrations = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .filter(|migration| migration.version < placeholder.version)
+        .cloned()
+        .collect::<Vec<_>>();
+    legacy_migrations.push(Migration::new(
+        placeholder.version,
+        Cow::Borrowed("some other migration"),
+        placeholder.migration_type,
+        SqlStr::from_static("SELECT 2;\n"),
+        placeholder.no_tx,
+    ));
+    let unrelated = legacy_migrations
+        .last()
+        .expect("the seeded migration should be present")
+        .clone();
+    Migrator::with_migrations(legacy_migrations)
+        .run(&pool)
+        .await
+        .expect("the seeded ledger should apply");
+
+    repair_legacy_agent_jobs_migration_checksum(&pool, &STATE_MIGRATOR)
+        .await
+        .expect("the repair should succeed without matching anything");
+
+    let row = sqlx::query("SELECT description, checksum FROM _sqlx_migrations WHERE version = ?")
+        .bind(placeholder.version)
+        .fetch_one(&pool)
+        .await
+        .expect("the seeded row should load");
+    assert_eq!(
+        (
+            row.get::<String, _>("description"),
+            row.get::<Vec<u8>, _>("checksum"),
+        ),
+        (
+            unrelated.description.to_string(),
+            unrelated.checksum.to_vec(),
+        )
+    );
 
     pool.close().await;
 }

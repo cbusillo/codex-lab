@@ -18,12 +18,12 @@ local content there instead of upstream content; it does not reject it.
 | Conflict `content` | 279 |
 | Conflict `modify/delete` | 7 |
 | Lane `amber_contract_adapt` | 107 |
-| Lane `green_bulk_adopt` | 153 |
-| Lane `intentionally_owned` | 28 |
+| Lane `green_bulk_adopt` | 150 |
+| Lane `intentionally_owned` | 31 |
 | Lane `red_manual_review` | 7 |
-| Residual lane `amber_contract_adapt` | 140 |
-| Residual lane `green_bulk_adopt` | 193 |
-| Residual lane `intentionally_owned` | 142 |
+| Residual lane `amber_contract_adapt` | 103 |
+| Residual lane `green_bulk_adopt` | 190 |
+| Residual lane `intentionally_owned` | 182 |
 | Residual lane `red_manual_review` | 3 |
 
 ## Contract-reviewed conflicts
@@ -109,11 +109,14 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/control_tests.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/registry.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/role_tests.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `HISTORY-1` | `codex-rs/core/src/context/world_state/environment_render_tests.rs` | durable environment baseline across resume and fork |
 | `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/context_manager/history.rs` | model-visible context bounds and history-rewrite exceptions |
 | `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/context_manager/history_tests.rs` | model-visible context bounds and history-rewrite exceptions |
 | `intentionally_owned` | `HISTORY-1` | `codex-rs/core/src/session/rollout_reconstruction_tests.rs` | durable environment baseline across resume and fork |
 | `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/session/turn.rs` | model-visible context bounds and history-rewrite exceptions |
 | `intentionally_owned` | `HISTORY-1` | `codex-rs/core/src/session/turn_context.rs` | durable environment baseline across resume and fork |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/state/session.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tasks/review.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_common.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs` | Every Code orchestration and review behavior |

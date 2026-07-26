@@ -24,6 +24,10 @@ GUARD_SCHEMA_VERSION = 1
 # upstream blob during a refresh. `upstream_convergence_guard.py` enforces this.
 GUARDED_LANES = ("intentionally_owned", "red_manual_review")
 
+# Marks a manifest row whose content is upstream's, so only its absence is a
+# violation. `upstream_convergence_guard.py` reads this field.
+PRESENCE_ONLY_GUARD = "presence_only"
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -88,6 +92,20 @@ SHARED_PROOF_REGISTRIES = (
     # registers Code Bridge, remote control, Background Review control, and
     # Project Validation coverage.
     "codex-rs/app-server/tests/suite/v2/mod.rs",
+)
+
+# Crate-level test binaries that declare `mod suite;`. They are the only edge
+# from the compiled test binary to the owned suites, so deleting one silently
+# stops every owned proof in that crate from running while no proof file goes
+# missing. Their content is upstream's, though, so a content comparison says
+# nothing: they are guarded for presence only.
+#
+# `codex-rs/app-server/tests/all.rs` is deliberately absent. Its pre-anchor
+# version also installed a test keyring store, so it carries a real content
+# question that belongs to `PROTOCOL-1` review rather than to a presence check.
+PRESENCE_ONLY_PROOF_REGISTRIES = (
+    "codex-rs/core/tests/all.rs",
+    "codex-rs/exec/tests/all.rs",
 )
 
 
@@ -214,6 +232,30 @@ RULES = (
             # upstream also owns, so the stem convention cannot reach them.
             "codex-rs/tui/src/app/thread_routing.rs",
             "codex-rs/tui/src/app/test_support.rs",
+            # The Background Review engine itself. `tasks/review.rs` drives the
+            # background run, its status events, and its budget cancellation;
+            # `state/session.rs` holds the durable per-session review state the
+            # engine reads back. Upstream owns both filenames with much smaller
+            # modules, so the stem convention cannot reach them.
+            "codex-rs/core/src/tasks/review.rs",
+            "codex-rs/core/src/tasks/review_tests.rs",
+            "codex-rs/core/src/state/session.rs",
+            "codex-rs/core/src/state/session_tests.rs",
+            # The TUI-side agent session environment that carries provenance
+            # into spawned agents.
+            "codex-rs/tui/src/agent_session_env*",
+            "codex-rs/tui/src/chatwidget/snapshots/*background_auto_review*",
+            # Every Code-only wire surface for Background Review, Auto Review,
+            # and session provenance. These are additive schemas with no
+            # upstream counterpart, mirroring how `VALIDATION-1` guards the
+            # Project Validation fixtures.
+            "codex-rs/app-server-protocol/schema/json/v2/AutoReview*",
+            "codex-rs/app-server-protocol/schema/json/v2/BackgroundAutoReview*",
+            "codex-rs/app-server-protocol/schema/json/v2/SessionProvenance*",
+            "codex-rs/app-server-protocol/schema/typescript/v2/AutoReview*",
+            "codex-rs/app-server-protocol/schema/typescript/v2/BackgroundAutoReview*",
+            "codex-rs/app-server-protocol/schema/typescript/v2/SessionProvenance*",
+            "codex-rs/app-server-protocol/schema/typescript/v2/ReviewStartTarget*",
         ),
         lane="intentionally_owned",
         contracts=("AGENT-1",),
@@ -227,6 +269,9 @@ RULES = (
             # proofs, including the app-server Code Bridge and remote-control
             # suites.
             *feature_paths("browser", "code_bridge", "remote_control"),
+            # The browser control module lives directly under `core/src`, which
+            # is not an implementation root, so the stem convention misses it.
+            "codex-rs/core/src/browser*",
             # The three named model-facing Code Bridge proofs live in the shared
             # upstream tool suite, so the stem convention cannot reach them.
             "codex-rs/core/tests/suite/tools.rs",
@@ -266,6 +311,10 @@ RULES = (
             "codex-rs/core/src/session_prefix_tests.rs",
             "codex-rs/core/src/session/turn.rs",
             "codex-rs/core/tests/suite/view_image.rs",
+            # The end-to-end proof for that one history rewrite: a turn that
+            # carries an image the Responses API rejects must recover through a
+            # checkpoint rather than a replay.
+            "codex-rs/core/tests/suite/invalid_image_recovery.rs",
         ),
         lane="intentionally_owned",
         contracts=("CONTEXT-1",),
@@ -295,12 +344,30 @@ RULES = (
             # entry point, plus their proofs.
             *feature_paths("rollout_reconstruction", "turn_context_environments"),
             "codex-rs/core/src/session/turn_context.rs",
-            "codex-rs/core/src/context/world_state/environment.rs",
-            "codex-rs/core/src/context/world_state/mod.rs",
+            # The whole world-state module, not two named files: the reader, its
+            # size limits, and its tool surface were restored as siblings and a
+            # per-file list silently misses the next one.
+            "codex-rs/core/src/context/world_state/**",
         ),
         lane="intentionally_owned",
         contracts=("HISTORY-1",),
         reason="durable environment baseline across resume and fork",
+    ),
+    Rule(
+        patterns=(
+            # Approval-vocabulary compatibility shims. Codex Lab keeps parsing
+            # the retired `on-failure` policy name and the retired review
+            # decisions on every external entry point -- CLI flag, MCP tool
+            # param, and protocol payload -- so an upgrade cannot reject a
+            # request an older client still sends. Upstream owns the enums
+            # these extend, so only the shims and their proofs are guarded.
+            "codex-rs/mcp-server/src/approval_response_compat*",
+            "codex-rs/protocol/src/review_decision_compat*",
+            "codex-rs/utils/cli/src/approval_mode_cli_arg*",
+        ),
+        lane="intentionally_owned",
+        contracts=("SANDBOX-1",),
+        reason="approval and review decision compatibility for older clients",
     ),
     Rule(
         patterns=(
@@ -314,7 +381,7 @@ RULES = (
         reason="Every Code shared CLI options for auth profiles and workspace roots",
     ),
     Rule(
-        patterns=SHARED_PROOF_REGISTRIES,
+        patterns=(*SHARED_PROOF_REGISTRIES, *PRESENCE_ONLY_PROOF_REGISTRIES),
         lane="intentionally_owned",
         contracts=("AGENT-1", "INTEGRATION-1", "VALIDATION-1"),
         reason="registration point for owned integration proofs",
@@ -652,9 +719,15 @@ def build_guard_manifest(
             if classified["lane"] not in GUARDED_LANES:
                 continue
             upstream_blob = upstream_objects.get(path)
-            if upstream_blob == baseline_blob:
+            presence_only = path in PRESENCE_ONLY_PROOF_REGISTRIES
+            # A path byte-identical to upstream has no local delta to revert, so
+            # it is normally not worth a manifest row. Presence-only registries
+            # are the exception: what they carry is the edge that makes the
+            # owned suites run at all, so they are recorded regardless of
+            # content and the guard checks them for absence alone.
+            if upstream_blob == baseline_blob and not presence_only:
                 continue
-            guarded[path] = {
+            entry = {
                 "path": path,
                 "lane": classified["lane"],
                 "contracts": classified["contracts"],
@@ -663,6 +736,9 @@ def build_guard_manifest(
                 "baselineBlob": baseline_blob,
                 "upstreamBlob": upstream_blob,
             }
+            if presence_only:
+                entry["guard"] = PRESENCE_ONLY_GUARD
+            guarded[path] = entry
 
     entries = [guarded[path] for path in sorted(guarded)]
     header = {
