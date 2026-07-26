@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 2,
+  "repository": "openai/codex",
+  "refs": {"base": "20dafe201d91d4405eef05ecd1db0257f13a9ac8", "local": "ced83ba965e65a64d9816ebbd4b861c7d91af1f9", "upstream": "62fd410384cca008446c2d64a4f2b3f915f4906e"},
+  "policy": {"defaultLane": "green_bulk_adopt", "rule": "Upstream wins unless a named convergence contract applies."},
+  "summary": {"conflicts": 0, "localChangedOnly": 444, "residualLocalInfluence": 445, "sharedIdentical": 0, "sharedMergeableDivergent": 1},
+  "conflictTypeCounts": {},
+  "laneCounts": {},
+  "residualLaneCounts": {"amber_contract_adapt": 153, "green_bulk_adopt": 194, "intentionally_owned": 88, "red_manual_review": 10},
+  "conflicts": [
+  ]
+}
