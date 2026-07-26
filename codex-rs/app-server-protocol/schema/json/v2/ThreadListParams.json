@@ -71,6 +71,13 @@
       ],
       "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
     },
+    "descendantOfThreadId": {
+      "description": "Optional root thread id; when set, only persisted spawned descendants of this thread are returned.\n\nStable alias for `ancestorThreadId`, retained for clients that shipped against it. Mutually exclusive with `parentThreadId` and `ancestorThreadId`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "isPinned": {
       "description": "Optional pinned filter; when set, only threads matching this value are returned.",
       "type": [

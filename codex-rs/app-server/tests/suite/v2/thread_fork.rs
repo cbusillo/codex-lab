@@ -100,6 +100,7 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
             cwd: None,
             use_state_db_only: false,
             search_term: None,
+            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })

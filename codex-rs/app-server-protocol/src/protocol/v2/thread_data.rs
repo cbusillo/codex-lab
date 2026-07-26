@@ -312,7 +312,9 @@ pub struct Thread {
     #[serde(default)]
     pub is_pinned: bool,
     /// Persisted thread history contract selected when this thread was created.
-    #[experimental("thread.historyMode")]
+    ///
+    /// This field is part of the published stable `Thread` surface; keep it
+    /// non-experimental so existing clients continue to receive it.
     #[serde(default)]
     pub history_mode: ThreadHistoryMode,
     /// Model provider used for this thread (for example, 'openai').

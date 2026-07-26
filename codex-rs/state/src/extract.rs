@@ -424,6 +424,7 @@ mod tests {
                         .join("parent/workspace")
                 ))
                 .expect("absolute parent cwd"),
+                environments: None,
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
@@ -470,6 +471,7 @@ mod tests {
                         .join("workspace")
                 ))
                 .expect("absolute workspace cwd"),
+                environments: None,
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
@@ -512,6 +514,7 @@ mod tests {
                 turn_id: Some("turn-1".to_string()),
                 cwd: serde_json::from_value(serde_json::json!(&fallback_cwd))
                     .expect("absolute fallback cwd"),
+                environments: None,
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
@@ -551,6 +554,7 @@ mod tests {
                         .join("fallback/workspace")
                 ))
                 .expect("absolute fallback cwd"),
+                environments: None,
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,

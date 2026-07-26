@@ -7,6 +7,7 @@ use crate::export::GENERATED_TS_HEADER;
 use crate::export::filter_experimental_ts_tree;
 use crate::export::generate_index_ts_tree;
 use crate::export::trim_trailing_line_whitespace;
+use crate::export::write_ts_compatibility_alias_tree;
 use crate::protocol::common::visit_client_response_types;
 use crate::protocol::common::visit_server_response_types;
 use anyhow::Context;
@@ -70,6 +71,7 @@ pub fn generate_typescript_schema_fixture_subtree_for_tests() -> Result<BTreeMap
     collect_typescript_fixture_file::<ServerNotificationEnvelope>(&mut files, &mut seen)?;
 
     filter_experimental_ts_tree(&mut files)?;
+    write_ts_compatibility_alias_tree(&mut files);
     generate_index_ts_tree(&mut files);
     for content in files.values_mut() {
         *content = trim_trailing_line_whitespace(content);

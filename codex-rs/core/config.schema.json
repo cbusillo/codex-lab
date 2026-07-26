@@ -1400,6 +1400,10 @@
               "default": null,
               "type": "string"
             },
+            "id": {
+              "description": "Stable identifier for this handler. When present it anchors the persisted hook-state key (enable/disable and `trusted_hash`) so reordering handlers does not silently drop the user's decisions.",
+              "type": "string"
+            },
             "statusMessage": {
               "default": null,
               "type": "string"

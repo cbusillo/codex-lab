@@ -17311,6 +17311,15 @@
           ],
           "description": "Optional Git metadata captured when the thread was created."
         },
+        "historyMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadHistoryMode"
+            }
+          ],
+          "default": "legacy",
+          "description": "Persisted thread history contract selected when this thread was created.\n\nThis field is part of the published stable `Thread` surface; keep it non-experimental so existing clients continue to receive it."
+        },
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
@@ -18875,6 +18884,13 @@
             }
           ],
           "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
+        },
+        "descendantOfThreadId": {
+          "description": "Optional root thread id; when set, only persisted spawned descendants of this thread are returned.\n\nStable alias for `ancestorThreadId`, retained for clients that shipped against it. Mutually exclusive with `parentThreadId` and `ancestorThreadId`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "isPinned": {
           "description": "Optional pinned filter; when set, only threads matching this value are returned.",

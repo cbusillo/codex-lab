@@ -7,6 +7,7 @@ use crate::context::environment_context::push_xml_escaped_text;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
+use codex_protocol::protocol::TurnContextItem;
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
@@ -300,6 +301,64 @@ struct EnvironmentSnapshot {
     cwd: String,
     status: EnvironmentStatus,
     shell: Option<String>,
+}
+
+impl EnvironmentsSnapshot {
+    /// Rebuild this section's baseline from a rollout `TurnContextItem`.
+    ///
+    /// Rollouts written before world-state items existed carry the resolved
+    /// environment selections on the turn context instead. Without this, resume
+    /// and fork have no baseline for the section and re-render the whole
+    /// `<environment_context>` block, losing the recorded per-environment cwds.
+    ///
+    /// Returns `None` for turn contexts that never persisted selections, so
+    /// those rollouts keep the existing history-based fallback rather than
+    /// getting a baseline invented from the legacy single `cwd`.
+    pub(super) fn from_turn_context_item(turn_context_item: &TurnContextItem) -> Option<Self> {
+        let environments = turn_context_item.environments.as_ref()?;
+        Some(Self {
+            environments: environments
+                .iter()
+                .map(|environment| {
+                    (
+                        environment.environment_id.clone(),
+                        EnvironmentSnapshot {
+                            cwd: PathUri::from_abs_path(&environment.cwd)
+                                .inferred_native_path_string(),
+                            status: EnvironmentStatus::Available,
+                            shell: environment.shell.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            current_date: turn_context_item.current_date.clone(),
+            timezone: turn_context_item.timezone.clone(),
+            network: turn_context_item.network.as_ref().map(|network| {
+                NetworkContext::new(
+                    network.allowed_domains.clone(),
+                    network.denied_domains.clone(),
+                )
+                .render()
+            }),
+            filesystem: Some(
+                FileSystemContext::from_permission_profile(
+                    &turn_context_item.permission_profile(),
+                    &workspace_roots_from_turn_context_item(turn_context_item),
+                )
+                .render(),
+            ),
+            subagents: None,
+        })
+    }
+}
+
+/// Older rollout items did not persist workspace roots. Fall back to the legacy
+/// cwd binding only when reconstructing that historical context.
+fn workspace_roots_from_turn_context_item(turn_context_item: &TurnContextItem) -> Vec<PathUri> {
+    match turn_context_item.workspace_roots.as_ref() {
+        Some(workspace_roots) => workspace_roots.iter().map(PathUri::from_abs_path).collect(),
+        None => vec![PathUri::from_abs_path(&turn_context_item.cwd)],
+    }
 }
 
 impl EnvironmentSnapshot {

@@ -510,6 +510,9 @@ fn map_hook_matcher_group_to_api(group: CoreMatcherGroup) -> ConfiguredHookMatch
 fn map_hook_handler_to_api(handler: CoreHookHandlerConfig) -> ConfiguredHookHandler {
     match handler {
         CoreHookHandlerConfig::Command {
+            // The hook `id` only anchors persisted hook-state keys; it is not
+            // part of the app-server hook handler surface.
+            id: _,
             command,
             command_windows,
             timeout_sec,

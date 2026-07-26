@@ -160,6 +160,19 @@ impl TurnEnvironmentSelections {
     }
 }
 
+/// One environment selection as persisted in a `TurnContextItem`.
+///
+/// Rollouts are read by older and newer Codex builds alike, so this stays a
+/// self-contained record of the resolved selection rather than a projection of
+/// the live environment types.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnContextEnvironmentItem {
+    pub environment_id: String,
+    pub cwd: AbsolutePathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
 #[serde(transparent)]
 #[ts(type = "string")]
@@ -3399,6 +3412,11 @@ pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub cwd: AbsolutePathBuf,
+    /// Resolved environment selections for this turn. This is persisted as
+    /// turn-context metadata so resume/fork replay can recover the durable
+    /// world-state baseline without re-resolving historical selections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<TurnContextEnvironmentItem>>,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6322,10 +6340,86 @@ mod tests {
     }
 
     #[test]
+    fn turn_context_item_round_trips_legacy_environments() -> Result<()> {
+        let cwd = test_path_buf("/tmp/workspace").abs();
+        let legacy_line = json!({
+            "cwd": cwd,
+            "environments": [
+                { "environment_id": "local", "cwd": cwd, "shell": "bash" },
+                { "environment_id": "remote", "cwd": cwd },
+            ],
+            "approval_policy": "never",
+            "sandbox_policy": serde_json::to_value(SandboxPolicy::DangerFullAccess)?,
+            "model": "gpt-5",
+            "summary": "auto",
+        });
+
+        let item: TurnContextItem = serde_json::from_value(legacy_line)?;
+
+        assert_eq!(
+            item.environments,
+            Some(vec![
+                TurnContextEnvironmentItem {
+                    environment_id: "local".to_string(),
+                    cwd: cwd.clone(),
+                    shell: Some("bash".to_string()),
+                },
+                TurnContextEnvironmentItem {
+                    environment_id: "remote".to_string(),
+                    cwd: cwd.clone(),
+                    shell: None,
+                },
+            ])
+        );
+        let reserialized = serde_json::to_value(&item)?;
+        assert_eq!(
+            reserialized["environments"],
+            json!([
+                { "environment_id": "local", "cwd": cwd, "shell": "bash" },
+                { "environment_id": "remote", "cwd": cwd },
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn turn_context_item_omits_environments_when_absent() -> Result<()> {
+        let item = TurnContextItem {
+            turn_id: None,
+            cwd: test_path_buf("/tmp").abs(),
+            environments: None,
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "gpt-5".to_string(),
+            comp_hash: None,
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            multi_agent_mode: None,
+            realtime_active: None,
+            effort: None,
+            summary: ReasoningSummaryConfig::Auto,
+        };
+
+        let value = serde_json::to_value(item)?;
+
+        assert_eq!(value.get("environments"), None);
+        Ok(())
+    }
+
+    #[test]
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
             cwd: test_path_buf("/tmp").abs(),
+            environments: None,
             workspace_roots: None,
             current_date: None,
             timezone: None,

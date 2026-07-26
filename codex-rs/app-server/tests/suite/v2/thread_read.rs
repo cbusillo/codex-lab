@@ -335,6 +335,7 @@ async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_histo
             cwd: None,
             use_state_db_only: false,
             search_term: None,
+            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -1040,6 +1041,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
+                descendant_of_thread_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
             },
@@ -1419,6 +1421,7 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
             cwd: None,
             use_state_db_only: true,
             search_term: None,
+            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
