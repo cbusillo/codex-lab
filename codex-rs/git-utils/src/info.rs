@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::path::Path;
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Stdio;
 
 use codex_file_system::ExecutorFileSystem;

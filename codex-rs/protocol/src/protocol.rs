@@ -1928,16 +1928,40 @@ pub enum ProjectValidationStatus {
     ConfigurationError,
     TimedOut,
     InfrastructureFailure,
+    Cancelled,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectValidationSkipReason {
+    ValidationDisabled,
+    NoChangedFiles,
+    NoApplicableProvider,
+    NonRootAgent,
+    UnchangedFingerprint,
+    UnsupportedEnvironment,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct ProjectValidationCompletedEvent {
     pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item_id: Option<String>,
     pub command: Vec<String>,
+    #[serde(default)]
+    pub command_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub cwd: Option<AbsolutePathBuf>,
     pub status: ProjectValidationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub skip_reason: Option<ProjectValidationSkipReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub changed_file_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub exit_code: Option<i32>,
@@ -6000,6 +6024,38 @@ mod tests {
         unknown["history_mode"] = json!("future");
         assert!(serde_json::from_value::<SessionMeta>(unknown).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn legacy_project_validation_event_defaults_new_disposition_fields() {
+        let event: ProjectValidationCompletedEvent = serde_json::from_value(json!({
+            "turn_id": "turn-1",
+            "command": ["just", "test"],
+            "status": "passed",
+            "exit_code": 0,
+            "output": "ok",
+            "output_truncated": false,
+            "duration_ms": 12
+        }))
+        .expect("deserialize legacy project validation event");
+
+        assert_eq!(
+            event,
+            ProjectValidationCompletedEvent {
+                turn_id: "turn-1".to_string(),
+                item_id: None,
+                command: vec!["just".to_string(), "test".to_string()],
+                command_truncated: false,
+                cwd: None,
+                status: ProjectValidationStatus::Passed,
+                skip_reason: None,
+                changed_file_count: None,
+                exit_code: Some(0),
+                output: "ok".to_string(),
+                output_truncated: false,
+                duration_ms: 12,
+            }
+        );
     }
 
     #[test]

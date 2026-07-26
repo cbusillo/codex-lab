@@ -12,6 +12,8 @@ use crate::session_state::ThreadSessionState;
 use crate::wrapping::word_wrap_lines;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::McpAuthStatus;
+use codex_app_server_protocol::ProjectValidationSkipReason;
+use codex_app_server_protocol::ProjectValidationStatus;
 use codex_config::types::McpServerConfig;
 use codex_otel::RuntimeMetricTotals;
 use codex_otel::RuntimeMetricsSummary;
@@ -65,6 +67,97 @@ fn streaming_agent_tail_blank_line_uses_one_viewport_row() {
 
   second");
     assert_eq!(cell.desired_height(/*width*/ 80), 3);
+}
+
+#[test]
+fn project_validation_disposition_snapshots() {
+    let cells = [
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::Passed,
+            skip_reason: None,
+            changed_file_count: Some(1),
+            command: &["shellcheck".to_string(), "script.sh".to_string()],
+            command_truncated: false,
+            exit_code: Some(0),
+            duration_ms: 42,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::ActionableFailure,
+            skip_reason: None,
+            changed_file_count: Some(2),
+            command: &["cargo".to_string(), "check".to_string()],
+            command_truncated: false,
+            exit_code: Some(7),
+            duration_ms: 99,
+            output_truncated: true,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::ConfigurationError,
+            skip_reason: None,
+            changed_file_count: None,
+            command: &[],
+            command_truncated: false,
+            exit_code: None,
+            duration_ms: 0,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::TimedOut,
+            skip_reason: None,
+            changed_file_count: None,
+            command: &[],
+            command_truncated: false,
+            exit_code: None,
+            duration_ms: 0,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::InfrastructureFailure,
+            skip_reason: None,
+            changed_file_count: None,
+            command: &[],
+            command_truncated: false,
+            exit_code: None,
+            duration_ms: 0,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::Cancelled,
+            skip_reason: None,
+            changed_file_count: Some(3),
+            command: &["shellcheck".to_string()],
+            command_truncated: false,
+            exit_code: None,
+            duration_ms: 12,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::Skipped,
+            skip_reason: Some(ProjectValidationSkipReason::NoApplicableProvider),
+            changed_file_count: Some(1),
+            command: &["shellcheck".to_string()],
+            command_truncated: true,
+            exit_code: None,
+            duration_ms: 0,
+            output_truncated: false,
+        }),
+    ];
+    let rendered = cells
+        .into_iter()
+        .flat_map(|cell| render_lines(&cell.display_lines(/*width*/ 160)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @"
+✔ Automatic Validation passed · 1 changed file · shellcheck script.sh · 42 ms
+✗ Automatic Validation failed · 2 changed files · exit 7 · cargo check · 99 ms · output truncated
+✗ Automatic Validation configuration error
+✗ Automatic Validation timed out
+✗ Automatic Validation infrastructure failure
+○ Automatic Validation cancelled · 3 changed files · shellcheck · 12 ms
+○ Automatic Validation skipped · no applicable provider · 1 changed file · shellcheck · command truncated
+");
 }
 
 fn stdio_server_config(

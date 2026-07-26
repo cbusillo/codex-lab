@@ -435,7 +435,8 @@ WHERE thread_id = ?
             | ThreadItem::ImageGeneration(_)
             | ThreadItem::EnteredReviewMode { .. }
             | ThreadItem::ExitedReviewMode { .. }
-            | ThreadItem::ContextCompaction { .. } => {}
+            | ThreadItem::ContextCompaction { .. }
+            | ThreadItem::ProjectValidation { .. } => {}
         }
     }
     Ok(())

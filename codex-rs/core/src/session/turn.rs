@@ -151,14 +151,54 @@ const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_tok
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the turn complete.
 ///
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunTurnMode {
+    Initial,
+    Continuation,
+}
+
+pub(crate) struct RunTurnState {
+    turn_diff_tracker: tokio::sync::OnceCell<SharedTurnDiffTracker>,
+    mode: RunTurnMode,
+}
+
+impl RunTurnState {
+    pub(crate) fn new() -> Self {
+        Self {
+            turn_diff_tracker: tokio::sync::OnceCell::new(),
+            mode: RunTurnMode::Initial,
+        }
+    }
+
+    fn begin_run(&mut self) -> RunTurnMode {
+        std::mem::replace(&mut self.mode, RunTurnMode::Continuation)
+    }
+
+    async fn turn_diff_tracker(&self, step_context: &StepContext) -> SharedTurnDiffTracker {
+        Arc::clone(
+            self.turn_diff_tracker
+                .get_or_init(|| async {
+                    Arc::new(tokio::sync::Mutex::new(
+                        TurnDiffTracker::with_environment_display_roots(
+                            turn_diff_display_roots(step_context).await,
+                        ),
+                    ))
+                })
+                .await,
+        )
+    }
+}
+
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     mut turn_context: Arc<TurnContext>,
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
     input: Vec<TurnInput>,
+    run_state: &mut RunTurnState,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
+    let run_mode = run_state.begin_run();
     turn_context = sess
         .ensure_mcp_manager_for_execution_account(&turn_context)
         .await;
@@ -200,55 +240,54 @@ pub(crate) async fn run_turn(
         Err(err) => return Err(err),
     };
     // Keep the exact model-visible state used by this turn and its inline compactions.
-    let (mut world_state, display_roots) = tokio::join!(
-        sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref()),
-        turn_diff_display_roots(first_step_context.as_ref()),
-    );
-
-    let Some((injection_items, explicitly_enabled_connectors)) = build_skills_and_plugins(
-        &sess,
-        first_step_context.as_ref(),
-        &input,
-        &cancellation_token,
-    )
-    .await
-    else {
-        return Ok(TurnRunResult::ineligible(false));
-    };
-
-    if run_pending_session_start_hooks(&sess, &turn_context).await {
-        return Ok(TurnRunResult::ineligible(false));
-    }
-    let mut can_drain_pending_input = input.is_empty();
-    if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
-        return Ok(TurnRunResult::ineligible(false));
-    }
-
-    sess.merge_connector_selection(explicitly_enabled_connectors.clone())
+    let mut world_state = sess
+        .record_context_updates_and_set_reference_context_item(first_step_context.as_ref())
         .await;
-    sess.set_previous_turn_settings(Some(PreviousTurnSettings {
-        model: turn_context.model_info.slug.clone(),
-        comp_hash: turn_context.model_info.comp_hash.clone(),
-        realtime_active: Some(turn_context.realtime_active),
-    }))
-    .await;
-    for response_item in injection_items {
-        sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-            .await;
-    }
+    let turn_diff_tracker = run_state
+        .turn_diff_tracker(first_step_context.as_ref())
+        .await;
+    let mut can_drain_pending_input = input.is_empty();
+    if run_mode == RunTurnMode::Initial {
+        let Some((injection_items, explicitly_enabled_connectors)) = build_skills_and_plugins(
+            &sess,
+            first_step_context.as_ref(),
+            &input,
+            &cancellation_token,
+        )
+        .await
+        else {
+            return Ok(TurnRunResult::ineligible(false));
+        };
 
-    track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
+        if run_pending_session_start_hooks(&sess, &turn_context).await {
+            return Ok(TurnRunResult::ineligible(false));
+        }
+        if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+            return Ok(TurnRunResult::ineligible(false));
+        }
+
+        sess.merge_connector_selection(explicitly_enabled_connectors.clone())
+            .await;
+        sess.set_previous_turn_settings(Some(PreviousTurnSettings {
+            model: turn_context.model_info.slug.clone(),
+            comp_hash: turn_context.model_info.comp_hash.clone(),
+            realtime_active: Some(turn_context.realtime_active),
+        }))
+        .await;
+        for response_item in injection_items {
+            sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
+                .await;
+        }
+
+        track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
+    } else if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+        return Ok(TurnRunResult::ineligible(false));
+    }
 
     let mut last_agent_message: Option<String> = None;
     let mut model_used_tools = false;
     let mut project_validation_eligibility = ProjectValidationEligibility::Ineligible;
     let mut stop_hook_active = false;
-    // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
-    // many turns, from the perspective of the user, it is a single turn.
-    let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
-        TurnDiffTracker::with_environment_display_roots(display_roots),
-    ));
-
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
     // Pending input is drained into history before building the next model request.

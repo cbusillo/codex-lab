@@ -11973,6 +11973,117 @@
       ],
       "type": "object"
     },
+    "ProjectValidationCompletedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "One completed project-validation command execution. An actionable first execution may be followed by one bounded correction cycle and a second completion notification.",
+      "properties": {
+        "changedFileCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commandTruncated": {
+          "type": "boolean"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "exitCode": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "itemId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "type": "string"
+        },
+        "outputTruncated": {
+          "type": "boolean"
+        },
+        "skipReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectValidationSkipReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ProjectValidationStatus"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "commandTruncated",
+        "durationMs",
+        "output",
+        "outputTruncated",
+        "status",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ProjectValidationCompletedNotification",
+      "type": "object"
+    },
+    "ProjectValidationSkipReason": {
+      "enum": [
+        "validationDisabled",
+        "noChangedFiles",
+        "noApplicableProvider",
+        "nonRootAgent",
+        "unchangedFingerprint",
+        "unsupportedEnvironment"
+      ],
+      "type": "string"
+    },
+    "ProjectValidationStatus": {
+      "enum": [
+        "passed",
+        "actionableFailure",
+        "configurationError",
+        "timedOut",
+        "infrastructureFailure",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    },
     "RateLimitReachedType": {
       "enum": [
         "rate_limit_reached",
@@ -14350,6 +14461,26 @@
             "params"
           ],
           "title": "Turn/startedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "validation/completed"
+              ],
+              "title": "Validation/completedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ProjectValidationCompletedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Validation/completedNotification",
           "type": "object"
         },
         {
@@ -17639,6 +17770,90 @@
             "type"
           ],
           "title": "ContextCompactionThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "changedFileCount": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "commandTruncated": {
+              "type": "boolean"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "durationMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            },
+            "outputTruncated": {
+              "type": "boolean"
+            },
+            "skipReason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProjectValidationSkipReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/definitions/ProjectValidationStatus"
+            },
+            "type": {
+              "enum": [
+                "projectValidation"
+              ],
+              "title": "ProjectValidationThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "commandTruncated",
+            "durationMs",
+            "id",
+            "output",
+            "outputTruncated",
+            "status",
+            "type"
+          ],
+          "title": "ProjectValidationThreadItem",
           "type": "object"
         }
       ]

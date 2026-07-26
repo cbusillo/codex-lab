@@ -186,6 +186,11 @@ impl ChatWidget {
                     notification.action,
                 );
             }
+            ServerNotification::ProjectValidationCompleted(notification) => {
+                self.add_to_history(history_cell::new_project_validation_notification_cell(
+                    &notification,
+                ));
+            }
             ServerNotification::ThreadClosed(_) => {
                 if !from_replay {
                     self.on_shutdown_complete();

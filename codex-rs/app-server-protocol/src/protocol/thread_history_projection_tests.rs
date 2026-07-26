@@ -7,6 +7,9 @@ use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::ProjectValidationCompletedEvent;
+use codex_protocol::protocol::ProjectValidationSkipReason;
+use codex_protocol::protocol::ProjectValidationStatus;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnAbortReason;
@@ -17,6 +20,8 @@ use codex_protocol::user_input::UserInput;
 use pretty_assertions::assert_eq;
 
 use super::*;
+use crate::protocol::v2::ProjectValidationSkipReason as V2ProjectValidationSkipReason;
+use crate::protocol::v2::ProjectValidationStatus as V2ProjectValidationStatus;
 use crate::protocol::v2::ThreadItem;
 use crate::protocol::v2::TurnError;
 
@@ -142,6 +147,131 @@ fn projects_completed_canonical_turn_items() {
 }
 
 #[test]
+fn projects_distinct_project_validation_attempts_by_rollout_ordinal() {
+    let event = ProjectValidationCompletedEvent {
+        turn_id: "turn-1".to_string(),
+        item_id: None,
+        command: vec!["cargo".to_string(), "check".to_string()],
+        command_truncated: false,
+        cwd: None,
+        status: ProjectValidationStatus::Skipped,
+        skip_reason: Some(ProjectValidationSkipReason::UnchangedFingerprint),
+        changed_file_count: Some(2),
+        exit_code: None,
+        output: "automatic validation skipped".to_string(),
+        output_truncated: false,
+        duration_ms: 0,
+    };
+
+    let first = project_with_ordinal(
+        RolloutItem::EventMsg(EventMsg::ProjectValidationCompleted(event.clone())),
+        Some(7),
+    );
+    let second = project_with_ordinal(
+        RolloutItem::EventMsg(EventMsg::ProjectValidationCompleted(event)),
+        Some(8),
+    );
+
+    assert_eq!(first.changed_items.len(), 1);
+    assert_eq!(second.changed_items.len(), 1);
+    assert_eq!(
+        first.changed_items[0],
+        ThreadHistoryItemChange {
+            turn_id: "turn-1".to_string(),
+            item: ThreadItem::ProjectValidation {
+                id: "project-validation-7".to_string(),
+                command: vec!["cargo".to_string(), "check".to_string()],
+                command_truncated: false,
+                cwd: None,
+                status: V2ProjectValidationStatus::Skipped,
+                skip_reason: Some(V2ProjectValidationSkipReason::UnchangedFingerprint),
+                changed_file_count: Some(2),
+                exit_code: None,
+                output: "automatic validation skipped".to_string(),
+                output_truncated: false,
+                duration_ms: 0,
+            },
+        }
+    );
+    assert_eq!(second.changed_items[0].item.id(), "project-validation-8");
+}
+
+#[test]
+fn project_validation_uses_persisted_item_id() {
+    let changes = project_with_ordinal(
+        RolloutItem::EventMsg(EventMsg::ProjectValidationCompleted(
+            ProjectValidationCompletedEvent {
+                turn_id: "turn-1".to_string(),
+                item_id: Some("validation-item".to_string()),
+                command: Vec::new(),
+                command_truncated: false,
+                cwd: None,
+                status: ProjectValidationStatus::Passed,
+                skip_reason: None,
+                changed_file_count: Some(1),
+                exit_code: Some(0),
+                output: "ok".to_string(),
+                output_truncated: false,
+                duration_ms: 12,
+            },
+        )),
+        Some(7),
+    );
+
+    assert_eq!(changes.changed_items[0].item.id(), "validation-item");
+}
+
+#[test]
+fn project_validation_item_id_does_not_require_rollout_ordinal() {
+    let changes = project_with_ordinal(
+        RolloutItem::EventMsg(EventMsg::ProjectValidationCompleted(
+            ProjectValidationCompletedEvent {
+                turn_id: "turn-1".to_string(),
+                item_id: Some("validation-item".to_string()),
+                command: Vec::new(),
+                command_truncated: false,
+                cwd: None,
+                status: ProjectValidationStatus::Passed,
+                skip_reason: None,
+                changed_file_count: Some(1),
+                exit_code: Some(0),
+                output: "ok".to_string(),
+                output_truncated: false,
+                duration_ms: 12,
+            },
+        )),
+        None,
+    );
+
+    assert_eq!(changes.changed_items[0].item.id(), "validation-item");
+}
+
+#[test]
+fn ignores_project_validation_without_rollout_ordinal() {
+    let changes = project_with_ordinal(
+        RolloutItem::EventMsg(EventMsg::ProjectValidationCompleted(
+            ProjectValidationCompletedEvent {
+                turn_id: "turn-1".to_string(),
+                item_id: None,
+                command: Vec::new(),
+                command_truncated: false,
+                cwd: None,
+                status: ProjectValidationStatus::Cancelled,
+                skip_reason: None,
+                changed_file_count: None,
+                exit_code: None,
+                output: "automatic validation cancelled".to_string(),
+                output_truncated: false,
+                duration_ms: 0,
+            },
+        )),
+        None,
+    );
+
+    assert!(changes.is_empty());
+}
+
+#[test]
 fn ignores_legacy_abort_without_turn_id_and_context_only_records() {
     let aborted = project(RolloutItem::EventMsg(EventMsg::TurnAborted(
         TurnAbortedEvent {
@@ -194,9 +324,13 @@ fn projects_identified_turn_aborts() {
 }
 
 fn project(item: RolloutItem) -> ThreadHistoryChangeSet {
+    project_with_ordinal(item, Some(7))
+}
+
+fn project_with_ordinal(item: RolloutItem, ordinal: Option<u64>) -> ThreadHistoryChangeSet {
     project_rollout_line(&RolloutLine {
         timestamp: "2026-07-09T00:00:00.000Z".to_string(),
-        ordinal: Some(7),
+        ordinal,
         item,
     })
 }

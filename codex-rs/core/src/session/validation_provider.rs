@@ -11,14 +11,46 @@ use codex_git_utils::get_worktree_changed_files_since;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use tokio::io::AsyncReadExt;
 
+use super::cargo_validation_provider::resolve_cargo_validation_command;
+
 const SHELLCHECK_MAX_FILES: usize = 64;
 const VALIDATION_PROVIDER_COMMAND_MAX_BYTES: usize = 8 * 1024;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AutomaticValidationProviderKind {
+    Cargo,
+    Shellcheck,
+}
+
 #[derive(Debug)]
 pub(crate) struct AutomaticValidationCommand {
+    pub(crate) kind: AutomaticValidationProviderKind,
     pub(crate) command: Vec<String>,
     pub(crate) cwd: AbsolutePathBuf,
+    pub(crate) execution_cwd: Option<AbsolutePathBuf>,
+    pub(crate) execution_cwd_guard: Option<tempfile::TempDir>,
     pub(crate) timeout_ms: u64,
+    pub(crate) changed_file_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AutomaticValidationProviderSkipReason {
+    ValidationDisabled,
+    NoChangedFiles,
+    NoApplicableProvider,
+    UnsupportedEnvironment,
+}
+
+#[derive(Debug)]
+pub(crate) struct AutomaticValidationProviderSkip {
+    pub(crate) reason: AutomaticValidationProviderSkipReason,
+    pub(crate) changed_file_count: Option<u32>,
+}
+
+#[derive(Debug)]
+pub(crate) enum AutomaticValidationProviderResolution {
+    Command(AutomaticValidationCommand),
+    Skipped(AutomaticValidationProviderSkip),
 }
 
 #[derive(Debug)]
@@ -36,28 +68,39 @@ pub(crate) struct AutomaticValidationProviderError {
 }
 
 pub(crate) fn automatic_validation_provider_enabled(config: &ValidationConfig) -> bool {
-    config.groups.functional && config.providers.shellcheck.enabled
+    config.groups.functional
+        && (config.providers.cargo.enabled || config.providers.shellcheck.enabled)
 }
 
 pub(crate) async fn resolve_automatic_validation_provider(
     config: &ValidationConfig,
     cwd: &AbsolutePathBuf,
     base_commit: Option<&str>,
-) -> Result<Option<AutomaticValidationCommand>, AutomaticValidationProviderError> {
+) -> Result<AutomaticValidationProviderResolution, AutomaticValidationProviderError> {
     if !automatic_validation_provider_enabled(config) {
-        return Ok(None);
+        return Ok(AutomaticValidationProviderResolution::Skipped(
+            AutomaticValidationProviderSkip {
+                reason: AutomaticValidationProviderSkipReason::ValidationDisabled,
+                changed_file_count: None,
+            },
+        ));
     }
 
     let Some(repo_root) = get_git_repo_root(cwd.as_ref()) else {
-        return Ok(None);
+        return Ok(AutomaticValidationProviderResolution::Skipped(
+            AutomaticValidationProviderSkip {
+                reason: AutomaticValidationProviderSkipReason::UnsupportedEnvironment,
+                changed_file_count: None,
+            },
+        ));
     };
     let repo_root = dunce::canonicalize(&repo_root).unwrap_or(repo_root);
     let provider_cwd = AbsolutePathBuf::try_from(repo_root.clone()).map_err(|error| {
         AutomaticValidationProviderError {
             kind: AutomaticValidationProviderErrorKind::Infrastructure,
-            command: config.providers.shellcheck.command.clone(),
+            command: configured_provider_command(config),
             cwd: Some(cwd.clone()),
-            message: format!("failed to resolve shellcheck repository root: {error}"),
+            message: format!("failed to resolve automatic validation repository root: {error}"),
         }
     })?;
     let changed_files = match base_commit {
@@ -68,25 +111,69 @@ pub(crate) async fn resolve_automatic_validation_provider(
     }
     .ok_or_else(|| AutomaticValidationProviderError {
         kind: AutomaticValidationProviderErrorKind::Infrastructure,
-        command: config.providers.shellcheck.command.clone(),
+        command: configured_provider_command(config),
         cwd: Some(provider_cwd.clone()),
-        message: "failed to enumerate changed files for shellcheck validation".to_string(),
+        message: "failed to enumerate changed files for automatic validation".to_string(),
     })?;
-    let matching_files = matching_shellcheck_files(&repo_root, changed_files).await;
-    if matching_files.is_empty() {
-        return Ok(None);
+    let changed_file_count = u32::try_from(changed_files.len()).unwrap_or(u32::MAX);
+    if changed_files.is_empty() {
+        return Ok(AutomaticValidationProviderResolution::Skipped(
+            AutomaticValidationProviderSkip {
+                reason: AutomaticValidationProviderSkipReason::NoChangedFiles,
+                changed_file_count: Some(changed_file_count),
+            },
+        ));
+    }
+    if config.providers.cargo.enabled
+        && let Some(command) = resolve_cargo_validation_command(
+            &config.providers.cargo,
+            &provider_cwd,
+            &changed_files,
+            changed_file_count,
+        )
+        .await?
+    {
+        return Ok(AutomaticValidationProviderResolution::Command(command));
+    }
+    if config.providers.shellcheck.enabled {
+        let matching_files = matching_shellcheck_files(&repo_root, &changed_files).await;
+        if !matching_files.is_empty() {
+            return build_shellcheck_command(
+                &config.providers.shellcheck,
+                provider_cwd,
+                matching_files,
+                changed_file_count,
+            )
+            .map(AutomaticValidationProviderResolution::Command);
+        }
     }
 
-    build_shellcheck_command(&config.providers.shellcheck, provider_cwd, matching_files).map(Some)
+    Ok(AutomaticValidationProviderResolution::Skipped(
+        AutomaticValidationProviderSkip {
+            reason: AutomaticValidationProviderSkipReason::NoApplicableProvider,
+            changed_file_count: Some(changed_file_count),
+        },
+    ))
 }
 
-async fn matching_shellcheck_files(repo_root: &Path, changed_files: Vec<PathBuf>) -> Vec<PathBuf> {
+fn configured_provider_command(config: &ValidationConfig) -> Vec<String> {
+    match (
+        config.providers.cargo.enabled,
+        config.providers.shellcheck.enabled,
+    ) {
+        (true, false) => config.providers.cargo.command.clone(),
+        (false, true) => config.providers.shellcheck.command.clone(),
+        _ => Vec::new(),
+    }
+}
+
+async fn matching_shellcheck_files(repo_root: &Path, changed_files: &[PathBuf]) -> Vec<PathBuf> {
     let mut matching_files = Vec::new();
     for path in changed_files {
         if path.extension().and_then(|extension| extension.to_str()) == Some("sh")
-            || file_starts_with_shebang(&repo_root.join(&path)).await
+            || file_starts_with_shebang(&repo_root.join(path)).await
         {
-            matching_files.push(path);
+            matching_files.push(path.clone());
         }
     }
     matching_files.sort();
@@ -109,6 +196,7 @@ fn build_shellcheck_command(
     config: &ShellcheckValidationProviderConfig,
     cwd: AbsolutePathBuf,
     matching_files: Vec<PathBuf>,
+    changed_file_count: u32,
 ) -> Result<AutomaticValidationCommand, AutomaticValidationProviderError> {
     let mut command = config.command.clone();
     if command
@@ -163,13 +251,17 @@ fn build_shellcheck_command(
     }
 
     Ok(AutomaticValidationCommand {
+        kind: AutomaticValidationProviderKind::Shellcheck,
         command,
         cwd,
+        execution_cwd: None,
+        execution_cwd_guard: None,
         timeout_ms: config.timeout_ms,
+        changed_file_count,
     })
 }
 
-fn configuration_error(
+pub(super) fn configuration_error(
     command: Vec<String>,
     cwd: AbsolutePathBuf,
     message: impl Into<String>,
@@ -182,7 +274,7 @@ fn configuration_error(
     }
 }
 
-fn infrastructure_error(
+pub(super) fn infrastructure_error(
     command: Vec<String>,
     cwd: AbsolutePathBuf,
     message: impl Into<String>,

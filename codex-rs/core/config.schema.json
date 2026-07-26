@@ -345,6 +345,12 @@
     },
     "AutoReviewToml": {
       "properties": {
+        "background_max_diff_bytes": {
+          "description": "Maximum diff size in bytes for automatic background reviews. Defaults to 120000. Reviews whose diff exceeds this limit are recorded as skipped rather than launched.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
@@ -358,6 +364,36 @@
         "enabled": {
           "default": true,
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "CargoValidationProviderConfig": {
+      "additionalProperties": false,
+      "description": "Trusted configuration for the built-in Cargo provider. Changed repository Cargo config is parsed for errors, but Cargo runs from an isolated directory so repository config cannot redirect validation through local executables.",
+      "properties": {
+        "command": {
+          "default": [
+            "cargo"
+          ],
+          "description": "Trusted Cargo executable. The provider requires exactly one executable and appends the built-in `check` subcommand and fixed bounded arguments. Repository-local values are ignored with a warning.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Whether changed Rust and Cargo workspace files select this provider.",
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "default": 30000,
+          "description": "Maximum execution time in milliseconds.",
+          "format": "uint64",
+          "maximum": 30000.0,
+          "minimum": 1.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -2572,6 +2608,28 @@
       },
       "type": "object"
     },
+    "ProjectValidationCommand": {
+      "additionalProperties": false,
+      "description": "One project-defined command that runs automatically after agent work.",
+      "properties": {
+        "command": {
+          "default": [],
+          "description": "Executable and arguments. Shell syntax is not interpreted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout_ms": {
+          "default": 60000,
+          "description": "Maximum execution time in milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "RawMcpServerConfig": {
       "additionalProperties": false,
       "description": "Raw MCP config shape used for deserialization and supported-field JSON Schema generation.\n\nFields that are accepted only to produce targeted validation errors should be skipped in the generated schema.\n\nKeep `TryFrom<RawMcpServerConfig> for McpServerConfig` exhaustively destructuring this struct so new TOML fields cannot be added here without updating the validation/mapping logic that produces [`McpServerConfig`].",
@@ -3006,6 +3064,35 @@
             "type": "string"
           },
           "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "ShellcheckValidationProviderConfig": {
+      "additionalProperties": false,
+      "description": "Trusted configuration for the built-in ShellCheck provider.",
+      "properties": {
+        "command": {
+          "default": [
+            "shellcheck"
+          ],
+          "description": "Executable and optional trusted prefix arguments. Only user, system, managed, or runtime config may set this field; repository-local values are ignored with a warning. The runtime appends `-f gcc` and the selected changed-file paths without shell parsing.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Whether changed shell files select this provider.",
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "default": 6000,
+          "description": "Maximum execution time in milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -4707,6 +4794,112 @@
         }
       ]
     },
+    "ValidationConfig": {
+      "additionalProperties": false,
+      "description": "Patch-local validation settings.",
+      "properties": {
+        "groups": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ValidationGroups"
+            }
+          ],
+          "default": {
+            "functional": false,
+            "stylistic": false
+          },
+          "description": "Validation categories enabled for patch-local checks."
+        },
+        "project_command": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProjectValidationCommand"
+            }
+          ],
+          "default": null,
+          "description": "Optional project command to run after a root turn changes a Git worktree. Model tool activity, non-Git workspaces, and unreadable worktree state preserve the existing fail-open behavior and run the command. An actionable failure sends a bounded command/output fragment to the model, permits one correction cycle, and reruns the command once. The command should therefore tolerate up to two executions per root turn. Commands targeting the same Git repository are serialized across root sessions in one runtime; non-Git workspaces remain uncoordinated. A waiting turn can be cancelled and correction reruns reacquire the repository lease. Repository-local config cannot set this executable field."
+        },
+        "providers": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ValidationProviders"
+            }
+          ],
+          "default": {
+            "cargo": {
+              "command": [
+                "cargo"
+              ],
+              "enabled": true,
+              "timeout_ms": 30000
+            },
+            "shellcheck": {
+              "command": [
+                "shellcheck"
+              ],
+              "enabled": true,
+              "timeout_ms": 6000
+            }
+          },
+          "description": "Automatically selected executable providers. Provider argv is trusted executable configuration and cannot be supplied by repository-local config."
+        }
+      },
+      "type": "object"
+    },
+    "ValidationGroups": {
+      "additionalProperties": false,
+      "description": "Category toggles for patch-local validation.",
+      "properties": {
+        "functional": {
+          "default": true,
+          "description": "Structural and correctness checks.",
+          "type": "boolean"
+        },
+        "stylistic": {
+          "default": false,
+          "description": "Formatting and style checks. Reserved for a later runtime slice.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ValidationProviders": {
+      "additionalProperties": false,
+      "description": "Automatically selected executable validation providers.",
+      "properties": {
+        "cargo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CargoValidationProviderConfig"
+            }
+          ],
+          "default": {
+            "command": [
+              "cargo"
+            ],
+            "enabled": true,
+            "timeout_ms": 30000
+          },
+          "description": "Cargo validation selected from changed Rust and Cargo workspace files."
+        },
+        "shellcheck": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ShellcheckValidationProviderConfig"
+            }
+          ],
+          "default": {
+            "command": [
+              "shellcheck"
+            ],
+            "enabled": true,
+            "timeout_ms": 6000
+          },
+          "description": "Shell script validation selected from changed `.sh` and shebang files."
+        }
+      },
+      "type": "object"
+    },
     "Verbosity": {
       "description": "Controls output length/detail on GPT-5 models via the Responses API. Serialized with lowercase values to match the OpenAI API.",
       "enum": [
@@ -5740,6 +5933,15 @@
         }
       ],
       "description": "Collection of settings that are specific to the TUI."
+    },
+    "validation": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ValidationConfig"
+        }
+      ],
+      "default": null,
+      "description": "Patch-local validation policy."
     },
     "web_search": {
       "allOf": [

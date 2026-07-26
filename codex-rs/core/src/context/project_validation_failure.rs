@@ -95,9 +95,13 @@ mod tests {
     fn actionable_failure_is_bounded_and_marked() {
         let event = ProjectValidationCompletedEvent {
             turn_id: "turn-1".to_string(),
+            item_id: None,
             command: vec![format!("command-start-{}-command-end", "x".repeat(8_000))],
+            command_truncated: false,
             cwd: None,
             status: ProjectValidationStatus::ActionableFailure,
+            skip_reason: None,
+            changed_file_count: None,
             exit_code: Some(7),
             output: "🦀".repeat(4_000),
             output_truncated: true,
