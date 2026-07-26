@@ -116,6 +116,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
+use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::user_input::UserInput;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
@@ -627,28 +628,47 @@ pub(crate) async fn run_turn(
 /// could not read one of them.
 ///
 /// The API rejects the whole request, so leaving the offending image in place makes every later
-/// turn of this thread fail. See [`ContextManager::replace_newest_images`] for why this narrow
+/// turn of this thread fail. See [`ContextManager::replace_all_images`] for why this narrow
 /// history rewrite is the accepted exception to the incremental-context rule. The sanitized
 /// history is checkpointed into the rollout so a resumed thread does not replay the poisoned
 /// image.
 async fn sanitize_invalid_image_history(sess: &Session) -> Option<ImageSanitizationSource> {
-    let (source, replacement_history) = {
+    let (source, replacement_history, window_number, window_ids, world_state_baseline) = {
         let mut state = sess.state.lock().await;
         let source = state
             .history
-            .replace_newest_images(INVALID_IMAGE_PLACEHOLDER)?;
-        (source, state.history.raw_items().to_vec())
+            .replace_all_images(INVALID_IMAGE_PLACEHOLDER)?;
+        (
+            source,
+            state.history.raw_items().to_vec(),
+            state.auto_compact_window_number(),
+            state.auto_compact_window_ids(),
+            state.history.world_state_baseline().cloned(),
+        )
     };
 
-    sess.persist_rollout_items(&[RolloutItem::Compacted(CompactedItem {
+    // Sanitization replaces history in place; it does not open a new context window. Persisting
+    // the *current* window identity keeps resume from treating this checkpoint as a legacy
+    // window-less compaction, which would discard the thread's window ids and inflate its window
+    // number.
+    let checkpoint = RolloutItem::Compacted(CompactedItem {
         message: INVALID_IMAGE_HISTORY_CHECKPOINT_MESSAGE.to_string(),
         replacement_history: Some(replacement_history),
-        window_number: None,
-        first_window_id: None,
-        previous_window_id: None,
-        window_id: None,
-    })])
-    .await;
+        window_number: Some(window_number),
+        first_window_id: Some(window_ids.first_window_id.to_string()),
+        previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
+        window_id: Some(window_ids.window_id.to_string()),
+    });
+    sess.persist_rollout_items(&[checkpoint]).await;
+    // Replay clears the world-state baseline at every checkpoint, but sanitization only rewrote
+    // image content: the live baseline is still correct. Re-persist it as a full snapshot so a
+    // resumed thread diffs against the same baseline instead of re-rendering all of world state.
+    if let Some(world_state_baseline) = world_state_baseline {
+        sess.persist_rollout_items(&[RolloutItem::WorldState(WorldStateItem::full(
+            world_state_baseline.into_value(),
+        ))])
+        .await;
+    }
     if let Err(err) = sess.flush_rollout().await {
         warn!("failed to persist invalid-image history sanitization: {err}");
     }

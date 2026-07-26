@@ -77,6 +77,7 @@ mod hooks;
 #[cfg(not(target_os = "windows"))]
 mod hooks_mcp;
 mod image_rollout;
+mod invalid_image_recovery;
 mod items;
 mod json_result;
 mod live_cli;

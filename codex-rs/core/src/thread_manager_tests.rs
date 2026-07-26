@@ -2098,3 +2098,43 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         1,
     );
 }
+
+#[tokio::test]
+async fn validate_environment_selections_rejects_more_than_the_maximum() {
+    let config = test_config().await;
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let selection = |index: usize| TurnEnvironmentSelection {
+        environment_id: format!("local-{index}"),
+        cwd: PathUri::from_abs_path(&config.cwd),
+        workspace_roots: Vec::new(),
+    };
+    let oversize = (0..=MAX_TURN_ENVIRONMENT_SELECTIONS)
+        .map(selection)
+        .collect::<Vec<_>>();
+
+    let err = manager
+        .validate_environment_selections(&oversize)
+        .expect_err("oversize environment selections must be rejected, not silently rendered");
+
+    assert!(
+        err.to_string().contains("too many turn environments"),
+        "unexpected error: {err}"
+    );
+}

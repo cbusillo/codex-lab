@@ -1,5 +1,7 @@
 use super::AGENT_FINAL_MESSAGE_PREFIX;
 use super::HANDOFF_STREAM_TRUNCATION_MARKER;
+use super::REALTIME_DELEGATION_INPUT_TOKEN_BUDGET;
+use super::REALTIME_DELEGATION_TRANSCRIPT_DELTA_TOKEN_BUDGET;
 use super::RealtimeHandoffState;
 use super::RealtimeSessionKind;
 use super::RealtimeStreamedItem;
@@ -14,6 +16,7 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::CodexResponseHandoffMode;
 use codex_protocol::protocol::RealtimeHandoffRequested;
 use codex_protocol::protocol::RealtimeTranscriptEntry;
+use codex_utils_output_truncation::approx_token_count;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -145,6 +148,54 @@ fn wraps_realtime_delegation_input_with_xml_escaping_without_transcript() {
         ),
         "<realtime_delegation>\n  <input>use a &lt; b &amp;&amp; c &gt; d</input>\n</realtime_delegation>"
     );
+}
+
+#[test]
+fn bounds_transcript_tail_flush_delegation_input_and_transcript_delta() {
+    // Realtime transcripts grow with session length, so both halves of the fragment are bounded
+    // with the shared realtime token-budget helper before injection.
+    let rendered = wrap_realtime_delegation_input(
+        &"input ".repeat(200_000),
+        Some(&"delta ".repeat(200_000)),
+        RealtimeDelegationSource::TranscriptTailFlush,
+    );
+
+    assert!(
+        approx_token_count(&rendered)
+            <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET
+                + REALTIME_DELEGATION_TRANSCRIPT_DELTA_TOKEN_BUDGET
+                + 100,
+        "rendered delegation was {} tokens",
+        approx_token_count(&rendered)
+    );
+    assert!(rendered.contains("<source>transcript_tail_flush</source>"));
+}
+
+#[test]
+fn bounds_handoff_delegation_input() {
+    let rendered = wrap_realtime_delegation_input(
+        &"input ".repeat(200_000),
+        /*transcript_delta*/ None,
+        RealtimeDelegationSource::Handoff,
+    );
+
+    assert!(
+        approx_token_count(&rendered) <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET + 100,
+        "rendered delegation was {} tokens",
+        approx_token_count(&rendered)
+    );
+}
+
+#[test]
+fn bounds_multibyte_delegation_input_without_splitting_characters() {
+    let rendered = wrap_realtime_delegation_input(
+        &"🙂".repeat(200_000),
+        /*transcript_delta*/ None,
+        RealtimeDelegationSource::Handoff,
+    );
+
+    assert!(rendered.is_char_boundary(rendered.len()));
+    assert!(approx_token_count(&rendered) <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET + 100);
 }
 
 #[tokio::test]

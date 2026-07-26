@@ -50,6 +50,13 @@ impl Handler {
         } else {
             agents
         };
+        // Agent completion messages and external-agent failure text are agent/process-authored and
+        // otherwise unbounded. `list_agents` output is model-visible, so it carries the same
+        // completion-payload budget as inter-agent notifications.
+        let agents = agents
+            .into_iter()
+            .map(ListedAgent::bounded_for_model)
+            .collect();
 
         Ok(boxed_tool_output(ListAgentsResult { agents }))
     }

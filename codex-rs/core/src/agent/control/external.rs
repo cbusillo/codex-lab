@@ -21,6 +21,18 @@ pub(super) struct ExternalAgentSpawn {
 }
 
 impl ListedAgent {
+    /// Apply the completion-payload budget to every agent-authored string this entry can carry
+    /// before it reaches a model-visible tool output.
+    pub(crate) fn bounded_for_model(mut self) -> Self {
+        self.agent_status = crate::session_prefix::bounded_status(&self.agent_status);
+        if let Some(failure) = self.failure.as_mut()
+            && let Some(message) = failure.message.as_mut()
+        {
+            *message = crate::session_prefix::bounded_completion_payload(message);
+        }
+        self
+    }
+
     pub(crate) fn redact_external_metadata(mut self) -> Self {
         if self.provider.is_none() {
             return self;

@@ -2477,14 +2477,14 @@ fn sanitized_texts(item: &ResponseItem) -> Vec<&str> {
 }
 
 #[test]
-fn replace_newest_images_reports_no_images_to_sanitize() {
+fn replace_all_images_reports_no_images_to_sanitize() {
     let mut history = create_history_with_items(vec![user_input_text_msg("hi")]);
 
-    assert_eq!(history.replace_newest_images("Image omitted"), None);
+    assert_eq!(history.replace_all_images("Image omitted"), None);
 }
 
 #[test]
-fn replace_newest_images_replaces_tool_output_images() {
+fn replace_all_images_replaces_tool_output_images() {
     for tool_output in [
         function_call_output_item(vec![
             FunctionCallOutputContentItem::InputText {
@@ -2503,7 +2503,7 @@ fn replace_newest_images_replaces_tool_output_images() {
         let version_before = history.history_version();
 
         assert_eq!(
-            history.replace_newest_images("Image omitted"),
+            history.replace_all_images("Image omitted"),
             Some(ImageSanitizationSource::Tool)
         );
         assert_eq!(
@@ -2515,7 +2515,7 @@ fn replace_newest_images_replaces_tool_output_images() {
 }
 
 #[test]
-fn replace_newest_images_replaces_user_images() {
+fn replace_all_images_replaces_user_images() {
     let mut history = create_history_with_items(vec![user_image_msg(vec![
         ContentItem::InputText {
             text: "look".to_string(),
@@ -2524,7 +2524,7 @@ fn replace_newest_images_replaces_user_images() {
     ])]);
 
     assert_eq!(
-        history.replace_newest_images("Image omitted"),
+        history.replace_all_images("Image omitted"),
         Some(ImageSanitizationSource::User)
     );
     assert_eq!(
@@ -2534,21 +2534,55 @@ fn replace_newest_images_replaces_user_images() {
 }
 
 #[test]
-fn replace_newest_images_only_sanitizes_the_newest_image_bearing_item() {
+fn replace_all_images_clears_every_candidate_image_in_one_pass() {
+    let mut history = create_history_with_items(vec![
+        user_image_msg(vec![user_image_item("user")]),
+        function_call_output_item(vec![tool_image_item("tool")]),
+        user_image_msg(vec![user_image_item("newer-user")]),
+    ]);
+
+    // The API never says which image it could not read, so every image is a candidate and all of
+    // them are cleared in a single pass rather than one per failed turn.
+    assert_eq!(
+        history.replace_all_images("Image omitted"),
+        Some(ImageSanitizationSource::User)
+    );
+
+    let raw_items = history.raw_items();
+    assert_eq!(sanitized_texts(&raw_items[0]), vec!["Image omitted"]);
+    assert_eq!(sanitized_texts(&raw_items[1]), vec!["Image omitted"]);
+    assert_eq!(sanitized_texts(&raw_items[2]), vec!["Image omitted"]);
+}
+
+#[test]
+fn replace_all_images_reports_tool_source_when_no_user_image_is_cleared() {
+    let mut history = create_history_with_items(vec![
+        user_input_text_msg("hi"),
+        function_call_output_item(vec![tool_image_item("tool")]),
+        custom_tool_call_output_item(vec![tool_image_item("other-tool")]),
+    ]);
+
+    assert_eq!(
+        history.replace_all_images("Image omitted"),
+        Some(ImageSanitizationSource::Tool)
+    );
+
+    let raw_items = history.raw_items();
+    assert_eq!(sanitized_texts(&raw_items[1]), vec!["Image omitted"]);
+    assert_eq!(sanitized_texts(&raw_items[2]), vec!["Image omitted"]);
+}
+
+#[test]
+fn replace_all_images_reports_user_source_when_a_user_image_precedes_tool_images() {
     let mut history = create_history_with_items(vec![
         user_image_msg(vec![user_image_item("user")]),
         function_call_output_item(vec![tool_image_item("tool")]),
     ]);
 
+    // A user-attached image anywhere in the candidate set wins: the user has to be told, so the
+    // turn must not be retried transparently.
     assert_eq!(
-        history.replace_newest_images("Image omitted"),
-        Some(ImageSanitizationSource::Tool)
+        history.replace_all_images("Image omitted"),
+        Some(ImageSanitizationSource::User)
     );
-
-    let raw_items = history.raw_items();
-    let ResponseItem::Message { content, .. } = &raw_items[0] else {
-        panic!("expected the older user message to survive untouched");
-    };
-    assert_eq!(content, &vec![user_image_item("user")]);
-    assert_eq!(sanitized_texts(&raw_items[1]), vec!["Image omitted"]);
 }

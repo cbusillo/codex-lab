@@ -1,5 +1,8 @@
 use super::PreviousSectionState;
 use super::WorldStateSection;
+use super::environment_limits::MAX_RENDERED_ENVIRONMENTS;
+use super::environment_limits::MAX_RENDERED_SUBAGENT_LINES;
+use super::environment_limits::bound_environment_context_body;
 use crate::context::ContextualUserFragment;
 use crate::context::environment_context::FileSystemContext;
 use crate::context::environment_context::NetworkContext;
@@ -7,6 +10,7 @@ use crate::context::environment_context::push_xml_escaped_text;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
+use codex_protocol::protocol::MAX_TURN_ENVIRONMENT_SELECTIONS;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
@@ -48,7 +52,19 @@ impl EnvironmentsState {
 
     pub(crate) fn with_subagents(mut self, subagents: String) -> Self {
         if !subagents.is_empty() {
-            self.subagents = Some(subagents);
+            // The elision marker counts against the line cap so the rendered block never exceeds
+            // `MAX_RENDERED_SUBAGENT_LINES` lines.
+            let elided = subagents.lines().count() > MAX_RENDERED_SUBAGENT_LINES;
+            let kept = if elided {
+                MAX_RENDERED_SUBAGENT_LINES - 1
+            } else {
+                MAX_RENDERED_SUBAGENT_LINES
+            };
+            let mut lines = subagents.lines().take(kept).collect::<Vec<_>>().join("\n");
+            if elided {
+                lines.push_str("\n- ...");
+            }
+            self.subagents = Some(lines);
         }
         self
     }
@@ -131,6 +147,7 @@ impl WorldStateSection for EnvironmentsState {
                 .environments
                 .keys()
                 .filter(|id| !self.environments.contains_key(*id))
+                .take(MAX_RENDERED_ENVIRONMENTS.saturating_sub(updates.len()))
                 .map(|id| (id.clone(), EnvironmentUpdate::Unavailable)),
         );
         let legacy_single = is_legacy_single(&self.environments)
@@ -205,7 +222,7 @@ impl ContextualUserFragment for RenderedEnvironments {
             }
         } else if !self.updates.is_empty() {
             rendered.push_str("  <environments>\n");
-            for (id, update) in &self.updates {
+            for (id, update) in self.updates.iter().take(MAX_RENDERED_ENVIRONMENTS) {
                 match update {
                     EnvironmentUpdate::Current(environment) => {
                         rendered.push_str("    <environment id=\"");
@@ -238,14 +255,14 @@ impl ContextualUserFragment for RenderedEnvironments {
         }
         if let Some(subagents) = &self.subagents {
             rendered.push_str("  <subagents>\n");
-            for line in subagents.lines() {
+            for line in subagents.lines().take(MAX_RENDERED_SUBAGENT_LINES) {
                 rendered.push_str("    ");
                 rendered.push_str(line);
                 rendered.push('\n');
             }
             rendered.push_str("  </subagents>\n");
         }
-        rendered
+        bound_environment_context_body(rendered)
     }
 }
 
@@ -398,6 +415,9 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
         })
         .collect::<BTreeMap<_, _>>();
     for environment in snapshot.starting() {
+        if environments.len() >= MAX_TURN_ENVIRONMENT_SELECTIONS {
+            break;
+        }
         environments
             .entry(environment.selection.environment_id.clone())
             .or_insert_with(|| EnvironmentState {
@@ -405,6 +425,16 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
                 status: EnvironmentStatus::Starting,
                 shell: None,
             });
+    }
+    // Ready environments are already capped by `ThreadEnvironments::update_selections`; starting
+    // entries are merged from a separate list, so re-assert the cap over the merged map.
+    while environments.len() > MAX_TURN_ENVIRONMENT_SELECTIONS {
+        let last = environments
+            .keys()
+            .next_back()
+            .cloned()
+            .unwrap_or_else(String::new);
+        environments.remove(&last);
     }
     environments
 }

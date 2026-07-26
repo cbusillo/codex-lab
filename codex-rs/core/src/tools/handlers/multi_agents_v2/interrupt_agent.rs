@@ -99,7 +99,7 @@ async fn handle_interrupt_agent(
     .await;
 
     Ok(InterruptAgentResult {
-        previous_status: status,
+        previous_status: crate::session_prefix::bounded_status(&status),
     })
 }
 

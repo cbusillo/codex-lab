@@ -148,7 +148,9 @@ async fn handle_resume_agent(
     turn.session_telemetry
         .counter("codex.multi_agent.resume", /*inc*/ 1, &[]);
 
-    Ok(ResumeAgentResult { status })
+    Ok(ResumeAgentResult {
+        status: crate::session_prefix::bounded_status(&status),
+    })
 }
 
 impl CoreToolRuntime for Handler {

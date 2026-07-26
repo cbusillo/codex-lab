@@ -35,7 +35,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
-/// Where the images removed by [`ContextManager::replace_newest_images`] came from.
+/// Where the images removed by [`ContextManager::replace_all_images`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImageSanitizationSource {
     /// The user attached the image, so the turn cannot simply be retried without telling them.
@@ -118,6 +118,10 @@ impl ContextManager {
 
     pub(crate) fn set_world_state_baseline(&mut self, snapshot: WorldStateSnapshot) {
         self.world_state_baseline = Some(snapshot);
+    }
+
+    pub(crate) fn world_state_baseline(&self) -> Option<&WorldStateSnapshot> {
+        self.world_state_baseline.as_ref()
     }
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
@@ -215,42 +219,55 @@ impl ContextManager {
         self.world_state_baseline = None;
     }
 
-    /// Replace every image in the newest image-bearing history item with `placeholder` and report
-    /// where those images came from. Returns `None` when history holds no images.
+    /// Replace every image anywhere in history with `placeholder` and report where those images
+    /// came from. Returns `None` when history holds no images.
     ///
     /// This is a deliberate, narrow exception to the "no history rewrite" rule. The Responses API
     /// rejects the *entire* request when any image in the transcript is unreadable, so an image
     /// the API refuses poisons every subsequent turn of the thread: without removing it, the
-    /// thread is permanently unusable. The rewrite is bounded to the images of a single item, is
-    /// only reachable after the API has already rejected the request (so the poisoned prefix was
-    /// never cached), and replaces each image with a shorter text placeholder, so it can never
-    /// grow model-visible context.
-    pub(crate) fn replace_newest_images(
+    /// thread is permanently unusable. The rewrite is only reachable after the API has already
+    /// rejected the request (so the poisoned prefix was never cached), and replaces each image
+    /// with a shorter text placeholder, so it can never grow model-visible context.
+    ///
+    /// Recovery policy: the API does not say *which* image it could not read, so every image in
+    /// history is a candidate. Clearing one item per rejection would destroy the same images
+    /// anyway — just spread over one failed turn each, with the newest (most likely good) image
+    /// destroyed first. Clearing the whole candidate set in a single bounded pass removes exactly
+    /// the same images with exactly one failed turn, which is the least destructive deterministic
+    /// policy available without per-image attribution from the API.
+    ///
+    /// The reported source is the most user-visible one: [`ImageSanitizationSource::User`] if any
+    /// cleared image was user-attached (the user must be told), otherwise
+    /// [`ImageSanitizationSource::Tool`] (the turn can be retried transparently).
+    pub(crate) fn replace_all_images(
         &mut self,
         placeholder: &str,
     ) -> Option<ImageSanitizationSource> {
         let items = Arc::make_mut(&mut self.items);
-        for item in items.iter_mut().rev() {
-            let source = match item {
+        let mut user_images_cleared = false;
+        let mut tool_images_cleared = false;
+        for item in items.iter_mut() {
+            match item {
                 ResponseItem::Message { role, content, .. } if role == "user" => {
-                    replace_message_images(content, placeholder)
-                        .then_some(ImageSanitizationSource::User)
+                    user_images_cleared |= replace_message_images(content, placeholder);
                 }
                 ResponseItem::FunctionCallOutput { output, .. }
                 | ResponseItem::CustomToolCallOutput { output, .. } => {
-                    replace_tool_output_images(output, placeholder)
-                        .then_some(ImageSanitizationSource::Tool)
+                    tool_images_cleared |= replace_tool_output_images(output, placeholder);
                 }
-                _ => None,
-            };
-
-            if let Some(source) = source {
-                self.history_version = self.history_version.saturating_add(1);
-                return Some(source);
+                _ => {}
             }
         }
 
-        None
+        let source = match (user_images_cleared, tool_images_cleared) {
+            (true, _) => Some(ImageSanitizationSource::User),
+            (false, true) => Some(ImageSanitizationSource::Tool),
+            (false, false) => None,
+        };
+        if source.is_some() {
+            self.history_version = self.history_version.saturating_add(1);
+        }
+        source
     }
 
     /// Drop the last `num_turns` instruction turns from this history.

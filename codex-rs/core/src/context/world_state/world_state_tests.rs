@@ -274,3 +274,62 @@ fn snapshot_merge_patch_changes_and_removes_nested_values() {
     assert_eq!(previous, current);
     assert_eq!(current.merge_patch_from(&current), None);
 }
+
+fn oversize_extension_fragment(body: String) -> Vec<Box<dyn ContextualUserFragment>> {
+    let mut world_state = WorldState::default();
+    world_state.add_extension_section(WorldStateSectionContribution::new(
+        "extension_oversize",
+        json!({"value": "after"}),
+        move |_| {
+            Some(RenderedWorldStateFragment::new(
+                "developer",
+                ("<extension_test>", "</extension_test>"),
+                body.clone(),
+            ))
+        },
+    ));
+    world_state.render_full()
+}
+
+#[test]
+fn extension_fragments_are_byte_capped_by_the_harness() {
+    // Extension authors cannot be trusted to bound their own contribution: the harness enforces
+    // the cap before the fragment reaches the permanent model-context prefix.
+    let rendered = oversize_extension_fragment("a".repeat(MAX_EXTENSION_FRAGMENT_BODY_BYTES * 4));
+
+    let body = rendered
+        .first()
+        .expect("extension fragment should render")
+        .body();
+    assert!(body.len() <= MAX_EXTENSION_FRAGMENT_BODY_BYTES);
+    assert!(body.contains("extension world-state fragment exceeded its size limit"));
+}
+
+#[test]
+fn extension_fragments_within_the_cap_are_untouched() {
+    let body = "a".repeat(MAX_EXTENSION_FRAGMENT_BODY_BYTES);
+    let rendered = oversize_extension_fragment(body.clone());
+
+    assert_eq!(
+        rendered
+            .first()
+            .expect("extension fragment should render")
+            .body(),
+        body
+    );
+}
+
+#[test]
+fn extension_fragment_cap_truncates_multibyte_text_on_a_char_boundary() {
+    let rendered = oversize_extension_fragment("🙂".repeat(MAX_EXTENSION_FRAGMENT_BODY_BYTES));
+
+    let body = rendered
+        .first()
+        .expect("extension fragment should render")
+        .body();
+    assert!(body.len() <= MAX_EXTENSION_FRAGMENT_BODY_BYTES);
+    let prefix = body
+        .strip_suffix(EXTENSION_FRAGMENT_TRUNCATION_NOTICE)
+        .expect("truncation notice");
+    assert!(prefix.chars().all(|ch| ch == '🙂'));
+}
