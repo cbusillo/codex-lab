@@ -573,6 +573,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         environment_manager: std::sync::Arc::new(environment_manager),
         config_warnings,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         enable_codex_api_key_env: true,
         client_name: "codex_exec".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),

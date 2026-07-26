@@ -90,6 +90,7 @@ pub(crate) use codex_app_server_client::legacy_core;
 mod account_label;
 mod additional_dirs;
 mod agent_install_helpers;
+mod agent_session_env;
 mod app;
 mod app_backtrack;
 mod app_command;
@@ -565,8 +566,8 @@ where
         state_db,
         environment_manager,
         config_warnings,
-        session_source: serde_json::from_value(serde_json::json!("cli"))
-            .unwrap_or_else(|err| panic!("cli session source should deserialize: {err}")),
+        session_source: agent_session_env::startup_session_source(),
+        session_provenance: agent_session_env::session_provenance_from_agent_env(),
         enable_codex_api_key_env: false,
         client_name: "codex-tui".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),

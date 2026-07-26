@@ -106,6 +106,8 @@ pub(crate) struct SessionConfiguration {
     pub(super) app_server_client_version: Option<String>,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     pub(super) session_source: SessionSource,
+    /// Optional external launch provenance supplied by an orchestrator.
+    pub(super) session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub(super) history_mode: ThreadHistoryMode,
     /// Immediate history source copied into this thread, when this thread was forked.
@@ -228,6 +230,7 @@ impl SessionConfiguration {
             personality: self.personality,
             collaboration_mode: self.collaboration_mode.clone(),
             session_source: self.session_source.clone(),
+            session_provenance: self.session_provenance.clone(),
             history_mode: self.history_mode,
             forked_from_thread_id: self.forked_from_thread_id,
             parent_thread_id: self.parent_thread_id,
@@ -624,6 +627,7 @@ impl Session {
                             forked_from_id,
                             parent_thread_id,
                             source: session_source,
+                            session_provenance: session_configuration.session_provenance.clone(),
                             thread_source: session_configuration.thread_source.clone(),
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {

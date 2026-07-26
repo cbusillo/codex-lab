@@ -57,6 +57,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -202,6 +203,7 @@ pub struct StartThreadOptions {
     pub initial_history: InitialHistory,
     pub history_mode: Option<ThreadHistoryMode>,
     pub session_source: Option<SessionSource>,
+    pub session_provenance: Option<SessionProvenance>,
     pub thread_source: Option<ThreadSource>,
     pub dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
     pub metrics_service_name: Option<String>,
@@ -219,6 +221,7 @@ impl StartThreadOptions {
             initial_history: InitialHistory::New,
             history_mode: None,
             session_source: None,
+            session_provenance: None,
             thread_source: None,
             dynamic_tools: Vec::new(),
             metrics_service_name: None,
@@ -291,6 +294,7 @@ pub(crate) struct ThreadManagerState {
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     external_time_provider: Option<Arc<dyn TimeProvider>>,
     session_source: SessionSource,
+    session_provenance: Option<SessionProvenance>,
     installation_id: String,
     analytics_events_client: Option<AnalyticsEventsClient>,
     // Captures submitted ops for testing purpose when test mode is enabled.
@@ -356,6 +360,45 @@ impl ThreadManager {
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
         external_time_provider: Option<Arc<dyn TimeProvider>>,
     ) -> Self {
+        Self::new_with_session_provenance(
+            config,
+            auth_manager,
+            models_manager,
+            codex_apps_tools_cache,
+            session_source,
+            /*session_provenance*/ None,
+            environment_manager,
+            extensions,
+            user_instructions_provider,
+            analytics_events_client,
+            thread_store,
+            agent_graph_store,
+            installation_id,
+            attestation_provider,
+            external_time_provider,
+        )
+    }
+
+    /// Build a thread manager that stamps every thread it starts with structured
+    /// launch provenance supplied by an external orchestrator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_session_provenance(
+        config: &Config,
+        auth_manager: Arc<AuthManager>,
+        models_manager: SharedModelsManager,
+        codex_apps_tools_cache: CodexAppsToolsCache,
+        session_source: SessionSource,
+        session_provenance: Option<SessionProvenance>,
+        environment_manager: Arc<EnvironmentManager>,
+        extensions: Arc<ExtensionRegistry<Config>>,
+        user_instructions_provider: Arc<dyn UserInstructionsProvider>,
+        analytics_events_client: Option<AnalyticsEventsClient>,
+        thread_store: Arc<dyn ThreadStore>,
+        agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
+        installation_id: String,
+        attestation_provider: Option<Arc<dyn AttestationProvider>>,
+        external_time_provider: Option<Arc<dyn TimeProvider>>,
+    ) -> Self {
         let codex_home = config.codex_home.clone();
         let restriction_product = session_source.restriction_product();
         let (thread_created_tx, _) = broadcast::channel(THREAD_CREATED_CHANNEL_CAPACITY);
@@ -404,6 +447,7 @@ impl ThreadManager {
                 external_time_provider,
                 auth_manager,
                 session_source,
+                session_provenance,
                 installation_id,
                 analytics_events_client,
                 ops_log: should_use_test_thread_manager_behavior()
@@ -542,6 +586,7 @@ impl ThreadManager {
                 external_time_provider: None,
                 auth_manager,
                 session_source: SessionSource::Exec,
+                session_provenance: None,
                 installation_id,
                 analytics_events_client: None,
                 ops_log: should_use_test_thread_manager_behavior()
@@ -806,6 +851,10 @@ impl ThreadManager {
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         let session_source = options.session_source.unwrap_or(resumed_session_source);
+        let session_provenance = options
+            .session_provenance
+            .or_else(|| options.initial_history.get_initial_session_provenance())
+            .or_else(|| self.state.session_provenance.clone());
         let thread_source = options.thread_source.or(resumed_thread_source);
         Box::pin(self.state.spawn_thread_with_source(
             options.config,
@@ -815,6 +864,7 @@ impl ThreadManager {
             Arc::clone(&self.state.auth_manager),
             agent_control,
             session_source,
+            session_provenance,
             /*parent_thread_id*/ None,
             forked_from_thread_id,
             ForkPersistence::Copied,
@@ -914,6 +964,7 @@ impl ThreadManager {
                 .restore_v2_agent_metadata(&config, resumed.conversation_id)
                 .await;
         }
+        let session_provenance = initial_history.get_resumed_session_provenance();
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
@@ -922,6 +973,7 @@ impl ThreadManager {
             auth_manager,
             agent_control,
             session_source,
+            session_provenance,
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
             ForkPersistence::Copied,
@@ -989,6 +1041,7 @@ impl ThreadManager {
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        let session_provenance = initial_history.get_resumed_session_provenance();
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
@@ -997,6 +1050,7 @@ impl ThreadManager {
             auth_manager,
             agent_control,
             session_source,
+            session_provenance,
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
             ForkPersistence::Copied,
@@ -1529,6 +1583,7 @@ impl ThreadManagerState {
             config,
             agent_control,
             self.session_source.clone(),
+            self.session_provenance.clone(),
             /*history_mode*/ None,
             /*parent_thread_id*/ None,
             /*forked_from_thread_id*/ None,
@@ -1547,6 +1602,7 @@ impl ThreadManagerState {
         config: Config,
         agent_control: AgentControl,
         session_source: SessionSource,
+        session_provenance: Option<SessionProvenance>,
         history_mode: Option<ThreadHistoryMode>,
         parent_thread_id: Option<ThreadId>,
         forked_from_thread_id: Option<ThreadId>,
@@ -1571,6 +1627,7 @@ impl ThreadManagerState {
             Arc::clone(&self.auth_manager),
             agent_control,
             session_source,
+            session_provenance,
             parent_thread_id,
             forked_from_thread_id,
             ForkPersistence::Copied,
@@ -1607,6 +1664,7 @@ impl ThreadManagerState {
             &config.workspace_roots,
         );
         let thread_source = initial_history.get_resumed_thread_source();
+        let session_provenance = initial_history.get_resumed_session_provenance();
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
@@ -1615,6 +1673,7 @@ impl ThreadManagerState {
             Arc::clone(&self.auth_manager),
             agent_control,
             session_source,
+            session_provenance,
             parent_thread_id,
             /*forked_from_thread_id*/ None,
             ForkPersistence::Copied,
@@ -1655,6 +1714,7 @@ impl ThreadManagerState {
                 &config.workspace_roots,
             )
         });
+        let session_provenance = initial_history.get_initial_session_provenance();
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
@@ -1663,6 +1723,7 @@ impl ThreadManagerState {
             Arc::clone(&self.auth_manager),
             agent_control,
             session_source,
+            session_provenance,
             parent_thread_id,
             forked_from_thread_id,
             ForkPersistence::Copied,
@@ -1700,6 +1761,9 @@ impl ThreadManagerState {
         supports_openai_form_elicitation: bool,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        let session_provenance = initial_history
+            .get_initial_session_provenance()
+            .or_else(|| self.session_provenance.clone());
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
@@ -1708,6 +1772,7 @@ impl ThreadManagerState {
             auth_manager,
             agent_control,
             self.session_source.clone(),
+            session_provenance,
             parent_thread_id,
             forked_from_thread_id,
             fork_persistence,
@@ -1735,6 +1800,7 @@ impl ThreadManagerState {
         auth_manager: Arc<AuthManager>,
         agent_control: AgentControl,
         session_source: SessionSource,
+        session_provenance: Option<SessionProvenance>,
         parent_thread_id: Option<ThreadId>,
         forked_from_thread_id: Option<ThreadId>,
         fork_persistence: ForkPersistence,
@@ -1830,6 +1896,7 @@ impl ThreadManagerState {
             requested_history_mode: history_mode,
             fork_persistence,
             session_source,
+            session_provenance,
             forked_from_thread_id,
             parent_thread_id,
             thread_source,

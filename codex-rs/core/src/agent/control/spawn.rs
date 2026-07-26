@@ -461,6 +461,7 @@ impl AgentControl {
                     config.clone(),
                     self.clone(),
                     session_source,
+                    /*session_provenance*/ None,
                     history_mode,
                     options.parent_thread_id,
                     /*forked_from_thread_id*/ None,

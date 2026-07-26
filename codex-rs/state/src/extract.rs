@@ -64,6 +64,7 @@ fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &Sessi
     }
     metadata.id = meta_line.meta.id;
     metadata.source = enum_to_string(&meta_line.meta.source);
+    metadata.session_provenance = meta_line.meta.session_provenance.clone();
     // Later SessionMeta lines do not redefine the canonical history_mode.
     metadata.thread_source = meta_line.meta.thread_source.clone();
     metadata.agent_nickname = meta_line.meta.agent_nickname.clone();
@@ -393,6 +394,7 @@ mod tests {
                     originator: "codex_cli_rs".to_string(),
                     cli_version: "0.0.0".to_string(),
                     source: SessionSource::Cli,
+                    session_provenance: None,
                     thread_source: None,
                     agent_path: None,
                     agent_nickname: None,
@@ -642,6 +644,7 @@ mod tests {
                     originator: "codex_cli_rs".to_string(),
                     cli_version: "0.0.0".to_string(),
                     source: SessionSource::Cli,
+                    session_provenance: None,
                     thread_source: None,
                     agent_path: None,
                     agent_nickname: None,
@@ -677,6 +680,7 @@ mod tests {
             updated_at: created_at,
             recency_at: created_at,
             source: "cli".to_string(),
+            session_provenance: None,
             history_mode: Default::default(),
             thread_source: None,
             agent_path: None,

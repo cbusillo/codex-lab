@@ -197,6 +197,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             cwd: absolute_path("tmp"),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
+            session_provenance: None,
             can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: None,

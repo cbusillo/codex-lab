@@ -2691,6 +2691,16 @@ impl InitialHistory {
             .and_then(|meta| meta.thread_source.clone())
     }
 
+    pub fn get_resumed_session_provenance(&self) -> Option<SessionProvenance> {
+        self.get_resumed_session_meta()
+            .and_then(|meta| meta.session_provenance.clone())
+    }
+
+    pub fn get_initial_session_provenance(&self) -> Option<SessionProvenance> {
+        self.get_session_meta()
+            .and_then(|meta| meta.session_provenance.clone())
+    }
+
     pub fn get_session_originator(&self) -> Option<String> {
         self.get_session_meta()
             .map(|meta| meta.originator.clone())
@@ -2752,6 +2762,39 @@ pub enum SessionSource {
     SubAgent(SubAgentSource),
     #[serde(other)]
     Unknown,
+}
+
+/// Structured provenance for sessions launched by an external orchestrator.
+///
+/// These fields are untrusted descriptive metadata. Authorization, product
+/// filtering, and runtime behavior must continue to use `SessionSource` and
+/// other server-side policy inputs.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+impl SessionProvenance {
+    pub fn is_empty(&self) -> bool {
+        self.request_id.is_none()
+            && self.repository.is_none()
+            && self.issue_number.is_none()
+            && self.issue_url.is_none()
+            && self.source.is_none()
+            && self.origin.is_none()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
@@ -3070,6 +3113,11 @@ pub struct SessionMeta {
     /// Optional analytics source classification for this thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_source: Option<ThreadSource>,
+    /// Optional structured launch provenance supplied by an external agent
+    /// orchestrator. This is intentionally separate from `source`, which is a
+    /// coarse runtime/product classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_provenance: Option<SessionProvenance>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_nickname: Option<String>,
@@ -3127,6 +3175,7 @@ impl Default for SessionMeta {
             cli_version: String::new(),
             source: SessionSource::default(),
             thread_source: None,
+            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             agent_path: None,
@@ -5946,6 +5995,50 @@ mod tests {
             _ => panic!("expected turn_aborted event"),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn session_meta_round_trips_session_provenance_and_omits_it_for_legacy_rollouts() -> Result<()>
+    {
+        let legacy: SessionMeta = serde_json::from_value(json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "id": "00000000-0000-0000-0000-000000000001",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "cwd": "/tmp",
+            "originator": "codex",
+            "cli_version": "0.0.0",
+            "model_provider": null,
+            "base_instructions": null
+        }))?;
+        assert_eq!(legacy.session_provenance, None);
+        let legacy_serialized = serde_json::to_value(&legacy)?;
+        assert_eq!(legacy_serialized.get("session_provenance"), None);
+
+        let provenance = SessionProvenance {
+            request_id: Some("agent-session-123".to_string()),
+            repository: Some("cbusillo/codex-lab".to_string()),
+            issue_number: Some(48),
+            issue_url: Some("https://github.com/cbusillo/codex-lab/issues/48".to_string()),
+            source: Some("agent-session".to_string()),
+            origin: Some("launchplane".to_string()),
+        };
+        let mut with_provenance = legacy;
+        with_provenance.session_provenance = Some(provenance.clone());
+        let serialized = serde_json::to_value(&with_provenance)?;
+        assert_eq!(
+            serialized["session_provenance"],
+            json!({
+                "requestId": "agent-session-123",
+                "repository": "cbusillo/codex-lab",
+                "issueNumber": 48,
+                "issueUrl": "https://github.com/cbusillo/codex-lab/issues/48",
+                "source": "agent-session",
+                "origin": "launchplane"
+            })
+        );
+        let reparsed: SessionMeta = serde_json::from_value(serialized)?;
+        assert_eq!(reparsed.session_provenance, Some(provenance));
         Ok(())
     }
 
