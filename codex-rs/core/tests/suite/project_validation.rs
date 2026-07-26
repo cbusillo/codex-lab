@@ -247,6 +247,23 @@ async fn submit_user_input(codex: &CodexThread, test: &TestCodex, text: &str) ->
     submit_user_input_at_cwd(codex, test, text, test.config.cwd.clone()).await
 }
 
+async fn submit_user_input_with_permission_profile(
+    codex: &CodexThread,
+    test: &TestCodex,
+    text: &str,
+    permission_profile: PermissionProfile,
+) -> Result<()> {
+    submit_user_input_with_environment_override(
+        codex,
+        test,
+        text,
+        test.config.cwd.clone(),
+        TestTurnEnvironmentOverride::Inherit,
+        permission_profile,
+    )
+    .await
+}
+
 async fn steer_user_input(codex: &CodexThread, text: &str) -> Result<()> {
     codex
         .steer_input(
@@ -282,6 +299,7 @@ async fn submit_user_input_at_cwd(
         text,
         cwd,
         TestTurnEnvironmentOverride::Inherit,
+        PermissionProfile::Disabled,
     )
     .await
 }
@@ -297,6 +315,7 @@ async fn submit_user_input_without_environments(
         text,
         test.config.cwd.clone(),
         TestTurnEnvironmentOverride::NoEnvironments,
+        PermissionProfile::Disabled,
     )
     .await
 }
@@ -307,9 +326,10 @@ async fn submit_user_input_with_environment_override(
     text: &str,
     cwd: AbsolutePathBuf,
     environment_override: TestTurnEnvironmentOverride,
+    permission_profile: PermissionProfile,
 ) -> Result<()> {
     let (sandbox_policy, permission_profile) =
-        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
+        turn_permission_fields(permission_profile, cwd.as_path());
     let session_model = test.session_configured.model.clone();
     let environments = match environment_override {
         TestTurnEnvironmentOverride::Inherit => None,
@@ -1826,6 +1846,108 @@ async fn automatic_shellcheck_provider_runs_one_correction_cycle() -> Result<()>
             .count(),
         1
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    std::fs::write(
+        repo.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.95.0\"\n",
+    )?;
+    init_git_repo(repo.path())?;
+    let provider = tempdir()?;
+    let fake_cargo = provider.path().join("cargo");
+    let canonical_repo = dunce::canonicalize(repo.path())?;
+    write_executable(
+        &fake_cargo,
+        &format!(
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "manifest=''\n",
+                "target_dir=''\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  case \"$1\" in\n",
+                "    --manifest-path) manifest=$2; shift 2 ;;\n",
+                "    --target-dir) target_dir=$2; shift 2 ;;\n",
+                "    *) shift ;;\n",
+                "  esac\n",
+                "done\n",
+                "test \"$manifest\" = '{manifest}' || exit 71\n",
+                "case \"$PWD\" in '{repo}'|'{repo}'/*) exit 64 ;; esac\n",
+                "test \"${{target_dir##*/}}\" = 'target' || exit 72\n",
+                "target_parent=${{target_dir%/target}}\n",
+                "test \"$(cd \"$target_parent\" && pwd -P)\" = \"$(pwd -P)\" || exit 72\n",
+                "grep -Fq 'channel = \"1.95.0\"' \"$PWD/rust-toolchain.toml\" || exit 73\n",
+                "if [ \"$(uname -s)\" = 'Darwin' ] && [ \"${{CODEX_SANDBOX:-}}\" != 'seatbelt' ]; then exit 70; fi\n",
+                "mkdir -p \"$target_dir\" || exit 75\n",
+                "printf allowed > \"$target_dir/probe\" || exit 76\n",
+            ),
+            manifest = canonical_repo.join("Cargo.toml").display(),
+            repo = canonical_repo.display(),
+        ),
+    )?;
+    let patch = "*** Begin Patch\n*** Add File: src/lib.rs\n+pub fn value() {}\n*** End Patch\n";
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-cargo-sandbox-1"),
+                ev_apply_patch_custom_tool_call("cargo-sandbox-patch", patch),
+                ev_completed("resp-cargo-sandbox-1"),
+            ]),
+            sse_completed("resp-cargo-sandbox-2"),
+        ],
+    )
+    .await;
+    let test = build_cargo_provider_codex(
+        &server,
+        repo.path(),
+        fake_cargo
+            .to_str()
+            .context("fake cargo path should be UTF-8")?
+            .to_string(),
+        /*timeout_ms*/ 5_000,
+    )
+    .await?;
+
+    submit_user_input_with_permission_profile(
+        &test.codex,
+        &test,
+        "add the Rust fixture",
+        PermissionProfile::workspace_write(),
+    )
+    .await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::Passed,
+        "exit code {:?}: {}",
+        validation_events[0].exit_code,
+        validation_events[0].output,
+    );
+    assert_eq!(validation_events[0].output, "cargo check passed");
+    let target_dir = validation_events[0]
+        .command
+        .iter()
+        .position(|argument| argument == "--target-dir")
+        .and_then(|index| validation_events[0].command.get(index + 1))
+        .context("cargo validation command should include a target directory")?;
+    assert!(!Path::new(target_dir).starts_with(&canonical_repo));
+    assert!(!Path::new(target_dir).exists());
+    assert_eq!(response_mock.requests().len(), 2);
     Ok(())
 }
 
