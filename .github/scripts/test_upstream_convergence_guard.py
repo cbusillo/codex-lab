@@ -153,6 +153,18 @@ class GuardViolationTest(GuardFixture):
 
         self.assertEqual(guard.ABSENT, report["violations"][0]["violation"])
 
+    def test_symbolic_link_at_owned_path_counts_as_absent(self) -> None:
+        target = self.root / "target.rs"
+        target.write_text("local\n", encoding="utf-8")
+        candidate = self.root / "codex-rs" / "auto-review" / "src" / "lib.rs"
+        candidate.parent.mkdir(parents=True)
+        candidate.symlink_to(target)
+
+        report = self.check([manifest_entry("codex-rs/auto-review/src/lib.rs", None)], [])
+
+        self.assertEqual(guard.ABSENT, report["violations"][0]["violation"])
+        self.assertIn("symbolic link", report["violations"][0]["detail"])
+
 
 class GuardWaiverTest(GuardFixture):
     def test_waiver_clears_the_matching_violation(self) -> None:
@@ -258,6 +270,67 @@ class WaiverLedgerValidationTest(GuardFixture):
                     "waivers": [waiver("a", guard.ABSENT), waiver("a", guard.ABSENT)],
                 }
             )
+
+
+class ManifestValidationTest(GuardFixture):
+    def load(self, entries: list[dict[str, object]]) -> list[dict[str, object]]:
+        path = self.root / "manifest.json"
+        lane_counts: dict[str, int] = {}
+        for entry in entries:
+            lane = str(entry["lane"])
+            lane_counts[lane] = lane_counts.get(lane, 0) + 1
+        write_json(
+            path,
+            {
+                "schemaVersion": 1,
+                "repository": guard.EXPECTED_REPOSITORY,
+                "ownershipBaseline": guard.EXPECTED_OWNERSHIP_BASELINE,
+                "policy": {
+                    "guardedLanes": list(guard.EXPECTED_GUARDED_LANES),
+                    "rule": guard.EXPECTED_MANIFEST_RULE,
+                },
+                "summary": {
+                    "guardedPaths": len(entries),
+                    "guardedLaneCounts": dict(sorted(lane_counts.items())),
+                },
+                "guardedPaths": entries,
+            },
+        )
+        return guard.load_manifest(path)
+
+    def test_rejects_path_escape(self) -> None:
+        with self.assertRaises(guard.WaiverError):
+            self.load([manifest_entry("../outside", None)])
+
+    def test_rejects_absolute_path(self) -> None:
+        with self.assertRaises(guard.WaiverError):
+            self.load([manifest_entry("/tmp/outside", None)])
+
+    def test_rejects_duplicate_path(self) -> None:
+        entry = manifest_entry("codex-rs/auto-review/src/lib.rs", None)
+        with self.assertRaises(guard.WaiverError):
+            self.load([entry, entry])
+
+    def test_rejects_changed_ownership_baseline(self) -> None:
+        path = self.root / "manifest.json"
+        document = {
+            "schemaVersion": 1,
+            "repository": guard.EXPECTED_REPOSITORY,
+            "ownershipBaseline": {
+                **guard.EXPECTED_OWNERSHIP_BASELINE,
+                "local": "f" * 40,
+            },
+            "policy": {
+                "guardedLanes": list(guard.EXPECTED_GUARDED_LANES),
+                "rule": guard.EXPECTED_MANIFEST_RULE,
+            },
+            "summary": {"guardedPaths": 0, "guardedLaneCounts": {}},
+            "guardedPaths": [],
+        }
+        write_json(path, document)
+
+        with self.assertRaisesRegex(guard.WaiverError, "ownership baseline"):
+            guard.load_manifest(path)
 
 
 class CheckedInLedgerTest(unittest.TestCase):
