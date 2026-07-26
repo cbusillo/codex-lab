@@ -52,6 +52,10 @@ const CONTROL_RESPONSE_GRACE_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_CONTROL_TIMEOUT_MS: u64 = MAX_CONTROL_TIMEOUT_MS;
 const MAX_CODE_BRIDGE_ID_BYTES: usize = 256;
 const MAX_MODEL_VISIBLE_CONTROL_FIELD_BYTES: usize = 1024;
+/// Hard cap for every error string the bridge can surface to the model. Bridge peers are
+/// untrusted, so `ErrorMessage.message` (and anything derived from a peer payload) must be
+/// bounded before it reaches the tool output.
+const MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES: usize = 1024;
 const MAX_MODEL_VISIBLE_IMAGE_BASE64_BYTES: usize = MAX_SCREENSHOT_BYTES.div_ceil(3) * 4;
 const TRUNCATED_FIELD_NOTICE: &str = " [truncated by code_bridge]";
 static NEXT_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -375,10 +379,31 @@ fn timeout_error(request_id: &str) -> ErrorMessage {
 fn expect_ack(payload: BridgePayload) -> Result<(), CodeBridgeClientError> {
     match payload {
         BridgePayload::Ack(_) => Ok(()),
-        BridgePayload::Error(error) => Err(CodeBridgeClientError::HelloRejected(error.message)),
+        BridgePayload::Error(error) => Err(CodeBridgeClientError::HelloRejected(
+            model_visible_error_text(&error.message),
+        )),
         other => Err(CodeBridgeClientError::HelloRejected(format!(
-            "unexpected Code Bridge response payload {other:?}"
+            "unexpected Code Bridge response payload kind: {}",
+            bridge_payload_kind(&other)
         ))),
+    }
+}
+
+/// Bounded, non-`Debug` label for a bridge payload. Payload bodies can carry megabytes of
+/// screenshot base64, so only the variant name is ever model-visible.
+fn bridge_payload_kind(payload: &BridgePayload) -> &'static str {
+    match payload {
+        BridgePayload::Hello(_) => "hello",
+        BridgePayload::HelloResponse(_) => "helloResponse",
+        BridgePayload::Heartbeat(_) => "heartbeat",
+        BridgePayload::Event(_) => "event",
+        BridgePayload::Subscribe(_) => "subscribe",
+        BridgePayload::Ack(_) => "ack",
+        BridgePayload::Error(_) => "error",
+        BridgePayload::ScreenshotRequest(_) => "screenshotRequest",
+        BridgePayload::ScreenshotResponse(_) => "screenshotResponse",
+        BridgePayload::ControlRequest(_) => "controlRequest",
+        BridgePayload::ControlResponse(_) => "controlResponse",
     }
 }
 
@@ -394,7 +419,7 @@ fn map_screenshot_response(response: ScreenshotResponseMessage) -> CodeBridgeRes
         "requestId": response.request_id,
         "respondingClientId": response.responding_client_id,
         "screenshot": screenshot,
-        "error": response.error,
+        "error": model_visible_error(response.error),
         }),
         image,
     }
@@ -412,7 +437,7 @@ fn map_control_response(response: ControlResponseMessage) -> CodeBridgeResult {
         "respondingClientId": response.responding_client_id,
         "summary": summary,
         "result": result,
-        "error": response.error,
+        "error": model_visible_error(response.error),
     }))
 }
 
@@ -436,9 +461,22 @@ fn error_response(status: &str, message: String) -> CodeBridgeResult {
     CodeBridgeResult::text(json!({
         "status": status,
         "error": {
-            "message": message,
+            "message": model_visible_error_text(&message),
         },
     }))
+}
+
+fn model_visible_error(error: Option<ErrorMessage>) -> Option<Value> {
+    error.map(|error| {
+        json!({
+            "code": error.code,
+            "message": model_visible_error_text(&error.message),
+        })
+    })
+}
+
+fn model_visible_error_text(message: &str) -> String {
+    truncate_model_visible_text(message, MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES).into_owned()
 }
 
 fn split_screenshot_payload(payload: ScreenshotPayload) -> (Value, Option<ScreenshotToolImage>) {

@@ -199,7 +199,7 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 control.release_external_agent(thread_id);
                 return;
             }
-            let message = err.to_string();
+            let message = bound_external_agent_message(&err.to_string());
             let parent_message =
                 external_agent_parent_failure_message(&launch, &err.detail, message.as_str());
             control.update_external_agent_failure(
@@ -426,6 +426,13 @@ async fn run_external_agent_inner(
                         )
                     })?;
                 response.final_message = Some(bound_external_agent_message(final_message));
+            } else {
+                // Failed responses flow into `AgentStatus::Errored` and the parent completion
+                // context, so they need the same model-visible bound as completed ones.
+                response.final_message = response
+                    .final_message
+                    .as_deref()
+                    .map(bound_external_agent_message);
             }
             Ok(response)
         }

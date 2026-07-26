@@ -134,3 +134,104 @@ fn control_response_caps_model_visible_summary_and_result() {
     assert!(summary.ends_with(TRUNCATED_FIELD_NOTICE));
     assert_eq!(response.response["result"]["truncated"], true);
 }
+
+/// Model-visible envelope overhead for the small status/id fields wrapped around a bounded
+/// error string. Kept tight so the assertions below fail if the error itself grows.
+const ERROR_ENVELOPE_SLACK_BYTES: usize = 256;
+
+#[test]
+fn screenshot_response_bounds_oversized_peer_error_message() {
+    let response = map_screenshot_response(ScreenshotResponseMessage {
+        request_id: "shot-err".to_string(),
+        responding_client_id: "browser-1".to_string(),
+        status: ControlStatus::Failed,
+        screenshot: None,
+        error: Some(ErrorMessage {
+            code: ErrorCode::PayloadTooLarge,
+            message: "e".repeat(MAX_SCREENSHOT_BYTES),
+        }),
+    });
+    let rendered = serde_json::to_string(&response.response).expect("serialize response");
+
+    let message = response.response["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(message.len() <= MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES);
+    assert!(message.ends_with(TRUNCATED_FIELD_NOTICE));
+    assert_eq!(response.response["error"]["code"], "payloadTooLarge");
+    assert!(
+        rendered.len() <= MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES + ERROR_ENVELOPE_SLACK_BYTES,
+        "rendered {} bytes",
+        rendered.len()
+    );
+}
+
+#[test]
+fn control_response_bounds_oversized_peer_error_message() {
+    let response = map_control_response(ControlResponseMessage {
+        request_id: "js-err".to_string(),
+        responding_client_id: "browser-1".to_string(),
+        status: ControlStatus::Failed,
+        summary: String::new(),
+        result: None,
+        error: Some(ErrorMessage {
+            code: ErrorCode::InvalidPayload,
+            message: "e".repeat(MAX_EVENT_TEXT_BYTES),
+        }),
+    });
+
+    let message = response.response["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(message.len() <= MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES);
+    assert!(message.ends_with(TRUNCATED_FIELD_NOTICE));
+}
+
+#[test]
+fn unexpected_ack_payload_reports_kind_without_screenshot_base64() {
+    let data_base64 = "A".repeat(MAX_SCREENSHOT_BYTES);
+    let err = expect_ack(BridgePayload::ScreenshotResponse(
+        ScreenshotResponseMessage {
+            request_id: "shot-unexpected".to_string(),
+            responding_client_id: "browser-1".to_string(),
+            status: ControlStatus::Ok,
+            screenshot: Some(ScreenshotPayload {
+                width: 1920,
+                height: 1080,
+                media_type: ScreenshotMediaType::Png,
+                data_base64: data_base64.clone(),
+            }),
+            error: None,
+        },
+    ))
+    .expect_err("an unexpected payload must not be accepted as an ack");
+
+    let response = error_response("failed", err.to_string());
+    let rendered = serde_json::to_string(&response.response).expect("serialize response");
+
+    assert!(!rendered.contains(&data_base64[..64]));
+    assert!(rendered.contains("screenshotResponse"));
+    assert!(response.image.is_none());
+    assert!(
+        rendered.len() <= MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES + ERROR_ENVELOPE_SLACK_BYTES,
+        "rendered {} bytes",
+        rendered.len()
+    );
+}
+
+#[test]
+fn error_response_bounds_oversized_peer_error_text() {
+    let response = error_response("failed", "z".repeat(MAX_SCREENSHOT_BYTES));
+    let rendered = serde_json::to_string(&response.response).expect("serialize response");
+
+    let message = response.response["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(message.len() <= MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES);
+    assert!(message.ends_with(TRUNCATED_FIELD_NOTICE));
+    assert!(
+        rendered.len() <= MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES + ERROR_ENVELOPE_SLACK_BYTES,
+        "rendered {} bytes",
+        rendered.len()
+    );
+}

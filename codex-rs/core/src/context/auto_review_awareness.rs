@@ -18,7 +18,18 @@ use crate::state::BackgroundAutoReviewActiveSnapshot;
 
 use super::ContextualUserFragment;
 
-const MAX_AWARENESS_BYTES: usize = 4 * 1024;
+const AWARENESS_START_MARKER: &str = "<auto_review_awareness>";
+const AWARENESS_END_MARKER: &str = "</auto_review_awareness>";
+/// Manually reviewed hard cap on the fully rendered fragment (both markers plus the body
+/// wrapper). 2 KiB of this ASCII-dominated status text is well under the 1K-token ceiling that
+/// `.codex/skills/code-review-context` requires for a per-turn injected fragment.
+const MAX_RENDERED_AWARENESS_BYTES: usize = 2 * 1024;
+/// `body()` wraps the stored body in a leading and trailing newline.
+const AWARENESS_BODY_WRAPPER_BYTES: usize = 2;
+const MAX_AWARENESS_BYTES: usize = MAX_RENDERED_AWARENESS_BYTES
+    - AWARENESS_START_MARKER.len()
+    - AWARENESS_END_MARKER.len()
+    - AWARENESS_BODY_WRAPPER_BYTES;
 const MAX_STATUS_LINES: usize = 6;
 const MARKER: &str = "... auto review awareness truncated";
 
@@ -49,7 +60,7 @@ impl ContextualUserFragment for AutoReviewAwareness {
     }
 
     fn type_markers() -> (&'static str, &'static str) {
-        ("<auto_review_awareness>", "</auto_review_awareness>")
+        (AWARENESS_START_MARKER, AWARENESS_END_MARKER)
     }
 
     fn body(&self) -> String {

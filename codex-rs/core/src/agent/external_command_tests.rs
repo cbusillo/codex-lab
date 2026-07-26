@@ -51,6 +51,74 @@ fn bounds_model_visible_external_agent_results() {
     assert!(bounded.ends_with("tail-marker"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_json_response_is_bounded_before_status_and_parent_context() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: "/bin/sh".to_string(),
+            protocol: ExternalCommandProtocol::Json,
+            args: vec![
+                "-c".to_string(),
+                r#"cat > /dev/null
+printf '{"status":"failed","final_message":"'
+i=0
+while [ $i -lt 900 ]; do printf '0123456789'; i=$((i+1)); done
+printf 'tail-marker"}'
+"#
+                .to_string(),
+            ],
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        true,
+    );
+
+    let response = run_external_agent_inner(&launch)
+        .await
+        .expect("failed json response should parse");
+    let final_message = response.final_message.expect("failed json final message");
+
+    assert_eq!(response.status, ExternalAgentResponseStatus::Failed);
+    assert!(
+        final_message.len() <= MAX_MODEL_VISIBLE_EXTERNAL_AGENT_BYTES,
+        "failed message was {} bytes",
+        final_message.len()
+    );
+    assert!(final_message.starts_with(EXTERNAL_AGENT_MESSAGE_TRUNCATED_MARKER));
+    assert!(final_message.ends_with("tail-marker"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_json_response_without_message_stays_absent() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: "/bin/sh".to_string(),
+            protocol: ExternalCommandProtocol::Json,
+            args: vec![
+                "-c".to_string(),
+                "cat > /dev/null; printf '{\"status\":\"failed\",\"final_message\":null}'"
+                    .to_string(),
+            ],
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        true,
+    );
+
+    let response = run_external_agent_inner(&launch)
+        .await
+        .expect("failed json response should parse");
+
+    assert_eq!(response.status, ExternalAgentResponseStatus::Failed);
+    assert_eq!(response.final_message, None);
+}
+
 #[tokio::test]
 async fn pre_cancelled_external_agent_does_not_launch_subprocess() {
     let temp_dir = TempDir::new().expect("tempdir");
