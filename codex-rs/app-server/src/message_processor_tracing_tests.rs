@@ -277,7 +277,10 @@ fn run_current_thread_test_with_stack<F>(name: &str, future: F) -> Result<()>
 where
     F: Future<Output = Result<()>> + Send + 'static,
 {
-    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
+    // Debug builds on Windows use noticeably more stack per frame than on Unix,
+    // and 4 MiB overflows while driving a full `thread/start` through the message
+    // processor. Match the production tokio worker stack size instead.
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
     let handle = std::thread::Builder::new()
         .name(name.to_string())

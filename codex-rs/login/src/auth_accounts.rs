@@ -295,13 +295,13 @@ fn create_accounts_tmp_file(path: &Path) -> io::Result<(PathBuf, fs::File)> {
             Err(err) => return Err(err),
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!(
-            "failed to allocate temporary accounts path for {}",
-            path.display()
-        ),
-    ))
+    // Exhausting every candidate temp name is a failure of this helper, not the
+    // `AlreadyExists` outcome of a single create attempt, so report it as a
+    // generic error that callers surface unchanged.
+    Err(io::Error::other(format!(
+        "failed to allocate temporary accounts path for {}",
+        path.display()
+    )))
 }
 
 fn replace_accounts_file(src: &Path, dst: &Path) -> io::Result<()> {
