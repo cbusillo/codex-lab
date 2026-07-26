@@ -218,6 +218,32 @@ class CheckedInLedgerTest(unittest.TestCase):
         self.assertEqual([], report["violations"])
         self.assertEqual([], report["staleWaivers"])
 
+    def test_owned_external_agent_proofs_are_guarded_and_unwaived(self) -> None:
+        """A refresh must not be able to delete the AGENT-1 preflight proofs.
+
+        These paths carry the only executable evidence for explicit
+        external-agent preflight, so an unwaived `absent` violation is the
+        intended failure when a snapshot merge drops them.
+        """
+
+        manifest = {
+            entry["path"]: entry
+            for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)
+        }
+        waived = {path for path, _ in guard.load_waivers(guard.DEFAULT_WAIVERS)}
+
+        for path in (
+            "codex-rs/core/tests/suite/external_agent_preflight.rs",
+            "codex-rs/core/src/agent/external_preflight.rs",
+            "codex-rs/core/src/agent/external_preflight_tests.rs",
+        ):
+            with self.subTest(path=path):
+                entry = manifest.get(path)
+                self.assertIsNotNone(entry, f"{path} must be a guarded owned path")
+                self.assertEqual("intentionally_owned", entry["lane"])
+                self.assertIn("AGENT-1", entry["contracts"])
+                self.assertNotIn(path, waived)
+
     def test_every_waiver_names_a_guarded_path(self) -> None:
         guarded = {entry["path"] for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)}
         waived = {path for path, _ in guard.load_waivers(guard.DEFAULT_WAIVERS)}

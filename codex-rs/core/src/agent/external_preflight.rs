@@ -391,6 +391,10 @@ fn install_hint_for_third_party_agent(launch_family: Option<&str>, command: &str
     }
 }
 
+#[cfg(test)]
+#[path = "external_preflight_tests.rs"]
+mod tests;
+
 pub(super) fn antigravity_launch_dir() -> PathBuf {
     crate::config::find_codex_home()
         .map(PathBuf::from)
