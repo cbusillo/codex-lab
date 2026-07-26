@@ -194,6 +194,25 @@ class RecordedUpstreamTest(GitFixture):
             convergence.recorded_upstream_tip(self.root, self.policy)
 
 
+class SnapshotDocumentTest(GitFixture):
+    def test_rejects_oversized_inventory_from_committed_history(self) -> None:
+        snapshot = "aaaaaaaa-bbbbbbbb"
+        commit = self.commit_file(
+            f"{self.policy.evidence_root}/{snapshot}/inventory.json",
+            " " * 17,
+            "oversized snapshot",
+        )
+
+        with patch.object(convergence, "MAX_SNAPSHOT_FILE_BYTES", 16):
+            with self.assertRaisesRegex(convergence.ConvergenceError, "exceeded 16"):
+                convergence.snapshot_document_at(
+                    self.root,
+                    self.policy,
+                    snapshot,
+                    commit,
+                )
+
+
 class RecordIntegrationTest(GitFixture):
     def make_linked_candidate(self) -> tuple[Path, str, str, str]:
         base = self.commit_file("base.txt", "base\n", "base")

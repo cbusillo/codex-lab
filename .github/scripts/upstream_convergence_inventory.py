@@ -250,6 +250,7 @@ def run_process_bounded(
     )
     if process.stdout is None or process.stderr is None:
         process.kill()
+        process.wait()
         raise RuntimeError(f"{operation} did not expose output pipes")
 
     events: queue.Queue[tuple[str, bytes | OSError | None]] = queue.Queue(maxsize=8)

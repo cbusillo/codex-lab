@@ -785,13 +785,31 @@ def snapshot_document_at(
     try:
         if commit is None:
             return read_snapshot_inventory(repo / policy.evidence_root / snapshot)
-        contents = run_git(repo, "show", f"{commit}:{relative}").stdout
-        if len(contents.encode()) > MAX_SNAPSHOT_FILE_BYTES:
-            raise ConvergenceError(
-                f"{relative} exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes"
+        result = inventory.run_git_process(
+            repo,
+            "show",
+            f"{commit}:{relative}",
+            max_output_bytes=MAX_SNAPSHOT_FILE_BYTES,
+            text=False,
+        )
+        if not isinstance(result.stdout, bytes) or not isinstance(result.stderr, bytes):
+            raise ConvergenceError(f"git show returned text output for {relative}")
+        if result.returncode != 0:
+            detail = (
+                (result.stderr or result.stdout)
+                .decode("utf-8", errors="replace")
+                .strip()
             )
+            raise ConvergenceError(f"git show failed for {relative}: {detail}")
+        contents = result.stdout.decode("utf-8")
         document = json.loads(contents)
-    except (json.JSONDecodeError, OSError, UnicodeError, ConvergenceError) as error:
+    except (
+        json.JSONDecodeError,
+        OSError,
+        RuntimeError,
+        UnicodeError,
+        ConvergenceError,
+    ) as error:
         raise ConvergenceError(f"cannot read {relative}: {error}") from error
     if not isinstance(document, dict):
         raise ConvergenceError(f"{relative} must contain a JSON object")
