@@ -1,420 +1,64 @@
 {
   "schemaVersion": 1,
-  "policy": {
-    "dispositions": {
-      "converged_with_upstream": "Upstream adopted the Codex Lab behavior, so the local delta is gone on purpose.",
-      "pending_restore": "The path was lost by an upstream-first merge and restoring it is tracked work.",
-      "upstream_deletion_adopted": "Upstream deleted the path and Codex Lab accepted the deletion."
-    },
-    "note": "A waiver that no longer matches a violation fails the guard, so restored paths cannot leave dead ledger entries behind.",
-    "rule": "Every waived owned path names a violation, a disposition, a deciding issue, and a reason."
-  },
+  "policy": {"dispositions": {"converged_with_upstream": "Upstream adopted the Codex Lab behavior, so the local delta is gone on purpose.", "pending_restore": "The path was lost by an upstream-first merge and restoring it is tracked work.", "upstream_deletion_adopted": "Upstream deleted the path and Codex Lab accepted the deletion."}, "note": "A waiver that no longer matches a violation fails the guard, so restored paths cannot leave dead ledger entries behind.", "rule": "Every waived owned path names a violation, a disposition, a deciding issue, and a reason."},
   "waivers": [
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "README.md",
-      "reason": "IDENTITY-1 has no canonical identity decision yet, so the candidate carries the upstream README until #428 resolves product identity.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/app-server/src/request_processors/external_agent_config_processor.rs",
-      "reason": "AGENT-1 external-agent configuration API lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/app-server/src/request_processors/external_agent_config_processor_tests.rs",
-      "reason": "AGENT-1 external-agent configuration API lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "converged_with_upstream",
-      "issue": 428,
-      "path": "codex-rs/app-server/tests/suite/mod.rs",
-      "reason": "Every Every Code-owned app-server proof is a v2 suite, so all of them -- Code Bridge, remote control, external-agent config, Background Review control, and Project Validation -- register in codex-rs/app-server/tests/suite/v2/mod.rs, which is guarded separately and does diverge from upstream. The crate-level registry has no owned entry left to carry, so matching upstream is the correct end state rather than pending restoration work.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/agent/control/restore.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/agent/status.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/session/multi_agents.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/agent_jobs.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/agent_jobs/report_agent_job_result.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/agent_jobs/spawn_agents_on_csv.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/agent_jobs_spec.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/agent_jobs_spec_tests.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/agent_jobs_tests.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents/send_input.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/close_agent.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/tests/suite/agent_jobs.rs",
-      "reason": "The agent-jobs integration proof follows its handler; both are tracked #428 restoration work, not an accepted upstream deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/tests/suite/auto_review.rs",
-      "reason": "The AGENT-1 matrix still names this suite as a gate, but the anchor left the upstream file in place; restoring the owned Auto Drive review coverage is tracked #428 work.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/core/tests/suite/guardian_review.rs",
-      "reason": "Owned guardian-review coverage reverted to upstream at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/external-agent-migration/Cargo.toml",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/external-agent-migration/src/lib.rs",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "upstream_deletion_adopted",
-      "issue": 428,
-      "path": "codex-rs/external-agent-sessions/src/detect.rs",
-      "reason": "The current external-agent migration facade replaces the legacy detector and is wired through current-binary migration coverage, so #428 accepts the duplicate legacy implementation's deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "upstream_deletion_adopted",
-      "issue": 428,
-      "path": "codex-rs/external-agent-sessions/src/export.rs",
-      "reason": "The current external-agent migration facade replaces the legacy exporter and is wired through current-binary migration coverage, so #428 accepts the duplicate legacy implementation's deletion.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "upstream_deletion_adopted",
-      "issue": 428,
-      "path": "codex-rs/external-agent-sessions/src/ledger.rs",
-      "reason": "The current external-agent migration facade owns durable import tracking, so #428 accepts deletion of the superseded standalone session ledger.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "upstream_deletion_adopted",
-      "issue": 428,
-      "path": "codex-rs/external-agent-sessions/src/records.rs",
-      "reason": "The current external-agent migration facade owns source parsing and import state, so #428 accepts deletion of the superseded legacy records module.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/models-manager/Cargo.toml",
-      "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/models-manager/models.json",
-      "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/models-manager/prompt.md",
-      "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/models-manager/src/cache.rs",
-      "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/models-manager/src/config.rs",
-      "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/models-manager/src/lib.rs",
-      "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/models-manager/src/model_info.rs",
-      "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/models-manager/src/model_info_tests.rs",
-      "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/tui/src/status/card.rs",
-      "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/tui/src/status/helpers.rs",
-      "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/tui/src/status/rate_limits.rs",
-      "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap",
-      "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "codex-rs/tui/src/status/tests.rs",
-      "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "scripts/local/test_install_codex_lab_dev.py",
-      "reason": "Local developer tooling lost at anchor 9d2eea2238; restore alongside the cleanup and install helpers it drives.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/agent-capability-self-report.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/auto-validation-cargo-provider.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/auto-validation-no-applicable-provider.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/gpt-5-6-luna-low-request-shape.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/jetbrains-inspection-false-green-proof.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/local-provider-config.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/multi-turn-resume.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/project-doc-skill-dedup.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/provider-preflight-diagnostics.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/provider-routing-live-claude-antigravity.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/skills-cache-continuity.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/skills-guidance-binding-triggers.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/third-party-agent-live-copilot.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/scenarios/token-usage-report.json",
-      "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "pending_restore",
-      "issue": 428,
-      "path": "tools/codex-exec-harness/test_local_cleanup.py",
-      "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.",
-      "violation": "absent"
-    }
+    {"disposition": "pending_restore", "issue": 428, "path": "README.md", "reason": "IDENTITY-1 has no canonical identity decision yet, so the candidate carries the upstream README until #428 resolves product identity.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/app-server/src/request_processors/external_agent_config_processor.rs", "reason": "AGENT-1 external-agent configuration API lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/app-server/src/request_processors/external_agent_config_processor_tests.rs", "reason": "AGENT-1 external-agent configuration API lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "converged_with_upstream", "issue": 428, "path": "codex-rs/app-server/tests/suite/mod.rs", "reason": "Every Every Code-owned app-server proof is a v2 suite, so all of them -- Code Bridge, remote control, external-agent config, Background Review control, and Project Validation -- register in codex-rs/app-server/tests/suite/v2/mod.rs, which is guarded separately and does diverge from upstream. The crate-level registry has no owned entry left to carry, so matching upstream is the correct end state rather than pending restoration work.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/agent/control/restore.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/agent/status.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/session/multi_agents.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/agent_jobs.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/agent_jobs/report_agent_job_result.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/agent_jobs/spawn_agents_on_csv.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/agent_jobs_spec.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/agent_jobs_spec_tests.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/agent_jobs_tests.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/multi_agents.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/multi_agents/send_input.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/close_agent.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/tests/suite/agent_jobs.rs", "reason": "The agent-jobs integration proof follows its handler; both are tracked #428 restoration work, not an accepted upstream deletion.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/tests/suite/auto_review.rs", "reason": "The AGENT-1 matrix still names this suite as a gate, but the anchor left the upstream file in place; restoring the owned Auto Drive review coverage is tracked #428 work.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/core/tests/suite/guardian_review.rs", "reason": "Owned guardian-review coverage reverted to upstream at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/external-agent-migration/Cargo.toml", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/external-agent-migration/src/lib.rs", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "reverted_to_upstream"},
+    {"disposition": "upstream_deletion_adopted", "issue": 428, "path": "codex-rs/external-agent-sessions/src/detect.rs", "reason": "The current external-agent migration facade replaces the legacy detector and is wired through current-binary migration coverage, so #428 accepts the duplicate legacy implementation's deletion.", "violation": "absent"},
+    {"disposition": "upstream_deletion_adopted", "issue": 428, "path": "codex-rs/external-agent-sessions/src/export.rs", "reason": "The current external-agent migration facade replaces the legacy exporter and is wired through current-binary migration coverage, so #428 accepts the duplicate legacy implementation's deletion.", "violation": "absent"},
+    {"disposition": "upstream_deletion_adopted", "issue": 428, "path": "codex-rs/external-agent-sessions/src/ledger.rs", "reason": "The current external-agent migration facade owns durable import tracking, so #428 accepts deletion of the superseded standalone session ledger.", "violation": "absent"},
+    {"disposition": "upstream_deletion_adopted", "issue": 428, "path": "codex-rs/external-agent-sessions/src/records.rs", "reason": "The current external-agent migration facade owns source parsing and import state, so #428 accepts deletion of the superseded legacy records module.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/models-manager/Cargo.toml", "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/models-manager/models.json", "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/models-manager/prompt.md", "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/models-manager/src/cache.rs", "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/models-manager/src/config.rs", "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/models-manager/src/lib.rs", "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/models-manager/src/model_info.rs", "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/models-manager/src/model_info_tests.rs", "reason": "MODEL-1 catalog and default-model comparison is still open; the candidate runs the upstream models-manager until that comparison lands.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/tui/src/status/card.rs", "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/tui/src/status/helpers.rs", "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/tui/src/status/rate_limits.rs", "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap", "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "codex-rs/tui/src/status/tests.rs", "reason": "IDENTITY-1 status-card copy and rate-limit presentation follow the identity decision; restoring them early would re-fork the surface twice.", "violation": "reverted_to_upstream"},
+    {"disposition": "pending_restore", "issue": 428, "path": "scripts/local/test_install_codex_lab_dev.py", "reason": "Local developer tooling lost at anchor 9d2eea2238; restore alongside the cleanup and install helpers it drives.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/agent-capability-self-report.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/auto-validation-cargo-provider.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/auto-validation-no-applicable-provider.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/gpt-5-6-luna-low-request-shape.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/jetbrains-inspection-false-green-proof.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/local-provider-config.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/multi-turn-resume.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/project-doc-skill-dedup.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/provider-preflight-diagnostics.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/provider-routing-live-claude-antigravity.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/skills-cache-continuity.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/skills-guidance-binding-triggers.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/third-party-agent-live-copilot.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/scenarios/token-usage-report.json", "reason": "Outside the minimal proof set restored for #428; each scenario returns with the runtime contract it proves.", "violation": "absent"},
+    {"disposition": "pending_restore", "issue": 428, "path": "tools/codex-exec-harness/test_local_cleanup.py", "reason": "AGENT-1 and INTEGRATION-1 behavior lost at anchor 9d2eea2238; restoration is tracked #428 work, not an accepted upstream deletion.", "violation": "absent"}
   ]
 }
