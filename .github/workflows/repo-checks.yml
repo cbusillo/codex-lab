@@ -14,7 +14,16 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Configure canonical upstream provenance
+        run: |
+          set -euo pipefail
+          git remote remove openai 2>/dev/null || true
+          git remote add openai https://github.com/openai/codex.git
+          git fetch --no-tags openai \
+            +refs/heads/main:refs/remotes/openai/main
 
       - uses: ./.github/actions/setup-ci
 
@@ -42,6 +51,9 @@ jobs:
       - name: Test Codex Lab release symbol and strip ordering
         run: python3 -m unittest discover -s .github/scripts -p 'test_codex_lab_release_symbols.py'
 
+      - name: Verify upstream convergence governance
+        run: python3 .github/scripts/verify_upstream_convergence_governance.py
+
       - name: Verify owned convergence paths survived the refresh
         run: python3 .github/scripts/upstream_convergence_guard.py
 
@@ -49,6 +61,19 @@ jobs:
         run: |
           python3 -m unittest discover -s .github/scripts \
             -p 'test_upstream_convergence_*.py'
+
+      - name: Validate upstream convergence evidence
+        env:
+          CONVERGENCE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CONVERGENCE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::A full review-base SHA is required for convergence validation."
+            exit 1
+          fi
+          git cat-file -e "$CONVERGENCE_BASE_SHA^{commit}"
+          python3 .github/scripts/upstream_convergence.py validate \
+            --against "$CONVERGENCE_BASE_SHA"
 
       - name: Install actionlint
         run: |

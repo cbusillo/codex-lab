@@ -69,6 +69,24 @@ class RepoCheckWiringTest(unittest.TestCase):
             "python3 .github/scripts/upstream_convergence_guard.py", contents
         )
 
+    def test_repo_checks_runs_the_governance_bootstrap(self) -> None:
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 .github/scripts/verify_upstream_convergence_governance.py",
+            contents,
+        )
+
+    def test_repo_checks_runs_the_convergence_validator(self) -> None:
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 .github/scripts/upstream_convergence.py validate", contents
+        )
+        self.assertIn("fetch-depth: 0", contents)
+        self.assertIn("git remote add openai https://github.com/openai/codex.git", contents)
+        self.assertIn('--against "$CONVERGENCE_BASE_SHA"', contents)
+
     def test_repo_checks_runs_the_guard_and_inventory_tests(self) -> None:
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
 
