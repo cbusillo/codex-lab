@@ -41,11 +41,27 @@ tree. Every Every Code-owned file that upstream did not carry vanished without
 one conflict marker, and no later merge can resurrect it because the anchor is
 already the merge base. Nothing in CI noticed.
 
-`upstream/convergence-guard.json` is the durable answer. It pins an ownership
-baseline and, for every `intentionally_owned` or `red_manual_review` path whose
-local blob differed from upstream at that baseline, records the baseline blob
-and the upstream blob. `upstream_convergence_guard.py` then fails a candidate
-when such a path is:
+`upstream/convergence-guard.json` is the durable answer. For every
+`intentionally_owned` or `red_manual_review` path it records the baseline blob
+and the upstream blob, drawn from two sources:
+
+- `ownership_baseline`: the path already differed from upstream at the pinned
+  pre-anchor local baseline.
+- `current_tree`: the path is owned in the candidate itself. Owned work created
+  or restored *after* the baseline is invisible to the baseline source, so
+  without this the manifest had to be hand-edited to protect new proofs, and a
+  hand-edited generated artifact drifts silently. Adding a path can only
+  increase protection, so this source cannot launder an anchor loss.
+
+Ownership itself comes from path patterns in
+`upstream_convergence_inventory.py`, not an enumerated list. Owned features are
+declared by filename stem and expanded across the conventional implementation
+and integration-proof roots, so an implementation and the proof that pins it are
+guarded together. Suite registry modules (`tests/suite/mod.rs`) are guarded as
+well: reverting one unregisters every owned proof in that crate while leaving
+each proof file in place.
+
+`upstream_convergence_guard.py` then fails a candidate when a guarded path is:
 
 - **absent** from the tree, or
 - **byte-identical** to the recorded upstream blob.
@@ -67,18 +83,23 @@ should follow upstream, record the decision in
 A waiver that no longer matches a violation fails the guard too, so a restored
 path cannot leave a dead entry behind.
 
-Regenerate the manifest only when the ownership baseline advances:
+Regenerate the manifest when the ownership baseline advances, when the
+classification rules change, or when owned work lands that should be guarded:
 
 ```sh
 python3 .github/scripts/upstream_convergence_inventory.py guard \
   b89ce9a2bcedcfddf3a48f387b7912d602d6d87c \
   4462b9deef211723b781b426f5e5d36a5777115f \
-  8add494682f7c0674672e8dc5b38a4565cd7629b > upstream/convergence-guard.json
+  8add494682f7c0674672e8dc5b38a4565cd7629b \
+  . --current HEAD > upstream/convergence-guard.json
 ```
 
-The baseline stays at pre-anchor local `8add4946` on purpose: regenerating it
-from the current candidate would bake the anchor's losses into the contract and
-make the guard agree with the failure it exists to catch.
+The three positional refs stay at pre-anchor local `8add4946` and its snapshot
+pair on purpose: recomputing that source from the current candidate would bake
+the anchor's losses into the contract and make the guard agree with the failure
+it exists to catch. `--current` only adds candidate-side owned paths, so it
+cannot remove protection. Never hand-edit the manifest; add a pattern rule
+instead.
 
 Issue #428 is the durable integration plan. `docs/convergence-contracts.md`
 defines which Every Code differences may survive the upstream-first default.

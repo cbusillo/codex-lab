@@ -33,6 +33,59 @@ class Rule:
     reason: str
 
 
+# Owned features follow a repo-wide naming convention: the implementation modules,
+# their `*_tests.rs` siblings, and the integration proofs that pin them all share a
+# filename stem. Deriving patterns from that stem keeps implementation and proof
+# coverage in lockstep, so a refresh cannot drop the proof while keeping the code
+# (or keep the code while quietly unregistering the proof).
+IMPLEMENTATION_ROOTS = (
+    "codex-rs/core/src/agent",
+    "codex-rs/core/src/context",
+    "codex-rs/core/src/session",
+    "codex-rs/core/src/tools/handlers",
+    "codex-rs/app-server/src/request_processors",
+    "codex-rs/app-server-protocol/src/protocol/v2",
+    "codex-rs/tui/src/history_cell",
+)
+
+# Integration-proof roots. These carry the executable evidence for owned behavior,
+# which is exactly what an upstream-first merge deletes without a conflict marker.
+PROOF_ROOTS = (
+    "codex-rs/core/tests/suite",
+    "codex-rs/exec/tests/suite",
+    "codex-rs/app-server/tests/suite",
+    "codex-rs/app-server/tests/suite/v2",
+)
+
+
+def feature_paths(*stems: str) -> tuple[str, ...]:
+    """Conventional implementation and proof patterns for owned feature stems.
+
+    A stem must be specific enough that no upstream-owned module shares the
+    prefix; `project_validation` is a feature, `validation` is not.
+    """
+
+    return tuple(
+        f"{root}/{stem}*"
+        for stem in stems
+        for root in (*IMPLEMENTATION_ROOTS, *PROOF_ROOTS)
+    )
+
+
+# Shared upstream files that carry owned deltas. They exist upstream too, so the
+# stem convention cannot reach them, and a wholesale revert to the upstream blob
+# would silently drop owned coverage. Guarding them still only forbids deletion
+# and byte-identical reversion, never ordinary upstream edits.
+SHARED_PROOF_REGISTRIES = (
+    # Registers every owned `core` suite module. Reverting this file unregisters
+    # the owned proofs while leaving their files in the tree, so the suites stop
+    # running without any path going missing.
+    "codex-rs/core/tests/suite/mod.rs",
+    "codex-rs/exec/tests/suite/mod.rs",
+    "codex-rs/app-server/tests/suite/mod.rs",
+)
+
+
 RULES = (
     Rule(
         patterns=("AGENTS.md",),
@@ -133,15 +186,23 @@ RULES = (
             "codex-rs/external-agent-migration/**",
             "codex-rs/external-agent-sessions/**",
             "codex-rs/core/src/agent/**",
-            # The explicit external-agent preflight proof is owned coverage: an
-            # upstream-first refresh that drops it removes the AGENT-1 evidence.
-            "codex-rs/core/tests/suite/external_agent_preflight.rs",
             "codex-rs/core/src/review_persistence.rs",
-            "codex-rs/core/src/session/background_auto_review*",
-            "codex-rs/core/src/tools/handlers/agent_jobs*",
-            "codex-rs/core/src/tools/handlers/auto_review*",
-            "codex-rs/core/src/tools/handlers/multi_agents*",
-            "codex-rs/tui/src/history_cell/auto_review_status.rs",
+            # Implementation and integration proofs for owned orchestration and
+            # review behavior, including the explicit external-agent preflight and
+            # provider-routing evidence and the Background Review suites.
+            *feature_paths(
+                "agent_jobs",
+                "auto_review",
+                "background_auto_review",
+                "background_review",
+                "external_agent",
+                "external_preflight",
+                "guardian_review",
+                "multi_agent",
+                "provider_routing",
+                "spawn_agent",
+                "subagent",
+            ),
         ),
         lane="intentionally_owned",
         contracts=("AGENT-1",),
@@ -151,14 +212,40 @@ RULES = (
         patterns=(
             "codex-rs/browser/**",
             "codex-rs/code-bridge-*/**",
-            "codex-rs/core/src/tools/handlers/code_bridge*",
-            "codex-rs/app-server/src/request_processors/code_bridge*",
-            "codex-rs/app-server-protocol/src/protocol/v2/code_bridge.rs",
-            "codex-rs/app-server/tests/suite/v2/code_bridge.rs",
+            # Model-facing bridge and browser handlers plus their integration
+            # proofs, including the app-server Code Bridge and remote-control
+            # suites.
+            *feature_paths("browser", "code_bridge", "remote_control"),
+            # The three named model-facing Code Bridge proofs live in the shared
+            # upstream tool suite, so the stem convention cannot reach them.
+            "codex-rs/core/tests/suite/tools.rs",
         ),
         lane="intentionally_owned",
         contracts=("INTEGRATION-1",),
         reason="Code Bridge, browser, and remote control",
+    ),
+    Rule(
+        patterns=(
+            # Project Validation is Every Code-owned: no upstream module carries
+            # any of these stems.
+            *feature_paths(
+                "cargo_validation_provider",
+                "project_validation",
+                "validation_provider",
+            ),
+            "codex-rs/app-server-protocol/src/protocol/v2/validation*",
+            "codex-rs/app-server-protocol/schema/json/v2/ProjectValidation*",
+            "codex-rs/app-server-protocol/schema/typescript/v2/ProjectValidation*",
+        ),
+        lane="intentionally_owned",
+        contracts=("VALIDATION-1",),
+        reason="Project Validation providers, status, and failure feedback",
+    ),
+    Rule(
+        patterns=SHARED_PROOF_REGISTRIES,
+        lane="intentionally_owned",
+        contracts=("AGENT-1", "INTEGRATION-1", "VALIDATION-1"),
+        reason="registration point for owned integration proofs",
     ),
     Rule(
         patterns=(
@@ -175,7 +262,7 @@ RULES = (
     Rule(
         patterns=("tools/codex-exec-harness/**",),
         lane="intentionally_owned",
-        contracts=("AGENT-1", "INTEGRATION-1"),
+        contracts=("AGENT-1", "INTEGRATION-1", "VALIDATION-1"),
         reason="executable proof harness for owned product contracts",
     ),
 )
@@ -455,39 +542,57 @@ def render_markdown(inventory: dict[str, object]) -> str:
 
 
 def build_guard_manifest(
-    repo: Path, base_ref: str, upstream_ref: str, local_ref: str
+    repo: Path,
+    base_ref: str,
+    upstream_ref: str,
+    local_ref: str,
+    current_ref: str,
 ) -> dict[str, object]:
     """Record the owned paths a later refresh must not silently drop or revert.
 
-    Only paths whose local blob already differs from upstream are guarded: a path
-    that is byte-identical at the ownership baseline has no local delta to lose.
+    Two sources contribute, because either one alone leaves a hole:
+
+    `ownership_baseline` covers owned paths that already differed from upstream at
+    the pre-anchor local baseline. A path byte-identical to upstream there had no
+    local delta to lose. This source must stay pinned to the pre-anchor baseline;
+    recomputing it from the candidate would bake the anchor's losses into the
+    contract.
+
+    `current_tree` covers owned paths in the candidate itself. Owned work created
+    or restored *after* the baseline is invisible to the baseline source, so
+    without this the manifest had to be hand-edited to protect new proofs -- and a
+    hand-edited generated artifact drifts silently. Adding a path can only
+    increase protection, so this source cannot launder an anchor loss.
     """
 
     base = resolve_commit(repo, base_ref)
     upstream = resolve_commit(repo, upstream_ref)
     local = resolve_commit(repo, local_ref)
+    current = resolve_commit(repo, current_ref)
     upstream_objects = tree_objects(repo, upstream)
-    local_objects = tree_objects(repo, local)
 
-    guarded: list[dict[str, object]] = []
-    for path, baseline_blob in sorted(local_objects.items()):
-        classified = classify_path(path)
-        if classified["lane"] not in GUARDED_LANES:
-            continue
-        upstream_blob = upstream_objects.get(path)
-        if upstream_blob == baseline_blob:
-            continue
-        guarded.append(
-            {
+    guarded: dict[str, dict[str, object]] = {}
+    for source, ref in (("ownership_baseline", local), ("current_tree", current)):
+        for path, baseline_blob in sorted(tree_objects(repo, ref).items()):
+            if path in guarded:
+                continue
+            classified = classify_path(path)
+            if classified["lane"] not in GUARDED_LANES:
+                continue
+            upstream_blob = upstream_objects.get(path)
+            if upstream_blob == baseline_blob:
+                continue
+            guarded[path] = {
                 "path": path,
                 "lane": classified["lane"],
                 "contracts": classified["contracts"],
                 "reason": classified["reason"],
+                "source": source,
                 "baselineBlob": baseline_blob,
                 "upstreamBlob": upstream_blob,
             }
-        )
 
+    entries = [guarded[path] for path in sorted(guarded)]
     header = {
         "schemaVersion": GUARD_SCHEMA_VERSION,
         "repository": "openai/codex",
@@ -495,6 +600,7 @@ def build_guard_manifest(
             "base": base,
             "upstream": upstream,
             "local": local,
+            "current": current,
         },
         "policy": {
             "guardedLanes": list(GUARDED_LANES),
@@ -502,15 +608,28 @@ def build_guard_manifest(
                 "An owned path may not be absent from the candidate, and may not "
                 "match the recorded upstream blob, without an explicit waiver."
             ),
+            "sources": {
+                "ownership_baseline": (
+                    "Owned path that already differed from upstream at the "
+                    "pre-anchor local baseline."
+                ),
+                "current_tree": (
+                    "Owned path in the candidate tree, so owned work created or "
+                    "restored after the baseline is guarded without hand-editing."
+                ),
+            },
         },
         "summary": {
-            "guardedPaths": len(guarded),
+            "guardedPaths": len(entries),
             "guardedLaneCounts": dict(
-                sorted(Counter(entry["lane"] for entry in guarded).items())
+                sorted(Counter(entry["lane"] for entry in entries).items())
+            ),
+            "guardedSourceCounts": dict(
+                sorted(Counter(entry["source"] for entry in entries).items())
             ),
         },
     }
-    return {**header, "guardedPaths": guarded}
+    return {**header, "guardedPaths": entries}
 
 
 def render_guard(manifest: dict[str, object]) -> str:
@@ -525,6 +644,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("upstream")
     parser.add_argument("local")
     parser.add_argument("repo", nargs="?", default=".")
+    parser.add_argument(
+        "--current",
+        default="HEAD",
+        help="Candidate ref whose owned paths are guarded alongside the baseline",
+    )
     return parser.parse_args()
 
 
@@ -539,7 +663,9 @@ def main() -> None:
     args = parse_args()
     repo = Path(args.repo).resolve()
     if args.format == "guard":
-        manifest = build_guard_manifest(repo, args.base, args.upstream, args.local)
+        manifest = build_guard_manifest(
+            repo, args.base, args.upstream, args.local, args.current
+        )
         print(render_guard(manifest), end="")
         return
     inventory = build_inventory(repo, args.base, args.upstream, args.local)

@@ -2831,6 +2831,7 @@ dependencies = [
  "codex-browser",
  "codex-code-bridge-client",
  "codex-code-bridge-protocol",
+ "codex-code-bridge-service",
  "codex-code-mode",
  "codex-config",
  "codex-connectors",
