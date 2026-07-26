@@ -198,6 +198,7 @@ use crate::config::ConstraintResult;
 use crate::config::PermissionProfileSnapshot;
 use crate::config::PermissionProfileState;
 use crate::config::StartedNetworkProxy;
+use crate::config::ThreadStoreConfig;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
@@ -540,8 +541,13 @@ async fn resolve_execution_account_for_session(
         ExecutionAccountPooling::Disabled
     };
     // Ephemeral threads (sub-agents and forks of them) may reuse a durable
-    // source lease but must never write a destination lease of their own.
-    let persistence = if config.ephemeral {
+    // source lease but must never write a destination lease of their own. A
+    // non-local thread store keeps thread state off this machine entirely, so a
+    // lease record under `codex_home` would be local state the thread does not
+    // own; treat those threads as ephemeral for lease writes too.
+    let persistence = if config.ephemeral
+        || !matches!(config.experimental_thread_store, ThreadStoreConfig::Local)
+    {
         ExecutionAccountLeasePersistence::Ephemeral
     } else {
         ExecutionAccountLeasePersistence::Durable

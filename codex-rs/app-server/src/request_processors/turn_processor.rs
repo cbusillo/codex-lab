@@ -504,7 +504,12 @@ impl TurnRequestProcessor {
         };
         let git_info = collect_git_info(cwd.as_path()).await;
         let repo_root = get_git_repo_root(cwd.as_path());
-        let worktree_path = repo_root.or_else(|| Some(cwd.as_path().to_path_buf()));
+        // Background Review matches its stored target by path equality. A canonicalized cwd is a
+        // Windows verbatim path (`\\?\C:\...`) while the recorded target is not, so normalize here
+        // to keep both spellings of the same directory comparable.
+        let worktree_path = repo_root
+            .or_else(|| Some(cwd.as_path().to_path_buf()))
+            .map(path_utils::normalize_for_native_workdir);
         let snapshot_epoch = worktree_path.as_ref().and_then(|scope| {
             match ReviewCoordination::for_scope(self.config.codex_home.as_ref(), scope)
                 .current_snapshot_epoch()

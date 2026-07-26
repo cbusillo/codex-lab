@@ -109,6 +109,11 @@ pub(crate) fn validate_encrypted_aggregate_for_read(
 /// Activation and trusted legacy mutations share the aggregate secrets lock. A
 /// pre-existing aggregate remains strict, while a first activation is deferred
 /// when the legacy sources cannot yet form a consistent snapshot.
+///
+/// Tests pin the Direct keyring backend so activation reads back the same
+/// records the `*_with_keyring_store` seeding helpers write. The platform
+/// default is Secrets on Windows, which would look at a different backend than
+/// the fixtures populated.
 #[cfg(test)]
 pub(crate) fn activate_encrypted_aggregate(
     codex_home: &Path,
@@ -119,7 +124,7 @@ pub(crate) fn activate_encrypted_aggregate(
         codex_home,
         mode,
         keyring_store,
-        AuthKeyringBackendKind::default(),
+        AuthKeyringBackendKind::Direct,
     )
 }
 
