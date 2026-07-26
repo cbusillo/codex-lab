@@ -142,6 +142,14 @@ python3 .github/scripts/upstream_convergence.py validate \
 reproducibility, plus any requested review-base comparison. The command never
 fetches, merges, builds, commits, pushes, or manages worktrees.
 
+When the exact review base predates `upstream/convergence-policy.json`,
+`validate --against` reports `comparisonMode: bootstrap`. Governance, guard,
+canonical-remote, complete-history, clean-worktree, and full snapshot
+reproducibility checks still run, but append-only and new-snapshot provenance
+comparison are not applied retroactively to pre-adoption evidence. A regular
+policy file at the review base permanently selects `comparisonMode: strict`;
+symlinked or non-file policy entries fail closed.
+
 ## Skill coordination
 
 When the routing instruction and shared skill change together, merge and

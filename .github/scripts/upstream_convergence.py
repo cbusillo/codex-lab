@@ -21,7 +21,8 @@ import verify_upstream_convergence_governance as governance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-POLICY_PATH = REPO_ROOT / "upstream" / "convergence-policy.json"
+CANONICAL_POLICY_PATH = Path("upstream/convergence-policy.json")
+POLICY_PATH = REPO_ROOT / CANONICAL_POLICY_PATH
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SNAPSHOT_FILES = ("inventory.json", "inventory.md", "residuals.json")
 REPORT_RECORD_LIMIT = 50
@@ -779,6 +780,85 @@ def snapshot_change_errors(
     return errors
 
 
+def canonical_policy_state_at(repo: Path, commit: str) -> str:
+    result = run_git(
+        repo,
+        "ls-tree",
+        commit,
+        "--",
+        CANONICAL_POLICY_PATH.as_posix(),
+    )
+    lines = result.stdout.splitlines()
+    if not lines:
+        return "absent"
+    if len(lines) != 1:
+        raise ConvergenceError(
+            f"comparison base has ambiguous {CANONICAL_POLICY_PATH} entries"
+        )
+    try:
+        metadata, path = lines[0].split("\t", 1)
+        mode, object_type, _object_id = metadata.split()
+    except ValueError as error:
+        raise ConvergenceError(
+            f"cannot parse comparison-base policy entry: {lines[0]!r}"
+        ) from error
+    if path != CANONICAL_POLICY_PATH.as_posix():
+        raise ConvergenceError(f"comparison-base policy resolved to unexpected path {path}")
+    if object_type != "blob" or mode not in {"100644", "100755"}:
+        raise ConvergenceError(
+            f"comparison-base policy must be a regular file: mode={mode} type={object_type}"
+        )
+    return "regular"
+
+
+def snapshot_review_analysis(
+    repo: Path,
+    policy: governance.ConvergencePolicy,
+    against: str,
+    remote_tip: str,
+) -> dict[str, object]:
+    base = resolve_exact_commit(repo, against, "against")
+    policy_state = canonical_policy_state_at(repo, base)
+    if policy_state == "absent":
+        return {
+            "comparisonBase": base,
+            "comparisonMode": "bootstrap",
+            "policyPath": CANONICAL_POLICY_PATH.as_posix(),
+            "policyStateAtBase": policy_state,
+            "appendOnlyChecked": False,
+            "provenanceChecked": False,
+            "bootstrapReason": "comparison base predates convergence policy",
+            "newSnapshots": None,
+            "errors": [],
+        }
+
+    change_errors, new_snapshots, existing_snapshots = snapshot_change_analysis(
+        repo, policy, base
+    )
+    errors = [
+        *change_errors,
+        *validate_new_snapshot_provenance(
+            repo,
+            policy,
+            base,
+            remote_tip,
+            new_snapshots,
+            existing_snapshots,
+        ),
+    ]
+    return {
+        "comparisonBase": base,
+        "comparisonMode": "strict",
+        "policyPath": CANONICAL_POLICY_PATH.as_posix(),
+        "policyStateAtBase": policy_state,
+        "appendOnlyChecked": True,
+        "provenanceChecked": True,
+        "bootstrapReason": None,
+        "newSnapshots": sorted(new_snapshots),
+        "errors": errors,
+    }
+
+
 def snapshot_document_at(
     repo: Path,
     policy: governance.ConvergencePolicy,
@@ -913,27 +993,30 @@ def validate(
     guard_report = guard.check(manifest, waivers, repo)
     snapshots = validate_snapshots(repo, policy)
     errors = []
-    new_snapshots: set[str] = set()
+    comparison: dict[str, object] = {
+        "comparisonBase": None,
+        "comparisonMode": "not_requested",
+        "policyPath": CANONICAL_POLICY_PATH.as_posix(),
+        "policyStateAtBase": None,
+        "appendOnlyChecked": False,
+        "provenanceChecked": False,
+        "bootstrapReason": None,
+        "newSnapshots": None,
+        "errors": [],
+    }
     if against is not None:
         remote = remote_identity(repo, policy)
-        change_errors, new_snapshots, existing_snapshots = snapshot_change_analysis(
-            repo, policy, against
+        comparison = snapshot_review_analysis(
+            repo,
+            policy,
+            against,
+            str(remote["remoteTip"]),
         )
-        errors.extend(change_errors)
+        errors.extend(comparison["errors"])
         if snapshots["historyUnavailable"]:
             errors.append(
                 "snapshot history is unavailable during review-base validation"
             )
-        errors.extend(
-            validate_new_snapshot_provenance(
-                repo,
-                policy,
-                against,
-                str(remote["remoteTip"]),
-                new_snapshots,
-                existing_snapshots,
-            )
-        )
     else:
         remote = optional_remote_identity(repo, policy)
     if state["operationMarkers"]:
@@ -981,8 +1064,14 @@ def validate(
         "governance": governance_report,
         "guard": guard_summary,
         "snapshots": snapshots,
-        "comparisonBase": against,
-        "newSnapshots": sorted(new_snapshots),
+        "comparisonBase": comparison["comparisonBase"],
+        "comparisonMode": comparison["comparisonMode"],
+        "policyPath": comparison["policyPath"],
+        "policyStateAtBase": comparison["policyStateAtBase"],
+        "appendOnlyChecked": comparison["appendOnlyChecked"],
+        "provenanceChecked": comparison["provenanceChecked"],
+        "bootstrapReason": comparison["bootstrapReason"],
+        "newSnapshots": comparison["newSnapshots"],
         "errors": errors,
         "nextAction": (
             "Convergence controls are valid."

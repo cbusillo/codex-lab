@@ -144,6 +144,80 @@ class SnapshotMutationTest(GitFixture):
         self.assertTrue(any("symlink" in error for error in errors), errors)
 
 
+class SnapshotReviewAnalysisTest(GitFixture):
+    def test_bootstrap_skips_retroactive_snapshot_comparison(self) -> None:
+        snapshot = "upstream/openai-codex/aaaaaaaa-bbbbbbbb/inventory.json"
+        base = self.commit_file(snapshot, "{}\n", "pre-policy snapshot")
+        run(self.root, "switch", "-c", "task")
+        self.commit_file(snapshot, '{"updated": true}\n', "update before adoption")
+        self.commit_file(
+            convergence.CANONICAL_POLICY_PATH.as_posix(),
+            "{}\n",
+            "adopt convergence policy",
+        )
+        head = run(self.root, "rev-parse", "HEAD")
+
+        report = convergence.snapshot_review_analysis(
+            self.root,
+            self.policy,
+            base,
+            head,
+        )
+
+        self.assertEqual("bootstrap", report["comparisonMode"])
+        self.assertEqual("absent", report["policyStateAtBase"])
+        self.assertFalse(report["appendOnlyChecked"])
+        self.assertFalse(report["provenanceChecked"])
+        self.assertIsNone(report["newSnapshots"])
+        self.assertEqual([], report["errors"])
+
+    def test_policy_bearing_base_enables_strict_comparison(self) -> None:
+        base = self.commit_file(
+            convergence.CANONICAL_POLICY_PATH.as_posix(),
+            "{}\n",
+            "adopt convergence policy",
+        )
+        run(self.root, "switch", "-c", "task")
+        head = self.commit_file("README.md", "next\n", "next")
+
+        report = convergence.snapshot_review_analysis(
+            self.root,
+            self.policy,
+            base,
+            head,
+        )
+
+        self.assertEqual("strict", report["comparisonMode"])
+        self.assertEqual("regular", report["policyStateAtBase"])
+        self.assertTrue(report["appendOnlyChecked"])
+        self.assertTrue(report["provenanceChecked"])
+        self.assertEqual([], report["newSnapshots"])
+        self.assertEqual([], report["errors"])
+
+    def test_rejects_symlinked_policy_at_comparison_base(self) -> None:
+        target = self.root / "policy-target.json"
+        target.write_text("{}\n", encoding="utf-8")
+        policy_path = self.root / convergence.CANONICAL_POLICY_PATH
+        policy_path.parent.mkdir(parents=True)
+        policy_path.symlink_to(target)
+        run(self.root, "add", "--all")
+        run(self.root, "commit", "-m", "symlink policy")
+        base = run(self.root, "rev-parse", "HEAD")
+
+        with self.assertRaisesRegex(convergence.ConvergenceError, "regular file"):
+            convergence.canonical_policy_state_at(self.root, base)
+
+    def test_rejects_tree_at_comparison_policy_path(self) -> None:
+        base = self.commit_file(
+            f"{convergence.CANONICAL_POLICY_PATH.as_posix()}/child",
+            "not a policy\n",
+            "policy path tree",
+        )
+
+        with self.assertRaisesRegex(convergence.ConvergenceError, "regular file"):
+            convergence.canonical_policy_state_at(self.root, base)
+
+
 class RecordedUpstreamTest(GitFixture):
     def write_snapshot(self, name: str, upstream: str) -> Path:
         directory = self.root / self.policy.evidence_root / name
