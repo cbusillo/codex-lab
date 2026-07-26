@@ -1,59 +1,7 @@
 use codex_protocol::protocol::SessionProvenance;
-use codex_protocol::protocol::SessionSource;
-
-pub(crate) fn session_source_from_agent_env() -> Option<SessionSource> {
-    session_source_from_agent_env_vars(std::env::vars())
-}
-
-pub(crate) fn startup_session_source() -> SessionSource {
-    session_source_from_agent_env().unwrap_or(SessionSource::Cli)
-}
 
 pub(crate) fn session_provenance_from_agent_env() -> Option<SessionProvenance> {
     session_provenance_from_agent_env_vars(std::env::vars())
-}
-
-fn session_source_from_agent_env_vars<I, K, V>(vars: I) -> Option<SessionSource>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: AsRef<str>,
-    V: AsRef<str>,
-{
-    let vars: Vec<(String, String)> = vars
-        .into_iter()
-        .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
-        .collect();
-
-    let source = if has_any_env_value(
-        &vars,
-        &[
-            "AGENT_SESSION_ORIGIN",
-            "AGENT_SESSION_SOURCE",
-            "AGENT_SESSION_REQUEST_ID",
-        ],
-    ) {
-        "agent_session"
-    } else if has_any_env_value(
-        &vars,
-        &[
-            "EVERY_CODE_SESSION_ORIGIN",
-            "EVERY_CODE_ORIGIN",
-            "LAUNCHPLANE_EVERY_CODE_ORIGIN",
-            "EVERY_CODE_REQUEST_ID",
-        ],
-    ) {
-        "every_code"
-    } else {
-        return None;
-    };
-
-    match SessionSource::from_startup_arg(source) {
-        Ok(source) => Some(source),
-        Err(err) => {
-            tracing::warn!(%source, %err, "Ignoring invalid agent session source from environment");
-            None
-        }
-    }
 }
 
 fn session_provenance_from_agent_env_vars<I, K, V>(vars: I) -> Option<SessionProvenance>
