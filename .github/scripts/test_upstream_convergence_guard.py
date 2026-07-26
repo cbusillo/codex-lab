@@ -21,6 +21,35 @@ def manifest_entry(path: str, upstream_blob: str | None) -> dict[str, object]:
     }
 
 
+V2_REGISTRY = "codex-rs/app-server/tests/suite/v2/mod.rs"
+
+# Owned implementations and proofs that landed after the last guard regeneration.
+# Each pairs the path with the contract it is the executable evidence for.
+NEW_OWNED_PROOFS = (
+    ("codex-rs/app-server/tests/suite/v2/background_review_control.rs", "AGENT-1"),
+    ("codex-rs/app-server/tests/suite/v2/project_validation.rs", "VALIDATION-1"),
+    ("codex-rs/tui/src/app/thread_routing.rs", "AGENT-1"),
+    ("codex-rs/core/tests/suite/session_provenance.rs", "AGENT-1"),
+    ("codex-rs/core/src/session/rollout_reconstruction_tests.rs", "HISTORY-1"),
+    ("codex-rs/core/tests/suite/turn_context_environments.rs", "HISTORY-1"),
+    ("codex-rs/core/src/context/token_budget_context_tests.rs", "CONTEXT-1"),
+    ("codex-rs/core/src/context_manager/history_tests.rs", "CONTEXT-1"),
+    ("codex-rs/core/src/session_prefix_tests.rs", "CONTEXT-1"),
+    ("codex-rs/config/src/hooks_tests.rs", "HOOKS-1"),
+    ("codex-rs/hooks/src/engine/mod_tests.rs", "HOOKS-1"),
+    ("codex-rs/exec/tests/suite/shared_cli_options.rs", "AUTH-1"),
+)
+
+
+def guarded_entry(test: unittest.TestCase, path: str) -> dict[str, object]:
+    manifest = {
+        entry["path"]: entry for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)
+    }
+    entry = manifest.get(path)
+    test.assertIsNotNone(entry, f"{path} must be a guarded owned path")
+    return entry
+
+
 def waiver(path: str, violation: str, **overrides: object) -> dict[str, object]:
     entry = {
         "path": path,
@@ -296,6 +325,66 @@ class CheckedInLedgerTest(unittest.TestCase):
         sources = {entry.get("source") for entry in entries}
 
         self.assertEqual({"ownership_baseline", "current_tree"}, sources)
+
+    def test_owned_app_server_proofs_register_in_the_guarded_v2_registry(self) -> None:
+        """The crate-level app-server registry carries no owned entry.
+
+        Every Every Code-owned app-server proof is a v2 suite, so reverting
+        `suite/v2/mod.rs` unregisters all of them while every proof file stays in
+        the tree. That is exactly the failure the crate-level registry cannot
+        catch, which is why its own `reverted_to_upstream` waiver is
+        `converged_with_upstream` rather than pending work.
+        """
+
+        entry = guarded_entry(self, V2_REGISTRY)
+        waivers = guard.load_waivers(guard.DEFAULT_WAIVERS)
+
+        self.assertEqual("intentionally_owned", entry["lane"])
+        self.assertNotIn(guard.waiver_key(V2_REGISTRY, guard.REVERTED), waivers)
+        crate_registry = waivers[
+            guard.waiver_key("codex-rs/app-server/tests/suite/mod.rs", guard.REVERTED)
+        ]
+        self.assertEqual("converged_with_upstream", crate_registry["disposition"])
+        self.assertIn(V2_REGISTRY, crate_registry["reason"])
+
+    def test_reverting_the_v2_registry_to_upstream_is_detected(self) -> None:
+        entry = guarded_entry(self, V2_REGISTRY)
+        contents = (guard.REPO_ROOT / V2_REGISTRY).read_bytes()
+
+        # A recorded upstream blob is what makes reversion detectable at all: a
+        # path upstream never had can only be caught by deletion.
+        self.assertIsNotNone(entry["upstreamBlob"])
+        # The tree is not currently reverted, so the guard reports nothing today.
+        self.assertIsNone(guard.evaluate(entry, guard.REPO_ROOT))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / V2_REGISTRY
+            target.parent.mkdir(parents=True)
+            target.write_bytes(contents)
+            reverted = {**entry, "upstreamBlob": guard.blob_id(contents)}
+
+            self.assertEqual(guard.REVERTED, guard.evaluate(reverted, root)[0])
+
+    def test_deleting_any_new_owned_proof_is_detected(self) -> None:
+        """Each proof below is the only executable evidence for its contract."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            empty_root = Path(temp_dir)
+            for path, contract in NEW_OWNED_PROOFS:
+                with self.subTest(path=path):
+                    entry = guarded_entry(self, path)
+                    self.assertEqual("intentionally_owned", entry["lane"])
+                    self.assertIn(contract, entry["contracts"])
+                    self.assertTrue((guard.REPO_ROOT / path).is_file())
+                    self.assertEqual(guard.ABSENT, guard.evaluate(entry, empty_root)[0])
+
+    def test_new_owned_proofs_are_not_waived(self) -> None:
+        waived = {path for path, _ in guard.load_waivers(guard.DEFAULT_WAIVERS)}
+
+        for path, _ in NEW_OWNED_PROOFS:
+            with self.subTest(path=path):
+                self.assertNotIn(path, waived)
 
     def test_every_waiver_names_a_guarded_path(self) -> None:
         guarded = {entry["path"] for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)}

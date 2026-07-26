@@ -11,6 +11,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from verify_repo_checks_test_registration import is_registered
+
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -70,9 +72,18 @@ class RepoCheckWiringTest(unittest.TestCase):
         )
 
     def test_repo_checks_runs_the_guard_and_inventory_tests(self) -> None:
+        # Asserted through the registration verifier rather than a literal
+        # pattern string: `repo-checks.yml` discovers the whole directory, so
+        # pinning one spelling of the pattern would break on every valid change
+        # to how discovery is expressed.
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
 
-        self.assertIn("test_upstream_convergence_*.py", contents)
+        for name in (
+            "test_upstream_convergence_guard.py",
+            "test_upstream_convergence_inventory.py",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(is_registered(name, ".github/scripts", contents))
 
     def test_repo_checks_is_reachable_from_blocking_ci(self) -> None:
         contents = (WORKFLOWS / "blocking-ci.yml").read_text(encoding="utf-8")
