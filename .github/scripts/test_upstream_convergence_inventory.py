@@ -66,6 +66,27 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
         self.assertEqual(classified["lane"], "intentionally_owned")
         self.assertEqual(classified["contracts"], ["AGENT-1", "INTEGRATION-1"])
 
+    def test_governance_files_are_intentionally_owned(self) -> None:
+        for path in (
+            "upstream/convergence-policy.json",
+            ".github/scripts/upstream_convergence.py",
+            ".github/scripts/verify_upstream_convergence_governance.py",
+            ".github/workflows/repo-checks.yml",
+        ):
+            with self.subTest(path=path):
+                classified = inventory.classify_path(path)
+                self.assertEqual("intentionally_owned", classified["lane"])
+                self.assertIn("GOVERNANCE-1", classified["contracts"])
+
+    def test_legacy_policy_preserves_historical_governance_classification(self) -> None:
+        classified = inventory.classify_path(
+            "upstream/convergence-guard.json",
+            inventory.LEGACY_POLICY_VERSION,
+        )
+
+        self.assertEqual("green_bulk_adopt", classified["lane"])
+        self.assertEqual([], classified["contracts"])
+
     def test_classify_path_omits_conflict_type(self) -> None:
         self.assertNotIn(
             "conflictType", inventory.classify_path("codex-rs/core/src/lib.rs")
@@ -81,7 +102,11 @@ class ResidualSemanticsTest(unittest.TestCase):
             "schemaVersion": inventory.SCHEMA_VERSION,
             "repository": "openai/codex",
             "refs": {"base": "a" * 40, "upstream": "b" * 40, "local": "c" * 40},
-            "policy": {"defaultLane": "green_bulk_adopt", "rule": "Upstream wins."},
+            "policy": {
+                "version": inventory.POLICY_VERSION,
+                "defaultLane": "green_bulk_adopt",
+                "rule": "Upstream wins.",
+            },
             "summary": {
                 "conflicts": 0,
                 "localChangedOnly": 1,
@@ -132,6 +157,11 @@ class ResidualSemanticsTest(unittest.TestCase):
 
         self.assertNotIn("residuals", document)
         self.assertEqual(1, document["summary"]["residualLocalInfluence"])
+
+    def test_current_policy_version_is_recorded(self) -> None:
+        document = json.loads(inventory.render_json(self.sample_inventory()))
+
+        self.assertEqual(inventory.POLICY_VERSION, document["policy"]["version"])
 
 
 class CheckedInSnapshotTest(unittest.TestCase):

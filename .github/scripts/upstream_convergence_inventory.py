@@ -19,6 +19,9 @@ LANE_PRIORITY = {
 
 SCHEMA_VERSION = 2
 GUARD_SCHEMA_VERSION = 1
+POLICY_VERSION = 2
+LEGACY_POLICY_VERSION = 1
+SUPPORTED_POLICY_VERSIONS = (LEGACY_POLICY_VERSION, POLICY_VERSION)
 
 # Lanes whose local content may not silently disappear or silently revert to the
 # upstream blob during a refresh. `upstream_convergence_guard.py` enforces this.
@@ -33,7 +36,7 @@ class Rule:
     reason: str
 
 
-RULES = (
+BASE_RULES = (
     Rule(
         patterns=("AGENTS.md",),
         lane="intentionally_owned",
@@ -177,6 +180,34 @@ RULES = (
     ),
 )
 
+GOVERNANCE_RULES = (
+    Rule(
+        patterns=(
+            "upstream/**",
+            ".github/scripts/upstream_convergence*.py",
+            ".github/scripts/test_upstream_convergence*.py",
+            ".github/scripts/verify_upstream_convergence_governance.py",
+            ".github/scripts/test_convergence_guard_workflows.py",
+            ".github/workflows/blocking-ci.yml",
+            ".github/workflows/repo-checks.yml",
+        ),
+        lane="intentionally_owned",
+        contracts=("GOVERNANCE-1",),
+        reason="upstream convergence policy, evidence, and enforcement",
+    ),
+)
+
+
+def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
+    if policy_version == LEGACY_POLICY_VERSION:
+        return BASE_RULES
+    if policy_version == POLICY_VERSION:
+        return (*GOVERNANCE_RULES, *BASE_RULES)
+    raise ValueError(
+        f"unsupported policy version {policy_version}; "
+        f"expected one of {SUPPORTED_POLICY_VERSIONS}"
+    )
+
 
 def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -233,7 +264,7 @@ def parse_conflict_message(line: str) -> tuple[str, str]:
 
 
 def merge_conflicts(
-    repo: Path, upstream: str, local: str
+    repo: Path, upstream: str, local: str, policy_version: int = POLICY_VERSION
 ) -> tuple[str, list[dict[str, object]]]:
     result = run_git(
         repo,
@@ -260,15 +291,19 @@ def merge_conflicts(
                 f"duplicate conflict path {path}: {previous} and {conflict_type}"
             )
         conflicts[path] = conflict_type
-    classified = [classify(path, conflicts[path]) for path in sorted(conflicts)]
+    classified = [
+        classify(path, conflicts[path], policy_version) for path in sorted(conflicts)
+    ]
     return result_tree, classified
 
 
-def classify_path(path: str) -> dict[str, object]:
+def classify_path(
+    path: str, policy_version: int = POLICY_VERSION
+) -> dict[str, object]:
     lane = "green_bulk_adopt"
     contracts: set[str] = set()
     reasons: list[str] = []
-    for rule in RULES:
+    for rule in rules_for_policy(policy_version):
         if not any(fnmatch.fnmatchcase(path, pattern) for pattern in rule.patterns):
             continue
         contracts.update(rule.contracts)
@@ -286,8 +321,10 @@ def classify_path(path: str) -> dict[str, object]:
     }
 
 
-def classify(path: str, conflict_type: str) -> dict[str, object]:
-    classified = classify_path(path)
+def classify(
+    path: str, conflict_type: str, policy_version: int = POLICY_VERSION
+) -> dict[str, object]:
+    classified = classify_path(path, policy_version)
     return {
         "path": classified["path"],
         "conflictType": conflict_type,
@@ -297,7 +334,13 @@ def classify(path: str, conflict_type: str) -> dict[str, object]:
     }
 
 
-def build_inventory(repo: Path, base_ref: str, upstream_ref: str, local_ref: str) -> dict[str, object]:
+def build_inventory(
+    repo: Path,
+    base_ref: str,
+    upstream_ref: str,
+    local_ref: str,
+    policy_version: int = POLICY_VERSION,
+) -> dict[str, object]:
     base = resolve_commit(repo, base_ref)
     upstream = resolve_commit(repo, upstream_ref)
     local = resolve_commit(repo, local_ref)
@@ -305,7 +348,7 @@ def build_inventory(repo: Path, base_ref: str, upstream_ref: str, local_ref: str
     if actual_base != base:
         raise ValueError(f"expected merge base {base}, found {actual_base}")
 
-    result_tree, conflicts = merge_conflicts(repo, upstream, local)
+    result_tree, conflicts = merge_conflicts(repo, upstream, local, policy_version)
     conflict_paths = {entry["path"] for entry in conflicts}
     local_paths = changed_paths(repo, base, local)
     upstream_paths = changed_paths(repo, base, upstream)
@@ -327,7 +370,14 @@ def build_inventory(repo: Path, base_ref: str, upstream_ref: str, local_ref: str
         for path in local_paths - conflict_paths
         if result_objects.get(path) != upstream_objects.get(path)
     )
-    residuals = [classify_path(path) for path in residual_paths]
+    residuals = [classify_path(path, policy_version) for path in residual_paths]
+
+    policy = {
+        "defaultLane": "green_bulk_adopt",
+        "rule": "Upstream wins unless a named convergence contract applies.",
+    }
+    if policy_version != LEGACY_POLICY_VERSION:
+        policy["version"] = policy_version
 
     return {
         "schemaVersion": SCHEMA_VERSION,
@@ -337,10 +387,7 @@ def build_inventory(repo: Path, base_ref: str, upstream_ref: str, local_ref: str
             "upstream": upstream,
             "local": local,
         },
-        "policy": {
-            "defaultLane": "green_bulk_adopt",
-            "rule": "Upstream wins unless a named convergence contract applies.",
-        },
+        "policy": policy,
         "summary": {
             "conflicts": len(conflicts),
             "localChangedOnly": len(local_paths - upstream_paths),
@@ -522,6 +569,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("upstream")
     parser.add_argument("local")
     parser.add_argument("repo", nargs="?", default=".")
+    parser.add_argument(
+        "--policy-version",
+        type=int,
+        choices=SUPPORTED_POLICY_VERSIONS,
+        default=POLICY_VERSION,
+    )
     return parser.parse_args()
 
 
@@ -539,7 +592,13 @@ def main() -> None:
         manifest = build_guard_manifest(repo, args.base, args.upstream, args.local)
         print(render_guard(manifest), end="")
         return
-    inventory = build_inventory(repo, args.base, args.upstream, args.local)
+    inventory = build_inventory(
+        repo,
+        args.base,
+        args.upstream,
+        args.local,
+        args.policy_version,
+    )
     print(RENDERERS[args.format](inventory), end="")
 
 

@@ -42,6 +42,9 @@ jobs:
       - name: Test Codex Lab release symbol and strip ordering
         run: python3 -m unittest discover -s .github/scripts -p 'test_codex_lab_release_symbols.py'
 
+      - name: Verify upstream convergence governance
+        run: python3 .github/scripts/verify_upstream_convergence_governance.py
+
       - name: Verify owned convergence paths survived the refresh
         run: python3 .github/scripts/upstream_convergence_guard.py
 
@@ -49,6 +52,18 @@ jobs:
         run: |
           python3 -m unittest discover -s .github/scripts \
             -p 'test_upstream_convergence_*.py'
+
+      - name: Validate upstream convergence evidence
+        env:
+          CONVERGENCE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$CONVERGENCE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && \
+             git cat-file -e "$CONVERGENCE_BASE_SHA^{commit}" 2>/dev/null; then
+            args+=(--against "$CONVERGENCE_BASE_SHA")
+          fi
+          python3 .github/scripts/upstream_convergence.py validate "${args[@]}"
 
       - name: Install actionlint
         run: |
