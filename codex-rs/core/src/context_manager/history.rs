@@ -35,6 +35,15 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
+/// Where the images removed by [`ContextManager::replace_newest_images`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageSanitizationSource {
+    /// The user attached the image, so the turn cannot simply be retried without telling them.
+    User,
+    /// A tool produced the image, so the turn can be retried transparently.
+    Tool,
+}
+
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
@@ -204,6 +213,44 @@ impl ContextManager {
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
+    }
+
+    /// Replace every image in the newest image-bearing history item with `placeholder` and report
+    /// where those images came from. Returns `None` when history holds no images.
+    ///
+    /// This is a deliberate, narrow exception to the "no history rewrite" rule. The Responses API
+    /// rejects the *entire* request when any image in the transcript is unreadable, so an image
+    /// the API refuses poisons every subsequent turn of the thread: without removing it, the
+    /// thread is permanently unusable. The rewrite is bounded to the images of a single item, is
+    /// only reachable after the API has already rejected the request (so the poisoned prefix was
+    /// never cached), and replaces each image with a shorter text placeholder, so it can never
+    /// grow model-visible context.
+    pub(crate) fn replace_newest_images(
+        &mut self,
+        placeholder: &str,
+    ) -> Option<ImageSanitizationSource> {
+        let items = Arc::make_mut(&mut self.items);
+        for item in items.iter_mut().rev() {
+            let source = match item {
+                ResponseItem::Message { role, content, .. } if role == "user" => {
+                    replace_message_images(content, placeholder)
+                        .then_some(ImageSanitizationSource::User)
+                }
+                ResponseItem::FunctionCallOutput { output, .. }
+                | ResponseItem::CustomToolCallOutput { output, .. } => {
+                    replace_tool_output_images(output, placeholder)
+                        .then_some(ImageSanitizationSource::Tool)
+                }
+                _ => None,
+            };
+
+            if let Some(source) = source {
+                self.history_version = self.history_version.saturating_add(1);
+                return Some(source);
+            }
+        }
+
+        None
     }
 
     /// Drop the last `num_turns` instruction turns from this history.
@@ -753,6 +800,36 @@ fn encrypted_function_output_estimate_adjustment(item: &ResponseItem) -> (i64, i
         );
         (payload_bytes, replacement_bytes)
     })
+}
+
+fn replace_message_images(content: &mut [ContentItem], placeholder: &str) -> bool {
+    let mut replaced = false;
+    for item in content.iter_mut() {
+        if matches!(item, ContentItem::InputImage { .. }) {
+            *item = ContentItem::InputText {
+                text: placeholder.to_string(),
+            };
+            replaced = true;
+        }
+    }
+    replaced
+}
+
+fn replace_tool_output_images(output: &mut FunctionCallOutputPayload, placeholder: &str) -> bool {
+    let Some(content_items) = output.content_items_mut() else {
+        return false;
+    };
+
+    let mut replaced = false;
+    for item in content_items.iter_mut() {
+        if matches!(item, FunctionCallOutputContentItem::InputImage { .. }) {
+            *item = FunctionCallOutputContentItem::InputText {
+                text: placeholder.to_string(),
+            };
+            replaced = true;
+        }
+    }
+    replaced
 }
 
 fn is_model_generated_item(item: &ResponseItem) -> bool {

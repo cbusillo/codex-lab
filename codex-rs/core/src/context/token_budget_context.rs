@@ -4,7 +4,19 @@ use codex_protocol::protocol::CONTEXT_WINDOW_CLOSE_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_OPEN_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_OPEN_TAG;
+use serde_json::Value;
 use uuid::Uuid;
+
+/// Hard rendered-byte cap for the MCP `notes/thread_hint` text carried by
+/// [`TokenBudgetContext`].
+///
+/// `TokenBudgetContext` is emitted into the permanent model-visible prefix, so the hint text is
+/// paid for on every request of the thread and can never be compacted away. The MCP server is an
+/// untrusted, arbitrarily verbose source, so the hint gets a hard byte cap instead of a
+/// best-effort token budget: 2 KiB is roughly 512 approximate tokens, comfortably below the 1K
+/// token threshold that requires manual review of a context fragment.
+pub(crate) const MAX_THREAD_HINT_BYTES: usize = 2 * 1024;
+const THREAD_HINT_TRUNCATION_NOTICE: &str = "\n[thread hint truncated]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TokenBudgetContext {
@@ -12,7 +24,7 @@ pub(crate) struct TokenBudgetContext {
     first_window_id: Uuid,
     previous_window_id: Option<Uuid>,
     window_id: Uuid,
-    mcp_result: Option<String>,
+    thread_hint: Option<String>,
 }
 
 impl TokenBudgetContext {
@@ -21,16 +33,59 @@ impl TokenBudgetContext {
         first_window_id: Uuid,
         previous_window_id: Option<Uuid>,
         window_id: Uuid,
-        mcp_result: Option<String>,
+        thread_hint: Option<String>,
     ) -> Self {
         Self {
             thread_id,
             first_window_id,
             previous_window_id,
             window_id,
-            mcp_result,
+            // Bound here rather than at the call site: this constructor is the only way to build
+            // the fragment, so no caller can introduce an unbounded bypass.
+            thread_hint: thread_hint.and_then(|hint| bounded_thread_hint(&hint)),
         }
     }
+}
+
+/// Join the text content items of an MCP `notes/thread_hint` result into a single bounded hint.
+///
+/// Accumulation stops once the cap is reached so a result with many items, or a single oversized
+/// item, never materializes in full before being truncated.
+pub(crate) fn join_thread_hint_content(content: &[Value]) -> Option<String> {
+    let mut joined = String::new();
+    for text in content
+        .iter()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+    {
+        if !joined.is_empty() {
+            joined.push('\n');
+        }
+        joined.push_str(text);
+        if joined.len() > MAX_THREAD_HINT_BYTES {
+            break;
+        }
+    }
+    bounded_thread_hint(&joined)
+}
+
+/// Truncate `hint` so the rendered text never exceeds [`MAX_THREAD_HINT_BYTES`] bytes.
+fn bounded_thread_hint(hint: &str) -> Option<String> {
+    if hint.is_empty() {
+        return None;
+    }
+    if hint.len() <= MAX_THREAD_HINT_BYTES {
+        return Some(hint.to_string());
+    }
+
+    let mut boundary = MAX_THREAD_HINT_BYTES.saturating_sub(THREAD_HINT_TRUNCATION_NOTICE.len());
+    while boundary > 0 && !hint.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    Some(format!(
+        "{}{THREAD_HINT_TRUNCATION_NOTICE}",
+        &hint[..boundary]
+    ))
 }
 
 impl ContextualUserFragment for TokenBudgetContext {
@@ -58,12 +113,16 @@ impl ContextualUserFragment for TokenBudgetContext {
         if let Some(previous_window_id) = self.previous_window_id {
             lines.push(format!("Previous context window id: {previous_window_id}"));
         }
-        if let Some(mcp_result) = &self.mcp_result {
-            lines.push(mcp_result.clone());
+        if let Some(thread_hint) = &self.thread_hint {
+            lines.push(thread_hint.clone());
         }
         format!("\n{}\n", lines.join("\n"))
     }
 }
+
+#[cfg(test)]
+#[path = "token_budget_context_tests.rs"]
+mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContextWindowGuidance {

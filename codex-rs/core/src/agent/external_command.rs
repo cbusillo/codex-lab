@@ -658,6 +658,10 @@ async fn send_completion_to_parent(
     if !control.is_external_agent(launch.thread_id) {
         return;
     }
+    // External agents produce their final message outside Codex, so it bypasses
+    // `format_inter_agent_completion_message`. Apply the same completion-message budget here
+    // before the text lands in the parent thread's model-visible history.
+    let message = crate::session_prefix::bounded_completion_payload(&message);
     let communication = InterAgentCommunication::new(
         launch.recipient.clone(),
         launch.author.clone(),

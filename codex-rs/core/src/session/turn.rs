@@ -17,6 +17,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context_manager::ImageSanitizationSource;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::inspect_pending_input;
@@ -104,12 +105,14 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
 use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
@@ -136,6 +139,17 @@ use tracing::trace_span;
 use tracing::warn;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
+
+/// Fixed-size text left in place of an image the Responses API refused to read.
+const INVALID_IMAGE_PLACEHOLDER: &str = "Image omitted: the model could not read this image.";
+const INVALID_IMAGE_HISTORY_CHECKPOINT_MESSAGE: &str =
+    "Sanitized an unreadable image from conversation history.";
+const INVALID_IMAGE_MESSAGE: &str =
+    "Invalid image in your last message. Please remove it and try again.";
+const INVALID_IMAGE_SANITIZED_MESSAGE: &str = concat!(
+    "The model could not read one of the images in this conversation, so it was removed from ",
+    "history. Later turns will work; retry with a different image if you still need it."
+);
 
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
@@ -543,13 +557,23 @@ pub(crate) async fn run_turn(
                     CodexErrorDetails::InvalidImageRequest()
                 ) =>
             {
+                warn!("Responses rejected an image; sanitizing history to prevent replay");
+                let sanitized = sanitize_invalid_image_history(&sess).await;
+                if sanitized == Some(ImageSanitizationSource::Tool) {
+                    // The offending image came from a tool, so the user has nothing to fix.
+                    // Retry the turn now that the transcript no longer carries it.
+                    continue;
+                }
                 sess.track_turn_codex_error(turn_context.as_ref(), &codex_error);
                 let error = CodexErrorInfo::BadRequest;
                 sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
                     .await;
+                let message = match sanitized {
+                    Some(ImageSanitizationSource::User) => INVALID_IMAGE_SANITIZED_MESSAGE,
+                    Some(ImageSanitizationSource::Tool) | None => INVALID_IMAGE_MESSAGE,
+                };
                 let event = EventMsg::Error(ErrorEvent {
-                    message: "Invalid image in your last message. Please remove it and try again."
-                        .to_string(),
+                    message: message.to_string(),
                     codex_error_info: Some(error),
                 });
                 sess.send_event(&turn_context, event).await;
@@ -597,6 +621,39 @@ pub(crate) async fn run_turn(
         project_validation_eligibility,
         model_used_tools,
     })
+}
+
+/// Remove the newest images from history after the Responses API rejected the request because it
+/// could not read one of them.
+///
+/// The API rejects the whole request, so leaving the offending image in place makes every later
+/// turn of this thread fail. See [`ContextManager::replace_newest_images`] for why this narrow
+/// history rewrite is the accepted exception to the incremental-context rule. The sanitized
+/// history is checkpointed into the rollout so a resumed thread does not replay the poisoned
+/// image.
+async fn sanitize_invalid_image_history(sess: &Session) -> Option<ImageSanitizationSource> {
+    let (source, replacement_history) = {
+        let mut state = sess.state.lock().await;
+        let source = state
+            .history
+            .replace_newest_images(INVALID_IMAGE_PLACEHOLDER)?;
+        (source, state.history.raw_items().to_vec())
+    };
+
+    sess.persist_rollout_items(&[RolloutItem::Compacted(CompactedItem {
+        message: INVALID_IMAGE_HISTORY_CHECKPOINT_MESSAGE.to_string(),
+        replacement_history: Some(replacement_history),
+        window_number: None,
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    })])
+    .await;
+    if let Err(err) = sess.flush_rollout().await {
+        warn!("failed to persist invalid-image history sanitization: {err}");
+    }
+
+    Some(source)
 }
 
 #[instrument(level = "trace", skip_all)]
