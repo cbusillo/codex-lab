@@ -121,6 +121,18 @@ class SnapshotMutationTest(GitFixture):
             convergence.snapshot_change_errors(self.root, self.policy, base),
         )
 
+    def test_rejects_historical_snapshot_path_containing_a_tab(self) -> None:
+        snapshot = "upstream/openai-codex/aaaaaaaa-bbbbbbbb"
+        base = self.commit_file(f"{snapshot}/inventory.json", "{}\n", "base snapshot")
+        run(self.root, "switch", "-c", "task")
+        path = f"{snapshot}/unexpected\tfile"
+        self.commit_file(path, "unexpected\n", "add malformed historical path")
+
+        self.assertEqual(
+            [f"historical snapshot changed (A): {path}"],
+            convergence.snapshot_change_errors(self.root, self.policy, base),
+        )
+
     def test_provenance_rejects_new_symlinked_inventory(self) -> None:
         base = self.commit_file("README.md", "base\n", "base")
         run(self.root, "switch", "-c", "task")

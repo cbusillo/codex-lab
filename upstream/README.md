@@ -79,6 +79,11 @@ never ordinary upstream edits.
 - **absent** from the tree, or
 - **byte-identical** to the recorded upstream blob.
 
+The two suite entrypoints marked `presence_only` are the deliberate exception:
+their upstream bytes are correct, but deleting either file would unregister the
+owned test suites it connects to the compiled test binary. Those rows are
+therefore checked for existence rather than content divergence.
+
 `repo-checks.yml` runs the guard on every pull request, so a refresh that
 silently reverts owned behavior cannot merge.
 

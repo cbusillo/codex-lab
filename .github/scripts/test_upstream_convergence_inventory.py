@@ -27,6 +27,10 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
         self.assertNotIn("GIT_OBJECT_DIRECTORY", env)
         self.assertNotIn("GIT_CONFIG_COUNT", env)
         self.assertEqual("1", env["GIT_NO_REPLACE_OBJECTS"])
+        self.assertEqual(os.devnull, env["GIT_CONFIG_GLOBAL"])
+        self.assertEqual(os.devnull, env["GIT_CONFIG_SYSTEM"])
+        self.assertEqual("1", env["GIT_ATTR_NOSYSTEM"])
+        self.assertEqual("0", env["GIT_TERMINAL_PROMPT"])
 
     def test_bounded_process_stops_when_combined_output_exceeds_limit(self) -> None:
         command = [
