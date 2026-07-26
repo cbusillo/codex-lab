@@ -63,6 +63,7 @@ use tempfile::TempDir;
 use tokio::time::Duration;
 use wiremock::BodyPrintLimit;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
 
 const VIEW_IMAGE_TURN_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1459,5 +1460,83 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         "view_image is not allowed because you do not support image inputs"
     );
 
+    Ok(())
+}
+
+/// A tool-produced image the Responses API refuses to read must be sanitized out of history so
+/// the turn can be retried instead of poisoning every later turn of the thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_image_bad_request_sanitizes_tool_image_and_retries() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build_with_auto_env(&server).await?;
+    let TestCodex {
+        codex,
+        session_configured,
+        ..
+    } = &test;
+
+    let rel_path = "assets/poisoned.png";
+    write_workspace_png(&test, rel_path, 8, 8, [10, 20, 30, 255]).await?;
+    let call_id = "view-image-invalid-request";
+    let arguments = serde_json::json!({ "path": rel_path }).to_string();
+
+    let mock = responses::mount_response_sequence(
+        &server,
+        vec![
+            responses::sse_response(sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "view_image", &arguments),
+                ev_completed("resp-1"),
+            ])),
+            ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"The image data you provided does not represent a valid image"}}"#,
+            ),
+            responses::sse_response(sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-3"),
+            ])),
+        ],
+    )
+    .await;
+
+    codex
+        .submit(disabled_user_turn(
+            &test,
+            vec![UserInput::Text {
+                text: "please inspect the image".into(),
+                text_elements: Vec::new(),
+            }],
+            session_configured.model.clone(),
+        ))
+        .await?;
+    wait_for_event_with_timeout(
+        codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        VIEW_IMAGE_TURN_COMPLETE_TIMEOUT,
+    )
+    .await;
+
+    let requests = mock.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "the rejected turn should be retried once"
+    );
+    let rejected_output = requests[1].function_call_output(call_id);
+    assert_eq!(
+        rejected_output["output"][0]["type"], "input_image",
+        "the rejected request should still carry the tool image"
+    );
+    assert_eq!(
+        requests[2].function_call_output(call_id).get("output"),
+        Some(&serde_json::json!([{
+            "type": "input_text",
+            "text": "Image omitted: the model could not read this image."
+        }]))
+    );
     Ok(())
 }

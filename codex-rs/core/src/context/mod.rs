@@ -86,6 +86,7 @@ pub(crate) use token_budget_context::ContextWindowGuidance;
 pub(crate) use token_budget_context::TokenBudgetContext;
 pub(crate) use token_budget_context::TokenBudgetRemainingContext;
 pub(crate) use token_budget_context::TokenBudgetReminder;
+pub(crate) use token_budget_context::join_thread_hint_content;
 pub(crate) use turn_aborted::TurnAborted;
 pub(crate) use user_instructions::UserInstructions;
 pub(crate) use user_shell_command::UserShellCommand;

@@ -2408,3 +2408,146 @@ fn text_only_items_unchanged() {
 
     assert_eq!(estimated, raw_len);
 }
+
+fn tool_image_item(base64: &str) -> FunctionCallOutputContentItem {
+    FunctionCallOutputContentItem::InputImage {
+        image_url: format!("data:image/png;base64,{base64}"),
+        detail: Some(DEFAULT_IMAGE_DETAIL),
+    }
+}
+
+fn function_call_output_item(content: Vec<FunctionCallOutputContentItem>) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: "call-1".to_string(),
+        output: FunctionCallOutputPayload::from_content_items(content),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn custom_tool_call_output_item(content: Vec<FunctionCallOutputContentItem>) -> ResponseItem {
+    ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "call-1".to_string(),
+        name: Some("tool".to_string()),
+        output: FunctionCallOutputPayload::from_content_items(content),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn user_image_item(base64: &str) -> ContentItem {
+    ContentItem::InputImage {
+        image_url: format!("data:image/png;base64,{base64}"),
+        detail: Some(DEFAULT_IMAGE_DETAIL),
+    }
+}
+
+fn user_image_msg(content: Vec<ContentItem>) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content,
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn sanitized_texts(item: &ResponseItem) -> Vec<&str> {
+    match item {
+        ResponseItem::Message { content, .. } => content
+            .iter()
+            .map(|content_item| match content_item {
+                ContentItem::InputText { text } => text.as_str(),
+                other => panic!("expected sanitized message text, got {other:?}"),
+            })
+            .collect(),
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => output
+            .content_items()
+            .expect("expected content-item tool output")
+            .iter()
+            .map(|content_item| match content_item {
+                FunctionCallOutputContentItem::InputText { text } => text.as_str(),
+                other => panic!("expected sanitized tool output text, got {other:?}"),
+            })
+            .collect(),
+        other => panic!("expected an image-bearing item, got {other:?}"),
+    }
+}
+
+#[test]
+fn replace_newest_images_reports_no_images_to_sanitize() {
+    let mut history = create_history_with_items(vec![user_input_text_msg("hi")]);
+
+    assert_eq!(history.replace_newest_images("Image omitted"), None);
+}
+
+#[test]
+fn replace_newest_images_replaces_tool_output_images() {
+    for tool_output in [
+        function_call_output_item(vec![
+            FunctionCallOutputContentItem::InputText {
+                text: "before".to_string(),
+            },
+            tool_image_item("AAA"),
+        ]),
+        custom_tool_call_output_item(vec![
+            FunctionCallOutputContentItem::InputText {
+                text: "before".to_string(),
+            },
+            tool_image_item("AAA"),
+        ]),
+    ] {
+        let mut history = create_history_with_items(vec![user_input_text_msg("hi"), tool_output]);
+        let version_before = history.history_version();
+
+        assert_eq!(
+            history.replace_newest_images("Image omitted"),
+            Some(ImageSanitizationSource::Tool)
+        );
+        assert_eq!(
+            sanitized_texts(&history.raw_items()[1]),
+            vec!["before", "Image omitted"]
+        );
+        assert!(history.history_version() > version_before);
+    }
+}
+
+#[test]
+fn replace_newest_images_replaces_user_images() {
+    let mut history = create_history_with_items(vec![user_image_msg(vec![
+        ContentItem::InputText {
+            text: "look".to_string(),
+        },
+        user_image_item("AAA"),
+    ])]);
+
+    assert_eq!(
+        history.replace_newest_images("Image omitted"),
+        Some(ImageSanitizationSource::User)
+    );
+    assert_eq!(
+        sanitized_texts(&history.raw_items()[0]),
+        vec!["look", "Image omitted"]
+    );
+}
+
+#[test]
+fn replace_newest_images_only_sanitizes_the_newest_image_bearing_item() {
+    let mut history = create_history_with_items(vec![
+        user_image_msg(vec![user_image_item("user")]),
+        function_call_output_item(vec![tool_image_item("tool")]),
+    ]);
+
+    assert_eq!(
+        history.replace_newest_images("Image omitted"),
+        Some(ImageSanitizationSource::Tool)
+    );
+
+    let raw_items = history.raw_items();
+    let ResponseItem::Message { content, .. } = &raw_items[0] else {
+        panic!("expected the older user message to survive untouched");
+    };
+    assert_eq!(content, &vec![user_image_item("user")]);
+    assert_eq!(sanitized_texts(&raw_items[1]), vec!["Image omitted"]);
+}
