@@ -749,6 +749,18 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    /// Compatibility route for older clients that pin a `turnId` in the method
+    /// name. It reuses `thread/items/list` and flattens the per-item turn ids
+    /// back out, since the turn is already fixed by the request.
+    pub(crate) async fn thread_turns_items_list(
+        &self,
+        params: ThreadTurnsItemsListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_items_list_response_inner(params.into())
+            .await
+            .map(|response| Some(ThreadTurnsItemsListResponse::from(response).into()))
+    }
+
     pub(crate) async fn thread_shell_command(
         &self,
         request_id: &ConnectionRequestId,

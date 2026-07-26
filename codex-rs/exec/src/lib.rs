@@ -78,6 +78,7 @@ use codex_login::AuthConfig;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
+use codex_login::profile_home;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_otel::set_parent_from_context;
@@ -87,6 +88,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewRequest;
@@ -267,17 +269,22 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         config_overrides,
     } = cli;
     let shared = shared.into_inner();
+    shared
+        .validate_workspace_root_mode()
+        .map_err(anyhow::Error::msg)?;
     let SharedCliOptions {
         images,
         model: model_cli_arg,
         oss,
         oss_provider,
         config_profile_v2,
+        auth_profile,
         sandbox_mode: sandbox_mode_cli_arg,
         dangerously_bypass_approvals_and_sandbox,
         bypass_hook_trust,
         cwd,
         add_dir,
+        workspace_root,
     } = shared;
 
     let (_stdout_with_ansi, stderr_with_ansi) = match color {
@@ -318,6 +325,20 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         }
         None => AbsolutePathBuf::current_dir()?,
     };
+    let workspace_roots = (!workspace_root.is_empty()).then(|| {
+        workspace_root
+            .into_iter()
+            .map(|path| AbsolutePathBuf::resolve_path_against_base(path, config_cwd.as_path()))
+            .collect()
+    });
+    let exact_workspace_profile = workspace_roots
+        .as_ref()
+        .is_some_and(|_| sandbox_mode == Some(SandboxMode::WorkspaceWrite));
+    let sandbox_mode_override = if exact_workspace_profile {
+        None
+    } else {
+        sandbox_mode
+    };
 
     // we load config.toml here to determine project state.
     #[allow(clippy::print_stderr)]
@@ -331,6 +352,11 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let user_config_path = config_profile_v2
         .as_ref()
         .map(|profile_v2| resolve_profile_v2_config_path(&codex_home, profile_v2));
+    let auth_home = match auth_profile.as_deref() {
+        Some(profile) => profile_home(&codex_home, profile)
+            .map_err(|err| anyhow::anyhow!("invalid --auth-profile {profile:?}: {err}"))?,
+        None => codex_home.to_path_buf(),
+    };
     let loader_overrides = LoaderOverrides {
         user_config_path,
         user_config_profile: config_profile_v2,
@@ -364,6 +390,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     )?;
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
+        auth_home.clone(),
         /*enable_codex_api_key_env*/ false,
         bootstrap_config_toml
             .cli_auth_credentials_store
@@ -429,11 +456,12 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         // the fully resolved reviewer is AutoReview.
         approval_policy: Some(AskForApproval::Never),
         approvals_reviewer: None,
-        sandbox_mode,
+        sandbox_mode: sandbox_mode_override,
         permission_profile: None,
-        default_permissions: None,
+        default_permissions: exact_workspace_profile
+            .then(|| BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
         cwd: resolved_cwd,
-        workspace_roots: None,
+        workspace_roots,
         model_provider: model_provider.clone(),
         service_tier: None,
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
@@ -454,6 +482,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let build_config = |overrides| {
         ConfigBuilder::default()
             .codex_home(codex_home.to_path_buf())
+            .auth_home(auth_home.clone())
             .cli_overrides(cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(loader_overrides.clone())
@@ -488,7 +517,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
 
     let auth_route_config = config.auth_route_config();
     if let Err(err) = enforce_login_restrictions(&AuthConfig {
-        codex_home: config.codex_home.to_path_buf(),
+        codex_home: config.auth_home.to_path_buf(),
         auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
         keyring_backend_kind: config.auth_keyring_backend_kind(),
         forced_login_method: config.forced_login_method,

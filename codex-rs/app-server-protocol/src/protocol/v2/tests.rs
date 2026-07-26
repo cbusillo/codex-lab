@@ -331,6 +331,59 @@ fn thread_items_list_round_trips() {
 }
 
 #[test]
+fn thread_turns_items_list_legacy_shape_round_trips() {
+    let params = ThreadTurnsItemsListParams {
+        thread_id: "thr_123".to_string(),
+        turn_id: "turn_456".to_string(),
+        cursor: Some("cursor_1".to_string()),
+        limit: Some(50),
+        sort_direction: Some(SortDirection::Asc),
+    };
+
+    assert_eq!(
+        serde_json::to_value(&params).expect("serialize legacy params"),
+        json!({
+            "threadId": "thr_123",
+            "turnId": "turn_456",
+            "cursor": "cursor_1",
+            "limit": 50,
+            "sortDirection": "asc",
+        })
+    );
+    assert_eq!(
+        ThreadItemsListParams::from(params),
+        ThreadItemsListParams {
+            thread_id: "thr_123".to_string(),
+            turn_id: Some("turn_456".to_string()),
+            cursor: Some("cursor_1".to_string()),
+            limit: Some(50),
+            sort_direction: Some(SortDirection::Asc),
+        }
+    );
+
+    // The turn is pinned by the request, so the legacy response keeps items
+    // unwrapped instead of echoing the per-item turn id.
+    let response = ThreadTurnsItemsListResponse::from(ThreadItemsListResponse {
+        data: vec![ThreadItemEntry {
+            turn_id: "turn_456".to_string(),
+            item: ThreadItem::ContextCompaction {
+                id: "item_1".to_string(),
+            },
+        }],
+        next_cursor: None,
+        backwards_cursor: Some("cursor_0".to_string()),
+    });
+    assert_eq!(
+        serde_json::to_value(response).expect("serialize legacy response"),
+        json!({
+            "data": [{"type": "contextCompaction", "id": "item_1"}],
+            "nextCursor": null,
+            "backwardsCursor": "cursor_0",
+        })
+    );
+}
+
+#[test]
 fn thread_list_params_accepts_single_cwd() {
     let params = serde_json::from_value::<ThreadListParams>(json!({
         "cwd": "/workspace",

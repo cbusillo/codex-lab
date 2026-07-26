@@ -58,8 +58,12 @@ pub fn cloud_config_bundle_loader(
     })
 }
 
+/// `auth_home` selects the credential store to authenticate the bundle fetch
+/// with; it differs from `codex_home` when `--auth-profile` is active.
+/// `codex_home` still owns where the fetched bundle is cached.
 pub async fn cloud_config_bundle_loader_for_storage(
     codex_home: PathBuf,
+    auth_home: PathBuf,
     enable_codex_api_key_env: bool,
     credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
@@ -68,7 +72,7 @@ pub async fn cloud_config_bundle_loader_for_storage(
 ) -> CloudConfigBundleLoader {
     let http_client_factory = auth_route_config.http_client_factory().clone();
     let auth_manager = AuthManager::shared(
-        codex_home.clone(),
+        auth_home,
         enable_codex_api_key_env,
         credentials_store_mode,
         /*forced_chatgpt_workspace_id*/ None,
