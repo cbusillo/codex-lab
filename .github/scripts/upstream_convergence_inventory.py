@@ -40,6 +40,7 @@ GIT_ENVIRONMENT_KEYS = {
     "GIT_WORK_TREE",
 }
 GIT_TIMEOUT_SECONDS = 300
+MAX_GIT_OUTPUT_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,18 @@ def git_environment(**updates: str) -> dict[str, str]:
     return env
 
 
+def checked_git_output(
+    result: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes],
+    operation: str,
+) -> None:
+    stdout = result.stdout.encode() if isinstance(result.stdout, str) else result.stdout
+    stderr = result.stderr.encode() if isinstance(result.stderr, str) else result.stderr
+    if len(stdout) + len(stderr) > MAX_GIT_OUTPUT_BYTES:
+        raise RuntimeError(
+            f"git {operation} exceeded {MAX_GIT_OUTPUT_BYTES} output bytes"
+        )
+
+
 def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
     if policy_version == LEGACY_POLICY_VERSION:
         return POLICY_V1_RULES
@@ -240,14 +253,23 @@ def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
 
 
 def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    result = subprocess.run(
         ["git", "-C", str(repo), *args],
-        check=check,
+        check=False,
         capture_output=True,
         text=True,
         env=git_environment(),
         timeout=GIT_TIMEOUT_SECONDS,
     )
+    checked_git_output(result, " ".join(args))
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
 
 
 def resolve_commit(repo: Path, ref: str) -> str:
@@ -270,11 +292,19 @@ def tree_objects(
 ) -> dict[str, str]:
     result = subprocess.run(
         ["git", "-C", str(repo), "ls-tree", "-r", "-z", ref],
-        check=True,
+        check=False,
         capture_output=True,
         env=env or git_environment(),
         timeout=GIT_TIMEOUT_SECONDS,
     )
+    checked_git_output(result, f"ls-tree -r -z {ref}")
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
     objects: dict[str, str] = {}
     for record in result.stdout.split(b"\0"):
         if not record:
@@ -326,6 +356,7 @@ def merge_conflicts(
             env=env,
             timeout=GIT_TIMEOUT_SECONDS,
         )
+        checked_git_output(result, "merge-tree --write-tree --messages")
         if result.returncode not in (0, 1):
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
         output_lines = result.stdout.splitlines()

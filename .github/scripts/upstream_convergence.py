@@ -440,11 +440,23 @@ def record(
     require_record_safety(state)
     refs = exact_refs(repo, base, upstream, local)
     remote = remote_identity(repo, policy, refs["upstream"])
+    evidence_root = repo / policy.evidence_root
+    if evidence_root.is_symlink():
+        raise ConvergenceError(
+            f"evidence root must not be a symlink: {policy.evidence_root}"
+        )
+    if evidence_root.exists() and not evidence_root.is_dir():
+        raise ConvergenceError(
+            f"evidence root must be a directory: {policy.evidence_root}"
+        )
     existing_snapshots = validate_snapshots(repo, policy)
-    if existing_snapshots["count"] and (
-        not existing_snapshots["passed"]
-        or existing_snapshots["historyUnavailable"]
-    ):
+    no_snapshot_error = f"no snapshots found under {policy.evidence_root}"
+    existing_errors = existing_snapshots["errors"]
+    if existing_snapshots["count"] == 0:
+        unexpected_errors = [error for error in existing_errors if error != no_snapshot_error]
+        if unexpected_errors:
+            raise ConvergenceError(unexpected_errors[0])
+    elif not existing_snapshots["passed"] or existing_snapshots["historyUnavailable"]:
         raise ConvergenceError(
             "existing snapshot history is not fully reproducible; run validate first"
         )
@@ -465,7 +477,6 @@ def record(
         refs["local"],
     )
     snapshot_id = f"{refs['base'][:8]}-{refs['upstream'][:8]}"
-    evidence_root = repo / policy.evidence_root
     evidence_root.mkdir(parents=True, exist_ok=True)
     free_bytes = shutil.disk_usage(evidence_root).free
     if free_bytes < 64 * 1024 * 1024:
@@ -515,10 +526,12 @@ def record(
 
 def snapshot_directories(repo: Path, evidence_root: str) -> list[Path]:
     root = repo / evidence_root
-    if not root.is_dir():
-        return []
     if root.is_symlink():
         raise ConvergenceError(f"evidence root must not be a symlink: {evidence_root}")
+    if not root.exists():
+        return []
+    if not root.is_dir():
+        raise ConvergenceError(f"evidence root must be a directory: {evidence_root}")
     try:
         entries = list(root.iterdir())
     except OSError as error:

@@ -343,6 +343,18 @@ class SnapshotAvailabilityTest(GitFixture):
         self.assertFalse(report["passed"])
         self.assertIn("non-snapshot entries", report["errors"][0])
 
+    def test_rejects_symlinked_evidence_root(self) -> None:
+        target = self.root / "other-evidence"
+        target.mkdir()
+        evidence_root = self.root / self.policy.evidence_root
+        evidence_root.parent.mkdir(parents=True)
+        evidence_root.symlink_to(target, target_is_directory=True)
+
+        report = convergence.validate_snapshots(self.root, self.policy)
+
+        self.assertFalse(report["passed"])
+        self.assertIn("evidence root must not be a symlink", report["errors"][0])
+
 
 class CheckedInSnapshotTest(unittest.TestCase):
     def test_checked_in_snapshots_are_valid(self) -> None:
