@@ -73,6 +73,9 @@ pub use permissions_instructions::PermissionsInstructions;
 pub(crate) use personality_spec_instructions::PersonalitySpecInstructions;
 pub(crate) use plugin_instructions::PluginInstructions;
 pub(crate) use project_validation_failure::ProjectValidationFailure;
+// The cap is enforced inside the fragment; only the delegation tests read it back.
+#[cfg(test)]
+pub(crate) use realtime_delegation::REALTIME_DELEGATION_RENDERED_TOKEN_CAP;
 pub(crate) use realtime_delegation::RealtimeDelegation;
 pub(crate) use realtime_delegation::RealtimeDelegationSource;
 pub(crate) use realtime_end_instructions::RealtimeEndInstructions;

@@ -6,7 +6,7 @@
   "summary": {"conflicts": 0, "localChangedOnly": 444, "residualLocalInfluence": 445, "sharedIdentical": 0, "sharedMergeableDivergent": 1},
   "conflictTypeCounts": {},
   "laneCounts": {},
-  "residualLaneCounts": {"amber_contract_adapt": 147, "green_bulk_adopt": 190, "intentionally_owned": 98, "red_manual_review": 10},
+  "residualLaneCounts": {"amber_contract_adapt": 147, "green_bulk_adopt": 189, "intentionally_owned": 99, "red_manual_review": 10},
   "conflicts": [
   ]
 }

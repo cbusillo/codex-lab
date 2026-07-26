@@ -119,12 +119,59 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assert_owned(path, "AGENT-1")
 
+    def test_background_review_engine_and_session_state_are_owned(self) -> None:
+        # The engine that runs a background review and the durable per-session
+        # state it reads back. Upstream owns both filenames, so only these exact
+        # paths are claimed.
+        for path in (
+            "codex-rs/core/src/tasks/review.rs",
+            "codex-rs/core/src/tasks/review_tests.rs",
+            "codex-rs/core/src/state/session.rs",
+            "codex-rs/core/src/state/session_tests.rs",
+            "codex-rs/tui/src/agent_session_env.rs",
+            "codex-rs/tui/src/agent_session_env_tests.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "AGENT-1")
+
+    def test_owned_review_wire_fixtures_are_owned(self) -> None:
+        # Additive Every Code schemas with no upstream counterpart, guarded the
+        # same way the Project Validation fixtures are.
+        for path in (
+            "codex-rs/app-server-protocol/schema/json/v2/BackgroundAutoReviewControlParams.json",
+            "codex-rs/app-server-protocol/schema/typescript/v2/AutoReviewRunSummary.ts",
+            "codex-rs/app-server-protocol/schema/typescript/v2/SessionProvenance.ts",
+            "codex-rs/app-server-protocol/schema/typescript/v2/ReviewStartTarget.ts",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "AGENT-1")
+
+    def test_approval_compatibility_shims_are_owned(self) -> None:
+        # Older clients still send the retired approval vocabulary on every
+        # external entry point; dropping a shim rejects requests that used to work.
+        for path in (
+            "codex-rs/mcp-server/src/approval_response_compat_tests.rs",
+            "codex-rs/protocol/src/review_decision_compat.rs",
+            "codex-rs/protocol/src/review_decision_compat_tests.rs",
+            "codex-rs/utils/cli/src/approval_mode_cli_arg.rs",
+            "codex-rs/utils/cli/src/approval_mode_cli_arg_tests.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "SANDBOX-1")
+
+    def test_history_rewrite_exception_proof_is_owned(self) -> None:
+        self.assert_owned(
+            "codex-rs/core/tests/suite/invalid_image_recovery.rs", "CONTEXT-1"
+        )
+
     def test_code_bridge_and_browser_handlers_and_proofs_are_owned(self) -> None:
         for path in (
             "codex-rs/core/src/tools/handlers/code_bridge.rs",
             "codex-rs/core/src/tools/handlers/code_bridge_tests.rs",
             "codex-rs/core/src/tools/handlers/browser.rs",
             "codex-rs/core/src/tools/handlers/browser_spec_tests.rs",
+            "codex-rs/core/src/browser.rs",
+            "codex-rs/core/src/browser_tests.rs",
             "codex-rs/app-server/tests/suite/v2/code_bridge.rs",
             "codex-rs/app-server/tests/suite/v2/remote_control.rs",
             "codex-rs/app-server/src/request_processors/remote_control_processor.rs",
@@ -178,6 +225,7 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
             "codex-rs/core/src/session/rollout_reconstruction.rs",
             "codex-rs/core/src/session/rollout_reconstruction_tests.rs",
             "codex-rs/core/src/context/world_state/environment.rs",
+            "codex-rs/core/src/context/world_state/environment_limits.rs",
             "codex-rs/core/src/context/world_state/mod.rs",
             "codex-rs/core/tests/suite/turn_context_environments.rs",
         ):

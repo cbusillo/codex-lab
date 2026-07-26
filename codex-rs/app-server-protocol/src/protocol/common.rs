@@ -3037,6 +3037,59 @@ mod tests {
         Ok(())
     }
 
+    /// Adding an account must not revoke and remove the account already stored. The TUI account
+    /// pane requests that by setting `preserveExistingAccount`, so the flag has to survive
+    /// serialization: omitting it is what makes the server take the revoke-and-remove path.
+    /// `codex_login::server::tests::persist_tokens_async_preserves_previous_account_when_adding_account`
+    /// pins what the server then does with it.
+    #[test]
+    fn serialize_account_login_chatgpt_preserves_existing_account() -> Result<()> {
+        let request = ClientRequest::LoginAccount {
+            request_id: RequestId::Integer(3),
+            params: v2::LoginAccountParams::Chatgpt {
+                app_brand: None,
+                codex_streamlined_login: false,
+                use_hosted_login_success_page: false,
+                preserve_existing_account: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "account/login/start",
+                "id": 3,
+                "params": {
+                    "type": "chatgpt",
+                    "appBrand": null,
+                    "preserveExistingAccount": true
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_login_chatgpt_device_code_preserves_existing_account() -> Result<()> {
+        let request = ClientRequest::LoginAccount {
+            request_id: RequestId::Integer(4),
+            params: v2::LoginAccountParams::ChatgptDeviceCode {
+                preserve_existing_account: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "account/login/start",
+                "id": 4,
+                "params": {
+                    "type": "chatgptDeviceCode",
+                    "preserveExistingAccount": true
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
     #[test]
     fn serialize_account_login_chatgpt_streamlined() -> Result<()> {
         let request = ClientRequest::LoginAccount {

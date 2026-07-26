@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
+use sqlx::SqlStr;
 use sqlx::SqlitePool;
+use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 
 /// Versions 36-38 of the state ledger are frozen: released Codex Lab builds
@@ -142,6 +144,75 @@ WHERE version = ?
         .execute(pool)
         .await?;
     }
+    Ok(())
+}
+
+/// Description of the version 43 placeholder that replaced the destructive
+/// agent-jobs drop, used to locate it without pinning a version number.
+const RETAIN_AGENT_JOBS_DESCRIPTION: &str = "retain agent jobs";
+
+/// The exact SQL that version 43 carried before it was reclaimed as an inert
+/// placeholder. Databases that applied it recorded its checksum, so the rewrite
+/// leaves them failing `Migrator::run` with `VersionMismatch(43)` forever.
+///
+/// The SQL is embedded rather than the checksum so the gate is derived the same
+/// way sqlx derives it, and so a reader can see exactly which migration is being
+/// matched. Version 43 was never released -- the shipped ledger stops at 38 --
+/// so this only repairs candidate and development databases built from the #428
+/// restoration branch.
+const LEGACY_DROP_AGENT_JOBS_SQL: &str =
+    "DROP TABLE IF EXISTS agent_job_items;\nDROP TABLE IF EXISTS agent_jobs;\n";
+
+/// Re-point a recorded version 43 row from the destructive drop onto the inert
+/// placeholder that replaced it.
+///
+/// The agent-job tables those databases dropped stay dropped: the agent-jobs
+/// handlers are still `pending_restore`, so nothing reads them, and recreating
+/// them here would invent a schema no migration produced. What the repair buys
+/// is that the database opens at all instead of failing every upgrade.
+pub(crate) async fn repair_legacy_agent_jobs_migration_checksum(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    let Some(placeholder) = migrator
+        .migrations
+        .iter()
+        .find(|migration| migration.description == RETAIN_AGENT_JOBS_DESCRIPTION)
+    else {
+        return Ok(());
+    };
+    let migrations_table_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if !migrations_table_exists {
+        return Ok(());
+    }
+
+    let legacy = Migration::new(
+        placeholder.version,
+        Cow::Borrowed("drop agent jobs"),
+        placeholder.migration_type,
+        SqlStr::from_static(LEGACY_DROP_AGENT_JOBS_SQL),
+        placeholder.no_tx,
+    );
+
+    sqlx::query(
+        r#"
+UPDATE _sqlx_migrations
+SET checksum = ?, description = ?
+WHERE version = ?
+  AND checksum = ?
+        "#,
+    )
+    .bind(placeholder.checksum.as_ref())
+    .bind(placeholder.description.as_ref())
+    .bind(placeholder.version)
+    .bind(legacy.checksum.as_ref())
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

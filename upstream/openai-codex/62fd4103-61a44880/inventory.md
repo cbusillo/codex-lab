@@ -17,8 +17,8 @@ local content there instead of upstream content; it does not reject it.
 | Conflict `content` | 1 |
 | Lane `amber_contract_adapt` | 1 |
 | Residual lane `amber_contract_adapt` | 146 |
-| Residual lane `green_bulk_adopt` | 192 |
-| Residual lane `intentionally_owned` | 98 |
+| Residual lane `green_bulk_adopt` | 191 |
+| Residual lane `intentionally_owned` | 99 |
 | Residual lane `red_manual_review` | 10 |
 
 ## Contract-reviewed conflicts

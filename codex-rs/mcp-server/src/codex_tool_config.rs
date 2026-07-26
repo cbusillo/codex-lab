@@ -68,6 +68,11 @@ pub struct CodexToolCallParam {
 #[serde(rename_all = "kebab-case")]
 pub enum CodexToolCallApprovalPolicy {
     Untrusted,
+    // `on-failure` is a deprecated alias kept for backward compatibility with MCP clients that
+    // still send the old policy name. It maps to the current on-request semantics, mirroring the
+    // alias `AskForApproval::OnRequest` already carries. It is deliberately a plain comment: a
+    // doc comment here would move the generated schema off its compact `enum` form.
+    #[serde(alias = "on-failure")]
     OnRequest,
     Never,
 }
@@ -370,6 +375,40 @@ mod tests {
           "title": "Codex"
         });
         assert_eq!(expected_tool_json, tool_json);
+    }
+
+    /// MCP clients written against the older policy vocabulary still send `on-failure`. It must
+    /// keep parsing, and it must land on the same `AskForApproval` the canonical `on-request`
+    /// name produces, rather than silently falling back to a stricter or looser policy.
+    #[test]
+    fn approval_policy_accepts_deprecated_on_failure_alias() {
+        let param = serde_json::from_value::<CodexToolCallParam>(serde_json::json!({
+            "prompt": "hello",
+            "approval-policy": "on-failure"
+        }))
+        .expect("on-failure should deserialize");
+
+        assert_eq!(
+            param.approval_policy,
+            Some(CodexToolCallApprovalPolicy::OnRequest)
+        );
+        assert_eq!(
+            param.approval_policy.map(AskForApproval::from),
+            Some(AskForApproval::OnRequest)
+        );
+    }
+
+    /// The alias is a read-only compatibility affordance: the advertised schema keeps offering
+    /// only the canonical names, so clients are never steered back onto the deprecated one.
+    #[test]
+    fn approval_policy_schema_offers_only_canonical_names() {
+        let tool = create_tool_for_codex_tool_call_param();
+        let tool_json = serde_json::to_value(&tool).expect("tool serializes");
+
+        assert_eq!(
+            tool_json["inputSchema"]["properties"]["approval-policy"]["enum"],
+            serde_json::json!(["untrusted", "on-request", "never"])
+        );
     }
 
     #[test]

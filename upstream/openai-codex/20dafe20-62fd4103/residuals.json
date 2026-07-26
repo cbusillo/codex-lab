@@ -4,7 +4,7 @@
   "refs": {"base": "20dafe201d91d4405eef05ecd1db0257f13a9ac8", "local": "ced83ba965e65a64d9816ebbd4b861c7d91af1f9", "upstream": "62fd410384cca008446c2d64a4f2b3f915f4906e"},
   "policy": {"rule": "A residual path is a non-conflicting path whose merge result differs from upstream, so local content survives without review."},
   "summary": {"residualLocalInfluence": 445},
-  "residualLaneCounts": {"amber_contract_adapt": 147, "green_bulk_adopt": 190, "intentionally_owned": 98, "red_manual_review": 10},
+  "residualLaneCounts": {"amber_contract_adapt": 147, "green_bulk_adopt": 189, "intentionally_owned": 99, "red_manual_review": 10},
   "residuals": [
     {"contracts": [], "lane": "green_bulk_adopt", "path": ".github/actionlint.yaml", "reason": "upstream-owned surface with no named local contract"},
     {"contracts": [], "lane": "green_bulk_adopt", "path": ".github/actions/setup-bazel-ci/action.yml", "reason": "upstream-owned surface with no named local contract"},
@@ -249,7 +249,7 @@
     {"contracts": [], "lane": "green_bulk_adopt", "path": "codex-rs/core/src/session_models_manager_tests.rs", "reason": "upstream-owned surface with no named local contract"},
     {"contracts": [], "lane": "green_bulk_adopt", "path": "codex-rs/core/src/state/service.rs", "reason": "upstream-owned surface with no named local contract"},
     {"contracts": [], "lane": "green_bulk_adopt", "path": "codex-rs/core/src/tasks/mod.rs", "reason": "upstream-owned surface with no named local contract"},
-    {"contracts": [], "lane": "green_bulk_adopt", "path": "codex-rs/core/src/tasks/review.rs", "reason": "upstream-owned surface with no named local contract"},
+    {"contracts": ["AGENT-1"], "lane": "intentionally_owned", "path": "codex-rs/core/src/tasks/review.rs", "reason": "Every Code orchestration and review behavior"},
     {"contracts": [], "lane": "green_bulk_adopt", "path": "codex-rs/core/src/thread_manager.rs", "reason": "upstream-owned surface with no named local contract"},
     {"contracts": [], "lane": "green_bulk_adopt", "path": "codex-rs/core/src/thread_manager_tests.rs", "reason": "upstream-owned surface with no named local contract"},
     {"contracts": [], "lane": "green_bulk_adopt", "path": "codex-rs/core/src/tools/handlers/request_plugin_install.rs", "reason": "upstream-owned surface with no named local contract"},

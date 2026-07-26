@@ -26,9 +26,26 @@ const WAIT_CALL_ID: &str = "wait-external-probe";
 const LIST_CALL_ID: &str = "list-external-probe";
 const ROLE: &str = "external_probe";
 const COLLABORATION_NAMESPACE: &str = "collaboration";
+const FOLLOW_UP_PROMPT: &str = "summarize what the external agent reported";
+/// The repeating unit of the stub external agent's ~200 KB final message.
+const EXTERNAL_AGENT_OUTPUT_CHUNK: &str = "0123456789";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     String::from_utf8_lossy(&request.body).contains(text)
+}
+
+/// Every text span an input item carries, whatever its role or content type.
+fn input_item_texts(item: &Value) -> Vec<String> {
+    item.get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter_map(|span| span.get("text").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn spawn_agent_arguments() -> Result<String> {
@@ -350,6 +367,10 @@ fn completion_payload(agent_status: &Value) -> &str {
 /// so both paths carry the completion-payload budget. (The v2 `wait_agent` output is a fixed
 /// string and carries no payload; the v1 `wait_agent` output is bounded through the same
 /// `bounded_status` helper.)
+///
+/// The notification is queued for the parent rather than injected into the turn that spawned the
+/// agent, so proving that path needs a second turn; asserting inside the first one only ever
+/// proves that a message which has not been delivered yet is absent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_external_agent_completion_is_bounded_in_wait_and_list_outputs() -> Result<()> {
     let stub_dir = TempDir::new()?;
@@ -378,7 +399,7 @@ async fn oversized_external_agent_completion_is_bounded_in_wait_and_list_outputs
         ]),
     )
     .await;
-    let wait_response = responses::mount_sse_once_match(
+    let _wait_response = responses::mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
             body_contains(request, SPAWN_CALL_ID) && !body_contains(request, WAIT_CALL_ID)
@@ -469,14 +490,32 @@ async fn oversized_external_agent_completion_is_bounded_in_wait_and_list_outputs
         approx_token_count(listed_payload)
     );
 
-    // The inter-agent notification path stays bounded too.
-    let notification_request = wait_response.single_request();
+    // The second path the unbounded final message reaches the model: the external agent's
+    // completion is queued for the parent and delivered on its *next* turn. It has to be driven,
+    // because any assertion made inside this turn is vacuous -- the notification is not there yet.
+    let follow_up = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-follow-up"),
+            ev_assistant_message("msg-follow-up", "follow-up complete"),
+            ev_completed("resp-follow-up"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn(FOLLOW_UP_PROMPT).await?;
+
+    let delivered = follow_up
+        .single_request()
+        .input()
+        .iter()
+        .flat_map(input_item_texts)
+        .find(|text| text.contains(EXTERNAL_AGENT_OUTPUT_CHUNK))
+        .expect("the parent thread should receive the external agent's completion notification");
     assert!(
-        !notification_request
-            .body_json()
-            .to_string()
-            .contains(&"0123456789".repeat(COMPLETION_MESSAGE_MAX_TOKENS)),
-        "the parent thread must not receive the full external agent output"
+        approx_token_count(&delivered) <= COMPLETION_MESSAGE_MAX_TOKENS,
+        "inter-agent completion notification was {} tokens",
+        approx_token_count(&delivered)
     );
 
     Ok(())
