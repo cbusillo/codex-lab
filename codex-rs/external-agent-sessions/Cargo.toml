@@ -8,6 +8,7 @@ license.workspace = true
 doctest = false
 name = "codex_external_agent_sessions"
 path = "src/lib.rs"
+test = false
 
 [lints]
 workspace = true
