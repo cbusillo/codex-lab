@@ -92,7 +92,9 @@ jobs:
   argument_comment_lint_prebuilt:
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # Cancelled at exactly 60 minutes on the current head; the Bazel build needs
+    # headroom above that on a cold cache.
+    timeout-minutes: 90
     environment:
       name: bazel
       deployment: false
@@ -480,7 +482,9 @@ jobs:
       target: x86_64-pc-windows-msvc
       profile: ci-test
       artifact_id: windows-x64
-      test_threads: 8
+      # 8 threads oversubscribes the 4-vCPU hosted Windows x64 runner: process
+      # spawn-heavy suites time out at the 60s per-test limit under that load.
+      test_threads: 4
     secrets: inherit
 
   tests_windows_arm64:

@@ -602,10 +602,36 @@ fn mode_args(backend: &ExternalCommandAgentBackendConfig, is_read_only: bool) ->
     }
 }
 
+/// Detects `C:\dir\tool.exe` and `\\server\share\tool.exe` style paths.
+///
+/// Shape-based rather than `cfg(windows)`-gated so the behaviour is identical
+/// (and testable) on every host: no POSIX command line legitimately starts with
+/// a drive letter or a UNC prefix.
+fn is_windows_absolute_path(command: &str) -> bool {
+    if command.starts_with(r"\\") {
+        return true;
+    }
+    let mut chars = command.chars();
+    let Some(drive) = chars.next() else {
+        return false;
+    };
+    drive.is_ascii_alphabetic()
+        && chars.next() == Some(':')
+        && matches!(chars.next(), Some('\\') | Some('/'))
+}
+
 pub(super) fn split_command_and_args(command: &str) -> anyhow::Result<(String, Vec<String>)> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Ok((String::new(), Vec::new()));
+    }
+    // POSIX shell quoting treats `\` as an escape, so running an absolute
+    // Windows path through `shlex` silently rewrites `C:\dir\tool.exe` into
+    // `C:dirtool.exe`. Take such a command as the executable path verbatim:
+    // splitting it would also corrupt the unquoted spaces in paths like
+    // `C:\Program Files\...`, and backends declare arguments in `args` anyway.
+    if is_windows_absolute_path(trimmed) {
+        return Ok((trimmed.to_string(), Vec::new()));
     }
     let tokens = shlex::split(trimmed).ok_or_else(|| {
         anyhow::anyhow!("external_command backend command has invalid shell quoting")

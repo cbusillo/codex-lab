@@ -582,6 +582,12 @@ debug = "limited"
 inherits = "test"
 opt-level = 0
 
+# `image` resize/encode work is unusably slow unoptimized: at opt-level 0 the
+# image preparation tests exceed the 60s nextest limit on Windows CI. Optimize
+# this dependency only; every other crate keeps the fast-compiling default.
+[profile.ci-test.package.image]
+opt-level = 2
+
 [patch.crates-io]
 # Uncomment to debug local changes.
 # ratatui = { path = "../../ratatui" }

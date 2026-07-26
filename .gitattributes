@@ -1,2 +1,16 @@
+# Check every text file out with LF on all platforms. Windows CI defaults to
+# `core.autocrlf=input`, but any runner or contributor with `core.autocrlf=true`
+# would otherwise get CRLF working-tree copies and break byte-for-byte
+# comparisons against files produced on Linux and macOS.
+* text=auto eol=lf
+
+# Byte-for-byte critical: `sqlx` hashes migration bodies, and a CRLF checkout
+# changes every shipped migration checksum
+# (`shipped_state_ledger_versions_stay_frozen`).
+*.sql text eol=lf
+
+# `insta` compares snapshot bodies literally, so CRLF fails every snapshot test.
+*.snap text eol=lf
+
 codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated

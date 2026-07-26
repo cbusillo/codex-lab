@@ -768,6 +768,49 @@ async fn malformed_json_output_is_classified() {
 }
 
 #[test]
+fn split_command_and_args_preserves_absolute_windows_paths() {
+    let (command, args) =
+        split_command_and_args(r"C:\Program Files\GitHub Copilot\copilot.exe").expect("split");
+    assert_eq!(command, r"C:\Program Files\GitHub Copilot\copilot.exe");
+    assert!(args.is_empty());
+
+    let (command, args) = split_command_and_args(r"D:\tools\claude.exe").expect("split");
+    assert_eq!(command, r"D:\tools\claude.exe");
+    assert!(args.is_empty());
+
+    let (command, args) = split_command_and_args(r"\\build\share\agents\qwen.exe").expect("split");
+    assert_eq!(command, r"\\build\share\agents\qwen.exe");
+    assert!(args.is_empty());
+}
+
+#[test]
+fn split_command_and_args_preserves_current_exe_path() {
+    let current_exe = std::env::current_exe().expect("current test executable");
+    let rendered = current_exe.display().to_string();
+
+    let (command, args) = split_command_and_args(&rendered).expect("split");
+
+    assert_eq!(PathBuf::from(&command), current_exe);
+    assert!(args.is_empty());
+}
+
+#[test]
+fn split_command_and_args_still_splits_posix_commands() {
+    let (command, args) =
+        split_command_and_args("npx -y @openai/codex 'hello world'").expect("split");
+
+    assert_eq!(command, "npx");
+    assert_eq!(
+        args,
+        vec![
+            "-y".to_string(),
+            "@openai/codex".to_string(),
+            "hello world".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn github_copilot_version_output_accepts_official_banner() {
     assert!(github_copilot_version_output(
         b"GitHub Copilot CLI 1.0.71.\n",

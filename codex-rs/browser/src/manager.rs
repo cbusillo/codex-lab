@@ -101,6 +101,26 @@ fn is_temporary_internal_launch_error_message(message: &str) -> bool {
         || message.contains("os error 24")
 }
 
+/// Chrome refuses to start when another process still holds the profile's
+/// `ProcessSingleton` lock, exiting with `PROFILE_IN_USE` (21) before the
+/// websocket URL is ever printed. On Windows the losing instance lingers well
+/// past its parent's exit, so this is the dominant flake for concurrently
+/// launched browsers.
+///
+/// Only retryable for internally managed temporary profiles, where the next
+/// attempt allocates a fresh profile directory; a caller-supplied
+/// `user_data_dir` would just contend for the same lock again.
+fn is_chrome_profile_lock_error_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("profile appears to be in use")
+        || message.contains("profile is already in use")
+        || message.contains("processsingleton")
+        || message.contains("profile_in_use")
+        // `std::process::ExitStatus` on Windows renders as `ExitStatus(21)`;
+        // the Unix debug form encodes the wait status, so it cannot collide.
+        || message.contains("exitstatus(21)")
+}
+
 fn chrome_logging_enabled() -> bool {
     env_truthy("CODE_SUBAGENT_DEBUG") || env_truthy("CODEX_BROWSER_LOG")
 }
@@ -967,7 +987,10 @@ impl BrowserManager {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis();
-                    let temp_path = format!("/tmp/codex-browser-{pid}-{timestamp}-{attempt}");
+                    let temp_path = std::env::temp_dir()
+                        .join(format!("codex-browser-{pid}-{timestamp}-{attempt}"))
+                        .to_string_lossy()
+                        .into_owned();
                     if tokio::fs::metadata(&temp_path).await.is_ok() {
                         let _ = tokio::fs::remove_dir_all(&temp_path).await;
                     }
@@ -1015,7 +1038,8 @@ impl BrowserManager {
                     Err(e) => {
                         let message = e.to_string();
 
-                        let is_temporary = is_temporary_internal_launch_error_message(&message);
+                        let is_temporary = is_temporary_internal_launch_error_message(&message)
+                            || (is_temp_profile && is_chrome_profile_lock_error_message(&message));
                         if is_temp_profile {
                             let _ = tokio::fs::remove_dir_all(&user_data_path).await;
                         }
@@ -2692,6 +2716,7 @@ pub struct BrowserStatus {
 #[cfg(test)]
 mod tests {
     use super::discover_ws_via_host_port;
+    use super::is_chrome_profile_lock_error_message;
     use super::should_restart_handler;
     use super::should_stop_handler;
     use std::io::Read;
@@ -2704,6 +2729,26 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use std::time::Instant;
+
+    #[test]
+    fn chrome_profile_lock_errors_are_recognized() {
+        assert!(is_chrome_profile_lock_error_message(
+            "Browser process exited with status ExitStatus(21) before websocket URL could be resolved, stderr: \"\""
+        ));
+        assert!(is_chrome_profile_lock_error_message(
+            "The profile appears to be in use by another Google Chrome process"
+        ));
+        assert!(is_chrome_profile_lock_error_message(
+            "Failed to create a ProcessSingleton for your profile directory."
+        ));
+
+        assert!(!is_chrome_profile_lock_error_message(
+            "Browser process exited with status ExitStatus(1) before websocket URL could be resolved, stderr: \"\""
+        ));
+        assert!(!is_chrome_profile_lock_error_message(
+            "Timeout while resolving websocket URL from browser process"
+        ));
+    }
 
     #[derive(Debug)]
     struct TestError(&'static str);

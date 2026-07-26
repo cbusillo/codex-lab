@@ -36,7 +36,9 @@ jobs:
   archive:
     name: Build nextest archive
     runs-on: ${{ inputs.archive_runner != '' && inputs.archive_runner || inputs.runner }}
-    timeout-minutes: 60
+    # Cancelled at exactly 60 minutes on the current head; cold-cache Windows
+    # and ARM archive builds need headroom above that.
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: codex-rs
