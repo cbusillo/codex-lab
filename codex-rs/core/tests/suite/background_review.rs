@@ -12,9 +12,11 @@ use anyhow::ensure;
 use codex_auto_review::AutoReviewBudget;
 use codex_auto_review::AutoReviewDispositionActor;
 use codex_auto_review::AutoReviewFindingDisposition;
+use codex_auto_review::AutoReviewFindingDispositionRecord;
 use codex_auto_review::AutoReviewRun;
 use codex_auto_review::AutoReviewRunFreshness;
 use codex_auto_review::AutoReviewRunSource;
+use codex_auto_review::AutoReviewRunState;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
@@ -481,6 +483,210 @@ async fn run_background_review_with_budget(
 async fn auto_review_disposition_tool_persists_agent_disposition() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
+    let turn = Box::pin(run_disposition_tool_turn(
+        serde_json::json!({
+            "run_id": SEEDED_RUN_ID,
+            "action": "defer",
+            "reason": "tracked in the follow-up issue",
+        }),
+        SeededRun::completed_and_current(),
+    ))
+    .await?;
+
+    assert!(
+        turn.output.contains("\"status\":\"ok\""),
+        "unexpected tool output: {}",
+        turn.output
+    );
+    assert_eq!(
+        turn.finding_disposition()?,
+        AutoReviewFindingDispositionRecord {
+            disposition: AutoReviewFindingDisposition::Deferred,
+            actor: AutoReviewDispositionActor::Agent,
+            reason: Some("tracked in the follow-up issue".to_string()),
+            updated_at_unix_secs: turn.finding_disposition()?.updated_at_unix_secs,
+        }
+    );
+
+    Ok(())
+}
+
+/// `repair` is the only disposition that opens a bounded repair turn, so it must
+/// hand the model the finding detail alongside the persisted `repairing` record
+/// and supply the default reason when the model omits one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_review_disposition_tool_repair_returns_detail_and_persists_repairing() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let turn = Box::pin(run_disposition_tool_turn(
+        serde_json::json!({
+            "run_id": SEEDED_RUN_ID,
+            "action": "repair",
+        }),
+        SeededRun::completed_and_current(),
+    ))
+    .await?;
+
+    let response: serde_json::Value = serde_json::from_str(&turn.output)?;
+    assert_eq!(response["status"], serde_json::json!("ok"));
+    assert_eq!(response["disposition"], serde_json::json!("repairing"));
+    assert_eq!(
+        response["reason"],
+        serde_json::json!("bounded repair turn opened by agent")
+    );
+    let detail = response
+        .get("repair_detail")
+        .context("repair must return the finding detail the model repairs against")?;
+    assert_eq!(detail["finding_count"], serde_json::json!(1));
+    assert_eq!(detail["omitted_findings"], serde_json::json!(0));
+    assert_eq!(detail["truncated"], serde_json::json!(false));
+    let content = detail["content"]
+        .as_str()
+        .context("repair detail must carry content")?;
+    assert!(
+        content.contains("Guard the new branch"),
+        "repair detail must describe the seeded finding: {content}"
+    );
+
+    let record = turn.finding_disposition()?;
+    assert_eq!(
+        record,
+        AutoReviewFindingDispositionRecord {
+            disposition: AutoReviewFindingDisposition::Repairing,
+            actor: AutoReviewDispositionActor::Agent,
+            reason: Some("bounded repair turn opened by agent".to_string()),
+            updated_at_unix_secs: record.updated_at_unix_secs,
+        }
+    );
+
+    Ok(())
+}
+
+/// `obsolete` is the escape hatch for runs the agent can no longer act on, so it
+/// must persist even when the run is stale and `repair`/`defer` would be
+/// rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_review_disposition_tool_obsolete_persists_for_stale_run() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let turn = Box::pin(run_disposition_tool_turn(
+        serde_json::json!({
+            "run_id": SEEDED_RUN_ID,
+            "action": "obsolete",
+            "reason": "  the findings no longer apply  ",
+        }),
+        SeededRun {
+            freshness: AutoReviewRunFreshness::Obsolete,
+            ..SeededRun::completed_and_current()
+        },
+    ))
+    .await?;
+
+    assert!(
+        turn.output.contains("\"status\":\"ok\""),
+        "unexpected tool output: {}",
+        turn.output
+    );
+    let record = turn.finding_disposition()?;
+    assert_eq!(
+        record,
+        AutoReviewFindingDispositionRecord {
+            disposition: AutoReviewFindingDisposition::Obsolete,
+            actor: AutoReviewDispositionActor::Agent,
+            // The handler trims the model-supplied reason before persisting it.
+            reason: Some("the findings no longer apply".to_string()),
+            updated_at_unix_secs: record.updated_at_unix_secs,
+        }
+    );
+
+    Ok(())
+}
+
+/// Repairing against a run whose findings no longer describe the worktree would
+/// send the agent chasing phantom findings, so a stale run must be refused and
+/// leave no disposition behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_review_disposition_tool_rejects_repair_for_stale_run() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let turn = Box::pin(run_disposition_tool_turn(
+        serde_json::json!({
+            "run_id": SEEDED_RUN_ID,
+            "action": "repair",
+        }),
+        SeededRun {
+            freshness: AutoReviewRunFreshness::Superseded,
+            ..SeededRun::completed_and_current()
+        },
+    ))
+    .await?;
+
+    assert!(
+        turn.output
+            .contains("repair/defer requires a completed Background Review with current findings"),
+        "stale run must be refused: {}",
+        turn.output
+    );
+    assert_eq!(turn.state.and_then(|state| state.finding_disposition), None);
+
+    Ok(())
+}
+
+/// The same refusal must apply to a run that never completed, which has no
+/// durable findings to repair at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_review_disposition_tool_rejects_defer_for_non_completed_run() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let turn = Box::pin(run_disposition_tool_turn(
+        serde_json::json!({
+            "run_id": SEEDED_RUN_ID,
+            "action": "defer",
+            "reason": "will look at it later",
+        }),
+        SeededRun {
+            status: AutoReviewRunStatus::Failed,
+            ..SeededRun::completed_and_current()
+        },
+    ))
+    .await?;
+
+    assert!(
+        turn.output
+            .contains("repair/defer requires a completed Background Review with current findings"),
+        "non-completed run must be refused: {}",
+        turn.output
+    );
+    assert_eq!(turn.state.and_then(|state| state.finding_disposition), None);
+
+    Ok(())
+}
+
+/// What the model saw and what the store kept after one `auto_review_disposition`
+/// call.
+struct DispositionToolTurn {
+    output: String,
+    state: Option<AutoReviewRunState>,
+}
+
+impl DispositionToolTurn {
+    fn finding_disposition(&self) -> Result<AutoReviewFindingDispositionRecord> {
+        self.state
+            .as_ref()
+            .context("disposition must persist run state")?
+            .finding_disposition
+            .clone()
+            .context("disposition must be recorded")
+    }
+}
+
+/// Runs one real turn whose only tool call is `auto_review_disposition` against a
+/// seeded run, so the assertions cover the production handler path rather than a
+/// direct call into the store.
+async fn run_disposition_tool_turn(
+    arguments: serde_json::Value,
+    seed: SeededRun,
+) -> Result<DispositionToolTurn> {
     let server = responses::start_mock_server().await;
     let call_id = "disposition-call";
     let responses_mock = responses::mount_sse_sequence(
@@ -491,12 +697,7 @@ async fn auto_review_disposition_tool_persists_agent_disposition() -> Result<()>
                 responses::ev_function_call(
                     call_id,
                     "auto_review_disposition",
-                    &serde_json::json!({
-                        "run_id": SEEDED_RUN_ID,
-                        "action": "defer",
-                        "reason": "tracked in the follow-up issue",
-                    })
-                    .to_string(),
+                    &arguments.to_string(),
                 ),
                 responses::ev_completed("resp-tool"),
             ]),
@@ -509,7 +710,7 @@ async fn auto_review_disposition_tool_persists_agent_disposition() -> Result<()>
     let test = Box::pin(builder.build(&server)).await?;
     let cwd = test.config.cwd.clone();
     let store = AutoReviewStore::for_scope(test.codex_home_path(), cwd.as_path());
-    seed_completed_background_review(&store, cwd.as_path())?;
+    seed.write(&store, cwd.as_path())?;
 
     Box::pin(submit_turn(
         &test.codex,
@@ -522,28 +723,12 @@ async fn auto_review_disposition_tool_persists_agent_disposition() -> Result<()>
     }))
     .await;
 
-    let output = responses_mock
-        .function_call_output_text(call_id)
-        .context("model must observe the disposition tool output")?;
-    assert!(
-        output.contains("\"status\":\"ok\""),
-        "unexpected tool output: {output}"
-    );
-
-    let state = store
-        .load_run_state(SEEDED_RUN_ID)?
-        .context("disposition must persist run state")?;
-    let record = state
-        .finding_disposition
-        .context("disposition must be recorded")?;
-    assert_eq!(record.disposition, AutoReviewFindingDisposition::Deferred);
-    assert_eq!(record.actor, AutoReviewDispositionActor::Agent);
-    assert_eq!(
-        record.reason.as_deref(),
-        Some("tracked in the follow-up issue")
-    );
-
-    Ok(())
+    Ok(DispositionToolTurn {
+        output: responses_mock
+            .function_call_output_text(call_id)
+            .context("model must observe the disposition tool output")?,
+        state: store.load_run_state(SEEDED_RUN_ID)?,
+    })
 }
 
 const SEEDED_RUN_ID: &str = "seeded-background-review";
@@ -566,19 +751,41 @@ fn seeded_review_output() -> ReviewOutputEvent {
     }
 }
 
-/// Writes a completed background review whose target matches what the session
-/// will compute for a plain (non-git) workspace, so the run reads as current.
-fn seed_completed_background_review(
+/// The lifecycle fields that decide whether the disposition tool will accept a
+/// run; everything else about the seeded run is fixed.
+struct SeededRun {
+    status: AutoReviewRunStatus,
+    freshness: AutoReviewRunFreshness,
+}
+
+impl SeededRun {
+    fn completed_and_current() -> Self {
+        Self {
+            status: AutoReviewRunStatus::Completed,
+            freshness: AutoReviewRunFreshness::Current,
+        }
+    }
+
+    fn write(self, store: &AutoReviewStore, cwd: &Path) -> Result<ReviewOutputEvent> {
+        seed_background_review(store, cwd, self.status, self.freshness)
+    }
+}
+
+/// Writes a background review whose target matches what the session will compute
+/// for a plain (non-git) workspace, so a `Current` run reads as current.
+fn seed_background_review(
     store: &AutoReviewStore,
     cwd: &Path,
+    status: AutoReviewRunStatus,
+    freshness: AutoReviewRunFreshness,
 ) -> Result<ReviewOutputEvent> {
     let output = seeded_review_output();
     let digests = finding_digests(&output);
     let run = AutoReviewRun {
         schema_version: SCHEMA_VERSION,
         run_id: SEEDED_RUN_ID.to_string(),
-        status: AutoReviewRunStatus::Completed,
-        freshness: AutoReviewRunFreshness::Current,
+        status,
+        freshness,
         source: AutoReviewRunSource::Background,
         target: AutoReviewRunTarget {
             branch: None,

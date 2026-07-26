@@ -10,13 +10,20 @@ use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 
 pub(super) async fn make_test_app() -> App {
-    let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    make_test_app_with_event_rx().await.0
+}
+
+/// Same fixture as [`make_test_app`], but keeps the `AppEvent` receiver alive so
+/// tests can assert on the events the app emits.
+pub(super) async fn make_test_app_with_event_rx()
+-> (App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+    let (chat_widget, app_event_tx, rx, _op_rx) = make_chatwidget_manual_with_sender().await;
     let config = chat_widget.config_ref().clone();
     let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
     let model = get_model_offline_for_tests(config.model.as_deref());
     let session_telemetry = test_session_telemetry(&config, model.as_str());
 
-    App {
+    let app = App {
         model_catalog: chat_widget.model_catalog(),
         session_telemetry,
         app_event_tx,
@@ -76,7 +83,8 @@ pub(super) async fn make_test_app() -> App {
         pending_login_add_account_id: None,
         completed_login_add_account_id: None,
         pending_auth_profile_login: None,
-    }
+    };
+    (app, rx)
 }
 
 fn test_session_telemetry(config: &Config, model: &str) -> SessionTelemetry {

@@ -1779,8 +1779,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::make_test_app_with_event_rx;
+    use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
+    use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
     use codex_protocol::models::ActivePermissionProfile;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+    use pretty_assertions::assert_eq;
 
     async fn config_with_workspace_profile() -> Config {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -1847,5 +1851,120 @@ mod tests {
             ),
             TurnPermissionsOverride::LegacySandbox(effective_permission_profile)
         );
+    }
+    fn status_notification(
+        thread_id: ThreadId,
+        run_id: &str,
+        status: BackgroundAutoReviewStatus,
+    ) -> ServerNotification {
+        ServerNotification::BackgroundAutoReviewStatusChanged(
+            BackgroundAutoReviewStatusChangedNotification {
+                thread_id: thread_id.to_string(),
+                run_id: run_id.to_string(),
+                status,
+                review_target: ApiReviewTarget::UncommittedChanges,
+                error_summary: None,
+            },
+        )
+    }
+
+    fn drain_summary_fetches(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    ) -> Vec<(ThreadId, String)> {
+        let mut fetches = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::FetchAutoReviewSummary { thread_id, run_id } = event {
+                fetches.push((thread_id, run_id));
+            }
+        }
+        fetches
+    }
+
+    /// Resuming a thread replays every buffered background-review status, so a
+    /// run that walked Pending -> Running -> Completed would ask the app server
+    /// for the same summary several times if the replay path did not claim the
+    /// fetch. Only the terminal status carries a summary, and only once.
+    #[tokio::test]
+    async fn replayed_statuses_fetch_each_run_summary_once() {
+        let (mut app, mut rx) = make_test_app_with_event_rx().await;
+        let thread_id = ThreadId::new();
+
+        for status in [
+            BackgroundAutoReviewStatus::Pending,
+            BackgroundAutoReviewStatus::Running,
+            BackgroundAutoReviewStatus::Completed,
+            // A duplicate terminal status can arrive from a second replay pass.
+            BackgroundAutoReviewStatus::Completed,
+        ] {
+            app.maybe_fetch_replayed_auto_review_summary(
+                &status_notification(thread_id, "run-1", status),
+                &HashSet::new(),
+            );
+        }
+
+        assert_eq!(
+            drain_summary_fetches(&mut rx),
+            vec![(thread_id, "run-1".to_string())]
+        );
+    }
+
+    /// Every terminal status persists a summary, and each distinct run needs its
+    /// own fetch: the claim is per `(thread, run)`, not per thread.
+    #[tokio::test]
+    async fn each_terminal_run_gets_its_own_summary_fetch() {
+        let (mut app, mut rx) = make_test_app_with_event_rx().await;
+        let thread_id = ThreadId::new();
+
+        for (run_id, status) in [
+            ("run-completed", BackgroundAutoReviewStatus::Completed),
+            ("run-failed", BackgroundAutoReviewStatus::Failed),
+            ("run-cancelled", BackgroundAutoReviewStatus::Cancelled),
+            ("run-superseded", BackgroundAutoReviewStatus::Superseded),
+            ("run-skipped", BackgroundAutoReviewStatus::Skipped),
+        ] {
+            app.maybe_fetch_replayed_auto_review_summary(
+                &status_notification(thread_id, run_id, status),
+                &HashSet::new(),
+            );
+        }
+
+        assert_eq!(
+            drain_summary_fetches(&mut rx),
+            vec![
+                (thread_id, "run-completed".to_string()),
+                (thread_id, "run-failed".to_string()),
+                (thread_id, "run-cancelled".to_string()),
+                (thread_id, "run-superseded".to_string()),
+                (thread_id, "run-skipped".to_string()),
+            ]
+        );
+    }
+
+    /// A summary that the replay already delivered must not be re-fetched, and a
+    /// run that has not reached a terminal status has no summary to fetch yet.
+    #[tokio::test]
+    async fn replayed_summaries_and_non_terminal_statuses_skip_the_fetch() {
+        let (mut app, mut rx) = make_test_app_with_event_rx().await;
+        let thread_id = ThreadId::new();
+        let already_replayed = HashSet::from(["run-replayed".to_string()]);
+
+        app.maybe_fetch_replayed_auto_review_summary(
+            &status_notification(
+                thread_id,
+                "run-replayed",
+                BackgroundAutoReviewStatus::Completed,
+            ),
+            &already_replayed,
+        );
+        app.maybe_fetch_replayed_auto_review_summary(
+            &status_notification(
+                thread_id,
+                "run-running",
+                BackgroundAutoReviewStatus::Running,
+            ),
+            &already_replayed,
+        );
+
+        assert_eq!(drain_summary_fetches(&mut rx), Vec::new());
     }
 }
