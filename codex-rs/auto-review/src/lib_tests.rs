@@ -704,6 +704,113 @@ fn save_run_prunes_metadata_for_runs_evicted_from_index() -> anyhow::Result<()> 
 }
 
 #[test]
+fn save_run_backfills_only_missing_metadata_sidecars() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+    store.save_run(&sample_run("run_2", &sample_output(Vec::new())))?;
+
+    // Tag an existing sidecar so a rewrite would be observable, and drop another so the
+    // backfill has something to restore.
+    let retained_path = store.run_metadata_path("run_1")?;
+    let mut tagged: AutoReviewRun =
+        serde_json::from_str(&std::fs::read_to_string(&retained_path)?)?;
+    tagged.started_at_unix_secs = 4242;
+    std::fs::write(
+        &retained_path,
+        format!("{}\n", serde_json::to_string_pretty(&tagged)?),
+    )?;
+    let backfilled_path = store.run_metadata_path("run_2")?;
+    std::fs::remove_file(&backfilled_path)?;
+
+    store.save_run(&sample_run("run_3", &sample_output(Vec::new())))?;
+
+    assert!(
+        backfilled_path.exists(),
+        "missing sidecar should be backfilled"
+    );
+    let retained: AutoReviewRun = serde_json::from_str(&std::fs::read_to_string(&retained_path)?)?;
+    assert_eq!(
+        retained.started_at_unix_secs, 4242,
+        "sidecars that already exist should not be rewritten on unrelated saves"
+    );
+
+    corrupt_runs_index(&store)?;
+    assert_eq!(
+        run_ids(store.list_runs()?),
+        vec![
+            "run_1".to_string(),
+            "run_2".to_string(),
+            "run_3".to_string()
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn save_run_rewrites_metadata_for_the_changed_run() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+
+    let updated = AutoReviewRun {
+        started_at_unix_secs: 99,
+        ..sample_run("run_1", &sample_output(Vec::new()))
+    };
+    store.save_run(&updated)?;
+
+    corrupt_runs_index(&store)?;
+    assert_eq!(store.load_run("run_1")?, updated);
+    Ok(())
+}
+
+#[test]
+fn save_run_removes_state_sidecars_for_runs_evicted_from_index() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    for index in 0..DEFAULT_MAX_RUNS {
+        let output = sample_output(Vec::new());
+        store.save_run(&AutoReviewRun {
+            run_id: format!("run_{index:03}"),
+            started_at_unix_secs: index as i64,
+            completed_at_unix_secs: Some(index as i64),
+            ..sample_run("unused", &output)
+        })?;
+    }
+    store.save_run_state(&AutoReviewRunState::new("run_000"))?;
+    store.save_run_state(&AutoReviewRunState::new("run_001"))?;
+    let evicted_state_path = store.run_state_path("run_000")?;
+    let retained_state_path = store.run_state_path("run_001")?;
+    assert!(evicted_state_path.exists());
+
+    // The next save pushes the index past its cap and evicts the oldest run.
+    let output = sample_output(Vec::new());
+    store.save_run(&AutoReviewRun {
+        run_id: format!("run_{DEFAULT_MAX_RUNS:03}"),
+        started_at_unix_secs: DEFAULT_MAX_RUNS as i64,
+        completed_at_unix_secs: Some(DEFAULT_MAX_RUNS as i64),
+        ..sample_run("unused", &output)
+    })?;
+
+    assert!(
+        !evicted_state_path.exists(),
+        "evicted run state should be removed"
+    );
+    assert!(
+        !store.run_metadata_path("run_000")?.exists(),
+        "evicted run metadata should be removed"
+    );
+    assert!(
+        retained_state_path.exists(),
+        "retained run state should be kept"
+    );
+    Ok(())
+}
+
+#[test]
 fn metadata_write_failure_does_not_update_index_or_prune_existing_metadata() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
