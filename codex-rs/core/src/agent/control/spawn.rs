@@ -1,3 +1,4 @@
+use super::external::ExternalAgentSpawn;
 use super::residency::is_v2_resident_session_source;
 use super::*;
 use crate::agent::role::apply_role_to_config;
@@ -17,7 +18,7 @@ struct SpawnAgentThreadInheritance {
 /// submission and lifecycle logging cannot receive one without the other. Other spawn sources
 /// provide user input directly, making an uncontextualized inter-agent communication
 /// unrepresentable.
-enum SpawnInitialInput {
+pub(super) enum SpawnInitialInput {
     UserInput(Vec<UserInput>),
     InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
 }
@@ -431,6 +432,27 @@ impl AgentControl {
             other => (other, AgentMetadata::default()),
         };
         let notification_source = session_source.clone();
+
+        let role_name = agent_metadata.agent_role.as_deref();
+        let role_config =
+            role_name.and_then(|role| crate::agent::role::resolve_role_config_owned(&config, role));
+        let resolved_backend = role_config.and_then(|role| role.backend);
+
+        if let Some(crate::config::AgentRoleBackendConfig::ExternalCommand(backend)) =
+            resolved_backend
+        {
+            return self
+                .spawn_external_agent(ExternalAgentSpawn {
+                    config,
+                    initial_input,
+                    notification_source,
+                    options,
+                    reservation,
+                    agent_metadata,
+                    backend,
+                })
+                .await;
+        }
 
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread = match (session_source, options.fork_mode.as_ref(), inheritance) {

@@ -23,7 +23,7 @@ use codex_external_agent_migration::ExternalAgentConfigMigrationItemType as Core
 use codex_external_agent_migration::MigrationDetails as CoreMigrationDetails;
 use codex_external_agent_migration::NamedMigration;
 use codex_external_agent_migration::PluginsMigration as CorePluginsMigration;
-use codex_external_agent_migration::sessions::ExternalAgentSessionMigration;
+use codex_external_agent_sessions::ExternalAgentSessionMigration;
 use codex_state::ExternalAgentConfigImportFailureRecord;
 use codex_state::ExternalAgentConfigImportSuccessRecord;
 

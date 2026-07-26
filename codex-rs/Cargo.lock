@@ -2057,6 +2057,7 @@ dependencies = [
  "codex-exec-server",
  "codex-extension-api",
  "codex-external-agent-migration",
+ "codex-external-agent-sessions",
  "codex-features",
  "codex-feedback",
  "codex-file-search",
@@ -2825,6 +2826,9 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-apply-patch",
  "codex-async-utils",
+ "codex-browser",
+ "codex-code-bridge-client",
+ "codex-code-bridge-protocol",
  "codex-code-mode",
  "codex-config",
  "codex-connectors",
@@ -3256,14 +3260,7 @@ dependencies = [
 name = "codex-external-agent-sessions"
 version = "0.0.0"
 dependencies = [
- "chrono",
- "codex-app-server-protocol",
- "codex-protocol",
- "codex-utils-output-truncation",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
+ "codex-external-agent-migration",
 ]
 
 [[package]]
@@ -3559,6 +3556,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "codex-agent-identity",
+ "codex-browser",
  "codex-config",
  "codex-http-client",
  "codex-keyring-store",

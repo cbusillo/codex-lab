@@ -10,6 +10,7 @@ pub mod account_usage;
 mod apply_patch;
 mod apps;
 mod audio_preparation;
+mod browser;
 mod client;
 mod client_common;
 mod execution_account;
