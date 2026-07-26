@@ -9,7 +9,7 @@ use crate::agent::external_preflight::antigravity_launch_dir;
 #[cfg(test)]
 use crate::agent::external_preflight::github_copilot_version_output;
 use crate::agent::external_preflight::preflight_external_agent_backend;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::agent::external_preflight::run_external_agent_preflight_command_with_timeout;
 use crate::config::ExternalCommandAgentBackendConfig;
 use crate::config::ExternalCommandProtocol;

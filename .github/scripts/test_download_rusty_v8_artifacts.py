@@ -251,9 +251,14 @@ class SetupRustyV8ActionTest(unittest.TestCase):
 class WorkflowArtifactSourceTest(unittest.TestCase):
     """CI may read upstream artifacts; the release path must not."""
 
-    def test_ci_reads_upstream_artifacts_explicitly(self) -> None:
-        workflow = (WORKFLOWS / "rust-ci-full.yml").read_text()
-        self.assertIn("artifact-repository: openai/codex", workflow)
+    def test_full_ci_reads_upstream_artifacts_explicitly(self) -> None:
+        for workflow_name in (
+            "rust-ci-full.yml",
+            "rust-ci-full-nextest-platform.yml",
+        ):
+            with self.subTest(workflow_name=workflow_name):
+                workflow = (WORKFLOWS / workflow_name).read_text()
+                self.assertIn("artifact-repository: openai/codex", workflow)
 
     def test_release_keeps_the_fail_closed_default(self) -> None:
         workflow = (WORKFLOWS / "rust-release.yml").read_text()

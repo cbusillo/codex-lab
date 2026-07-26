@@ -55,6 +55,7 @@ mod plugin_read;
 mod plugin_share;
 mod plugin_uninstall;
 mod process_exec;
+#[cfg(unix)]
 mod project_validation;
 mod rate_limit_reset_credits;
 mod rate_limits;

@@ -87,7 +87,7 @@ fn command_exists_on_path(command: &str) -> bool {
 
     #[cfg(windows)]
     {
-        return which::which(command).is_ok();
+        which::which(command).is_ok()
     }
 
     #[cfg(not(windows))]

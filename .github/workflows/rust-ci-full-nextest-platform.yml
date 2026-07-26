@@ -79,6 +79,22 @@ jobs:
         with:
           targets: ${{ inputs.target }}
 
+      - if: ${{ !contains(inputs.target, 'windows') }}
+        name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ inputs.target }}
+          # Full CI only compiles and tests this repository; it publishes no
+          # artifacts. Release workflows keep the same-repository default.
+          artifact-repository: openai/codex
+
+      # Runs 30201090398, 30201567036, and 30202380677 all lost the hosted ARM
+      # runner during final archive linking with Cargo's default parallelism.
+      - name: Limit Cargo build concurrency on Linux ARM64
+        if: ${{ runner.os == 'Linux' && runner.arch == 'ARM64' }}
+        shell: bash
+        run: echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+
       - name: Expose MSVC SDK environment (Windows)
         if: ${{ runner.os == 'Windows' && inputs.target == 'aarch64-pc-windows-msvc' }}
         uses: ./.github/actions/setup-msvc-env
