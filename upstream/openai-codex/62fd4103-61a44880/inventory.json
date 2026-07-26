@@ -6,7 +6,7 @@
   "summary": {"conflicts": 1, "localChangedOnly": 446, "residualLocalInfluence": 446, "sharedIdentical": 1, "sharedMergeableDivergent": 0},
   "conflictTypeCounts": {"content": 1},
   "laneCounts": {"amber_contract_adapt": 1},
-  "residualLaneCounts": {"amber_contract_adapt": 147, "green_bulk_adopt": 195, "intentionally_owned": 94, "red_manual_review": 10},
+  "residualLaneCounts": {"amber_contract_adapt": 146, "green_bulk_adopt": 192, "intentionally_owned": 98, "red_manual_review": 10},
   "conflicts": [
     {"conflictType": "content", "contracts": ["PROTOCOL-1"], "lane": "amber_contract_adapt", "path": "codex-rs/app-server/tests/suite/v2/thread_fork.rs", "reason": "app-server and wire compatibility"}
   ]

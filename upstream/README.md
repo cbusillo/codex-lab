@@ -57,9 +57,17 @@ Ownership itself comes from path patterns in
 `upstream_convergence_inventory.py`, not an enumerated list. Owned features are
 declared by filename stem and expanded across the conventional implementation
 and integration-proof roots, so an implementation and the proof that pins it are
-guarded together. Suite registry modules (`tests/suite/mod.rs`) are guarded as
-well: reverting one unregisters every owned proof in that crate while leaving
-each proof file in place.
+guarded together. Suite registry modules are guarded as well: reverting one
+unregisters every owned proof in that crate while leaving each proof file in
+place. That includes the nested `app-server/tests/suite/v2/mod.rs`, because
+every Every Code-owned app-server proof is a v2 suite and registers there rather
+than in the crate-level `tests/suite/mod.rs`.
+
+Shared upstream modules that carry an owned delta but no owned filename -- the
+TUI thread routing module, the context manager history, the hook config and
+discovery modules, the turn-context writer -- are listed explicitly by their
+contract. Guarding one still only forbids deletion and byte-identical reversion,
+never ordinary upstream edits.
 
 `upstream_convergence_guard.py` then fails a candidate when a guarded path is:
 

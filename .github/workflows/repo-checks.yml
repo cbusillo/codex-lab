@@ -30,43 +30,17 @@ jobs:
       - name: Verify blocking CI runner routing
         run: python3 .github/scripts/verify_blocking_ci_runner_routing.py
 
-      - name: Test blocking CI runner routing verifier
-        run: python3 -m unittest discover -s .github/scripts -p 'test_verify_blocking_ci_runner_routing.py'
-
       - name: Verify upstream-only release publishing stays fork-guarded
         run: python3 .github/scripts/verify_upstream_only_release_publishing.py
-
-      - name: Test upstream-only release publishing verifier
-        run: python3 -m unittest discover -s .github/scripts -p 'test_verify_upstream_only_release_publishing.py'
 
       - name: Verify release installers and Codex Lab assets stay fork-owned
         run: python3 .github/scripts/verify_release_installer_provenance.py
 
-      - name: Test release installer provenance verifier
-        run: python3 -m unittest discover -s .github/scripts -p 'test_verify_release_installer_provenance.py'
-
-      - name: Test rusty_v8 artifact download
-        run: python3 -m unittest discover -s .github/scripts -p 'test_download_rusty_v8_artifacts.py'
-
-      - name: Test conditional apt installs
-        run: python3 -m unittest discover -s .github/scripts -p 'test_install_apt_packages.py'
-
-      - name: Test repo-checks npm staging inputs
-        run: python3 -m unittest discover -s .github/scripts -p 'test_repo_checks_npm_staging.py'
-
-      - name: Test Codex Lab signing exposure gate
-        run: python3 -m unittest discover -s .github/scripts -p 'test_codex_lab_signing_exposure.py'
-
-      - name: Test Codex Lab release symbol and strip ordering
-        run: python3 -m unittest discover -s .github/scripts -p 'test_codex_lab_release_symbols.py'
-
       - name: Verify owned convergence paths survived the refresh
         run: python3 .github/scripts/upstream_convergence_guard.py
 
-      - name: Test upstream convergence inventory and guard
-        run: |
-          python3 -m unittest discover -s .github/scripts \
-            -p 'test_upstream_convergence_*.py'
+      - name: Verify every repo-check Python test is registered
+        run: python3 .github/scripts/verify_repo_checks_test_registration.py
 
       - name: Install actionlint
         run: |
@@ -74,13 +48,18 @@ jobs:
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Lint convergence guard workflows and shell
-        # Fail instead of skipping when a linter is missing from the image.
+      - name: Test repo-check helper scripts
+        # One discovery run over the whole directory instead of a per-file
+        # pattern list, so a new `.github/scripts/test_*.py` is executed the
+        # moment it lands. `verify_repo_checks_test_registration.py` above fails
+        # if that ever stops being true.
+        #
+        # Runs after actionlint installs because the convergence workflow lint
+        # tests need it; CONVERGENCE_LINT_REQUIRED makes a missing linter fail
+        # instead of skipping to green.
         env:
           CONVERGENCE_LINT_REQUIRED: "1"
-        run: |
-          python3 -m unittest discover -s .github/scripts \
-            -p 'test_convergence_guard_workflows.py'
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
       - name: Test Codex exec harness
         run: python3 -m unittest discover -s tools/codex-exec-harness -p 'test_*.py'

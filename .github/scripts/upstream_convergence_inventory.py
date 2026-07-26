@@ -83,6 +83,11 @@ SHARED_PROOF_REGISTRIES = (
     "codex-rs/core/tests/suite/mod.rs",
     "codex-rs/exec/tests/suite/mod.rs",
     "codex-rs/app-server/tests/suite/mod.rs",
+    # Every Every Code-owned app-server proof is a v2 suite, so this nested
+    # registry -- not the crate-level one above -- is the file that actually
+    # registers Code Bridge, remote control, Background Review control, and
+    # Project Validation coverage.
+    "codex-rs/app-server/tests/suite/v2/mod.rs",
 )
 
 
@@ -200,9 +205,15 @@ RULES = (
                 "guardian_review",
                 "multi_agent",
                 "provider_routing",
+                "session_provenance",
                 "spawn_agent",
                 "subagent",
             ),
+            # Background Review status replay and its summary claiming live in
+            # this shared TUI routing module and its inline test module, which
+            # upstream also owns, so the stem convention cannot reach them.
+            "codex-rs/tui/src/app/thread_routing.rs",
+            "codex-rs/tui/src/app/test_support.rs",
         ),
         lane="intentionally_owned",
         contracts=("AGENT-1",),
@@ -240,6 +251,67 @@ RULES = (
         lane="intentionally_owned",
         contracts=("VALIDATION-1",),
         reason="Project Validation providers, status, and failure feedback",
+    ),
+    Rule(
+        patterns=(
+            # Model-visible context safety: every agent-authored or tool-authored
+            # string that reaches history is bounded, and the one narrow history
+            # rewrite (dropping an image the Responses API cannot read) is
+            # checkpointed instead of replayed. Upstream owns these filenames, so
+            # the stem convention cannot reach them.
+            *feature_paths("token_budget_context"),
+            "codex-rs/core/src/context_manager/history.rs",
+            "codex-rs/core/src/context_manager/history_tests.rs",
+            "codex-rs/core/src/session_prefix.rs",
+            "codex-rs/core/src/session_prefix_tests.rs",
+            "codex-rs/core/src/session/turn.rs",
+            "codex-rs/core/tests/suite/view_image.rs",
+        ),
+        lane="intentionally_owned",
+        contracts=("CONTEXT-1",),
+        reason="model-visible context bounds and history-rewrite exceptions",
+    ),
+    Rule(
+        patterns=(
+            # Hook handler ids anchor the persisted enable/disable and
+            # `trusted_hash` state, and `hooks.json` tolerates extension keys
+            # while still rejecting misplaced event tables. Both are Every
+            # Code-only behavior inside shared upstream modules.
+            "codex-rs/config/src/hook_config.rs",
+            "codex-rs/config/src/hooks_tests.rs",
+            "codex-rs/hooks/src/declarations.rs",
+            "codex-rs/hooks/src/engine/discovery.rs",
+            "codex-rs/hooks/src/engine/mod_tests.rs",
+            "codex-rs/hooks/src/lib.rs",
+        ),
+        lane="intentionally_owned",
+        contracts=("HOOKS-1",),
+        reason="hook identity and persisted hook state",
+    ),
+    Rule(
+        patterns=(
+            # The durable environment baseline: the turn-context writer, the
+            # world-state reader that rebuilds from it, and the reconstruction
+            # entry point, plus their proofs.
+            *feature_paths("rollout_reconstruction", "turn_context_environments"),
+            "codex-rs/core/src/session/turn_context.rs",
+            "codex-rs/core/src/context/world_state/environment.rs",
+            "codex-rs/core/src/context/world_state/mod.rs",
+        ),
+        lane="intentionally_owned",
+        contracts=("HISTORY-1",),
+        reason="durable environment baseline across resume and fork",
+    ),
+    Rule(
+        patterns=(
+            # `--auth-profile` has no upstream counterpart, and
+            # `--workspace-root` only accepts the workspace-write sandbox here.
+            *feature_paths("shared_cli_options"),
+            "codex-rs/utils/cli/src/shared_options.rs",
+        ),
+        lane="intentionally_owned",
+        contracts=("AUTH-1", "SANDBOX-1"),
+        reason="Every Code shared CLI options for auth profiles and workspace roots",
     ),
     Rule(
         patterns=SHARED_PROOF_REGISTRIES,

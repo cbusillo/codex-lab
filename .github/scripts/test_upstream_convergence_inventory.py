@@ -159,15 +159,91 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
                     set(classified["contracts"]),
                 )
 
+    def test_owned_app_server_v2_proofs_are_owned(self) -> None:
+        for path, contract in (
+            (
+                "codex-rs/app-server/tests/suite/v2/background_review_control.rs",
+                "AGENT-1",
+            ),
+            ("codex-rs/app-server/tests/suite/v2/project_validation.rs", "VALIDATION-1"),
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, contract)
+
+    def test_durable_environment_baseline_writer_reader_and_proofs_are_owned(
+        self,
+    ) -> None:
+        for path in (
+            "codex-rs/core/src/session/turn_context.rs",
+            "codex-rs/core/src/session/rollout_reconstruction.rs",
+            "codex-rs/core/src/session/rollout_reconstruction_tests.rs",
+            "codex-rs/core/src/context/world_state/environment.rs",
+            "codex-rs/core/src/context/world_state/mod.rs",
+            "codex-rs/core/tests/suite/turn_context_environments.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "HISTORY-1")
+
+    def test_model_visible_context_safety_paths_are_owned(self) -> None:
+        for path in (
+            "codex-rs/core/src/context/token_budget_context.rs",
+            "codex-rs/core/src/context/token_budget_context_tests.rs",
+            "codex-rs/core/src/context_manager/history.rs",
+            "codex-rs/core/src/context_manager/history_tests.rs",
+            "codex-rs/core/src/session_prefix.rs",
+            "codex-rs/core/src/session_prefix_tests.rs",
+            "codex-rs/core/src/session/turn.rs",
+            "codex-rs/core/tests/suite/view_image.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "CONTEXT-1")
+
+    def test_hook_identity_paths_are_owned(self) -> None:
+        for path in (
+            "codex-rs/config/src/hook_config.rs",
+            "codex-rs/config/src/hooks_tests.rs",
+            "codex-rs/hooks/src/declarations.rs",
+            "codex-rs/hooks/src/engine/discovery.rs",
+            "codex-rs/hooks/src/engine/mod_tests.rs",
+            "codex-rs/hooks/src/lib.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "HOOKS-1")
+
+    def test_background_review_replay_and_provenance_paths_are_owned(self) -> None:
+        for path in (
+            "codex-rs/tui/src/app/thread_routing.rs",
+            "codex-rs/tui/src/app/test_support.rs",
+            "codex-rs/core/tests/suite/session_provenance.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "AGENT-1")
+
+    def test_shared_cli_option_surface_and_proof_are_owned(self) -> None:
+        for path in (
+            "codex-rs/utils/cli/src/shared_options.rs",
+            "codex-rs/exec/tests/suite/shared_cli_options.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "AUTH-1")
+
     def test_feature_stems_do_not_claim_unrelated_upstream_modules(self) -> None:
         # `validation` is a word upstream uses for config, cloud, OTEL, and
-        # request validation. Only the Project Validation stems are owned.
+        # request validation. Only the Project Validation stems are owned. The
+        # same applies to the newer stems: the shared-module rules name exact
+        # files so a neighbouring upstream module in the same directory stays
+        # green.
         for path in (
             "codex-rs/config/src/validation.rs",
             "codex-rs/cloud-config/src/validation.rs",
             "codex-rs/otel/src/metrics/validation.rs",
             "codex-rs/tui/src/chatwidget/tests/goal_validation.rs",
             "codex-rs/core/src/tools/handlers/shell.rs",
+            "codex-rs/core/src/session/token_budget.rs",
+            "codex-rs/core/src/context_manager/normalize.rs",
+            "codex-rs/hooks/src/registry.rs",
+            "codex-rs/utils/cli/src/resume_command.rs",
+            "codex-rs/tui/src/app/thread_events.rs",
         ):
             with self.subTest(path=path):
                 self.assertEqual(
