@@ -72,11 +72,116 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
             "content",
         )
         self.assertEqual(classified["lane"], "intentionally_owned")
-        self.assertEqual(classified["contracts"], ["AGENT-1", "INTEGRATION-1"])
+        self.assertEqual(
+            classified["contracts"], ["AGENT-1", "INTEGRATION-1", "VALIDATION-1"]
+        )
 
     def test_classify_path_omits_conflict_type(self) -> None:
         self.assertNotIn(
             "conflictType", inventory.classify_path("codex-rs/core/src/lib.rs")
+        )
+
+
+class OwnedFeatureCoverageTest(unittest.TestCase):
+    """Owned implementations and the proofs that pin them classify together.
+
+    The anchor merge deleted owned code and owned coverage in one silent step, so
+    a feature whose implementation is guarded while its integration proof is not
+    can still lose its evidence without any path going missing.
+    """
+
+    def assert_owned(self, path: str, contract: str) -> None:
+        classified = inventory.classify_path(path)
+        self.assertEqual("intentionally_owned", classified["lane"], path)
+        self.assertIn(contract, classified["contracts"], path)
+
+    def test_project_validation_implementation_and_proofs_are_owned(self) -> None:
+        for path in (
+            "codex-rs/core/src/session/project_validation.rs",
+            "codex-rs/core/src/session/project_validation_coordinator.rs",
+            "codex-rs/core/src/session/validation_provider.rs",
+            "codex-rs/core/src/session/cargo_validation_provider.rs",
+            "codex-rs/core/src/context/project_validation_failure.rs",
+            "codex-rs/tui/src/history_cell/project_validation.rs",
+            "codex-rs/core/tests/suite/project_validation.rs",
+            "codex-rs/exec/tests/suite/project_validation_event.rs",
+            "codex-rs/app-server-protocol/src/protocol/v2/validation.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "VALIDATION-1")
+
+    def test_background_review_implementation_and_proof_are_owned(self) -> None:
+        for path in (
+            "codex-rs/core/src/session/background_auto_review.rs",
+            "codex-rs/core/src/session/background_auto_review_tests.rs",
+            "codex-rs/core/tests/suite/background_review.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "AGENT-1")
+
+    def test_code_bridge_and_browser_handlers_and_proofs_are_owned(self) -> None:
+        for path in (
+            "codex-rs/core/src/tools/handlers/code_bridge.rs",
+            "codex-rs/core/src/tools/handlers/code_bridge_tests.rs",
+            "codex-rs/core/src/tools/handlers/browser.rs",
+            "codex-rs/core/src/tools/handlers/browser_spec_tests.rs",
+            "codex-rs/app-server/tests/suite/v2/code_bridge.rs",
+            "codex-rs/app-server/tests/suite/v2/remote_control.rs",
+            "codex-rs/app-server/src/request_processors/remote_control_processor.rs",
+            # The three named model-facing Code Bridge proofs live here.
+            "codex-rs/core/tests/suite/tools.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "INTEGRATION-1")
+
+    def test_external_agent_preflight_and_routing_proofs_are_owned(self) -> None:
+        for path in (
+            "codex-rs/core/tests/suite/external_agent_preflight.rs",
+            "codex-rs/core/src/agent/external_preflight.rs",
+            "codex-rs/core/src/agent/external_preflight_tests.rs",
+            "codex-rs/core/src/agent/provider_routing.rs",
+            "codex-rs/core/src/agent/provider_routing_tests.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "AGENT-1")
+
+    def test_proof_registries_are_owned_so_suites_cannot_be_unregistered(self) -> None:
+        # Reverting a suite registry leaves every owned proof file in the tree
+        # while silently removing it from the test binary.
+        for path in inventory.SHARED_PROOF_REGISTRIES:
+            with self.subTest(path=path):
+                classified = inventory.classify_path(path)
+                self.assertEqual("intentionally_owned", classified["lane"])
+                # A registry may also carry a surface contract of its own crate,
+                # so require the owned proof contracts rather than an exact set.
+                self.assertLessEqual(
+                    {"AGENT-1", "INTEGRATION-1", "VALIDATION-1"},
+                    set(classified["contracts"]),
+                )
+
+    def test_feature_stems_do_not_claim_unrelated_upstream_modules(self) -> None:
+        # `validation` is a word upstream uses for config, cloud, OTEL, and
+        # request validation. Only the Project Validation stems are owned.
+        for path in (
+            "codex-rs/config/src/validation.rs",
+            "codex-rs/cloud-config/src/validation.rs",
+            "codex-rs/otel/src/metrics/validation.rs",
+            "codex-rs/tui/src/chatwidget/tests/goal_validation.rs",
+            "codex-rs/core/src/tools/handlers/shell.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    "green_bulk_adopt", inventory.classify_path(path)["lane"]
+                )
+
+    def test_feature_paths_covers_implementation_and_proof_roots(self) -> None:
+        patterns = inventory.feature_paths("project_validation")
+
+        self.assertIn("codex-rs/core/src/session/project_validation*", patterns)
+        self.assertIn("codex-rs/core/tests/suite/project_validation*", patterns)
+        self.assertEqual(
+            len(inventory.IMPLEMENTATION_ROOTS) + len(inventory.PROOF_ROOTS),
+            len(patterns),
         )
 
 

@@ -17,13 +17,13 @@ local content there instead of upstream content; it does not reject it.
 | Conflict `add/add` | 9 |
 | Conflict `content` | 279 |
 | Conflict `modify/delete` | 7 |
-| Lane `amber_contract_adapt` | 110 |
-| Lane `green_bulk_adopt` | 166 |
-| Lane `intentionally_owned` | 12 |
+| Lane `amber_contract_adapt` | 107 |
+| Lane `green_bulk_adopt` | 163 |
+| Lane `intentionally_owned` | 18 |
 | Lane `red_manual_review` | 7 |
-| Residual lane `amber_contract_adapt` | 147 |
-| Residual lane `green_bulk_adopt` | 213 |
-| Residual lane `intentionally_owned` | 115 |
+| Residual lane `amber_contract_adapt` | 141 |
+| Residual lane `green_bulk_adopt` | 197 |
+| Residual lane `intentionally_owned` | 137 |
 | Residual lane `red_manual_review` | 3 |
 
 ## Contract-reviewed conflicts
@@ -74,7 +74,7 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/message_processor.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/account_processor.rs` | app-server and wire compatibility |
-| `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/external_agent_config_processor.rs` | app-server and wire compatibility |
+| `intentionally_owned` | `AGENT-1`, `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/external_agent_config_processor.rs` | app-server and wire compatibility; Every Code orchestration and review behavior |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/thread_processor.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/thread_processor_tests.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/thread_resume_redaction.rs` | app-server and wire compatibility |
@@ -86,9 +86,9 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/common/test_app_server.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3`, `PROTOCOL-1` | `codex-rs/app-server/tests/suite/auth.rs` | credential persistence and account selection; app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/conversation_summary.rs` | app-server and wire compatibility |
-| `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/mod.rs` | app-server and wire compatibility |
+| `intentionally_owned` | `AGENT-1`, `INTEGRATION-1`, `PROTOCOL-1`, `VALIDATION-1` | `codex-rs/app-server/tests/suite/mod.rs` | app-server and wire compatibility; registration point for owned integration proofs |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/connection_handling_websocket.rs` | app-server and wire compatibility |
-| `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/external_agent_config.rs` | app-server and wire compatibility |
+| `intentionally_owned` | `AGENT-1`, `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/external_agent_config.rs` | app-server and wire compatibility; Every Code orchestration and review behavior |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/plugin_list.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/remote_thread_store.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/review.rs` | app-server and wire compatibility |
@@ -113,7 +113,10 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_v2/close_agent.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `AGENT-1`, `INTEGRATION-1`, `VALIDATION-1` | `codex-rs/core/tests/suite/mod.rs` | registration point for owned integration proofs |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/core/tests/suite/multi_agent_resume.rs` | Every Code orchestration and review behavior |
 | `amber_contract_adapt` | `HISTORY-1` | `codex-rs/core/tests/suite/sqlite_state.rs` | durable history and resume semantics |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/core/tests/suite/subagent_notifications.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/external-agent-migration/src/sessions/export.rs` | Every Code orchestration and review behavior |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3` | `codex-rs/login/Cargo.toml` | credential persistence and account selection |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3` | `codex-rs/login/src/auth/auth_tests.rs` | credential persistence and account selection |

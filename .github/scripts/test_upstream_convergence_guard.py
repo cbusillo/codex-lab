@@ -244,6 +244,59 @@ class CheckedInLedgerTest(unittest.TestCase):
                 self.assertIn("AGENT-1", entry["contracts"])
                 self.assertNotIn(path, waived)
 
+    def test_restored_owned_proofs_are_guarded_and_unwaived(self) -> None:
+        """The restored implementations and proofs cannot silently disappear again.
+
+        Each path below is either an owned implementation or the executable proof
+        that pins it. An unwaived guard entry is what turns a future refresh that
+        drops one into a CI failure instead of silent evidence loss.
+        """
+
+        manifest = {
+            entry["path"]: entry
+            for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)
+        }
+        waived = {path for path, _ in guard.load_waivers(guard.DEFAULT_WAIVERS)}
+
+        for path, contract in (
+            # Project Validation
+            ("codex-rs/core/src/session/project_validation.rs", "VALIDATION-1"),
+            ("codex-rs/core/src/session/validation_provider.rs", "VALIDATION-1"),
+            ("codex-rs/core/tests/suite/project_validation.rs", "VALIDATION-1"),
+            ("codex-rs/exec/tests/suite/project_validation_event.rs", "VALIDATION-1"),
+            # Background Review
+            ("codex-rs/core/src/session/background_auto_review.rs", "AGENT-1"),
+            ("codex-rs/core/tests/suite/background_review.rs", "AGENT-1"),
+            # Code Bridge and browser model handlers plus their proofs
+            ("codex-rs/core/src/tools/handlers/code_bridge.rs", "INTEGRATION-1"),
+            ("codex-rs/core/src/tools/handlers/browser.rs", "INTEGRATION-1"),
+            ("codex-rs/core/tests/suite/tools.rs", "INTEGRATION-1"),
+            ("codex-rs/app-server/tests/suite/v2/code_bridge.rs", "INTEGRATION-1"),
+            ("codex-rs/app-server/tests/suite/v2/remote_control.rs", "INTEGRATION-1"),
+            # External-agent preflight and routing
+            ("codex-rs/core/tests/suite/external_agent_preflight.rs", "AGENT-1"),
+            ("codex-rs/core/src/agent/provider_routing.rs", "AGENT-1"),
+            # Registration points: reverting these unregisters owned suites
+            # without deleting a single proof file.
+            ("codex-rs/core/tests/suite/mod.rs", "INTEGRATION-1"),
+            ("codex-rs/exec/tests/suite/mod.rs", "VALIDATION-1"),
+        ):
+            with self.subTest(path=path):
+                entry = manifest.get(path)
+                self.assertIsNotNone(entry, f"{path} must be a guarded owned path")
+                self.assertEqual("intentionally_owned", entry["lane"])
+                self.assertIn(contract, entry["contracts"])
+                self.assertNotIn(path, waived)
+
+    def test_manifest_records_why_each_path_is_guarded(self) -> None:
+        # Owned work created after the pinned ownership baseline is only guarded
+        # by the current-tree source, so a manifest that lost it would quietly
+        # stop protecting every restored proof.
+        entries = guard.load_manifest(guard.DEFAULT_MANIFEST)
+        sources = {entry.get("source") for entry in entries}
+
+        self.assertEqual({"ownership_baseline", "current_tree"}, sources)
+
     def test_every_waiver_names_a_guarded_path(self) -> None:
         guarded = {entry["path"] for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)}
         waived = {path for path, _ in guard.load_waivers(guard.DEFAULT_WAIVERS)}
