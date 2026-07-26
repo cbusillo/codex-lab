@@ -78,7 +78,8 @@ Regenerate the manifest only when the ownership baseline advances:
 python3 .github/scripts/upstream_convergence_inventory.py guard \
   b89ce9a2bcedcfddf3a48f387b7912d602d6d87c \
   4462b9deef211723b781b426f5e5d36a5777115f \
-  8add494682f7c0674672e8dc5b38a4565cd7629b > upstream/convergence-guard.json
+  8add494682f7c0674672e8dc5b38a4565cd7629b \
+  --policy-version 1 > upstream/convergence-guard.json
 ```
 
 The baseline stays at pre-anchor local `8add4946` on purpose: regenerating it
@@ -112,3 +113,15 @@ python3 .github/scripts/upstream_convergence.py validate \
 `validate` checks policy, governance wiring, the guard, snapshot structure and
 reproducibility, plus any requested review-base comparison. The command never
 fetches, merges, builds, commits, pushes, or manages worktrees.
+
+## Skill coordination
+
+When the routing instruction and shared skill change together, merge and
+reconcile the `upstream-convergence` skill first. Verify that
+`$upstream-convergence` resolves from the active skills checkout before landing
+the Codex Lab commit that requires the route.
+
+Repository checks protect against accidental convergence regressions. GitHub
+must separately require blocking CI and code-owner review for the paths in
+`.github/CODEOWNERS`; candidate-controlled scripts cannot provide that external
+trust boundary by themselves.

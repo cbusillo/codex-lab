@@ -62,6 +62,47 @@ class PolicyValidationTest(unittest.TestCase):
         with self.assertRaises(governance.PolicyError):
             governance.load_policy(self.path, self.root)
 
+    def test_rejects_policy_file_outside_repository(self) -> None:
+        outside = self.root.parent / f"{self.root.name}-policy.json"
+        outside.write_text(json.dumps(policy_document()), encoding="utf-8")
+        self.addCleanup(outside.unlink)
+
+        with self.assertRaises(governance.PolicyError):
+            governance.load_policy(outside, self.root)
+
+    def test_missing_governance_files_are_reported_without_crashing(self) -> None:
+        self.write(policy_document())
+
+        report = governance.verify(self.root, self.path)
+
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "required governance file is missing: AGENTS.md", report["errors"]
+        )
+
+    def test_rejects_symlinked_governance_file(self) -> None:
+        self.write(policy_document())
+        target = self.root / "agents-target.md"
+        target.write_text("# Target\n", encoding="utf-8")
+        (self.root / "AGENTS.md").symlink_to(target)
+
+        report = governance.verify(self.root, self.path)
+
+        self.assertIn(
+            "required governance file must not be a symlink: AGENTS.md",
+            report["errors"],
+        )
+
+    def test_reports_policy_identity_change(self) -> None:
+        self.write(policy_document())
+
+        report = governance.verify(self.root, self.path)
+
+        self.assertIn(
+            "convergence policy differs from the pinned Codex Lab identity",
+            report["errors"],
+        )
+
 
 class CheckedInGovernanceTest(unittest.TestCase):
     def test_repository_governance_is_complete_and_owned(self) -> None:
@@ -69,6 +110,7 @@ class CheckedInGovernanceTest(unittest.TestCase):
 
         self.assertEqual([], report["errors"])
         self.assertTrue(report["passed"])
+        self.assertTrue(report["guardBaselineReproduced"])
 
 
 if __name__ == "__main__":

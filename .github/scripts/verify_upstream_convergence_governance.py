@@ -5,16 +5,20 @@
 import argparse
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import upstream_convergence_inventory as inventory
+import upstream_convergence_guard as guard
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = REPO_ROOT / "upstream" / "convergence-policy.json"
 SUPPORTED_POLICY_SCHEMA = 1
+MAX_POLICY_BYTES = 1024 * 1024
+MAX_GOVERNANCE_FILE_BYTES = 4 * 1024 * 1024
 
 GOVERNANCE_PATHS = (
     "AGENTS.md",
@@ -23,11 +27,12 @@ GOVERNANCE_PATHS = (
     "upstream/convergence-policy.json",
     "upstream/convergence-guard.json",
     "upstream/convergence-waivers.json",
+    ".github/CODEOWNERS",
     ".github/scripts/upstream_convergence.py",
     ".github/scripts/upstream_convergence_guard.py",
     ".github/scripts/upstream_convergence_inventory.py",
     ".github/scripts/verify_upstream_convergence_governance.py",
-    ".github/scripts/test_upstream_convergence.py",
+    ".github/scripts/test_upstream_convergence_driver.py",
     ".github/scripts/test_upstream_convergence_guard.py",
     ".github/scripts/test_upstream_convergence_inventory.py",
     ".github/scripts/test_upstream_convergence_governance.py",
@@ -50,6 +55,20 @@ class ConvergencePolicy:
     contracts_path: str
     evidence_root: str
     plan_issue: str
+
+
+EXPECTED_POLICY = ConvergencePolicy(
+    repository="openai/codex",
+    remote="openai",
+    branch="main",
+    allowed_fetch_urls=(
+        "https://github.com/openai/codex.git",
+        "git@github.com:openai/codex.git",
+    ),
+    contracts_path="upstream/convergence-contracts.md",
+    evidence_root="upstream/openai-codex",
+    plan_issue="https://github.com/cbusillo/codex-lab/issues/428",
+)
 
 
 def require_exact_keys(
@@ -91,12 +110,22 @@ def validate_repo_path(repo_root: Path, value: object, location: str) -> str:
 
 
 def load_policy(path: Path, repo_root: Path) -> ConvergencePolicy:
+    root = repo_root.resolve()
+    resolved_policy = path.resolve()
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        resolved_policy.relative_to(root)
+    except ValueError as error:
+        raise PolicyError(f"policy path escapes the repository: {resolved_policy}") from error
+    try:
+        if resolved_policy.stat().st_size > MAX_POLICY_BYTES:
+            raise PolicyError(f"policy exceeds {MAX_POLICY_BYTES} bytes: {resolved_policy}")
+        document = json.loads(resolved_policy.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
         raise PolicyError(f"missing convergence policy: {path}") from error
     except json.JSONDecodeError as error:
         raise PolicyError(f"invalid JSON in {path}: {error}") from error
+    except (OSError, UnicodeError) as error:
+        raise PolicyError(f"cannot read {path}: {error}") from error
     if not isinstance(document, dict):
         raise PolicyError(f"{path}: expected a JSON object")
     require_exact_keys(
@@ -152,6 +181,19 @@ def load_policy(path: Path, repo_root: Path) -> ConvergencePolicy:
     )
 
 
+def read_governance_text(path: Path, errors: list[str]) -> str | None:
+    try:
+        if path.stat().st_size > MAX_GOVERNANCE_FILE_BYTES:
+            errors.append(
+                f"governance file exceeds {MAX_GOVERNANCE_FILE_BYTES} bytes: {path}"
+            )
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        errors.append(f"cannot read governance file {path}: {error}")
+        return None
+
+
 def verify(repo_root: Path, policy_path: Path) -> dict[str, object]:
     errors: list[str] = []
     try:
@@ -162,11 +204,16 @@ def verify(repo_root: Path, policy_path: Path) -> dict[str, object]:
             "passed": False,
             "errors": [str(error)],
         }
+    if policy != EXPECTED_POLICY:
+        errors.append("convergence policy differs from the pinned Codex Lab identity")
 
     for relative in GOVERNANCE_PATHS:
         path = repo_root / relative
         if not path.is_file():
             errors.append(f"required governance file is missing: {relative}")
+            continue
+        if path.is_symlink():
+            errors.append(f"required governance file must not be a symlink: {relative}")
             continue
         classified = inventory.classify_path(relative)
         if classified["lane"] != "intentionally_owned":
@@ -183,44 +230,88 @@ def verify(repo_root: Path, policy_path: Path) -> dict[str, object]:
     if not evidence.is_dir():
         errors.append(f"evidence root is missing: {policy.evidence_root}")
 
-    agents = (repo_root / "AGENTS.md").read_text(encoding="utf-8")
-    if "$upstream-convergence" not in agents:
-        errors.append("AGENTS.md does not route refresh work to $upstream-convergence")
-    if policy.contracts_path not in agents:
-        errors.append("AGENTS.md does not name the repository contract authority")
+    agents_path = repo_root / "AGENTS.md"
+    if agents_path.is_file() and not agents_path.is_symlink():
+        agents = read_governance_text(agents_path, errors)
+        if agents is not None:
+            if "$upstream-convergence" not in agents:
+                errors.append(
+                    "AGENTS.md does not route refresh work to $upstream-convergence"
+                )
+            if policy.contracts_path not in agents:
+                errors.append("AGENTS.md does not name the repository contract authority")
 
-    readme = (repo_root / "upstream" / "README.md").read_text(encoding="utf-8")
-    for expected in (
-        "upstream/convergence-policy.json",
-        policy.contracts_path,
-        ".github/scripts/upstream_convergence.py",
-    ):
-        if expected not in readme:
-            errors.append(f"upstream/README.md does not reference {expected}")
+    readme_path = repo_root / "upstream" / "README.md"
+    if readme_path.is_file() and not readme_path.is_symlink():
+        readme = read_governance_text(readme_path, errors)
+        if readme is not None:
+            for expected in (
+                "upstream/convergence-policy.json",
+                policy.contracts_path,
+                ".github/scripts/upstream_convergence.py",
+            ):
+                if expected not in readme:
+                    errors.append(f"upstream/README.md does not reference {expected}")
 
-    repo_checks = (repo_root / ".github" / "workflows" / "repo-checks.yml").read_text(
-        encoding="utf-8"
-    )
-    for command in (
-        "python3 .github/scripts/verify_upstream_convergence_governance.py",
-        "python3 .github/scripts/upstream_convergence_guard.py",
-        "python3 .github/scripts/upstream_convergence.py validate",
-        "test_upstream_convergence_*.py",
-    ):
-        if command not in repo_checks:
-            errors.append(f"repo-checks.yml does not run {command}")
+    repo_checks_path = repo_root / ".github" / "workflows" / "repo-checks.yml"
+    if repo_checks_path.is_file() and not repo_checks_path.is_symlink():
+        repo_checks = read_governance_text(repo_checks_path, errors)
+        if repo_checks is not None:
+            for command in (
+                "python3 .github/scripts/verify_upstream_convergence_governance.py",
+                "python3 .github/scripts/upstream_convergence_guard.py",
+                "python3 .github/scripts/upstream_convergence.py validate",
+                "test_upstream_convergence_*.py",
+            ):
+                if command not in repo_checks:
+                    errors.append(f"repo-checks.yml does not run {command}")
 
-    blocking_ci = (
-        repo_root / ".github" / "workflows" / "blocking-ci.yml"
-    ).read_text(encoding="utf-8")
-    if "uses: ./.github/workflows/repo-checks.yml" not in blocking_ci:
-        errors.append("blocking-ci.yml does not call repo-checks.yml")
+    blocking_ci_path = repo_root / ".github" / "workflows" / "blocking-ci.yml"
+    if blocking_ci_path.is_file() and not blocking_ci_path.is_symlink():
+        blocking_ci = read_governance_text(blocking_ci_path, errors)
+        if blocking_ci is not None:
+            if "uses: ./.github/workflows/repo-checks.yml" not in blocking_ci:
+                errors.append("blocking-ci.yml does not call repo-checks.yml")
+
+    codeowners_path = repo_root / ".github" / "CODEOWNERS"
+    if codeowners_path.is_file() and not codeowners_path.is_symlink():
+        codeowners = read_governance_text(codeowners_path, errors)
+        if codeowners is not None:
+            for expected in (
+                "/AGENTS.md @cbusillo",
+                "/upstream/ @cbusillo",
+                "/.github/CODEOWNERS @openai/codex-core-agent-team @cbusillo",
+                "/.github/workflows/repo-checks.yml @cbusillo",
+            ):
+                if expected not in codeowners:
+                    errors.append(f"CODEOWNERS does not protect {expected.split()[0]}")
+
+    guard_reproduced = False
+    guard_path = repo_root / "upstream" / "convergence-guard.json"
+    if guard_path.is_file() and not guard_path.is_symlink():
+        try:
+            expected_guard = inventory.build_guard_manifest(
+                repo_root,
+                guard.EXPECTED_OWNERSHIP_BASELINE["base"],
+                guard.EXPECTED_OWNERSHIP_BASELINE["upstream"],
+                guard.EXPECTED_OWNERSHIP_BASELINE["local"],
+                inventory.LEGACY_POLICY_VERSION,
+            )
+            guard_reproduced = (
+                inventory.render_guard(expected_guard)
+                == read_governance_text(guard_path, errors)
+            )
+            if not guard_reproduced:
+                errors.append("convergence guard does not reproduce from its immutable baseline")
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            errors.append(f"cannot reproduce convergence guard baseline: {error}")
 
     return {
         "schemaVersion": 1,
         "repository": policy.repository,
-        "policy": str(policy_path.relative_to(repo_root)),
+        "policy": str(policy_path.resolve().relative_to(repo_root.resolve())),
         "requiredPaths": len(GOVERNANCE_PATHS),
+        "guardBaselineReproduced": guard_reproduced,
         "errors": errors,
         "passed": not errors,
     }

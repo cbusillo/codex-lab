@@ -3,8 +3,10 @@
 import argparse
 import fnmatch
 import json
+import os
 import re
 import subprocess
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +28,18 @@ SUPPORTED_POLICY_VERSIONS = (LEGACY_POLICY_VERSION, POLICY_VERSION)
 # Lanes whose local content may not silently disappear or silently revert to the
 # upstream blob during a refresh. `upstream_convergence_guard.py` enforces this.
 GUARDED_LANES = ("intentionally_owned", "red_manual_review")
+GIT_ENVIRONMENT_KEYS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_WORK_TREE",
+}
+GIT_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -36,7 +50,9 @@ class Rule:
     reason: str
 
 
-BASE_RULES = (
+# Immutable policy used by every checked-in version-1 snapshot. Add a new policy
+# version instead of editing these rules after snapshot publication.
+POLICY_V1_RULES = (
     Rule(
         patterns=("AGENTS.md",),
         lane="intentionally_owned",
@@ -184,6 +200,7 @@ GOVERNANCE_RULES = (
     Rule(
         patterns=(
             "upstream/**",
+            ".github/CODEOWNERS",
             ".github/scripts/upstream_convergence*.py",
             ".github/scripts/test_upstream_convergence*.py",
             ".github/scripts/verify_upstream_convergence_governance.py",
@@ -197,12 +214,25 @@ GOVERNANCE_RULES = (
     ),
 )
 
+POLICY_V2_RULES = (*GOVERNANCE_RULES, *POLICY_V1_RULES)
+
+
+def git_environment(**updates: str) -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in GIT_ENVIRONMENT_KEYS and not key.startswith("GIT_CONFIG_")
+    }
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env.update(updates)
+    return env
+
 
 def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
     if policy_version == LEGACY_POLICY_VERSION:
-        return BASE_RULES
+        return POLICY_V1_RULES
     if policy_version == POLICY_VERSION:
-        return (*GOVERNANCE_RULES, *BASE_RULES)
+        return POLICY_V2_RULES
     raise ValueError(
         f"unsupported policy version {policy_version}; "
         f"expected one of {SUPPORTED_POLICY_VERSIONS}"
@@ -215,6 +245,8 @@ def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedP
         check=check,
         capture_output=True,
         text=True,
+        env=git_environment(),
+        timeout=GIT_TIMEOUT_SECONDS,
     )
 
 
@@ -233,11 +265,15 @@ def changed_paths(repo: Path, base: str, tip: str) -> set[str]:
     return {path for path in result.stdout.splitlines() if path}
 
 
-def tree_objects(repo: Path, ref: str) -> dict[str, str]:
+def tree_objects(
+    repo: Path, ref: str, env: dict[str, str] | None = None
+) -> dict[str, str]:
     result = subprocess.run(
         ["git", "-C", str(repo), "ls-tree", "-r", "-z", ref],
         check=True,
         capture_output=True,
+        env=env or git_environment(),
+        timeout=GIT_TIMEOUT_SECONDS,
     )
     objects: dict[str, str] = {}
     for record in result.stdout.split(b"\0"):
@@ -265,36 +301,52 @@ def parse_conflict_message(line: str) -> tuple[str, str]:
 
 def merge_conflicts(
     repo: Path, upstream: str, local: str, policy_version: int = POLICY_VERSION
-) -> tuple[str, list[dict[str, object]]]:
-    result = run_git(
-        repo,
-        "merge-tree",
-        "--write-tree",
-        "--messages",
-        upstream,
-        local,
-        check=False,
-    )
-    if result.returncode not in (0, 1):
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
-    output_lines = result.stdout.splitlines()
-    if not output_lines:
-        raise ValueError("merge-tree did not report a result tree")
-    result_tree = output_lines[0]
-    conflicts: dict[str, str] = {}
-    for line in output_lines[1:]:
-        if not line.startswith("CONFLICT ("):
-            continue
-        conflict_type, path = parse_conflict_message(line)
-        if previous := conflicts.get(path):
-            raise ValueError(
-                f"duplicate conflict path {path}: {previous} and {conflict_type}"
-            )
-        conflicts[path] = conflict_type
+) -> tuple[dict[str, str], list[dict[str, object]]]:
+    raw_objects = Path(run_git(repo, "rev-parse", "--git-path", "objects").stdout.strip())
+    objects = raw_objects if raw_objects.is_absolute() else (repo / raw_objects).resolve()
+    with tempfile.TemporaryDirectory(prefix="upstream-convergence-objects-") as temporary:
+        env = git_environment(
+            GIT_OBJECT_DIRECTORY=temporary,
+            GIT_ALTERNATE_OBJECT_DIRECTORIES=str(objects),
+        )
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "merge-tree",
+                "--write-tree",
+                "--messages",
+                upstream,
+                local,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+        if result.returncode not in (0, 1):
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        output_lines = result.stdout.splitlines()
+        if not output_lines:
+            raise ValueError("merge-tree did not report a result tree")
+        result_tree = output_lines[0]
+        conflicts: dict[str, str] = {}
+        for line in output_lines[1:]:
+            if not line.startswith("CONFLICT ("):
+                continue
+            conflict_type, path = parse_conflict_message(line)
+            if previous := conflicts.get(path):
+                raise ValueError(
+                    f"duplicate conflict path {path}: {previous} and {conflict_type}"
+                )
+            conflicts[path] = conflict_type
+        result_objects = tree_objects(repo, result_tree, env)
     classified = [
         classify(path, conflicts[path], policy_version) for path in sorted(conflicts)
     ]
-    return result_tree, classified
+    return result_objects, classified
 
 
 def classify_path(
@@ -348,14 +400,13 @@ def build_inventory(
     if actual_base != base:
         raise ValueError(f"expected merge base {base}, found {actual_base}")
 
-    result_tree, conflicts = merge_conflicts(repo, upstream, local, policy_version)
+    result_objects, conflicts = merge_conflicts(repo, upstream, local, policy_version)
     conflict_paths = {entry["path"] for entry in conflicts}
     local_paths = changed_paths(repo, base, local)
     upstream_paths = changed_paths(repo, base, upstream)
     shared_paths = local_paths & upstream_paths
     upstream_objects = tree_objects(repo, upstream)
     local_objects = tree_objects(repo, local)
-    result_objects = tree_objects(repo, result_tree)
     identical_paths = {
         path
         for path in shared_paths
@@ -499,7 +550,11 @@ def render_markdown(inventory: dict[str, object]) -> str:
 
 
 def build_guard_manifest(
-    repo: Path, base_ref: str, upstream_ref: str, local_ref: str
+    repo: Path,
+    base_ref: str,
+    upstream_ref: str,
+    local_ref: str,
+    policy_version: int = POLICY_VERSION,
 ) -> dict[str, object]:
     """Record the owned paths a later refresh must not silently drop or revert.
 
@@ -515,7 +570,7 @@ def build_guard_manifest(
 
     guarded: list[dict[str, object]] = []
     for path, baseline_blob in sorted(local_objects.items()):
-        classified = classify_path(path)
+        classified = classify_path(path, policy_version)
         if classified["lane"] not in GUARDED_LANES:
             continue
         upstream_blob = upstream_objects.get(path)
@@ -589,7 +644,13 @@ def main() -> None:
     args = parse_args()
     repo = Path(args.repo).resolve()
     if args.format == "guard":
-        manifest = build_guard_manifest(repo, args.base, args.upstream, args.local)
+        manifest = build_guard_manifest(
+            repo,
+            args.base,
+            args.upstream,
+            args.local,
+            args.policy_version,
+        )
         print(render_guard(manifest), end="")
         return
     inventory = build_inventory(

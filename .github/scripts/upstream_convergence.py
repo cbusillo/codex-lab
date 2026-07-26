@@ -23,6 +23,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = REPO_ROOT / "upstream" / "convergence-policy.json"
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SNAPSHOT_FILES = ("inventory.json", "inventory.md", "residuals.json")
+REPORT_RECORD_LIMIT = 50
+MAX_SNAPSHOTS = 256
+MAX_SNAPSHOT_FILE_BYTES = 8 * 1024 * 1024
+MAX_GIT_OUTPUT_BYTES = 32 * 1024 * 1024
 
 
 class ConvergenceError(RuntimeError):
@@ -32,11 +36,22 @@ class ConvergenceError(RuntimeError):
 def run_git(
     repo: Path, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            env=inventory.git_environment(),
+            timeout=inventory.GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ConvergenceError(
+            f"git {' '.join(args)} exceeded {inventory.GIT_TIMEOUT_SECONDS} seconds"
+        ) from error
+    if len(result.stdout.encode()) + len(result.stderr.encode()) > MAX_GIT_OUTPUT_BYTES:
+        raise ConvergenceError(
+            f"git {' '.join(args)} exceeded {MAX_GIT_OUTPUT_BYTES} output bytes"
+        )
     if check and result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise ConvergenceError(f"git {' '.join(args)} failed: {detail}")
@@ -68,34 +83,54 @@ def git_common_dir(repo: Path) -> Path:
 def convergence_lock(repo: Path):
     lock_path = git_common_dir(repo) / "upstream-convergence.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+", encoding="utf-8")
+    handle = lock_path.open("a+b")
+    backend = None
     try:
         try:
             import fcntl
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            backend = "fcntl"
         except ImportError:
             import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            handle.seek(0)
+            if not handle.read(1):
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                backend = "msvcrt"
+            except OSError as error:
+                raise ConvergenceError(
+                    f"another upstream convergence operation holds {lock_path}"
+                ) from error
         except OSError as error:
             raise ConvergenceError(
                 f"another upstream convergence operation holds {lock_path}"
             ) from error
         handle.seek(0)
         handle.truncate()
-        handle.write(f"pid={os.getpid()} worktree={repo.resolve()}\n")
+        handle.write(f"pid={os.getpid()} worktree={repo.resolve()}\n".encode())
         handle.flush()
         yield
     finally:
         try:
-            if "fcntl" in sys.modules:
-                sys.modules["fcntl"].flock(handle.fileno(), sys.modules["fcntl"].LOCK_UN)
-            elif "msvcrt" in sys.modules:
+            if backend is not None:
                 handle.seek(0)
-                sys.modules["msvcrt"].locking(
-                    handle.fileno(), sys.modules["msvcrt"].LK_UNLCK, 1
-                )
+                handle.truncate()
+                handle.write(b"\0")
+                handle.flush()
+                if backend == "fcntl":
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                else:
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         finally:
             handle.close()
 
@@ -141,6 +176,9 @@ def worktree_state(repo: Path) -> dict[str, object]:
         for line in run_git(repo, "worktree", "list", "--porcelain").stdout.splitlines()
         if line.startswith("worktree ")
     ]
+    replacement_refs = run_git(
+        repo, "for-each-ref", "--format=%(refname)", "refs/replace"
+    ).stdout.splitlines()
     return {
         "root": str(repo.resolve()),
         "head": run_git(repo, "rev-parse", "HEAD").stdout.strip(),
@@ -148,6 +186,9 @@ def worktree_state(repo: Path) -> dict[str, object]:
         "defaultBranch": default_branch(repo),
         "clean": not status,
         "operationMarkers": operation_markers(repo),
+        "replacementRefs": replacement_refs,
+        "shallow": run_git(repo, "rev-parse", "--is-shallow-repository").stdout.strip()
+        == "true",
         "primaryWorktree": str(Path(worktrees[0]).resolve()) if worktrees else None,
     }
 
@@ -158,6 +199,10 @@ def require_read_safety(state: dict[str, object]) -> None:
     if state["operationMarkers"]:
         markers = ", ".join(state["operationMarkers"])
         raise ConvergenceError(f"Git operation is already in progress: {markers}")
+    if state["replacementRefs"]:
+        raise ConvergenceError("Git replacement refs make commit provenance ambiguous")
+    if state["shallow"]:
+        raise ConvergenceError("complete Git history is required for convergence inspection")
 
 
 def require_record_safety(state: dict[str, object]) -> None:
@@ -175,12 +220,30 @@ def normalize_remote_url(value: str) -> str:
     raw = value.strip().removesuffix("/").removesuffix(".git")
     if raw.startswith("git@") and ":" in raw:
         host, path = raw.removeprefix("git@").split(":", 1)
-        return f"{host.lower()}/{path.strip('/')}"
+        return f"ssh://git@{host.lower()}/{path.strip('/')}"
     parsed = urlparse(raw)
-    if parsed.scheme in {"http", "https", "ssh", "git"} and parsed.hostname:
+    if parsed.scheme in {"https", "ssh"} and parsed.hostname:
+        if parsed.password is not None:
+            raise ConvergenceError("upstream fetch URL must not contain credentials")
+        if parsed.scheme == "https" and parsed.username is not None:
+            raise ConvergenceError("upstream fetch URL must not contain credentials")
+        if parsed.scheme == "ssh" and parsed.username != "git":
+            raise ConvergenceError("upstream SSH URL must use the git account")
+        if parsed.query or parsed.fragment:
+            raise ConvergenceError(
+                "upstream fetch URL must not contain a query or fragment"
+            )
         path = parsed.path.strip("/")
-        return f"{parsed.hostname.lower()}/{path}"
-    raise ConvergenceError(f"unsupported upstream fetch URL: {value}")
+        try:
+            port = parsed.port
+        except ValueError as error:
+            raise ConvergenceError("upstream fetch URL has an invalid port") from error
+        host = parsed.hostname.lower()
+        if port is not None:
+            host = f"{host}:{port}"
+        account = "git@" if parsed.scheme == "ssh" else ""
+        return f"{parsed.scheme}://{account}{host}/{path}"
+    raise ConvergenceError("unsupported upstream fetch URL")
 
 
 def remote_identity(
@@ -266,6 +329,22 @@ def governance_changes(repo: Path, base: str, upstream: str) -> list[dict[str, o
     ]
 
 
+def unique_ancestry_tip(repo: Path, commits: list[str], description: str) -> str | None:
+    if not commits:
+        return None
+    tips = [
+        commit
+        for commit in commits
+        if not any(
+            commit != other and ref_is_ancestor(repo, commit, other)
+            for other in commits
+        )
+    ]
+    if len(set(tips)) != 1:
+        raise ConvergenceError(f"{description} has multiple tips: {tips}")
+    return tips[0]
+
+
 def recorded_upstream_tip(
     repo: Path, policy: governance.ConvergencePolicy
 ) -> str | None:
@@ -273,6 +352,8 @@ def recorded_upstream_tip(
     for snapshot in snapshot_directories(repo, policy.evidence_root):
         if snapshot.name.startswith("."):
             continue
+        if snapshot.is_symlink():
+            raise ConvergenceError(f"snapshot directory must not be a symlink: {snapshot}")
         try:
             document = json.loads(
                 (snapshot / "inventory.json").read_text(encoding="utf-8")
@@ -285,19 +366,7 @@ def recorded_upstream_tip(
                 f"recorded upstream {upstream!r} from {snapshot} is unavailable"
             )
         commits.append(upstream)
-    if not commits:
-        return None
-    tips = [
-        commit
-        for commit in commits
-        if not any(
-            commit != other and ref_is_ancestor(repo, commit, other)
-            for other in commits
-        )
-    ]
-    if len(set(tips)) != 1:
-        raise ConvergenceError(f"recorded upstream history has multiple tips: {tips}")
-    return tips[0]
+    return unique_ancestry_tip(repo, commits, "recorded upstream history")
 
 
 def require_forward_upstream(
@@ -371,6 +440,14 @@ def record(
     require_record_safety(state)
     refs = exact_refs(repo, base, upstream, local)
     remote = remote_identity(repo, policy, refs["upstream"])
+    existing_snapshots = validate_snapshots(repo, policy)
+    if existing_snapshots["count"] and (
+        not existing_snapshots["passed"]
+        or existing_snapshots["historyUnavailable"]
+    ):
+        raise ConvergenceError(
+            "existing snapshot history is not fully reproducible; run validate first"
+        )
     previous_upstream = require_forward_upstream(repo, policy, refs["upstream"])
     head = str(state["head"])
     if head != refs["local"] and not (
@@ -413,6 +490,9 @@ def record(
         if run_git(repo, "rev-parse", "HEAD").stdout.strip() != head:
             raise ConvergenceError("HEAD changed while the snapshot was being recorded")
         temporary.rename(destination)
+        if run_git(repo, "rev-parse", "HEAD").stdout.strip() != head:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise ConvergenceError("HEAD changed while the snapshot was being published")
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
@@ -425,6 +505,7 @@ def record(
         "upstream": remote,
         "refs": refs,
         "previousRecordedUpstream": previous_upstream,
+        "existingSnapshotsValidated": existing_snapshots["count"],
         "snapshot": str(destination.relative_to(repo)),
         "freeBytesBeforeRecord": free_bytes,
         "summary": result["summary"],
@@ -436,7 +517,25 @@ def snapshot_directories(repo: Path, evidence_root: str) -> list[Path]:
     root = repo / evidence_root
     if not root.is_dir():
         return []
-    return sorted(path for path in root.iterdir() if path.is_dir())
+    if root.is_symlink():
+        raise ConvergenceError(f"evidence root must not be a symlink: {evidence_root}")
+    try:
+        entries = list(root.iterdir())
+    except OSError as error:
+        raise ConvergenceError(
+            f"cannot enumerate evidence root {evidence_root}: {error}"
+        ) from error
+    unexpected = sorted(path.name for path in entries if not path.is_dir())
+    if unexpected:
+        raise ConvergenceError(
+            f"evidence root contains non-snapshot entries: {unexpected[:REPORT_RECORD_LIMIT]}"
+        )
+    directories = sorted(entries)
+    if len(directories) > MAX_SNAPSHOTS:
+        raise ConvergenceError(
+            f"evidence root contains {len(directories)} snapshots; limit is {MAX_SNAPSHOTS}"
+        )
+    return directories
 
 
 def commit_exists(repo: Path, commit: str) -> bool:
@@ -449,7 +548,16 @@ def validate_snapshots(
     errors: list[str] = []
     reproduced: list[str] = []
     unavailable: list[str] = []
-    directories = snapshot_directories(repo, policy.evidence_root)
+    try:
+        directories = snapshot_directories(repo, policy.evidence_root)
+    except ConvergenceError as error:
+        return {
+            "count": 0,
+            "reproduced": [],
+            "historyUnavailable": [],
+            "errors": [str(error)],
+            "passed": False,
+        }
     if not directories:
         errors.append(f"no snapshots found under {policy.evidence_root}")
 
@@ -458,19 +566,48 @@ def validate_snapshots(
         if snapshot.name.startswith("."):
             errors.append(f"incomplete temporary snapshot remains: {relative}")
             continue
-        files = sorted(path.name for path in snapshot.iterdir() if path.is_file())
-        if files != sorted(SNAPSHOT_FILES):
+        if snapshot.is_symlink():
+            errors.append(f"snapshot directory must not be a symlink: {relative}")
+            continue
+        try:
+            entries = list(snapshot.iterdir())
+        except OSError as error:
+            errors.append(f"cannot enumerate {relative}: {error}")
+            continue
+        symlinks = sorted(path.name for path in entries if path.is_symlink())
+        if symlinks:
+            errors.append(f"{relative} contains symbolic links: {symlinks}")
+            continue
+        names = sorted(path.name for path in entries)
+        if names != sorted(SNAPSHOT_FILES) or not all(path.is_file() for path in entries):
             errors.append(
-                f"{relative} contains {files}, expected {sorted(SNAPSHOT_FILES)}"
+                f"{relative} contains {names}, expected {sorted(SNAPSHOT_FILES)}"
+            )
+            continue
+        try:
+            oversized = sorted(
+                path.name
+                for path in entries
+                if path.stat().st_size > MAX_SNAPSHOT_FILE_BYTES
+            )
+        except OSError as error:
+            errors.append(f"cannot stat files in {relative}: {error}")
+            continue
+        if oversized:
+            errors.append(
+                f"{relative} contains files over {MAX_SNAPSHOT_FILE_BYTES} bytes: {oversized}"
             )
             continue
         try:
             document = json.loads((snapshot / "inventory.json").read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as error:
+        except (json.JSONDecodeError, OSError, UnicodeError) as error:
             errors.append(f"cannot read {relative}/inventory.json: {error}")
             continue
+        if not isinstance(document, dict):
+            errors.append(f"{relative}/inventory.json must contain a JSON object")
+            continue
         refs = document.get("refs")
-        if not isinstance(refs, dict) or any(
+        if not isinstance(refs, dict) or set(refs) != {"base", "upstream", "local"} or any(
             FULL_SHA.fullmatch(str(refs.get(name, ""))) is None
             for name in ("base", "upstream", "local")
         ):
@@ -487,7 +624,11 @@ def validate_snapshots(
             if isinstance(raw_policy, dict)
             else inventory.LEGACY_POLICY_VERSION
         )
-        if policy_version not in inventory.SUPPORTED_POLICY_VERSIONS:
+        if (
+            isinstance(policy_version, bool)
+            or not isinstance(policy_version, int)
+            or policy_version not in inventory.SUPPORTED_POLICY_VERSIONS
+        ):
             errors.append(f"{relative} uses unsupported policy version {policy_version}")
             continue
         if not all(commit_exists(repo, str(refs[name])) for name in refs):
@@ -509,11 +650,15 @@ def validate_snapshots(
             "inventory.md": inventory.render_markdown(generated),
             "residuals.json": inventory.render_residuals(generated),
         }
-        mismatched = [
-            name
-            for name, contents in expected.items()
-            if (snapshot / name).read_text(encoding="utf-8") != contents
-        ]
+        try:
+            mismatched = [
+                name
+                for name, contents in expected.items()
+                if (snapshot / name).read_text(encoding="utf-8") != contents
+            ]
+        except (OSError, UnicodeError) as error:
+            errors.append(f"cannot compare {relative}: {error}")
+            continue
         if mismatched:
             errors.append(f"{relative} is not reproducible: {mismatched}")
         else:
@@ -528,9 +673,9 @@ def validate_snapshots(
     }
 
 
-def snapshot_change_errors(
+def snapshot_change_analysis(
     repo: Path, policy: governance.ConvergencePolicy, against: str
-) -> list[str]:
+) -> tuple[list[str], set[str], set[str]]:
     base = resolve_exact_commit(repo, against, "against")
     tree = run_git(
         repo,
@@ -551,6 +696,7 @@ def snapshot_change_errors(
         policy.evidence_root,
     ).stdout.splitlines()
     errors = []
+    added = set()
     prefix = f"{policy.evidence_root}/"
     for line in changes:
         status, path = line.split("\t", 1)
@@ -561,6 +707,124 @@ def snapshot_change_errors(
             errors.append(f"historical snapshot changed ({status}): {path}")
         elif status != "A":
             errors.append(f"new snapshot path is not an addition ({status}): {path}")
+        else:
+            added.add(snapshot)
+    return errors, added, existing
+
+
+def snapshot_change_errors(
+    repo: Path, policy: governance.ConvergencePolicy, against: str
+) -> list[str]:
+    errors, _, _ = snapshot_change_analysis(repo, policy, against)
+    return errors
+
+
+def snapshot_document_at(
+    repo: Path,
+    policy: governance.ConvergencePolicy,
+    snapshot: str,
+    commit: str | None = None,
+) -> dict[str, object]:
+    relative = f"{policy.evidence_root}/{snapshot}/inventory.json"
+    try:
+        if commit is None:
+            path = repo / relative
+            if path.stat().st_size > MAX_SNAPSHOT_FILE_BYTES:
+                raise ConvergenceError(
+                    f"{relative} exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes"
+                )
+            contents = path.read_text(encoding="utf-8")
+        else:
+            contents = run_git(repo, "show", f"{commit}:{relative}").stdout
+            if len(contents.encode()) > MAX_SNAPSHOT_FILE_BYTES:
+                raise ConvergenceError(
+                    f"{relative} exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes"
+                )
+        document = json.loads(contents)
+    except (json.JSONDecodeError, OSError, UnicodeError, ConvergenceError) as error:
+        raise ConvergenceError(f"cannot read {relative}: {error}") from error
+    if not isinstance(document, dict):
+        raise ConvergenceError(f"{relative} must contain a JSON object")
+    return document
+
+
+def validate_new_snapshot_provenance(
+    repo: Path,
+    policy: governance.ConvergencePolicy,
+    against: str,
+    remote_tip: str,
+    new_snapshots: set[str],
+    existing_snapshots: set[str],
+) -> list[str]:
+    errors: list[str] = []
+    previous_upstreams = []
+    for snapshot in sorted(existing_snapshots):
+        try:
+            document = snapshot_document_at(repo, policy, snapshot, against)
+            upstream = str(document["refs"]["upstream"])
+            if FULL_SHA.fullmatch(upstream) is None or not commit_exists(repo, upstream):
+                raise ConvergenceError(f"recorded upstream is unavailable: {upstream}")
+            previous_upstreams.append(upstream)
+        except (KeyError, TypeError, ConvergenceError) as error:
+            errors.append(f"cannot verify historical snapshot {snapshot}: {error}")
+    try:
+        previous_tip = unique_ancestry_tip(
+            repo, previous_upstreams, "historical upstream snapshot chain"
+        )
+    except ConvergenceError as error:
+        errors.append(str(error))
+        previous_tip = None
+
+    head = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    new_upstreams = []
+    for snapshot in sorted(new_snapshots):
+        try:
+            document = snapshot_document_at(repo, policy, snapshot)
+            raw_policy = document.get("policy")
+            policy_version = raw_policy.get("version") if isinstance(raw_policy, dict) else None
+            if policy_version != inventory.POLICY_VERSION:
+                raise ConvergenceError(
+                    f"new snapshot must use policy version {inventory.POLICY_VERSION}"
+                )
+            raw_refs = document.get("refs")
+            if not isinstance(raw_refs, dict):
+                raise ConvergenceError("snapshot refs must be an object")
+            refs = exact_refs(
+                repo,
+                str(raw_refs.get("base", "")),
+                str(raw_refs.get("upstream", "")),
+                str(raw_refs.get("local", "")),
+            )
+            if not ref_is_ancestor(repo, refs["upstream"], remote_tip):
+                raise ConvergenceError(
+                    f"upstream {refs['upstream']} is not reachable from {remote_tip}"
+                )
+            if not ref_is_ancestor(repo, refs["upstream"], head) or not ref_is_ancestor(
+                repo, refs["local"], head
+            ):
+                raise ConvergenceError(
+                    "candidate HEAD does not contain both local and upstream snapshot inputs"
+                )
+            if previous_tip == refs["upstream"]:
+                raise ConvergenceError("new snapshot does not advance the recorded upstream")
+            if previous_tip is not None and not ref_is_ancestor(
+                repo, previous_tip, refs["upstream"]
+            ):
+                raise ConvergenceError(
+                    f"upstream moved backward or diverged from {previous_tip}"
+                )
+            new_upstreams.append(refs["upstream"])
+        except ConvergenceError as error:
+            errors.append(f"new snapshot {snapshot} has invalid provenance: {error}")
+
+    try:
+        unique_ancestry_tip(
+            repo,
+            [*previous_upstreams, *new_upstreams],
+            "combined upstream snapshot chain",
+        )
+    except ConvergenceError as error:
+        errors.append(str(error))
     return errors
 
 
@@ -571,19 +835,43 @@ def validate(
     against: str | None,
 ) -> dict[str, object]:
     state = worktree_state(repo)
-    remote = optional_remote_identity(repo, policy)
     governance_report = governance.verify(repo, policy_path)
     manifest = guard.load_manifest(repo / "upstream" / "convergence-guard.json")
     waivers = guard.load_waivers(repo / "upstream" / "convergence-waivers.json")
     guard_report = guard.check(manifest, waivers, repo)
     snapshots = validate_snapshots(repo, policy)
     errors = []
+    new_snapshots: set[str] = set()
     if against is not None:
-        errors.extend(snapshot_change_errors(repo, policy, against))
+        remote = remote_identity(repo, policy)
+        change_errors, new_snapshots, existing_snapshots = snapshot_change_analysis(
+            repo, policy, against
+        )
+        errors.extend(change_errors)
+        if snapshots["historyUnavailable"]:
+            errors.append(
+                "snapshot history is unavailable during review-base validation"
+            )
+        errors.extend(
+            validate_new_snapshot_provenance(
+                repo,
+                policy,
+                against,
+                str(remote["remoteTip"]),
+                new_snapshots,
+                existing_snapshots,
+            )
+        )
+    else:
+        remote = optional_remote_identity(repo, policy)
     if state["operationMarkers"]:
         errors.append(
             "Git operation is in progress: " + ", ".join(state["operationMarkers"])
         )
+    if state["replacementRefs"]:
+        errors.append("Git replacement refs make commit provenance ambiguous")
+    if against is not None and state["shallow"]:
+        errors.append("complete Git history is required for review-base validation")
     if not state["clean"]:
         errors.append("worktree must be clean for exact validation evidence")
     waiver_dispositions: dict[str, int] = {}
@@ -597,8 +885,14 @@ def validate(
         "waivedCount": len(guard_report["waived"]),
         "staleWaiverCount": len(guard_report["staleWaivers"]),
         "waiverDispositionCounts": dict(sorted(waiver_dispositions.items())),
-        "violations": guard_report["violations"],
-        "staleWaivers": guard_report["staleWaivers"],
+        "violations": guard_report["violations"][:REPORT_RECORD_LIMIT],
+        "violationRecordsTruncated": max(
+            0, len(guard_report["violations"]) - REPORT_RECORD_LIMIT
+        ),
+        "staleWaivers": guard_report["staleWaivers"][:REPORT_RECORD_LIMIT],
+        "staleWaiverRecordsTruncated": max(
+            0, len(guard_report["staleWaivers"]) - REPORT_RECORD_LIMIT
+        ),
     }
     passed = (
         governance_report["passed"]
@@ -616,6 +910,7 @@ def validate(
         "guard": guard_summary,
         "snapshots": snapshots,
         "comparisonBase": against,
+        "newSnapshots": sorted(new_snapshots),
         "errors": errors,
         "nextAction": (
             "Convergence controls are valid."
@@ -683,14 +978,24 @@ def main(argv: list[str]) -> int:
     try:
         repository_root(repo)
         policy = governance.load_policy(policy_path, repo)
-        with convergence_lock(repo):
-            if args.operation == "inspect":
-                report = inspect(repo, policy, args.base, args.upstream, args.local)
-            elif args.operation == "record":
+        if args.operation == "inspect":
+            report = inspect(repo, policy, args.base, args.upstream, args.local)
+        elif args.operation == "record":
+            with convergence_lock(repo):
                 report = record(repo, policy, args.base, args.upstream, args.local)
-            else:
-                report = validate(repo, policy, policy_path, args.against)
-    except (ConvergenceError, governance.PolicyError, guard.WaiverError) as error:
+        else:
+            report = validate(repo, policy, policy_path, args.against)
+    except (
+        ConvergenceError,
+        governance.PolicyError,
+        guard.WaiverError,
+        KeyError,
+        OSError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as error:
         if args.json:
             json.dump(
                 {

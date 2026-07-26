@@ -1,6 +1,8 @@
 import json
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import upstream_convergence_inventory as inventory
 
@@ -9,6 +11,22 @@ SNAPSHOT_ROOT = Path(__file__).resolve().parents[2] / "upstream" / "openai-codex
 
 
 class UpstreamConvergenceInventoryTest(unittest.TestCase):
+    def test_git_environment_removes_provenance_overrides(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "GIT_DIR": "/tmp/other.git",
+                "GIT_OBJECT_DIRECTORY": "/tmp/objects",
+                "GIT_CONFIG_COUNT": "1",
+            },
+        ):
+            env = inventory.git_environment()
+
+        self.assertNotIn("GIT_DIR", env)
+        self.assertNotIn("GIT_OBJECT_DIRECTORY", env)
+        self.assertNotIn("GIT_CONFIG_COUNT", env)
+        self.assertEqual("1", env["GIT_NO_REPLACE_OBJECTS"])
+
     def test_parses_content_conflict(self) -> None:
         self.assertEqual(
             inventory.parse_conflict_message(
@@ -69,6 +87,7 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
     def test_governance_files_are_intentionally_owned(self) -> None:
         for path in (
             "upstream/convergence-policy.json",
+            ".github/CODEOWNERS",
             ".github/scripts/upstream_convergence.py",
             ".github/scripts/verify_upstream_convergence_governance.py",
             ".github/workflows/repo-checks.yml",

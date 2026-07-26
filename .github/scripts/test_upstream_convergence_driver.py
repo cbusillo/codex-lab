@@ -19,6 +19,15 @@ def run(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def loose_object_count(repo: Path) -> int:
+    fields = dict(
+        line.split(": ", 1)
+        for line in run(repo, "count-objects", "-v").splitlines()
+        if ": " in line
+    )
+    return int(fields["count"])
+
+
 class GitFixture(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -48,14 +57,12 @@ class GitFixture(unittest.TestCase):
 
 class RemoteIdentityTest(GitFixture):
     def test_normalizes_supported_github_urls(self) -> None:
-        expected = "github.com/openai/codex"
-
         self.assertEqual(
-            expected,
+            "ssh://git@github.com/openai/codex",
             convergence.normalize_remote_url("git@github.com:openai/codex.git"),
         )
         self.assertEqual(
-            expected,
+            "https://github.com/openai/codex",
             convergence.normalize_remote_url("https://github.com/openai/codex.git"),
         )
 
@@ -64,6 +71,24 @@ class RemoteIdentityTest(GitFixture):
 
         with self.assertRaises(convergence.ConvergenceError):
             convergence.remote_identity(self.root, self.policy)
+
+    def test_rejects_embedded_remote_credentials(self) -> None:
+        with self.assertRaisesRegex(convergence.ConvergenceError, "credentials"):
+            convergence.normalize_remote_url(
+                "https://secret@github.com/openai/codex.git"
+            )
+
+    def test_preserves_nondefault_port_in_remote_identity(self) -> None:
+        self.assertEqual(
+            "https://github.com:444/openai/codex",
+            convergence.normalize_remote_url(
+                "https://github.com:444/openai/codex.git"
+            ),
+        )
+
+    def test_rejects_insecure_remote_transport(self) -> None:
+        with self.assertRaisesRegex(convergence.ConvergenceError, "unsupported"):
+            convergence.normalize_remote_url("http://github.com/openai/codex.git")
 
 
 class SnapshotMutationTest(GitFixture):
@@ -158,6 +183,8 @@ class RecordIntegrationTest(GitFixture):
 
     def test_records_atomically_and_refuses_overwrite(self) -> None:
         linked, base, upstream, local = self.make_linked_candidate()
+        objects_before = loose_object_count(linked)
+        review_base = run(linked, "rev-parse", "HEAD")
 
         report = convergence.record(
             linked,
@@ -168,17 +195,51 @@ class RecordIntegrationTest(GitFixture):
         )
 
         snapshot = linked / str(report["snapshot"])
+        self.assertEqual(objects_before, loose_object_count(linked))
+        self.assertEqual(0, report["existingSnapshotsValidated"])
         self.assertEqual(
             sorted(convergence.SNAPSHOT_FILES),
             sorted(path.name for path in snapshot.iterdir()),
         )
         document = json.loads((snapshot / "inventory.json").read_text(encoding="utf-8"))
         self.assertEqual(convergence.inventory.POLICY_VERSION, document["policy"]["version"])
-
         run(linked, "add", str(snapshot.relative_to(linked)))
         run(linked, "commit", "-m", "record snapshot")
+        change_errors, added, existing = convergence.snapshot_change_analysis(
+            linked, self.policy, review_base
+        )
+        self.assertEqual([], change_errors)
+        self.assertEqual({snapshot.name}, added)
+        self.assertEqual(set(), existing)
+        self.assertEqual(
+            [],
+            convergence.validate_new_snapshot_provenance(
+                linked,
+                self.policy,
+                review_base,
+                upstream,
+                added,
+                existing,
+            ),
+        )
         with self.assertRaisesRegex(convergence.ConvergenceError, "snapshot already exists"):
             convergence.record(linked, self.policy, base, upstream, local)
+
+
+class LockTest(GitFixture):
+    def test_lock_clears_diagnostic_owner_after_release(self) -> None:
+        lock_path = convergence.git_common_dir(self.root) / "upstream-convergence.lock"
+
+        with convergence.convergence_lock(self.root):
+            self.assertIn(b"pid=", lock_path.read_bytes())
+
+        self.assertEqual(b"\0", lock_path.read_bytes())
+
+    def test_second_lock_holder_is_rejected(self) -> None:
+        with convergence.convergence_lock(self.root):
+            with self.assertRaises(convergence.ConvergenceError):
+                with convergence.convergence_lock(self.root):
+                    self.fail("second lock holder should not enter")
 
 
 class ExactRefTest(GitFixture):
@@ -187,6 +248,100 @@ class ExactRefTest(GitFixture):
 
         with self.assertRaises(convergence.ConvergenceError):
             convergence.resolve_exact_commit(self.root, "HEAD", "local")
+
+
+class SafetyStateTest(unittest.TestCase):
+    def state(self, **overrides: object) -> dict[str, object]:
+        state: dict[str, object] = {
+            "clean": True,
+            "operationMarkers": [],
+            "replacementRefs": [],
+            "shallow": False,
+        }
+        state.update(overrides)
+        return state
+
+    def test_inspection_rejects_shallow_history(self) -> None:
+        with self.assertRaisesRegex(convergence.ConvergenceError, "complete Git history"):
+            convergence.require_read_safety(self.state(shallow=True))
+
+    def test_inspection_rejects_replacement_refs(self) -> None:
+        with self.assertRaisesRegex(convergence.ConvergenceError, "replacement refs"):
+            convergence.require_read_safety(
+                self.state(replacementRefs=["refs/replace/abc"])
+            )
+
+
+class SnapshotAvailabilityTest(GitFixture):
+    def write_snapshot(self) -> Path:
+        snapshot = (
+            self.root
+            / self.policy.evidence_root
+            / "aaaaaaaa-bbbbbbbb"
+        )
+        snapshot.mkdir(parents=True)
+        (snapshot / "inventory.json").write_text(
+            json.dumps(
+                {
+                    "repository": "openai/codex",
+                    "refs": {
+                        "base": "a" * 40,
+                        "upstream": "b" * 40,
+                        "local": "c" * 40,
+                    },
+                    "policy": {
+                        "defaultLane": "green_bulk_adopt",
+                        "rule": "Upstream wins.",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (snapshot / "inventory.md").write_text("# Inventory\n", encoding="utf-8")
+        (snapshot / "residuals.json").write_text("{}\n", encoding="utf-8")
+        return snapshot
+
+    def test_reports_missing_history_without_claiming_reproduction(self) -> None:
+        snapshot = self.write_snapshot()
+
+        report = convergence.validate_snapshots(self.root, self.policy)
+
+        self.assertTrue(report["passed"])
+        self.assertEqual([], report["reproduced"])
+        self.assertEqual(
+            [str(snapshot.relative_to(self.root))], report["historyUnavailable"]
+        )
+
+    def test_rejects_symbolic_links_inside_snapshot(self) -> None:
+        snapshot = self.write_snapshot()
+        target = self.root / "outside-inventory.json"
+        target.write_text("{}\n", encoding="utf-8")
+        (snapshot / "inventory.json").unlink()
+        (snapshot / "inventory.json").symlink_to(target)
+
+        report = convergence.validate_snapshots(self.root, self.policy)
+
+        self.assertFalse(report["passed"])
+        self.assertIn("symbolic links", report["errors"][0])
+
+    def test_rejects_non_object_inventory(self) -> None:
+        snapshot = self.write_snapshot()
+        (snapshot / "inventory.json").write_text("[]\n", encoding="utf-8")
+
+        report = convergence.validate_snapshots(self.root, self.policy)
+
+        self.assertFalse(report["passed"])
+        self.assertIn("must contain a JSON object", report["errors"][0])
+
+    def test_rejects_non_snapshot_entry_in_evidence_root(self) -> None:
+        root = self.root / self.policy.evidence_root
+        root.mkdir(parents=True)
+        (root / "README.txt").write_text("unexpected\n", encoding="utf-8")
+
+        report = convergence.validate_snapshots(self.root, self.policy)
+
+        self.assertFalse(report["passed"])
+        self.assertIn("non-snapshot entries", report["errors"][0])
 
 
 class CheckedInSnapshotTest(unittest.TestCase):
