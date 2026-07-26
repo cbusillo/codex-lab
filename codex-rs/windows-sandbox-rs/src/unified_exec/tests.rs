@@ -576,8 +576,25 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
         /*use_private_desktop*/ true,
     )
     .expect("run legacy capture powershell");
+    // Surface the child's own diagnostics before touching the pid marker: when
+    // PowerShell fails to start (missing modules, loader errors) the marker is
+    // never written, and a bare `read descendant pid` panic hides the reason.
+    println!("capture pwsh exit_code={}", result.exit_code);
+    println!("capture pwsh timed_out={}", result.timed_out);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    println!("capture pwsh stdout={stdout:?}");
+    println!("capture pwsh stderr={stderr:?}");
+
     let descendant_pid = fs::read_to_string(&ready_marker)
-        .expect("read descendant pid")
+        .unwrap_or_else(|err| {
+            panic!(
+                "read descendant pid ({err}); exit_code={} timed_out={} stdout={stdout:?} stderr={stderr:?}\n{}",
+                result.exit_code,
+                result.timed_out,
+                sandbox_log(codex_home.path())
+            )
+        })
         .trim()
         .parse()
         .expect("parse descendant pid");
@@ -585,11 +602,6 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     fs::write(&release_marker, "release").expect("release descendant after root exit");
     let descendant_process = descendant_process.expect("open descendant after normal capture exit");
 
-    println!("capture pwsh exit_code={}", result.exit_code);
-    println!("capture pwsh timed_out={}", result.timed_out);
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    println!("capture pwsh stderr={stderr:?}");
     assert_eq!(result.exit_code, 0, "stdout={stdout:?} stderr={stderr:?}");
     assert!(
         stdout.contains("LEGACY-CAPTURE-DIRECT"),

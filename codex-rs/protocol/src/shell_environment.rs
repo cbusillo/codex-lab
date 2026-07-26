@@ -115,7 +115,8 @@ const UNIX_CORE_ENV_VARS: &[&str] = &[
     "USER",
 ];
 
-#[cfg(target_os = "windows")]
+/// Defined on every target so that Windows-only consumers can keep their own
+/// environment allowlists aligned with this one in cross-platform tests.
 pub const WINDOWS_CORE_ENV_VARS: &[&str] = &[
     // Core path resolution
     "PATH",
