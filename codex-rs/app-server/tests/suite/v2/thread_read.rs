@@ -40,6 +40,8 @@ use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
+use codex_app_server_protocol::ThreadTurnsItemsListParams;
+use codex_app_server_protocol::ThreadTurnsItemsListResponse;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::Turn;
@@ -1976,6 +1978,45 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
     assert_eq!(third_items_page.data[1].turn_id, "turn-2");
     assert_eq!(third_items_page.data[1].item.id(), "user-2");
 
+    // The legacy `thread/turns/items/list` route serves the same items for a
+    // pinned turn, unwrapped out of their `{ turnId, item }` entries.
+    let legacy_request_id = mcp
+        .send_thread_turns_items_list_request(ThreadTurnsItemsListParams {
+            thread_id: thread_id.to_string(),
+            turn_id: "turn-1".to_string(),
+            cursor: None,
+            limit: None,
+            sort_direction: Some(SortDirection::Asc),
+        })
+        .await?;
+    let legacy_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(legacy_request_id)),
+    )
+    .await??;
+    let legacy_page: ThreadTurnsItemsListResponse = to_response(legacy_response)?;
+    let turn_one_page = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("turn-1"),
+        /*cursor*/ None,
+        /*limit*/ None,
+        SortDirection::Asc,
+    )
+    .await?;
+    assert_eq!(
+        legacy_page,
+        ThreadTurnsItemsListResponse {
+            data: turn_one_page
+                .data
+                .iter()
+                .map(|entry| entry.item.clone())
+                .collect(),
+            next_cursor: turn_one_page.next_cursor.clone(),
+            backwards_cursor: turn_one_page.backwards_cursor.clone(),
+        }
+    );
+
     let turn_start_id = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread_id.to_string(),
@@ -2025,6 +2066,44 @@ async fn thread_items_list_returns_unsupported() -> Result<()> {
     )
     .await??;
 
+    assert_eq!(read_err.error.code, -32601);
+    assert_eq!(
+        read_err.error.message,
+        "thread/items/list is not supported yet"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_turns_items_list_returns_unsupported() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+
+    let read_id = mcp
+        .send_thread_turns_items_list_request(ThreadTurnsItemsListParams {
+            thread_id: "00000000-0000-4000-8000-000000000123".to_string(),
+            turn_id: "turn-1".to_string(),
+            cursor: None,
+            limit: None,
+            sort_direction: None,
+        })
+        .await?;
+    let read_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+
+    // The compatibility route delegates, so unsupported stores surface the
+    // `thread/items/list` error rather than an unknown-method error.
     assert_eq!(read_err.error.code, -32601);
     assert_eq!(
         read_err.error.message,

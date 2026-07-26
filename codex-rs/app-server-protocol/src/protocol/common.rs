@@ -670,6 +670,12 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadItemsListResponse,
     },
+    #[experimental("thread/turns/items/list")]
+    ThreadTurnsItemsList => "thread/turns/items/list" {
+        params: v2::ThreadTurnsItemsListParams,
+        serialization: None,
+        response: v2::ThreadTurnsItemsListResponse,
+    },
     /// Append raw Responses API items to the thread history without starting a user turn.
     ThreadInjectItems => "thread/inject_items" {
         params: v2::ThreadInjectItemsParams,
@@ -1737,7 +1743,6 @@ server_notification_definitions! {
     ThreadSettingsUpdated => "thread/settings/updated" (v2::ThreadSettingsUpdatedNotification),
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
     TurnStarted => "turn/started" (v2::TurnStartedNotification),
-    #[experimental("validation/completed")]
     ProjectValidationCompleted => "validation/completed" (v2::ProjectValidationCompletedNotification),
     BackgroundAutoReviewStatusChanged => "review/backgroundStatus/changed" (v2::BackgroundAutoReviewStatusChangedNotification),
     HookStarted => "hook/started" (v2::HookStartedNotification),
