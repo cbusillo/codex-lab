@@ -103,6 +103,7 @@ mod pending_input;
 mod permissions_messages;
 mod personality;
 mod plugins;
+mod project_validation;
 mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;

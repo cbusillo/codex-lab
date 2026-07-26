@@ -125,6 +125,9 @@ pub use exec_events::McpToolCallItemResult;
 pub use exec_events::McpToolCallStatus;
 pub use exec_events::PatchApplyStatus;
 pub use exec_events::PatchChangeKind;
+pub use exec_events::ProjectValidationCompletedEvent;
+pub use exec_events::ProjectValidationSkipReason;
+pub use exec_events::ProjectValidationStatus;
 pub use exec_events::ReasoningItem;
 pub use exec_events::ThreadErrorEvent;
 pub use exec_events::ThreadEvent;
@@ -1331,6 +1334,9 @@ fn should_process_notification(
             notification.thread_id == thread_id && notification.turn_id == turn_id
         }
         ServerNotification::ModelVerification(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::ProjectValidationCompleted(notification) => {
             notification.thread_id == thread_id && notification.turn_id == turn_id
         }
         ServerNotification::ThreadTokenUsageUpdated(notification) => {

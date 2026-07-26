@@ -1480,6 +1480,7 @@ The app-server streams JSON-RPC notifications while a turn is running. Each turn
 - `model/rerouted` — `{ threadId, turnId, fromModel, toModel, reason }` when the backend reroutes a request to a different model (for example, due to high-risk cyber safety checks).
 - `model/verification` — `{ threadId, turnId, verifications }` when the backend flags additional account verification, such as `trustedAccessForCyber`.
 - `turn/moderationMetadata` — experimental; `{ threadId, turnId, metadata }` when a first-party backend supplies turn-scoped moderation metadata for client-side presentation.
+- `validation/completed` — `{ threadId, turnId, command, commandTruncated, cwd, status, skipReason, changedFileCount, exitCode, output, outputTruncated, durationMs }` for the terminal Automatic Validation disposition. `status` is `passed`, `actionableFailure`, `configurationError`, `timedOut`, `infrastructureFailure`, `cancelled`, or `skipped`. A skipped disposition carries `skipReason` as `validationDisabled`, `noChangedFiles`, `noApplicableProvider`, `nonRootAgent`, `unchangedFingerprint`, or `unsupportedEnvironment`.
 
 `turn/started` carries no items. `turn/completed` carries only the final agent message as a summary fallback; continue consuming `item/*` notifications for the full canonical item list.
 
@@ -1501,6 +1502,7 @@ The app-server streams JSON-RPC notifications while a turn is running. Each turn
 - `enteredReviewMode` — `{id, review}` sent when the reviewer starts; `review` is a short user-facing label such as `"current changes"` or the requested target description.
 - `exitedReviewMode` — `{id, review}` emitted when the reviewer finishes; `review` is the full plain-text review (usually, overall notes plus bullet point findings).
 - `contextCompaction` — `{id}` emitted when codex compacts the conversation history. This can happen automatically.
+- `projectValidation` — `{id, command, commandTruncated, cwd, status, skipReason, changedFileCount, exitCode, output, outputTruncated, durationMs}` persists each Automatic Validation disposition in thread history, including skipped and cancelled attempts.
 - `compacted` - `{threadId, turnId}` when codex compacts the conversation history. This can happen automatically. **Deprecated:** Use `contextCompaction` instead.
 
 All items emit shared lifecycle events:

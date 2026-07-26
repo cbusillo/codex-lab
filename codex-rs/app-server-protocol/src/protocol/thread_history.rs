@@ -50,6 +50,7 @@ use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::PatchApplyBeginEvent;
 use codex_protocol::protocol::PatchApplyEndEvent;
+use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnAbortedEvent;
@@ -381,6 +382,9 @@ impl ThreadHistoryBuilder {
             EventMsg::ExitedReviewMode(payload) => self.handle_exited_review_mode(payload),
             EventMsg::ItemStarted(payload) => self.handle_item_started(payload),
             EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload),
+            EventMsg::ProjectValidationCompleted(payload) => {
+                self.handle_project_validation_completed(payload)
+            }
             EventMsg::HookStarted(_) | EventMsg::HookCompleted(_) => {}
             EventMsg::Error(payload) => self.handle_error(payload),
             EventMsg::TokenCount(_) => {}
@@ -593,6 +597,29 @@ impl ThreadHistoryBuilder {
 
     fn handle_item_completed(&mut self, payload: &ItemCompletedEvent) {
         self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
+    }
+
+    fn handle_project_validation_completed(&mut self, payload: &ProjectValidationCompletedEvent) {
+        let id = payload
+            .item_id
+            .clone()
+            .unwrap_or_else(|| self.next_item_id());
+        self.upsert_item_in_turn_id(
+            &payload.turn_id,
+            ThreadItem::ProjectValidation {
+                id,
+                command: payload.command.clone(),
+                command_truncated: payload.command_truncated,
+                cwd: payload.cwd.clone(),
+                status: payload.status.into(),
+                skip_reason: payload.skip_reason.map(Into::into),
+                changed_file_count: payload.changed_file_count,
+                exit_code: payload.exit_code,
+                output: payload.output.clone(),
+                output_truncated: payload.output_truncated,
+                duration_ms: payload.duration_ms,
+            },
+        );
     }
 
     fn handle_materialized_item_lifecycle(
@@ -3355,6 +3382,160 @@ mod tests {
                 duration_ms: Some(5),
             }
         );
+    }
+
+    #[test]
+    fn assigns_late_project_validation_to_original_turn() {
+        let events = vec![
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "first".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                last_agent_message: None,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-b".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "second".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            }),
+            EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
+                turn_id: "turn-a".into(),
+                item_id: Some("validation-a".into()),
+                command: Vec::new(),
+                command_truncated: false,
+                cwd: None,
+                status: codex_protocol::protocol::ProjectValidationStatus::Skipped,
+                skip_reason: Some(
+                    codex_protocol::protocol::ProjectValidationSkipReason::NoApplicableProvider,
+                ),
+                changed_file_count: Some(1),
+                exit_code: None,
+                output: "automatic validation skipped".into(),
+                output_truncated: false,
+                duration_ms: 0,
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-b".into(),
+                last_agent_message: None,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].id, "turn-a");
+        assert_eq!(turns[1].id, "turn-b");
+        assert_eq!(turns[0].items.len(), 2);
+        assert_eq!(turns[1].items.len(), 1);
+        assert!(matches!(
+            &turns[0].items[1],
+            ThreadItem::ProjectValidation {
+                id,
+                status: crate::protocol::v2::ProjectValidationStatus::Skipped,
+                skip_reason: Some(
+                    crate::protocol::v2::ProjectValidationSkipReason::NoApplicableProvider
+                ),
+                changed_file_count: Some(1),
+                ..
+            } if id == "validation-a"
+        ));
+    }
+
+    #[test]
+    fn preserves_distinct_project_validation_items_in_one_turn() {
+        let events = vec![
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
+                turn_id: "turn-a".into(),
+                item_id: Some("validation-initial".into()),
+                command: vec!["cargo".into(), "check".into()],
+                command_truncated: false,
+                cwd: None,
+                status: codex_protocol::protocol::ProjectValidationStatus::ActionableFailure,
+                skip_reason: None,
+                changed_file_count: Some(1),
+                exit_code: Some(1),
+                output: "first failure".into(),
+                output_truncated: false,
+                duration_ms: 10,
+            }),
+            EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
+                turn_id: "turn-a".into(),
+                item_id: Some("validation-rerun".into()),
+                command: vec!["cargo".into(), "check".into()],
+                command_truncated: false,
+                cwd: None,
+                status: codex_protocol::protocol::ProjectValidationStatus::Passed,
+                skip_reason: None,
+                changed_file_count: Some(1),
+                exit_code: Some(0),
+                output: "clean".into(),
+                output_truncated: false,
+                duration_ms: 8,
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                last_agent_message: None,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].items.len(), 2);
+        assert_eq!(turns[0].items[0].id(), "validation-initial");
+        assert_eq!(turns[0].items[1].id(), "validation-rerun");
     }
 
     #[test]

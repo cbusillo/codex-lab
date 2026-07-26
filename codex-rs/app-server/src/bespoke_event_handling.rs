@@ -47,6 +47,7 @@ use codex_app_server_protocol::NetworkPolicyAmendment as V2NetworkPolicyAmendmen
 use codex_app_server_protocol::NetworkPolicyRuleAction as V2NetworkPolicyRuleAction;
 use codex_app_server_protocol::PermissionsRequestApprovalParams;
 use codex_app_server_protocol::PermissionsRequestApprovalResponse;
+use codex_app_server_protocol::ProjectValidationCompletedNotification;
 use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
@@ -1033,6 +1034,28 @@ pub(crate) async fn apply_bespoke_event_handling(
                 &event_turn_id,
             );
             outgoing.send_server_notification(notification).await;
+        }
+        EventMsg::ProjectValidationCompleted(event) => {
+            let notification = ProjectValidationCompletedNotification {
+                thread_id: conversation_id.to_string(),
+                turn_id: event.turn_id,
+                item_id: event.item_id,
+                command: event.command,
+                command_truncated: event.command_truncated,
+                cwd: event.cwd,
+                status: event.status.into(),
+                skip_reason: event.skip_reason.map(Into::into),
+                changed_file_count: event.changed_file_count,
+                exit_code: event.exit_code,
+                output: event.output,
+                output_truncated: event.output_truncated,
+                duration_ms: event.duration_ms,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::ProjectValidationCompleted(
+                    notification,
+                ))
+                .await;
         }
         EventMsg::HookStarted(event) => {
             let notification = HookStartedNotification {

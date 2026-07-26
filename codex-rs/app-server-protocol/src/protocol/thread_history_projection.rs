@@ -73,6 +73,36 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
             }],
             ..Default::default()
         },
+        RolloutItem::EventMsg(EventMsg::ProjectValidationCompleted(event)) => {
+            let id = match event.item_id.clone() {
+                Some(item_id) => item_id,
+                None => {
+                    let Some(ordinal) = line.ordinal else {
+                        return ThreadHistoryChangeSet::default();
+                    };
+                    format!("project-validation-{ordinal}")
+                }
+            };
+            ThreadHistoryChangeSet {
+                changed_items: vec![ThreadHistoryItemChange {
+                    turn_id: event.turn_id.clone(),
+                    item: ThreadItem::ProjectValidation {
+                        id,
+                        command: event.command.clone(),
+                        command_truncated: event.command_truncated,
+                        cwd: event.cwd.clone(),
+                        status: event.status.into(),
+                        skip_reason: event.skip_reason.map(Into::into),
+                        changed_file_count: event.changed_file_count,
+                        exit_code: event.exit_code,
+                        output: event.output.clone(),
+                        output_truncated: event.output_truncated,
+                        duration_ms: event.duration_ms,
+                    },
+                }],
+                ..Default::default()
+            }
+        }
         RolloutItem::SessionMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)

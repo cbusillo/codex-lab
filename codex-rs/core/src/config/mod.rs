@@ -21,6 +21,7 @@ use codex_config::ResidencyRequirement;
 use codex_config::SandboxModeRequirement;
 use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
+use codex_config::ValidationConfig;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
@@ -661,6 +662,9 @@ pub struct Config {
     /// been escalated. This does not disable separate safety checks such as
     /// ARC.
     pub approvals_reviewer: ApprovalsReviewer,
+
+    /// Patch-local validation policy.
+    pub validation: ValidationConfig,
 
     /// enforce_residency means web traffic cannot be routed outside of a
     /// particular geography. HTTP clients should direct their requests
@@ -4033,6 +4037,7 @@ impl Config {
             explicit_permission_profile_mode,
             custom_permission_profiles,
             approvals_reviewer: constrained_approvals_reviewer.value(),
+            validation: cfg.validation.unwrap_or_default(),
             enforce_residency: enforce_residency.value,
             notify: cfg.notify,
             base_instructions,

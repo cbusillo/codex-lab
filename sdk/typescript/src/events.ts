@@ -61,6 +61,39 @@ export type ItemCompletedEvent = {
   item: ThreadItem;
 };
 
+export type ProjectValidationStatus =
+  | "passed"
+  | "actionable_failure"
+  | "configuration_error"
+  | "timed_out"
+  | "infrastructure_failure"
+  | "cancelled"
+  | "skipped";
+
+export type ProjectValidationSkipReason =
+  | "validation_disabled"
+  | "no_changed_files"
+  | "no_applicable_provider"
+  | "non_root_agent"
+  | "unchanged_fingerprint"
+  | "unsupported_environment";
+
+/** Emitted when a configured project-validation command reaches a terminal state. */
+export type ProjectValidationCompletedEvent = {
+  type: "validation.completed";
+  item_id?: string;
+  command: string[];
+  command_truncated: boolean;
+  cwd?: string;
+  status: ProjectValidationStatus;
+  skip_reason?: ProjectValidationSkipReason;
+  changed_file_count?: number;
+  exit_code?: number;
+  output: string;
+  output_truncated: boolean;
+  duration_ms: number;
+};
+
 /** Fatal error emitted by the stream. */
 export type ThreadError = {
   message: string;
@@ -81,4 +114,5 @@ export type ThreadEvent =
   | ItemStartedEvent
   | ItemUpdatedEvent
   | ItemCompletedEvent
+  | ProjectValidationCompletedEvent
   | ThreadErrorEvent;

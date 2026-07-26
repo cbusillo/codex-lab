@@ -32,6 +32,7 @@ codex-async-utils = { workspace = true }
 codex-code-mode = { workspace = true }
 codex-connectors = { workspace = true }
 codex-context-fragments = { workspace = true }
+codex-auto-review = { workspace = true }
 codex-config = { workspace = true }
 codex-core-plugins = { workspace = true }
 codex-core-skills = { workspace = true }
@@ -85,6 +86,7 @@ dunce = { workspace = true }
 eventsource-stream = { workspace = true }
 futures = { workspace = true }
 fs2 = { workspace = true }
+globset = { workspace = true }
 http = { workspace = true }
 iana-time-zone = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "webp"] }

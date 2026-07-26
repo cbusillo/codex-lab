@@ -107,6 +107,9 @@ pub(crate) async fn run_codex_thread_interactive(
             .services
             .turn_environments
             .environment_manager(),
+        project_validation_coordinator: Arc::clone(
+            &parent_session.services.project_validation_coordinator,
+        ),
         skills_service: Arc::clone(&parent_session.services.skills_service),
         plugins_manager: Arc::clone(&parent_session.services.plugins_manager),
         mcp_manager: Arc::clone(&parent_session.services.mcp_manager),

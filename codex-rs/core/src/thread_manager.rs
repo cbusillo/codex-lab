@@ -15,6 +15,7 @@ use crate::session::GitEnrichmentPolicy;
 use crate::session::INITIAL_SUBMIT_ID;
 use crate::session::SessionIo;
 use crate::session::SessionSpawnArgs;
+use crate::session::project_validation_coordinator::ProjectValidationCoordinator;
 use crate::session::resolve_multi_agent_version;
 use crate::session::session::Session;
 use crate::tasks::InterruptedTurnHistoryMarker;
@@ -279,6 +280,7 @@ pub(crate) struct ThreadManagerState {
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
     environment_manager: Arc<EnvironmentManager>,
+    project_validation_coordinator: Arc<ProjectValidationCoordinator>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
     skills_service: Arc<SkillsService>,
     plugins_manager: Arc<PluginsManager>,
@@ -391,6 +393,7 @@ impl ThreadManager {
                 thread_created_tx,
                 models_manager,
                 environment_manager,
+                project_validation_coordinator: Arc::new(ProjectValidationCoordinator::default()),
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
                 plugins_manager,
@@ -527,6 +530,7 @@ impl ThreadManager {
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
                     .models_manager(codex_home, /*config_model_catalog*/ None),
                 environment_manager,
+                project_validation_coordinator: Arc::new(ProjectValidationCoordinator::default()),
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
                 plugins_manager,
@@ -1821,6 +1825,7 @@ impl ThreadManagerState {
             auth_manager,
             control_models_manager: Arc::clone(&self.models_manager),
             environment_manager: Arc::clone(&self.environment_manager),
+            project_validation_coordinator: Arc::clone(&self.project_validation_coordinator),
             skills_service: Arc::clone(&self.skills_service),
             plugins_manager: Arc::clone(&self.plugins_manager),
             mcp_manager: Arc::clone(&self.mcp_manager),

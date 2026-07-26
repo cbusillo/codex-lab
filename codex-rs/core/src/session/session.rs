@@ -518,6 +518,7 @@ impl Session {
         supports_openai_form_elicitation: bool,
         agent_control: AgentControl,
         environment_manager: Arc<EnvironmentManager>,
+        project_validation_coordinator: Arc<ProjectValidationCoordinator>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         analytics_events_client: Option<AnalyticsEventsClient>,
         thread_store: Arc<dyn ThreadStore>,
@@ -1176,6 +1177,7 @@ impl Session {
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
+                project_validation_coordinator,
             };
             let apps_context = AppsContext::new(services.execution_account.cache_identity());
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);

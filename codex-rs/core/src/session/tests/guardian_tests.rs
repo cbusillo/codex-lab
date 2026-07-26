@@ -738,6 +738,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         auth_manager,
         control_models_manager,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        project_validation_coordinator: Arc::new(ProjectValidationCoordinator::default()),
         skills_service,
         plugins_manager,
         mcp_manager,
