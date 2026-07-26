@@ -58,6 +58,14 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
         self.assertEqual(classified["lane"], "intentionally_owned")
         self.assertEqual(classified["contracts"], ["AGENT-1"])
 
+    def test_external_agent_preflight_proof_is_intentionally_owned(self) -> None:
+        classified = inventory.classify(
+            "codex-rs/core/tests/suite/external_agent_preflight.rs",
+            "content",
+        )
+        self.assertEqual(classified["lane"], "intentionally_owned")
+        self.assertEqual(classified["contracts"], ["AGENT-1"])
+
     def test_proof_harness_is_intentionally_owned(self) -> None:
         classified = inventory.classify(
             "tools/codex-exec-harness/scenarios/background-review-same-turn-commit.json",

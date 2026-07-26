@@ -64,6 +64,8 @@ mod execution_account_apps;
 mod execution_account_lifecycle;
 #[cfg(not(target_os = "windows"))]
 mod extension_sandbox;
+#[cfg(not(target_os = "windows"))]
+mod external_agent_preflight;
 mod external_auth;
 mod fork_thread;
 mod git_enrichment;

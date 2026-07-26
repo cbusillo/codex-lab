@@ -133,6 +133,9 @@ RULES = (
             "codex-rs/external-agent-migration/**",
             "codex-rs/external-agent-sessions/**",
             "codex-rs/core/src/agent/**",
+            # The explicit external-agent preflight proof is owned coverage: an
+            # upstream-first refresh that drops it removes the AGENT-1 evidence.
+            "codex-rs/core/tests/suite/external_agent_preflight.rs",
             "codex-rs/core/src/review_persistence.rs",
             "codex-rs/core/src/session/background_auto_review*",
             "codex-rs/core/src/tools/handlers/agent_jobs*",
