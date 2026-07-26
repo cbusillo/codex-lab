@@ -20,10 +20,10 @@ named contract lane. Schema version 2 renamed the misleading
 Regenerate a snapshot from the repository root:
 
 ```sh
-snapshot=upstream/openai-codex/20dafe20-62fd4103
-base=20dafe201d91d4405eef05ecd1db0257f13a9ac8
-upstream=62fd410384cca008446c2d64a4f2b3f915f4906e
-local=ced83ba965e65a64d9816ebbd4b861c7d91af1f9
+snapshot=upstream/openai-codex/62fd4103-61a44880
+base=62fd410384cca008446c2d64a4f2b3f915f4906e
+upstream=61a44880a85d2fd0d8770908dea5733495e571c8
+local=cd0c1ddbc6b7f92ce0d83cb4db28c6573a25bc59
 
 for format in json markdown residuals; do
   python3 .github/scripts/upstream_convergence_inventory.py "$format" \

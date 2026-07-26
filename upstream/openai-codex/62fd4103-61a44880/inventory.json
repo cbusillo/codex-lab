@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "repository": "openai/codex",
+  "refs": {"base": "62fd410384cca008446c2d64a4f2b3f915f4906e", "local": "cd0c1ddbc6b7f92ce0d83cb4db28c6573a25bc59", "upstream": "61a44880a85d2fd0d8770908dea5733495e571c8"},
+  "policy": {"defaultLane": "green_bulk_adopt", "rule": "Upstream wins unless a named convergence contract applies."},
+  "summary": {"conflicts": 1, "localChangedOnly": 446, "residualLocalInfluence": 446, "sharedIdentical": 1, "sharedMergeableDivergent": 0},
+  "conflictTypeCounts": {"content": 1},
+  "laneCounts": {"amber_contract_adapt": 1},
+  "residualLaneCounts": {"amber_contract_adapt": 152, "green_bulk_adopt": 196, "intentionally_owned": 88, "red_manual_review": 10},
+  "conflicts": [
+    {"conflictType": "content", "contracts": ["PROTOCOL-1"], "lane": "amber_contract_adapt", "path": "codex-rs/app-server/tests/suite/v2/thread_fork.rs", "reason": "app-server and wire compatibility"}
+  ]
+}
