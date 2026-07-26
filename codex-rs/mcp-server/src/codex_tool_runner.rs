@@ -368,6 +368,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::RawResponseItem(_)
                     | EventMsg::RawResponseCompleted(_)
                     | EventMsg::EnteredReviewMode(_)
+                    | EventMsg::BackgroundAutoReviewStatus(_)
                     | EventMsg::ProjectValidationCompleted(_)
                     | EventMsg::ItemStarted(_)
                     | EventMsg::ItemCompleted(_)

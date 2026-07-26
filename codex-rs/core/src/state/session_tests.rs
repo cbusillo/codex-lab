@@ -6,6 +6,57 @@ use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SpendControlLimitSnapshot;
 use pretty_assertions::assert_eq;
 
+#[test]
+fn background_auto_review_schedules_only_changed_dirty_fingerprint() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
+
+    let schedule = state.complete_regular_turn("turn-1", Some("sha256:new".to_string()));
+
+    let schedule = schedule.expect("changed dirty fingerprint should schedule review");
+    assert_eq!(schedule.generation, 1);
+    assert_eq!(schedule.fingerprint, "sha256:new");
+    assert!(state.is_current_schedule(1));
+}
+
+#[test]
+fn background_auto_review_skips_unchanged_dirty_fingerprint() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:dirty".to_string()));
+
+    let schedule = state.complete_regular_turn("turn-1", Some("sha256:dirty".to_string()));
+
+    assert_eq!(schedule, None);
+}
+
+#[test]
+fn background_auto_review_skips_stale_overlapping_turn_completion() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
+    state.begin_regular_turn("turn-2".to_string(), Some("sha256:old".to_string()));
+    let schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:first".to_string()))
+        .expect("first completed turn should schedule review");
+    assert_eq!(schedule.fingerprint, "sha256:first");
+
+    assert_eq!(
+        state.complete_regular_turn("turn-2", Some("sha256:late".to_string())),
+        None
+    );
+}
+
+#[test]
+fn background_auto_review_remove_regular_turn_clears_pending_snapshot() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
+    state.remove_regular_turn("turn-1");
+
+    assert_eq!(
+        state.complete_regular_turn("turn-1", Some("sha256:new".to_string())),
+        None
+    );
+}
+
 #[tokio::test]
 // Verifies connector merging deduplicates repeated IDs.
 async fn merge_connector_selection_deduplicates_entries() {

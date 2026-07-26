@@ -7,6 +7,7 @@ use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::effective_tool_mode;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::AutoReviewDispositionHandler;
 use crate::tools::handlers::BrowserHandler;
 use crate::tools::handlers::CodeBridgeHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
@@ -739,6 +740,9 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
 
     if turn_context.config.update_plan_enabled {
         planned_tools.add(PlanHandler);
+    }
+    if !turn_context.session_source.is_non_root_agent() {
+        planned_tools.add(AutoReviewDispositionHandler);
     }
 
     if !tool_name_owned_by_external_source(context, CODE_BRIDGE_TOOL_NAME) {

@@ -53,6 +53,10 @@ impl SessionTask for RegularTask {
         "session_task.turn"
     }
 
+    fn background_review_trigger_eligible(&self) -> bool {
+        true
+    }
+
     async fn run(
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,

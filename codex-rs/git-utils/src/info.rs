@@ -286,7 +286,11 @@ pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
     let Some(diff) = diff_against_sha(cwd, &GitSha::new("HEAD")).await else {
         return Some("unknown".to_string());
     };
-    if diff.is_empty() {
+    diff_fingerprint(&diff)
+}
+
+pub fn diff_fingerprint(diff: &str) -> Option<String> {
+    if diff.trim().is_empty() {
         return None;
     }
 

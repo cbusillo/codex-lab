@@ -66,6 +66,47 @@ impl App {
         })
     }
 
+    pub(super) fn try_claim_auto_review_summary_fetch(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: &str,
+    ) -> bool {
+        self.pending_auto_review_summary_fetches
+            .insert((thread_id, run_id.to_string()))
+    }
+
+    pub(super) fn fetch_auto_review_summary(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        run_id: String,
+    ) {
+        if !self.try_claim_auto_review_summary_fetch(thread_id, &run_id) {
+            return;
+        }
+        self.spawn_auto_review_summary_fetch(app_server, thread_id, run_id);
+    }
+
+    pub(super) fn spawn_auto_review_summary_fetch(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        run_id: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = fetch_auto_review_summary(request_handle, thread_id)
+                .await
+                .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::AutoReviewSummaryLoaded {
+                thread_id,
+                run_id,
+                result,
+            });
+        });
+    }
+
     /// Spawns a background task to fetch account rate limits and deliver the
     /// result as a `RateLimitsLoaded` event.
     ///
@@ -847,6 +888,22 @@ pub(super) async fn fetch_skills_list(
         })
         .await
         .wrap_err("skills/list failed in TUI")
+}
+
+pub(super) async fn fetch_auto_review_summary(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+) -> Result<AutoReviewSummaryReadResponse> {
+    let request_id = RequestId::String(format!("auto-review-summary-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams {
+                thread_id: thread_id.to_string(),
+            },
+        })
+        .await
+        .wrap_err("review/summary/read failed in TUI")
 }
 
 pub(super) async fn fetch_connectors_list(

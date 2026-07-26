@@ -213,6 +213,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 
 mod apps_context;
+mod background_auto_review;
 pub(crate) mod cargo_validation_provider;
 mod code_mode_warning;
 mod config_lock;

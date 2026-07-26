@@ -4,6 +4,7 @@ use super::App;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
+use super::background_auto_review_status_has_summary;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
@@ -18,6 +19,7 @@ use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_protocol::ThreadId;
 
 impl App {
     pub(super) fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
@@ -164,6 +166,17 @@ impl App {
             _ => {}
         }
 
+        let auto_review_summary_target = match &notification {
+            ServerNotification::BackgroundAutoReviewStatusChanged(notification)
+                if background_auto_review_status_has_summary(notification.status) =>
+            {
+                ThreadId::from_string(&notification.thread_id)
+                    .ok()
+                    .map(|thread_id| (thread_id, notification.run_id.clone()))
+            }
+            _ => None,
+        };
+
         match server_notification_thread_target(&notification) {
             ServerNotificationThreadTarget::Thread(thread_id) => {
                 let result = if self.primary_thread_id == Some(thread_id)
@@ -177,6 +190,11 @@ impl App {
 
                 if let Err(err) = result {
                     tracing::warn!("failed to enqueue app-server notification: {err}");
+                }
+                if let Some((summary_thread_id, run_id)) = auto_review_summary_target
+                    && summary_thread_id == thread_id
+                {
+                    self.fetch_auto_review_summary(app_server_client, thread_id, run_id);
                 }
                 return;
             }

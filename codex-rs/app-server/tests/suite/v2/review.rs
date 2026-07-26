@@ -5,6 +5,9 @@ use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_shell_command_sse_response;
+use codex_app_server_protocol::BackgroundAutoReviewControlAction;
+use codex_app_server_protocol::BackgroundAutoReviewControlParams;
+use codex_app_server_protocol::BackgroundAutoReviewControlReason;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -38,6 +41,42 @@ use tokio::time::timeout;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 const COLLIDING_REVIEW_SKILL_MARKER: &str = "COLLIDING_REVIEW_SKILL_MARKER";
+
+#[tokio::test]
+async fn background_auto_review_control_rejects_empty_run_id() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let thread_id = start_default_thread(&mut mcp).await?;
+
+    let request_id = mcp
+        .send_background_auto_review_control_request(BackgroundAutoReviewControlParams {
+            thread_id,
+            run_id: "  \t  ".to_string(),
+            action: BackgroundAutoReviewControlAction::Cancel,
+            reason: BackgroundAutoReviewControlReason::UserRequested,
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error.error.message.contains("runId must not be empty"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn review_start_rejects_detached_delivery_for_paginated_parent() -> Result<()> {

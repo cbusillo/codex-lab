@@ -1,4 +1,3 @@
-
 use super::*;
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::Op;

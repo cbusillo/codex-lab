@@ -7,6 +7,7 @@ use codex_protocol::user_input::UserInput;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::MutexGuard;
 use tokio::sync::watch;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +36,18 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<InterAgentCommunication>>,
+}
+
+pub(crate) struct TriggerTurnMailboxGuard<'a> {
+    mailbox_pending_mails: MutexGuard<'a, VecDeque<InterAgentCommunication>>,
+}
+
+impl TriggerTurnMailboxGuard<'_> {
+    pub(crate) fn has_trigger_turn_items(&self) -> bool {
+        self.mailbox_pending_mails
+            .iter()
+            .any(|mail| mail.trigger_turn)
+    }
 }
 
 impl InputQueue {
@@ -90,6 +103,12 @@ impl InputQueue {
             .await
             .iter()
             .any(|mail| mail.trigger_turn)
+    }
+
+    pub(crate) async fn lock_trigger_turn_mailbox_items(&self) -> TriggerTurnMailboxGuard<'_> {
+        TriggerTurnMailboxGuard {
+            mailbox_pending_mails: self.mailbox_pending_mails.lock().await,
+        }
     }
 
     pub(crate) async fn drain_mailbox_input_items(&self) -> Vec<TurnInput> {

@@ -347,6 +347,8 @@ pub(crate) async fn run_turn(
             }
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
+            let auto_review_awareness_input_item =
+                build_auto_review_awareness_input_item(sess.as_ref(), turn_context.as_ref()).await;
 
             let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
                 sess.installation_id.clone(),
@@ -361,6 +363,7 @@ pub(crate) async fn run_turn(
                 &mut client_session,
                 &responses_metadata,
                 sampling_request_input,
+                auto_review_awareness_input_item,
                 cancellation_token.child_token(),
             )
             .await
@@ -870,6 +873,28 @@ async fn build_extension_turn_input_items(
     Some(items)
 }
 
+async fn build_auto_review_awareness_input_item(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> Option<ResponseItem> {
+    let cwd = turn_context
+        .environments
+        .single_local_environment_cwd()?
+        .clone();
+    let codex_home = sess.codex_home().await;
+    let active_snapshot = {
+        let state = sess.state.lock().await;
+        state.background_auto_review.active_snapshot()
+    };
+    crate::context::build_auto_review_awareness(
+        codex_home.as_path(),
+        cwd.as_path(),
+        active_snapshot,
+    )
+    .await
+    .map(ContextualUserFragment::into)
+}
+
 #[tracing::instrument(
     level = "trace",
     skip_all,
@@ -1263,6 +1288,7 @@ async fn run_sampling_request(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
+    request_only_input_item: Option<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1294,6 +1320,11 @@ async fn run_sampling_request(
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        let original_prompt_input = prompt_input.clone();
+        let mut prompt_input = prompt_input;
+        if let Some(request_only_input_item) = &request_only_input_item {
+            prompt_input.push(request_only_input_item.clone());
+        }
         let prompt = build_prompt(
             prompt_input,
             router.as_ref(),
@@ -1314,7 +1345,7 @@ async fn run_sampling_request(
         .await
         {
             Ok(output) => {
-                return Ok((output, original_input.unwrap_or(prompt.input)));
+                return Ok((output, original_input.unwrap_or(original_prompt_input)));
             }
             Err(err) => match err.details() {
                 CodexErrorDetails::ContextWindowExceeded => {
@@ -1339,7 +1370,7 @@ async fn run_sampling_request(
         };
 
         if original_input.is_none() {
-            original_input = Some(prompt.input);
+            original_input = Some(original_prompt_input);
         }
 
         if !err.is_retryable() {
@@ -1855,6 +1886,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::RealtimeConversationListVoicesResponse(_)
         | EventMsg::PlanUpdate(_)
         | EventMsg::TurnAborted(_)
+        | EventMsg::BackgroundAutoReviewStatus(_)
         | EventMsg::ShutdownComplete
         | EventMsg::EnteredReviewMode(_)
         | EventMsg::ProjectValidationCompleted(_)
@@ -2770,6 +2802,15 @@ async fn try_run_sampling_request(
             tracker.get_unified_diff()
         };
         if let Some(unified_diff) = unified_diff {
+            let active_turn_state = {
+                let active_turn = sess.active_turn.lock().await;
+                active_turn
+                    .as_ref()
+                    .map(|active_turn| Arc::clone(&active_turn.turn_state))
+            };
+            if let Some(turn_state) = active_turn_state {
+                turn_state.lock().await.completed_turn_diff = Some(unified_diff.clone());
+            }
             let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
             sess.clone().send_event(&turn_context, msg).await;
         }

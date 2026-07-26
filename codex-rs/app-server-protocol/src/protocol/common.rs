@@ -886,6 +886,26 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ReviewStartResponse,
     },
+    BackgroundAutoReviewControl => "review/background/control" {
+        params: v2::BackgroundAutoReviewControlParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::BackgroundAutoReviewControlResponse,
+    },
+    AutoReviewSummaryRead => "review/summary/read" {
+        params: v2::AutoReviewSummaryReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutoReviewSummaryReadResponse,
+    },
+    AutoReviewFindingDetailRead => "review/findingDetail/read" {
+        params: v2::AutoReviewFindingDetailReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutoReviewFindingDetailReadResponse,
+    },
+    AutoReviewDispositionWrite => "review/disposition/write" {
+        params: v2::AutoReviewDispositionWriteParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutoReviewDispositionWriteResponse,
+    },
 
     ModelList => "model/list" {
         params: v2::ModelListParams,
@@ -1719,6 +1739,7 @@ server_notification_definitions! {
     TurnStarted => "turn/started" (v2::TurnStartedNotification),
     #[experimental("validation/completed")]
     ProjectValidationCompleted => "validation/completed" (v2::ProjectValidationCompletedNotification),
+    BackgroundAutoReviewStatusChanged => "review/backgroundStatus/changed" (v2::BackgroundAutoReviewStatusChangedNotification),
     HookStarted => "hook/started" (v2::HookStartedNotification),
     TurnCompleted => "turn/completed" (v2::TurnCompletedNotification),
     HookCompleted => "hook/completed" (v2::HookCompletedNotification),

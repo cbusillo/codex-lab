@@ -411,6 +411,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
         | EventMsg::TurnAborted(_)
         | EventMsg::ShutdownComplete
         | EventMsg::EnteredReviewMode(_)
+        | EventMsg::BackgroundAutoReviewStatus(_)
         | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
@@ -489,6 +490,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         | EventMsg::RealtimeConversationListVoicesResponse(_)
         | EventMsg::PlanUpdate(_)
         | EventMsg::EnteredReviewMode(_)
+        | EventMsg::BackgroundAutoReviewStatus(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::RawResponseCompleted(_)

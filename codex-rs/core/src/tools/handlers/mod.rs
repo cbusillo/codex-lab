@@ -1,5 +1,7 @@
 pub(crate) mod apply_patch;
 pub(crate) mod apply_patch_spec;
+mod auto_review_disposition;
+pub(crate) mod auto_review_disposition_spec;
 mod browser;
 pub(crate) mod browser_spec;
 mod code_bridge;
@@ -58,6 +60,7 @@ use crate::session::turn_context::TurnEnvironment;
 pub(crate) use crate::tools::code_mode::CodeModeExecuteHandler;
 pub(crate) use crate::tools::code_mode::CodeModeWaitHandler;
 pub use apply_patch::ApplyPatchHandler;
+pub(crate) use auto_review_disposition::AutoReviewDispositionHandler;
 pub use browser::BrowserHandler;
 pub use code_bridge::CodeBridgeHandler;
 use codex_protocol::models::AdditionalPermissionProfile;

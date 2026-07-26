@@ -566,7 +566,7 @@ where
         state_db,
         environment_manager,
         config_warnings,
-        session_source: SessionSource::Cli,
+        session_source: codex_protocol::protocol::SessionSource::Cli,
         session_provenance: agent_session_env::session_provenance_from_agent_env(),
         enable_codex_api_key_env: false,
         client_name: "codex-tui".to_string(),

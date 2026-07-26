@@ -95,6 +95,7 @@ const IN_PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 /// `MessageProcessor` continues to produce that shape internally.
 pub type RequestResult = std::result::Result<JsonRpcResult, JSONRPCErrorError>;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum AppServerEvent {
     Lagged { skipped: usize },
