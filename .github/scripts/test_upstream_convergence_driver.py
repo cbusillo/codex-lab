@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import upstream_convergence as convergence
 import verify_upstream_convergence_governance as governance
@@ -122,12 +123,13 @@ class SnapshotMutationTest(GitFixture):
 
 
 class RecordedUpstreamTest(GitFixture):
-    def write_snapshot(self, name: str, upstream: str) -> None:
+    def write_snapshot(self, name: str, upstream: str) -> Path:
         directory = self.root / self.policy.evidence_root / name
         directory.mkdir(parents=True)
         (directory / "inventory.json").write_text(
             json.dumps({"refs": {"upstream": upstream}}), encoding="utf-8"
         )
+        return directory
 
     def test_rejects_backward_upstream_target(self) -> None:
         older = self.commit_file("one.txt", "one\n", "one")
@@ -147,6 +149,27 @@ class RecordedUpstreamTest(GitFixture):
             older,
             convergence.require_forward_upstream(self.root, self.policy, newer),
         )
+
+    def test_rejects_oversized_inventory_during_inspection(self) -> None:
+        commit = self.commit_file("one.txt", "one\n", "one")
+        snapshot = self.write_snapshot("snapshot", commit)
+        (snapshot / "inventory.json").write_text(" " * 17, encoding="utf-8")
+
+        with patch.object(convergence, "MAX_SNAPSHOT_FILE_BYTES", 16):
+            with self.assertRaisesRegex(convergence.ConvergenceError, "exceeds"):
+                convergence.recorded_upstream_tip(self.root, self.policy)
+
+    def test_rejects_symlinked_inventory_during_inspection(self) -> None:
+        commit = self.commit_file("one.txt", "one\n", "one")
+        snapshot = self.write_snapshot("snapshot", commit)
+        inventory_path = snapshot / "inventory.json"
+        outside = self.root / "outside-inventory.json"
+        outside.write_text(inventory_path.read_text(encoding="utf-8"), encoding="utf-8")
+        inventory_path.unlink()
+        inventory_path.symlink_to(outside)
+
+        with self.assertRaisesRegex(convergence.ConvergenceError, "symlink"):
+            convergence.recorded_upstream_tip(self.root, self.policy)
 
 
 class RecordIntegrationTest(GitFixture):
@@ -224,6 +247,16 @@ class RecordIntegrationTest(GitFixture):
         )
         with self.assertRaisesRegex(convergence.ConvergenceError, "snapshot already exists"):
             convergence.record(linked, self.policy, base, upstream, local)
+
+    def test_rejects_generated_snapshot_over_size_limit_before_publication(self) -> None:
+        linked, base, upstream, local = self.make_linked_candidate()
+
+        with patch.object(convergence, "MAX_SNAPSHOT_FILE_BYTES", 1):
+            with self.assertRaisesRegex(convergence.ConvergenceError, "generated snapshot"):
+                convergence.record(linked, self.policy, base, upstream, local)
+
+        evidence_root = linked / self.policy.evidence_root
+        self.assertFalse(evidence_root.exists())
 
 
 class LockTest(GitFixture):

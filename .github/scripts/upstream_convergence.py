@@ -355,11 +355,9 @@ def recorded_upstream_tip(
         if snapshot.is_symlink():
             raise ConvergenceError(f"snapshot directory must not be a symlink: {snapshot}")
         try:
-            document = json.loads(
-                (snapshot / "inventory.json").read_text(encoding="utf-8")
-            )
+            document = read_snapshot_inventory(snapshot)
             upstream = str(document["refs"]["upstream"])
-        except (KeyError, json.JSONDecodeError, OSError, TypeError) as error:
+        except (KeyError, TypeError) as error:
             raise ConvergenceError(f"cannot read upstream ref from {snapshot}: {error}")
         if FULL_SHA.fullmatch(upstream) is None or not commit_exists(repo, upstream):
             raise ConvergenceError(
@@ -476,6 +474,20 @@ def record(
         refs["upstream"],
         refs["local"],
     )
+    rendered = {
+        "inventory.json": inventory.render_json(result),
+        "inventory.md": inventory.render_markdown(result),
+        "residuals.json": inventory.render_residuals(result),
+    }
+    oversized = sorted(
+        name
+        for name, contents in rendered.items()
+        if len(contents.encode("utf-8")) > MAX_SNAPSHOT_FILE_BYTES
+    )
+    if oversized:
+        raise ConvergenceError(
+            f"generated snapshot files exceed {MAX_SNAPSHOT_FILE_BYTES} bytes: {oversized}"
+        )
     snapshot_id = f"{refs['base'][:8]}-{refs['upstream'][:8]}"
     evidence_root.mkdir(parents=True, exist_ok=True)
     free_bytes = shutil.disk_usage(evidence_root).free
@@ -489,15 +501,8 @@ def record(
 
     temporary = Path(tempfile.mkdtemp(prefix=f".{snapshot_id}.", dir=evidence_root))
     try:
-        (temporary / "inventory.json").write_text(
-            inventory.render_json(result), encoding="utf-8"
-        )
-        (temporary / "inventory.md").write_text(
-            inventory.render_markdown(result), encoding="utf-8"
-        )
-        (temporary / "residuals.json").write_text(
-            inventory.render_residuals(result), encoding="utf-8"
-        )
+        for name, contents in rendered.items():
+            (temporary / name).write_text(contents, encoding="utf-8")
         if run_git(repo, "rev-parse", "HEAD").stdout.strip() != head:
             raise ConvergenceError("HEAD changed while the snapshot was being recorded")
         temporary.rename(destination)
@@ -553,6 +558,26 @@ def snapshot_directories(repo: Path, evidence_root: str) -> list[Path]:
 
 def commit_exists(repo: Path, commit: str) -> bool:
     return run_git(repo, "cat-file", "-e", f"{commit}^{{commit}}", check=False).returncode == 0
+
+
+def read_snapshot_inventory(snapshot: Path) -> dict[str, object]:
+    path = snapshot / "inventory.json"
+    if path.is_symlink():
+        raise ConvergenceError(f"snapshot inventory must not be a symlink: {path}")
+    try:
+        if not path.is_file():
+            raise ConvergenceError(f"snapshot inventory must be a file: {path}")
+        size = path.stat().st_size
+        if size > MAX_SNAPSHOT_FILE_BYTES:
+            raise ConvergenceError(
+                f"snapshot inventory exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes: {path}"
+            )
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeError) as error:
+        raise ConvergenceError(f"cannot read snapshot inventory {path}: {error}") from error
+    if not isinstance(document, dict):
+        raise ConvergenceError(f"snapshot inventory must contain a JSON object: {path}")
+    return document
 
 
 def validate_snapshots(
@@ -612,12 +637,9 @@ def validate_snapshots(
             )
             continue
         try:
-            document = json.loads((snapshot / "inventory.json").read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeError) as error:
-            errors.append(f"cannot read {relative}/inventory.json: {error}")
-            continue
-        if not isinstance(document, dict):
-            errors.append(f"{relative}/inventory.json must contain a JSON object")
+            document = read_snapshot_inventory(snapshot)
+        except ConvergenceError as error:
+            errors.append(str(error))
             continue
         refs = document.get("refs")
         if not isinstance(refs, dict) or set(refs) != {"base", "upstream", "local"} or any(
