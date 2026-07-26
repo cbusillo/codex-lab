@@ -23,5 +23,5 @@
 /.github/workflows/blocking-ci.yml @cbusillo
 /.github/workflows/repo-checks.yml @cbusillo
 
-# Keep ownership changes reviewed by both product owners.
-/.github/CODEOWNERS @openai/codex-core-agent-team @cbusillo
+# Keep ownership changes reviewed by the fork owner.
+/.github/CODEOWNERS @cbusillo

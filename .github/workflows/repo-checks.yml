@@ -64,21 +64,29 @@ jobs:
             exit 1
           fi
           git cat-file -e "$CONVERGENCE_BASE_SHA^{commit}"
+          echo "Convergence comparison base: $CONVERGENCE_BASE_SHA"
+          report="$RUNNER_TEMP/upstream-convergence-validation.json"
           python3 .github/scripts/upstream_convergence.py validate \
-            --against "$CONVERGENCE_BASE_SHA"
+            --against "$CONVERGENCE_BASE_SHA" --json | tee "$report"
+          {
+            echo "### Upstream convergence validation"
+            echo
+            echo "- Base: \`$CONVERGENCE_BASE_SHA\`"
+            jq -r '
+              "- Comparison mode: `\(.comparisonMode)`",
+              "- Policy state at base: `\(.policyStateAtBase)`",
+              "- Append-only checked: `\(.appendOnlyChecked)`",
+              "- Provenance checked: `\(.provenanceChecked)`",
+              "- Bootstrap reason: \(.bootstrapReason // \"none\")",
+              "- New snapshots: `\((.newSnapshots // []) | join(\", \"))`"
+            ' "$report"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install actionlint
         run: |
           set -euo pipefail
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      - name: Test upstream convergence controls
-        env:
-          CONVERGENCE_LINT_REQUIRED: "1"
-        run: >-
-          python3 -m unittest discover -s .github/scripts
-          -p 'test_upstream_convergence_*.py'
 
       - name: Test repo-check helper scripts
         # One discovery run over the whole directory instead of a per-file

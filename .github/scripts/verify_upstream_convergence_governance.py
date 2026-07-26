@@ -264,8 +264,8 @@ def verify(repo_root: Path, policy_path: Path) -> dict[str, object]:
             for command in (
                 "python3 .github/scripts/verify_upstream_convergence_governance.py",
                 "python3 .github/scripts/upstream_convergence_guard.py",
+                "python3 .github/scripts/verify_repo_checks_test_registration.py",
                 "python3 .github/scripts/upstream_convergence.py validate",
-                "test_upstream_convergence_*.py",
             ):
                 if command not in repo_checks:
                     errors.append(f"repo-checks.yml does not run {command}")
@@ -284,7 +284,7 @@ def verify(repo_root: Path, policy_path: Path) -> dict[str, object]:
             for expected in (
                 "/AGENTS.md @cbusillo",
                 "/upstream/ @cbusillo",
-                "/.github/CODEOWNERS @openai/codex-core-agent-team @cbusillo",
+                "/.github/CODEOWNERS @cbusillo",
                 "/.github/workflows/repo-checks.yml @cbusillo",
             ):
                 if expected not in codeowners:

@@ -88,6 +88,9 @@ class RepoCheckWiringTest(unittest.TestCase):
         self.assertIn("fetch-depth: 0", contents)
         self.assertIn("git remote add openai https://github.com/openai/codex.git", contents)
         self.assertIn('--against "$CONVERGENCE_BASE_SHA"', contents)
+        self.assertIn('--json | tee "$report"', contents)
+        self.assertIn("Convergence comparison base:", contents)
+        self.assertIn("$GITHUB_STEP_SUMMARY", contents)
 
     def test_repo_checks_runs_the_guard_and_inventory_tests(self) -> None:
         # Asserted through the registration verifier rather than a literal
