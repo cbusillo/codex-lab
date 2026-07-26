@@ -18,12 +18,12 @@ local content there instead of upstream content; it does not reject it.
 | Conflict `content` | 279 |
 | Conflict `modify/delete` | 7 |
 | Lane `amber_contract_adapt` | 107 |
-| Lane `green_bulk_adopt` | 163 |
-| Lane `intentionally_owned` | 18 |
+| Lane `green_bulk_adopt` | 153 |
+| Lane `intentionally_owned` | 28 |
 | Lane `red_manual_review` | 7 |
-| Residual lane `amber_contract_adapt` | 141 |
-| Residual lane `green_bulk_adopt` | 197 |
-| Residual lane `intentionally_owned` | 137 |
+| Residual lane `amber_contract_adapt` | 140 |
+| Residual lane `green_bulk_adopt` | 193 |
+| Residual lane `intentionally_owned` | 142 |
 | Residual lane `red_manual_review` | 3 |
 
 ## Contract-reviewed conflicts
@@ -102,11 +102,18 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/thread_unarchive.rs` | app-server and wire compatibility |
 | `red_manual_review` | `IDENTITY-1` | `codex-rs/cli/src/login.rs` | visible or executable product identity |
 | `red_manual_review` | `IDENTITY-1` | `codex-rs/cli/src/main.rs` | visible or executable product identity |
+| `intentionally_owned` | `HOOKS-1` | `codex-rs/config/src/hook_config.rs` | hook identity and persisted hook state |
+| `intentionally_owned` | `HOOKS-1` | `codex-rs/config/src/hooks_tests.rs` | hook identity and persisted hook state |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/control.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/control/spawn.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/control_tests.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/registry.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/role_tests.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/context_manager/history.rs` | model-visible context bounds and history-rewrite exceptions |
+| `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/context_manager/history_tests.rs` | model-visible context bounds and history-rewrite exceptions |
+| `intentionally_owned` | `HISTORY-1` | `codex-rs/core/src/session/rollout_reconstruction_tests.rs` | durable environment baseline across resume and fork |
+| `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/session/turn.rs` | model-visible context bounds and history-rewrite exceptions |
+| `intentionally_owned` | `HISTORY-1` | `codex-rs/core/src/session/turn_context.rs` | durable environment baseline across resume and fork |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_common.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs` | Every Code orchestration and review behavior |
@@ -118,6 +125,8 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `HISTORY-1` | `codex-rs/core/tests/suite/sqlite_state.rs` | durable history and resume semantics |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/tests/suite/subagent_notifications.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/external-agent-migration/src/sessions/export.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `HOOKS-1` | `codex-rs/hooks/src/engine/discovery.rs` | hook identity and persisted hook state |
+| `intentionally_owned` | `HOOKS-1` | `codex-rs/hooks/src/engine/mod_tests.rs` | hook identity and persisted hook state |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3` | `codex-rs/login/Cargo.toml` | credential persistence and account selection |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3` | `codex-rs/login/src/auth/auth_tests.rs` | credential persistence and account selection |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3` | `codex-rs/login/src/auth/manager.rs` | credential persistence and account selection |
@@ -164,4 +173,5 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `HISTORY-1` | `codex-rs/thread-store/src/thread_metadata_sync.rs` | durable history and resume semantics |
 | `amber_contract_adapt` | `HISTORY-1` | `codex-rs/thread-store/src/types.rs` | durable history and resume semantics |
 | `red_manual_review` | `IDENTITY-1` | `codex-rs/tui/src/app.rs` | visible or executable product identity |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/tui/src/app/thread_routing.rs` | Every Code orchestration and review behavior |
 | `red_manual_review` | `IDENTITY-1` | `codex-rs/tui/src/lib.rs` | visible or executable product identity |
