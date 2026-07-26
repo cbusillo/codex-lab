@@ -15,6 +15,7 @@ SELECT
     threads.updated_at_ms AS updated_at,
     threads.recency_at_ms AS recency_at,
     threads.source,
+    threads.session_provenance,
     threads.history_mode,
     threads.thread_source,
     threads.agent_nickname,
@@ -537,6 +538,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
         let preview = metadata_preview(metadata);
+        let session_provenance = serialize_session_provenance(metadata)?;
         let result = sqlx::query(
             r#"
 INSERT INTO threads (
@@ -549,6 +551,7 @@ INSERT INTO threads (
     updated_at_ms,
     recency_at_ms,
     source,
+    session_provenance,
     history_mode,
     thread_source,
     agent_nickname,
@@ -573,7 +576,7 @@ INSERT INTO threads (
     git_branch,
     git_origin_url,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -586,6 +589,7 @@ ON CONFLICT(id) DO NOTHING
         .bind(datetime_to_epoch_millis(updated_at))
         .bind(datetime_to_epoch_millis(recency_at))
         .bind(metadata.source.as_str())
+        .bind(session_provenance.as_deref())
         .bind(metadata.history_mode.as_str())
         .bind(
             metadata
@@ -819,6 +823,7 @@ WHERE id = ?
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let insert_recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
         let preview = metadata_preview(metadata);
+        let session_provenance = serialize_session_provenance(metadata)?;
         // Backfill/reconcile callers merge existing git info before upserting, but that
         // read/modify/write is not atomic. Preserve non-null SQLite git fields here so
         // an explicit metadata update cannot be lost if a stale rollout upsert lands later.
@@ -834,6 +839,7 @@ INSERT INTO threads (
     updated_at_ms,
     recency_at_ms,
     source,
+    session_provenance,
     history_mode,
     thread_source,
     agent_nickname,
@@ -858,7 +864,7 @@ INSERT INTO threads (
     git_branch,
     git_origin_url,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -868,6 +874,7 @@ ON CONFLICT(id) DO UPDATE SET
     updated_at_ms = excluded.updated_at_ms,
     recency_at_ms = threads.recency_at_ms,
     source = excluded.source,
+    session_provenance = COALESCE(excluded.session_provenance, threads.session_provenance),
     history_mode = excluded.history_mode,
     thread_source = excluded.thread_source,
     agent_nickname = excluded.agent_nickname,
@@ -900,6 +907,7 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(datetime_to_epoch_millis(updated_at))
         .bind(datetime_to_epoch_millis(insert_recency_at))
         .bind(metadata.source.as_str())
+        .bind(session_provenance.as_deref())
         .bind(metadata.history_mode.as_str())
         .bind(
             metadata
@@ -1193,6 +1201,7 @@ SELECT
     threads.updated_at_ms AS updated_at,
     threads.recency_at_ms AS recency_at,
     threads.source,
+    threads.session_provenance,
     threads.history_mode,
     threads.thread_source,
     threads.agent_nickname,
@@ -1396,6 +1405,18 @@ pub(super) fn push_thread_order_and_limit(
     builder.push_bind(limit as i64);
 }
 
+/// Encode structured launch provenance for the nullable `threads.session_provenance` column.
+fn serialize_session_provenance(
+    metadata: &crate::ThreadMetadata,
+) -> anyhow::Result<Option<String>> {
+    metadata
+        .session_provenance
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(anyhow::Error::from)
+}
+
 fn metadata_preview(metadata: &crate::ThreadMetadata) -> &str {
     metadata
         .preview
@@ -1416,6 +1437,7 @@ mod tests {
     use codex_protocol::protocol::GitInfo;
     use codex_protocol::protocol::SessionMeta;
     use codex_protocol::protocol::SessionMetaLine;
+    use codex_protocol::protocol::SessionProvenance;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::ThreadHistoryMode;
     use codex_utils_absolute_path::test_support::PathExt;
@@ -1798,6 +1820,69 @@ mod tests {
             .await?;
         assert!(logs.is_empty());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn upsert_thread_round_trips_session_provenance() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000458").expect("valid thread id");
+        let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+        metadata.session_provenance = Some(SessionProvenance {
+            request_id: Some("req-123".to_string()),
+            repository: Some("cbusillo/codex-lab".to_string()),
+            issue_number: Some(126),
+            issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
+            source: Some("github-plan".to_string()),
+            origin: Some("launchplane".to_string()),
+        });
+
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("upsert should succeed");
+
+        let persisted = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist");
+
+        assert_eq!(persisted, metadata);
+    }
+
+    #[tokio::test]
+    async fn upsert_thread_keeps_session_provenance_absent_for_legacy_threads() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000459").expect("valid thread id");
+        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("upsert should succeed");
+
+        let persisted = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist");
+
+        assert_eq!(persisted, metadata);
+        assert_eq!(persisted.session_provenance, None);
     }
 
     #[tokio::test]
@@ -2329,6 +2414,7 @@ mod tests {
                 originator: String::new(),
                 cli_version: String::new(),
                 source: SessionSource::Cli,
+                session_provenance: None,
                 thread_source: None,
                 agent_path: None,
                 agent_nickname: None,
@@ -2399,6 +2485,7 @@ mod tests {
                 originator: String::new(),
                 cli_version: String::new(),
                 source: SessionSource::Cli,
+                session_provenance: None,
                 thread_source: None,
                 agent_path: None,
                 agent_nickname: None,

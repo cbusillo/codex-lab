@@ -128,6 +128,7 @@ mod tests {
                     forked_from_id: None,
                     parent_thread_id,
                     source: SessionSource::Exec,
+                    session_provenance: None,
                     thread_source: None,
                     originator: "test_originator".to_string(),
                     base_instructions: BaseInstructions::default(),
@@ -365,6 +366,7 @@ mod tests {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -482,6 +484,7 @@ impl InMemoryThreadStore {
             agent_path: params.source.get_agent_path().map(Into::into),
             originator: params.originator.clone(),
             source: params.source.clone(),
+            session_provenance: params.session_provenance.clone(),
             thread_source: params.thread_source.clone(),
             model_provider: Some(params.metadata.model_provider.clone()),
             base_instructions: Some(params.base_instructions.clone()),
@@ -870,6 +873,7 @@ fn stored_thread_from_state(
         source: metadata
             .and_then(|metadata| metadata.source.clone())
             .unwrap_or_else(|| created.source.clone()),
+        session_provenance: created.session_provenance.clone(),
         history_mode: created.history_mode,
         thread_source: metadata
             .and_then(|metadata| metadata.thread_source.clone())

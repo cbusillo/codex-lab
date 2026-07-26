@@ -35,6 +35,7 @@ fn write_rollout_with_metadata(path: &Path, thread_id: ThreadId) -> std::io::Res
                 originator: "test_originator".into(),
                 cli_version: "test_version".into(),
                 source: SessionSource::Cli,
+                session_provenance: None,
                 thread_source: None,
                 agent_path: None,
                 agent_nickname: None,

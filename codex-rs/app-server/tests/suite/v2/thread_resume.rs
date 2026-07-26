@@ -2542,6 +2542,7 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
         originator: "codex".to_string(),
         cli_version: "0.0.0".to_string(),
         source: RolloutSessionSource::Cli,
+        session_provenance: None,
         thread_source: None,
         agent_path: None,
         agent_nickname: None,

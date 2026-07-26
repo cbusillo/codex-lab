@@ -131,6 +131,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RateLimitReachedType;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -457,6 +458,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
     pub(crate) fork_persistence: ForkPersistence,
     pub(crate) session_source: SessionSource,
+    pub(crate) session_provenance: Option<SessionProvenance>,
     pub(crate) forked_from_thread_id: Option<ThreadId>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) thread_source: Option<ThreadSource>,
@@ -613,6 +615,7 @@ impl Session {
             requested_history_mode,
             fork_persistence,
             session_source,
+            session_provenance,
             forked_from_thread_id,
             parent_thread_id,
             thread_source,
@@ -801,6 +804,7 @@ impl Session {
             app_server_client_name: None,
             app_server_client_version: None,
             session_source,
+            session_provenance,
             history_mode,
             forked_from_thread_id,
             parent_thread_id,

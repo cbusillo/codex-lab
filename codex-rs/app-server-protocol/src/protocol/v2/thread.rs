@@ -3,6 +3,7 @@ use super::ApprovalsReviewer;
 use super::AskForApproval;
 use super::SandboxMode;
 use super::SandboxPolicy;
+use super::SessionProvenanceParams;
 use super::Thread;
 use super::ThreadHistoryMode;
 use super::ThreadItem;
@@ -115,6 +116,10 @@ pub struct ThreadStartParams {
     /// Optional client-supplied analytics source classification for this thread.
     #[ts(optional = nullable)]
     pub thread_source: Option<ThreadSource>,
+    /// Optional client-supplied launch provenance for externally orchestrated
+    /// sessions. This is descriptive metadata only.
+    #[ts(optional = nullable)]
+    pub session_provenance: Option<SessionProvenanceParams>,
     /// Optional sticky environments for this thread.
     ///
     /// Omitted selects the default environment when environment access is

@@ -86,6 +86,7 @@ use codex_core::resolve_installation_id;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
 use codex_login::AuthManager;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 pub use codex_rollout::StateDbHandle;
 pub use codex_state::log_db::LogDbLayer;
@@ -145,6 +146,8 @@ pub struct InProcessStartArgs {
     pub config_warnings: Vec<ConfigWarningNotification>,
     /// Session source stamped into thread/session metadata.
     pub session_source: SessionSource,
+    /// Session provenance stamped into thread/session metadata.
+    pub session_provenance: Option<SessionProvenance>,
     /// Whether auth loading should honor the `CODEX_API_KEY` environment variable.
     pub enable_codex_api_key_env: bool,
     /// Initialize params used for initial handshake.
@@ -448,6 +451,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 state_db: args.state_db,
                 config_warnings: args.config_warnings,
                 session_source: args.session_source,
+                session_provenance: args.session_provenance,
                 auth_manager,
                 installation_id,
                 code_mode_session_provider: None,
@@ -800,6 +804,7 @@ mod tests {
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             config_warnings: Vec::new(),
             session_source,
+            session_provenance: None,
             enable_codex_api_key_env: false,
             initialize: InitializeParams {
                 client_info: ClientInfo {

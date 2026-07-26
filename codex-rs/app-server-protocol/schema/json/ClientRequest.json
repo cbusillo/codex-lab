@@ -3794,6 +3794,50 @@
       ],
       "type": "object"
     },
+    "SessionProvenanceParams": {
+      "description": "Client-supplied provenance for a thread started by an external orchestrator.\n\nThis request shape intentionally keeps nested fields optional so clients can submit partial descriptive metadata without sending explicit nulls.",
+      "properties": {
+        "issueNumber": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "issueUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Settings": {
       "description": "Settings for a collaboration mode.",
       "properties": {
@@ -4803,6 +4847,17 @@
             "string",
             "null"
           ]
+        },
+        "sessionProvenance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionProvenanceParams"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional client-supplied launch provenance for externally orchestrated sessions. This is descriptive metadata only."
         },
         "sessionStartSource": {
           "anyOf": [

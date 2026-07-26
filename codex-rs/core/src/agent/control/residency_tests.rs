@@ -145,6 +145,7 @@ async fn spawn_v2_subagent(
             config,
             control.clone(),
             SessionSource::SubAgent(SubAgentSource::Other(label.to_string())),
+            /*session_provenance*/ None,
             /*history_mode*/ None,
             Some(parent_thread_id),
             /*forked_from_thread_id*/ None,

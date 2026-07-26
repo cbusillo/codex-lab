@@ -3,6 +3,7 @@ use super::ThreadItem;
 use super::ThreadStatus;
 use super::TurnStatus;
 use codex_experimental_api_macros::ExperimentalApi;
+use codex_protocol::protocol::SessionProvenance as CoreSessionProvenance;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
@@ -88,6 +89,130 @@ impl From<ThreadHistoryMode> for CoreThreadHistoryMode {
         match value {
             ThreadHistoryMode::Legacy => Self::Legacy,
             ThreadHistoryMode::Paginated => Self::Paginated,
+        }
+    }
+}
+
+/// Structured provenance for a thread started by an external orchestrator.
+///
+/// These fields are descriptive metadata only. Runtime authorization and
+/// product filtering must continue to use server-side policy and `source`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SessionProvenance {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub issue_number: Option<u64>,
+    #[serde(default)]
+    pub issue_url: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+/// Client-supplied provenance for a thread started by an external orchestrator.
+///
+/// This request shape intentionally keeps nested fields optional so clients can
+/// submit partial descriptive metadata without sending explicit nulls.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SessionProvenanceParams {
+    #[ts(optional = nullable)]
+    pub request_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub repository: Option<String>,
+    #[ts(optional = nullable)]
+    #[ts(type = "number | null")]
+    pub issue_number: Option<u64>,
+    #[ts(optional = nullable)]
+    pub issue_url: Option<String>,
+    #[ts(optional = nullable)]
+    pub source: Option<String>,
+    #[ts(optional = nullable)]
+    pub origin: Option<String>,
+}
+
+impl From<CoreSessionProvenance> for SessionProvenance {
+    fn from(value: CoreSessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<SessionProvenance> for CoreSessionProvenance {
+    fn from(value: SessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<CoreSessionProvenance> for SessionProvenanceParams {
+    fn from(value: CoreSessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<SessionProvenanceParams> for CoreSessionProvenance {
+    fn from(value: SessionProvenanceParams) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<SessionProvenance> for SessionProvenanceParams {
+    fn from(value: SessionProvenance) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
+        }
+    }
+}
+
+impl From<SessionProvenanceParams> for SessionProvenance {
+    fn from(value: SessionProvenanceParams) -> Self {
+        Self {
+            request_id: value.request_id,
+            repository: value.repository,
+            issue_number: value.issue_number,
+            issue_url: value.issue_url,
+            source: value.source,
+            origin: value.origin,
         }
     }
 }
@@ -217,6 +342,10 @@ pub struct Thread {
     pub can_accept_direct_input: Option<bool>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
+    /// Optional structured launch provenance supplied by an external agent
+    /// orchestrator.
+    #[serde(default)]
+    pub session_provenance: Option<SessionProvenance>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     pub agent_nickname: Option<String>,
     /// Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.

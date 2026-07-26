@@ -17899,6 +17899,100 @@
         ],
         "type": "object"
       },
+      "SessionProvenance": {
+        "description": "Structured provenance for a thread started by an external orchestrator.\n\nThese fields are descriptive metadata only. Runtime authorization and product filtering must continue to use server-side policy and `source`.",
+        "properties": {
+          "issueNumber": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "issueUrl": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repository": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SessionProvenanceParams": {
+        "description": "Client-supplied provenance for a thread started by an external orchestrator.\n\nThis request shape intentionally keeps nested fields optional so clients can submit partial descriptive metadata without sending explicit nulls.",
+        "properties": {
+          "issueNumber": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "issueUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repository": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "SessionSource": {
         "oneOf": [
           {
@@ -18692,6 +18786,18 @@
           "sessionId": {
             "description": "Session id shared by threads that belong to the same session tree.",
             "type": "string"
+          },
+          "sessionProvenance": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SessionProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional structured launch provenance supplied by an external agent orchestrator."
           },
           "source": {
             "allOf": [
@@ -21255,6 +21361,17 @@
               "string",
               "null"
             ]
+          },
+          "sessionProvenance": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SessionProvenanceParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional client-supplied launch provenance for externally orchestrated sessions. This is descriptive metadata only."
           },
           "sessionStartSource": {
             "anyOf": [
