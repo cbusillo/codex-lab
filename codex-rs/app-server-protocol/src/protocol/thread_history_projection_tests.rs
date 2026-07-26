@@ -240,7 +240,7 @@ fn project_validation_item_id_does_not_require_rollout_ordinal() {
                 duration_ms: 12,
             },
         )),
-        None,
+        /*ordinal*/ None,
     );
 
     assert_eq!(changes.changed_items[0].item.id(), "validation-item");
@@ -265,7 +265,7 @@ fn ignores_project_validation_without_rollout_ordinal() {
                 duration_ms: 0,
             },
         )),
-        None,
+        /*ordinal*/ None,
     );
 
     assert!(changes.is_empty());

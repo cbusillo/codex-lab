@@ -95,7 +95,7 @@ async fn background_auto_review_transient_status_stays_quiet() {
         background_auto_review_status_notification(
             "run-background-1",
             BackgroundAutoReviewStatus::Running,
-            None,
+            /*error_summary*/ None,
         ),
         /*replay_kind*/ None,
     );
@@ -103,7 +103,7 @@ async fn background_auto_review_transient_status_stays_quiet() {
         background_auto_review_status_notification(
             "run-background-1",
             BackgroundAutoReviewStatus::Completed,
-            None,
+            /*error_summary*/ None,
         ),
         /*replay_kind*/ None,
     );
@@ -187,7 +187,7 @@ async fn stale_terminal_auto_review_status_does_not_displace_current_run() {
         background_auto_review_status_notification(
             "newer-run",
             BackgroundAutoReviewStatus::Running,
-            None,
+            /*error_summary*/ None,
         ),
         /*replay_kind*/ None,
     );
@@ -195,7 +195,7 @@ async fn stale_terminal_auto_review_status_does_not_displace_current_run() {
         background_auto_review_status_notification(
             "newer-run",
             BackgroundAutoReviewStatus::Completed,
-            None,
+            /*error_summary*/ None,
         ),
         /*replay_kind*/ None,
     );

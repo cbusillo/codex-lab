@@ -239,8 +239,8 @@ impl ReviewPersistenceContext {
             token_usage,
             /*error_summary*/ None,
             freshness,
-            None,
-            None,
+            /*superseded_by*/ None,
+            /*cancel_reason*/ None,
             /*saved_token_estimate*/ None,
             move |state| {
                 merge_usage(&mut state.usage, usage);
@@ -279,7 +279,7 @@ impl ReviewPersistenceContext {
             /*token_usage*/ None,
             Some(error_summary),
             AutoReviewRunFreshness::Current,
-            None,
+            /*superseded_by*/ None,
             Some(cancel_reason),
             /*saved_token_estimate*/ None,
         )
@@ -362,7 +362,7 @@ impl ReviewPersistenceContext {
             Some(error_summary),
             AutoReviewRunFreshness::Superseded,
             superseded_by,
-            None,
+            /*cancel_reason*/ None,
             /*saved_token_estimate*/ None,
         )
     }
@@ -397,7 +397,7 @@ impl ReviewPersistenceContext {
             token_usage,
             Some(error_summary),
             AutoReviewRunFreshness::Current,
-            None,
+            /*superseded_by*/ None,
             Some(
                 AutoReviewTerminalReason::EmptyOutput
                     .cancel_reason()
@@ -427,7 +427,7 @@ impl ReviewPersistenceContext {
             token_usage,
             Some(error_summary),
             AutoReviewRunFreshness::Current,
-            None,
+            /*superseded_by*/ None,
             Some(reason.cancel_reason().to_string()),
             /*saved_token_estimate*/ None,
             move |state| {
@@ -452,7 +452,7 @@ impl ReviewPersistenceContext {
             /*token_usage*/ None,
             Some(error_summary),
             AutoReviewRunFreshness::Current,
-            None,
+            /*superseded_by*/ None,
             Some(reason.cancel_reason().to_string()),
             /*saved_token_estimate*/ None,
             move |state| {
@@ -519,8 +519,8 @@ impl ReviewPersistenceContext {
             token_usage,
             error_summary,
             AutoReviewRunFreshness::Current,
-            None,
-            None,
+            /*superseded_by*/ None,
+            /*cancel_reason*/ None,
             /*saved_token_estimate*/ None,
         )
     }
@@ -1154,7 +1154,7 @@ mod tests {
             /*prompt_token_estimate*/ None,
         )
         .await
-        .with_background_budget(test_budget(), 12_000);
+        .with_background_budget(test_budget(), /*scope_bytes*/ 12_000);
         let usage = AutoReviewUsage {
             scope_bytes: Some(12_000),
             elapsed_ms: Some(30_000),
@@ -1208,7 +1208,7 @@ mod tests {
             /*prompt_token_estimate*/ None,
         )
         .await
-        .with_background_budget(test_budget(), 12_000);
+        .with_background_budget(test_budget(), /*scope_bytes*/ 12_000);
         let output = output_with_finding(cwd.path());
 
         assert!(persistence.save_completed_with_freshness(
@@ -1252,7 +1252,7 @@ mod tests {
             /*prompt_token_estimate*/ None,
         )
         .await
-        .with_background_budget(test_budget(), 12_000);
+        .with_background_budget(test_budget(), /*scope_bytes*/ 12_000);
         let output = output_with_finding(cwd.path());
 
         assert!(persistence.save_completed_with_freshness(

@@ -222,9 +222,10 @@ async fn cargo_provider_precedes_shellcheck_for_mixed_rust_changes() {
     config.providers.cargo.command = vec!["fake-cargo".to_string()];
     config.providers.shellcheck.command = vec!["fake-shellcheck".to_string()];
     let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf()).expect("absolute repo path");
-    let resolution = resolve_automatic_validation_provider(&config, &cwd, None)
-        .await
-        .expect("resolve provider");
+    let resolution =
+        resolve_automatic_validation_provider(&config, &cwd, /*base_commit*/ None)
+            .await
+            .expect("resolve provider");
     let AutomaticValidationProviderResolution::Command(command) = resolution else {
         panic!("cargo should be selected for mixed Rust and shell changes");
     };

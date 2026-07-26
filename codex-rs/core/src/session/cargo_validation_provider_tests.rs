@@ -547,7 +547,7 @@ fn cargo_command_requires_one_trusted_executable() {
         CargoTarget::Workspace {
             manifest: cwd.join("Cargo.toml").into_path_buf(),
         },
-        None,
+        /*toolchain_file*/ None,
         /*changed_file_count*/ 1,
     )
     .expect_err("prefix arguments could invoke a cargo alias");

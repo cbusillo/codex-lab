@@ -85,7 +85,7 @@ fn multibyte_thread_hint_is_capped_on_a_char_boundary() {
 #[test]
 fn rendered_context_bounds_a_hint_supplied_directly_to_the_constructor() {
     let rendered = context_with_hint(Some("b".repeat(MAX_THREAD_HINT_BYTES * 4))).render();
-    let baseline = context_with_hint(None).render();
+    let baseline = context_with_hint(/*hint*/ None).render();
 
     assert!(
         rendered.len() <= baseline.len() + MAX_THREAD_HINT_BYTES + 1,

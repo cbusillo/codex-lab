@@ -88,7 +88,7 @@ impl Session {
             let mut state = self.state.lock().await;
             let _ = state
                 .background_auto_review
-                .complete_regular_turn_from_start(start, None);
+                .complete_regular_turn_from_start(start, /*after_fingerprint*/ None);
             debug!("background auto review skipped: no single local worktree");
             return;
         };
@@ -182,7 +182,7 @@ impl Session {
                 Arc::clone(&self),
                 &persistence,
                 BackgroundAutoReviewStatus::Pending,
-                None,
+                /*error_summary*/ None,
             )
             .await;
         }
@@ -267,9 +267,11 @@ impl Session {
             .config
             .background_auto_review_budget
             .max_scope_bytes;
-        if let Some(error_summary) =
-            background_auto_review_size_limit_summary(&turn_diff, None, max_scope_bytes)
-        {
+        if let Some(error_summary) = background_auto_review_size_limit_summary(
+            &turn_diff,
+            /*resolved_prompt*/ None,
+            max_scope_bytes,
+        ) {
             debug!(%error_summary, "background auto review skipped: oversized diff");
             self.record_scope_budget_skipped_background_auto_review(
                 &persistence,

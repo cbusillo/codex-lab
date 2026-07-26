@@ -157,7 +157,7 @@ async fn run_review_task(
                 session.clone_session(),
                 persistence,
                 BackgroundAutoReviewStatus::Running,
-                None,
+                /*error_summary*/ None,
             )
             .await;
         }
@@ -262,7 +262,7 @@ async fn run_review_task(
                     session.clone_session(),
                     &persistence,
                     BackgroundAutoReviewStatus::Completed,
-                    None,
+                    /*error_summary*/ None,
                 )
                 .await;
             }

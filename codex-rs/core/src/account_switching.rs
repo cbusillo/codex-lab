@@ -447,8 +447,8 @@ mod tests {
             AuthCredentialsStoreMode::File,
             token_data(account_id, "user@example.com"),
             Utc::now(),
-            None,
-            false,
+            /*label*/ None,
+            /*make_active*/ false,
         )
         .expect("upsert chatgpt")
         .id
@@ -462,8 +462,8 @@ mod tests {
             AuthCredentialsStoreMode::File,
             tokens,
             Utc::now(),
-            None,
-            false,
+            /*label*/ None,
+            /*make_active*/ false,
         )
         .expect("upsert claim-only chatgpt")
         .id
@@ -474,8 +474,8 @@ mod tests {
             codex_home,
             AuthCredentialsStoreMode::File,
             key.to_string(),
-            None,
-            false,
+            /*label*/ None,
+            /*make_active*/ false,
         )
         .expect("upsert api key")
         .id
@@ -534,14 +534,14 @@ mod tests {
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &slower,
-            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, 10.0),
+            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, /*used_percent*/ 10.0),
             now,
         )
         .expect("record slower");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             "faster",
-            rate_limit_snapshot(now.timestamp() + 60 * 60, 80.0),
+            rate_limit_snapshot(now.timestamp() + 60 * 60, /*used_percent*/ 80.0),
             now,
         )
         .expect("record faster");
@@ -550,9 +550,9 @@ mod tests {
             temp.path(),
             temp.path(),
             &RateLimitSwitchState::default(),
-            false,
+            /*allow_api_key_fallback*/ false,
             now,
-            None,
+            /*current_account_id*/ None,
         )
         .expect("select");
 
@@ -569,7 +569,7 @@ mod tests {
         account_usage::record_usage_limit_hint(
             temp.path(),
             "preferred",
-            None,
+            /*plan*/ None,
             Some(now + Duration::hours(2)),
             now,
             Some(RateLimitReachedType::RateLimitReached),
@@ -578,14 +578,14 @@ mod tests {
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &preferred,
-            rate_limit_snapshot(now.timestamp() + 60 * 60, 10.0),
+            rate_limit_snapshot(now.timestamp() + 60 * 60, /*used_percent*/ 10.0),
             now,
         )
         .expect("record stored snapshot");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &alternate,
-            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, 10.0),
+            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, /*used_percent*/ 10.0),
             now,
         )
         .expect("record alternate snapshot");
@@ -594,7 +594,7 @@ mod tests {
             temp.path(),
             temp.path(),
             &RateLimitSwitchState::default(),
-            false,
+            /*allow_api_key_fallback*/ false,
             now,
             Some(&current),
         )
@@ -647,14 +647,14 @@ mod tests {
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &stored_active,
-            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, 80.0),
+            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, /*used_percent*/ 80.0),
             now,
         )
         .expect("record stored active snapshot");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &current_session,
-            rate_limit_snapshot(now.timestamp() + 60 * 60, 10.0),
+            rate_limit_snapshot(now.timestamp() + 60 * 60, /*used_percent*/ 10.0),
             now,
         )
         .expect("record current session snapshot");
@@ -684,7 +684,7 @@ mod tests {
             temp.path(),
             temp.path(),
             &RateLimitSwitchState::default(),
-            true,
+            /*allow_api_key_fallback*/ true,
             now,
             Some(&current),
         )
@@ -703,7 +703,7 @@ mod tests {
         account_usage::record_usage_limit_hint(
             temp.path(),
             "blocked",
-            None,
+            /*plan*/ None,
             Some(now + Duration::hours(2)),
             now,
             Some(RateLimitReachedType::RateLimitReached),
@@ -714,7 +714,7 @@ mod tests {
             temp.path(),
             temp.path(),
             &RateLimitSwitchState::default(),
-            true,
+            /*allow_api_key_fallback*/ true,
             now,
             Some(&current),
         )
@@ -737,9 +737,15 @@ mod tests {
             Some(now + Duration::hours(1)),
         );
 
-        let selected =
-            select_next_account_id(temp.path(), temp.path(), &state, true, now, Some(&current))
-                .expect("select");
+        let selected = select_next_account_id(
+            temp.path(),
+            temp.path(),
+            &state,
+            /*allow_api_key_fallback*/ true,
+            now,
+            Some(&current),
+        )
+        .expect("select");
 
         assert_eq!(selected, Some(second_api_key));
     }
@@ -752,19 +758,25 @@ mod tests {
         let candidate = upsert_chatgpt(temp.path(), "candidate");
         let api_key = upsert_api_key(temp.path(), "sk-test");
         let mut state = RateLimitSwitchState::default();
-        state.mark_limited(&current, AuthMode::Chatgpt, None);
+        state.mark_limited(&current, AuthMode::Chatgpt, /*blocked_until*/ None);
 
-        let selected =
-            select_next_account_id(temp.path(), temp.path(), &state, true, now, Some(&current))
-                .expect("select");
-        assert_eq!(selected, Some(candidate.clone()));
-
-        state.mark_limited(&candidate, AuthMode::Chatgpt, None);
         let selected = select_next_account_id(
             temp.path(),
             temp.path(),
             &state,
-            true,
+            /*allow_api_key_fallback*/ true,
+            now,
+            Some(&current),
+        )
+        .expect("select");
+        assert_eq!(selected, Some(candidate.clone()));
+
+        state.mark_limited(&candidate, AuthMode::Chatgpt, /*blocked_until*/ None);
+        let selected = select_next_account_id(
+            temp.path(),
+            temp.path(),
+            &state,
+            /*allow_api_key_fallback*/ true,
             now,
             Some(&candidate),
         )
@@ -780,19 +792,25 @@ mod tests {
         let candidate = upsert_chatgpt(temp.path(), "candidate");
         let api_key = upsert_api_key(temp.path(), "sk-test");
         let mut state = RateLimitSwitchState::default();
-        state.mark_limited(&current, AuthMode::Chatgpt, None);
+        state.mark_limited(&current, AuthMode::Chatgpt, /*blocked_until*/ None);
 
-        let selected =
-            select_next_account_id(temp.path(), temp.path(), &state, true, now, Some(&current))
-                .expect("select");
-        assert_eq!(selected, Some(candidate.clone()));
-
-        state.mark_limited(&candidate, AuthMode::Chatgpt, None);
         let selected = select_next_account_id(
             temp.path(),
             temp.path(),
             &state,
-            true,
+            /*allow_api_key_fallback*/ true,
+            now,
+            Some(&current),
+        )
+        .expect("select");
+        assert_eq!(selected, Some(candidate.clone()));
+
+        state.mark_limited(&candidate, AuthMode::Chatgpt, /*blocked_until*/ None);
+        let selected = select_next_account_id(
+            temp.path(),
+            temp.path(),
+            &state,
+            /*allow_api_key_fallback*/ true,
             now,
             Some(&candidate),
         )
@@ -814,9 +832,15 @@ mod tests {
             Some(now - Duration::minutes(1)),
         );
 
-        let selected =
-            select_next_account_id(temp.path(), temp.path(), &state, true, now, Some(&current))
-                .expect("select");
+        let selected = select_next_account_id(
+            temp.path(),
+            temp.path(),
+            &state,
+            /*allow_api_key_fallback*/ true,
+            now,
+            Some(&current),
+        )
+        .expect("select");
         assert_eq!(selected, Some(candidate.clone()));
 
         state.mark_limited(
@@ -828,7 +852,7 @@ mod tests {
             temp.path(),
             temp.path(),
             &state,
-            true,
+            /*allow_api_key_fallback*/ true,
             now,
             Some(&candidate),
         )
@@ -852,14 +876,14 @@ mod tests {
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             &slower,
-            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, 10.0),
+            rate_limit_snapshot(now.timestamp() + 3 * 60 * 60, /*used_percent*/ 10.0),
             now,
         )
         .expect("record slower");
         account_usage::record_rate_limit_snapshot(
             temp.path(),
             "faster",
-            rate_limit_snapshot(now.timestamp() + 60 * 60, 80.0),
+            rate_limit_snapshot(now.timestamp() + 60 * 60, /*used_percent*/ 80.0),
             now,
         )
         .expect("record faster");
@@ -868,7 +892,7 @@ mod tests {
             temp.path(),
             temp.path(),
             AuthCredentialsStoreMode::File,
-            false,
+            /*allow_api_key_fallback*/ false,
             now,
         )
         .expect("select preferred account");

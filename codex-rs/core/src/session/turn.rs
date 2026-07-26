@@ -239,7 +239,7 @@ pub(crate) async fn run_turn(
         sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
             .await;
         error!("Failed to run pre-sampling compact");
-        return Ok(TurnRunResult::ineligible(false));
+        return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
     }
 
     // run_turn owns the step used to seed context and make the first sampling request.
@@ -271,14 +271,14 @@ pub(crate) async fn run_turn(
         )
         .await
         else {
-            return Ok(TurnRunResult::ineligible(false));
+            return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
         };
 
         if run_pending_session_start_hooks(&sess, &turn_context).await {
-            return Ok(TurnRunResult::ineligible(false));
+            return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
         }
         if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
-            return Ok(TurnRunResult::ineligible(false));
+            return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
         }
 
         sess.merge_connector_selection(explicitly_enabled_connectors.clone())
@@ -296,7 +296,7 @@ pub(crate) async fn run_turn(
 
         track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
     } else if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
-        return Ok(TurnRunResult::ineligible(false));
+        return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
     }
 
     let mut last_agent_message: Option<String> = None;

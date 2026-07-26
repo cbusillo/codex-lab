@@ -42,19 +42,19 @@ fn elapsed_and_token_budgets_use_reach_then_exceed_boundaries() {
 
     assert_eq!(
         (
-            elapsed_reaches_budget(4_999, &budget),
-            elapsed_reaches_budget(5_000, &budget),
-            elapsed_exceeds_budget(5_000, &budget),
-            elapsed_exceeds_budget(5_001, &budget),
+            elapsed_reaches_budget(/*elapsed_ms*/ 4_999, &budget),
+            elapsed_reaches_budget(/*elapsed_ms*/ 5_000, &budget),
+            elapsed_exceeds_budget(/*elapsed_ms*/ 5_000, &budget),
+            elapsed_exceeds_budget(/*elapsed_ms*/ 5_001, &budget),
         ),
         (false, true, false, true)
     );
     assert_eq!(
         (
-            total_tokens_reach_budget(99, &budget),
-            total_tokens_reach_budget(100, &budget),
-            total_tokens_exceed_budget(100, &budget),
-            total_tokens_exceed_budget(101, &budget),
+            total_tokens_reach_budget(/*total_tokens*/ 99, &budget),
+            total_tokens_reach_budget(/*total_tokens*/ 100, &budget),
+            total_tokens_exceed_budget(/*total_tokens*/ 100, &budget),
+            total_tokens_exceed_budget(/*total_tokens*/ 101, &budget),
         ),
         (false, true, false, true)
     );
@@ -68,8 +68,8 @@ fn output_and_finding_budgets_only_trip_when_exceeded() {
         (
             raw_output_exceeds_budget(&"x".repeat(64), &budget),
             raw_output_exceeds_budget(&"x".repeat(65), &budget),
-            findings_exceed_budget(&output_with_findings(2), &budget),
-            findings_exceed_budget(&output_with_findings(3), &budget),
+            findings_exceed_budget(&output_with_findings(/*count*/ 2), &budget),
+            findings_exceed_budget(&output_with_findings(/*count*/ 3), &budget),
         ),
         (false, true, false, true)
     );

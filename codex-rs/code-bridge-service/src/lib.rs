@@ -516,7 +516,7 @@ impl ServiceState {
                 event_kind: event_kind(&message.event),
                 event: message.event.clone(),
             },
-            true,
+            /*retain*/ true,
             outgoing,
         );
         ack_for(envelope)
@@ -582,7 +582,7 @@ impl ServiceState {
         self.enqueue_delivery(
             envelope.clone(),
             DeliveryRoute::Target(message.target_client_id.clone()),
-            true,
+            /*retain*/ true,
             outgoing,
         );
         ack_for(envelope)
@@ -614,7 +614,7 @@ impl ServiceState {
         self.enqueue_delivery(
             envelope.clone(),
             DeliveryRoute::Target(pending.requester_client_id),
-            true,
+            /*retain*/ true,
             outgoing,
         );
         BridgePayload::Ack(AckMessage {
@@ -683,7 +683,7 @@ impl ServiceState {
         self.enqueue_delivery(
             envelope.clone(),
             DeliveryRoute::Target(message.target_client_id.clone()),
-            true,
+            /*retain*/ true,
             outgoing,
         );
         ack_for(envelope)
@@ -715,7 +715,7 @@ impl ServiceState {
         self.enqueue_delivery(
             envelope.clone(),
             DeliveryRoute::Target(pending.requester_client_id),
-            true,
+            /*retain*/ true,
             outgoing,
         );
         BridgePayload::Ack(AckMessage {
@@ -811,7 +811,7 @@ impl ServiceState {
             self.enqueue_delivery(
                 envelope,
                 DeliveryRoute::Target(pending.requester_client_id),
-                true,
+                /*retain*/ true,
                 outgoing,
             );
         }
@@ -1151,7 +1151,7 @@ async fn events_handler(
                                     format!("Code Bridge event stream lagged by {skipped} messages"),
                                 ),
                             };
-                            yield envelope_to_sse_event(0, envelope);
+                            yield envelope_to_sse_event(/*sequence*/ 0, envelope);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
@@ -2070,12 +2070,17 @@ mod tests {
             .await;
         }
 
-        let subscriber_a_events =
-            open_events_after(&client, &service.handle, &subscriber_a, "subscriber-a", 0)
-                .await
-                .expect("subscriber-a initial stream");
+        let subscriber_a_events = open_events_after(
+            &client,
+            &service.handle,
+            &subscriber_a,
+            "subscriber-a",
+            /*last_event_id*/ 0,
+        )
+        .await
+        .expect("subscriber-a initial stream");
         let mut subscriber_a_events = subscriber_a_events.bytes_stream().eventsource();
-        let initial_messages = next_event_messages(&mut subscriber_a_events, 3).await;
+        let initial_messages = next_event_messages(&mut subscriber_a_events, /*count*/ 3).await;
         assert_event_ids(&initial_messages, &["event-1", "event-2", "event-3"]);
         let last_seen_sequence = initial_messages
             .last()
@@ -2105,16 +2110,21 @@ mod tests {
         .await
         .expect("subscriber-a reconnect stream");
         let mut subscriber_a_events = subscriber_a_events.bytes_stream().eventsource();
-        let replay_messages = next_event_messages(&mut subscriber_a_events, 2).await;
+        let replay_messages = next_event_messages(&mut subscriber_a_events, /*count*/ 2).await;
         assert_event_ids(&replay_messages, &["event-4", "event-5"]);
         assert_no_sse_message(&mut subscriber_a_events).await;
 
-        let subscriber_b_events =
-            open_events_after(&client, &service.handle, &subscriber_b, "subscriber-b", 0)
-                .await
-                .expect("subscriber-b first stream");
+        let subscriber_b_events = open_events_after(
+            &client,
+            &service.handle,
+            &subscriber_b,
+            "subscriber-b",
+            /*last_event_id*/ 0,
+        )
+        .await
+        .expect("subscriber-b first stream");
         let mut subscriber_b_events = subscriber_b_events.bytes_stream().eventsource();
-        let late_messages = next_event_messages(&mut subscriber_b_events, 5).await;
+        let late_messages = next_event_messages(&mut subscriber_b_events, /*count*/ 5).await;
         assert_event_ids(
             &late_messages,
             &["event-1", "event-2", "event-3", "event-4", "event-5"],
@@ -2215,7 +2225,7 @@ mod tests {
         .await
         .expect("subscriber reconnect events");
         let mut subscriber_events = subscriber_events.bytes_stream().eventsource();
-        let replayed = next_event_messages(&mut subscriber_events, 1).await;
+        let replayed = next_event_messages(&mut subscriber_events, /*count*/ 1).await;
         let second_sequence = replayed[0].sequence;
         assert_event_ids(&replayed, &["event-2"]);
         drop(subscriber_events);
@@ -2617,7 +2627,7 @@ mod tests {
                     ClientRole::Producer,
                     producer_capabilities(),
                 ),
-                None,
+                /*client_session*/ None,
             )
             .await
             .expect("first hello");
@@ -2636,7 +2646,7 @@ mod tests {
                     ClientRole::Producer,
                     producer_capabilities(),
                 ),
-                None,
+                /*client_session*/ None,
             )
             .await
             .expect("duplicate hello");
@@ -2670,7 +2680,7 @@ mod tests {
                     ClientRole::Producer,
                     producer_capabilities(),
                 ),
-                None,
+                /*client_session*/ None,
             )
             .await
             .expect("first hello");
@@ -2689,7 +2699,7 @@ mod tests {
                     ClientRole::Subscriber,
                     subscriber_capabilities(),
                 ),
-                None,
+                /*client_session*/ None,
             )
             .await
             .expect("subscriber hello");
@@ -2720,7 +2730,7 @@ mod tests {
             .expect("screenshot request");
 
         let stream_state = shared
-            .open_event_stream("producer-1", &first_token, 0)
+            .open_event_stream("producer-1", &first_token, /*last_seen_sequence*/ 0)
             .await
             .expect("staged replay stream");
         assert_eq!(stream_state.replay.len(), 1);
@@ -2733,7 +2743,7 @@ mod tests {
                     ClientRole::Producer,
                     producer_capabilities(),
                 ),
-                None,
+                /*client_session*/ None,
             )
             .await
             .expect("duplicate hello");
@@ -2750,7 +2760,7 @@ mod tests {
 
         let fresh_token = current_session_token(&shared, "producer-1").await;
         let fresh = shared
-            .open_event_stream("producer-1", &fresh_token, 0)
+            .open_event_stream("producer-1", &fresh_token, /*last_seen_sequence*/ 0)
             .await
             .expect("fresh replay stream");
         assert_eq!(fresh.replay.len(), 1);
@@ -2948,10 +2958,15 @@ mod tests {
         )
         .await;
 
-        let producer_events =
-            open_events_after(&client, &service.handle, &producer, "producer-1", 0)
-                .await
-                .expect("producer reconnect events");
+        let producer_events = open_events_after(
+            &client,
+            &service.handle,
+            &producer,
+            "producer-1",
+            /*last_event_id*/ 0,
+        )
+        .await
+        .expect("producer reconnect events");
         let mut producer_events = producer_events.bytes_stream().eventsource();
         let message = next_sse_message(&mut producer_events).await;
         let request_sequence = message.sequence;
@@ -2993,10 +3008,15 @@ mod tests {
         let mut producer_events = producer_events.bytes_stream().eventsource();
         assert_no_sse_message(&mut producer_events).await;
 
-        let requester_events =
-            open_events_after(&client, &service.handle, &requester, "requester-1", 0)
-                .await
-                .expect("requester reconnect events");
+        let requester_events = open_events_after(
+            &client,
+            &service.handle,
+            &requester,
+            "requester-1",
+            /*last_event_id*/ 0,
+        )
+        .await
+        .expect("requester reconnect events");
         let mut requester_events = requester_events.bytes_stream().eventsource();
         let message = next_sse_message(&mut requester_events).await;
         assert!(matches!(
@@ -3518,7 +3538,7 @@ mod tests {
                     }),
                 ),
                 DeliveryRoute::Target("requester-1".to_string()),
-                true,
+                /*retain*/ true,
                 &mut outgoing,
             );
         }
@@ -3933,8 +3953,15 @@ mod tests {
         session: &TestClientSession,
         client_id: &str,
     ) -> reqwest::Result<reqwest::Response> {
-        open_events_after_with_endpoint(client, endpoint_url, auth_secret, session, client_id, 0)
-            .await
+        open_events_after_with_endpoint(
+            client,
+            endpoint_url,
+            auth_secret,
+            session,
+            client_id,
+            /*last_event_id*/ 0,
+        )
+        .await
     }
 
     async fn open_events_after(

@@ -16,7 +16,7 @@ fn background_auto_review_schedules_only_changed_dirty_fingerprint() {
     let schedule = schedule.expect("changed dirty fingerprint should schedule review");
     assert_eq!(schedule.generation, 1);
     assert_eq!(schedule.fingerprint, "sha256:new");
-    assert!(state.is_current_schedule(1));
+    assert!(state.is_current_schedule(/*generation*/ 1));
 }
 
 #[test]

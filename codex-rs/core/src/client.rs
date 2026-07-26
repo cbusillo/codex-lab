@@ -1047,7 +1047,8 @@ impl ModelClient {
                             == expected_websocket_auth_cache_key
                 }
                 (None, None) => {
-                    websocket_auth_cache_key(None, &provider) == expected_websocket_auth_cache_key
+                    websocket_auth_cache_key(/*execution_account*/ None, &provider)
+                        == expected_websocket_auth_cache_key
                 }
                 _ => false,
             };

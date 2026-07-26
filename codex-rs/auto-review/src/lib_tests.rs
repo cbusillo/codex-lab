@@ -503,7 +503,7 @@ fn corrupt_index_recovers_detail_from_metadata_and_output() -> anyhow::Result<()
     corrupt_runs_index(&store)?;
 
     let detail = store.finding_detail("run_1", "f1", DETAIL_MAX_BYTES)?;
-    let run_detail = store.detail("run_1", None, DETAIL_MAX_BYTES)?;
+    let run_detail = store.detail("run_1", /*finding_id*/ None, DETAIL_MAX_BYTES)?;
 
     assert_eq!(detail.kind, AutoReviewDetailKind::Finding);
     assert_eq!(detail.finding_id.as_deref(), Some("f1"));
@@ -606,7 +606,7 @@ fn corrupt_index_still_blocks_orphan_reconciliation_writes() -> anyhow::Result<(
     corrupt_runs_index(&store)?;
 
     let error = store
-        .reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 3)
+        .reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 3)
         .expect_err("corrupt canonical index should block reconciliation writes");
 
     assert!(
@@ -648,7 +648,7 @@ fn orphan_reconciliation_recovers_when_index_is_missing() -> anyhow::Result<()> 
     std::fs::remove_file(store.runs_path())?;
 
     assert_eq!(
-        store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 3)?,
+        store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 3)?,
         1
     );
 
@@ -770,7 +770,7 @@ fn finding_detail_reads_completed_output_sidecar() -> anyhow::Result<()> {
     store.save_run(&run)?;
     store.save_output("run_1", &output)?;
 
-    let detail = store.finding_detail("run_1", "f1", 120)?;
+    let detail = store.finding_detail("run_1", "f1", /*max_bytes*/ 120)?;
 
     assert_eq!(detail.kind, AutoReviewDetailKind::Finding);
     assert_eq!(detail.finding_id.as_deref(), Some("f1"));
@@ -839,7 +839,7 @@ fn detail_formats_bounded_run_overview() -> anyhow::Result<()> {
     store.save_run(&run)?;
     store.save_output("run_1", &output)?;
 
-    let detail = store.detail("run_1", None, DETAIL_MAX_BYTES)?;
+    let detail = store.detail("run_1", /*finding_id*/ None, DETAIL_MAX_BYTES)?;
 
     assert_eq!(detail.kind, AutoReviewDetailKind::Run);
     assert_eq!(detail.finding_id, None);
@@ -1050,7 +1050,14 @@ fn diagnostics_count_stale_current_turn_diff_as_stale_suppression_for_uncommitte
 
 #[test]
 fn diagnostics_are_absent_for_empty_runs() {
-    assert_eq!(AutoReviewDiagnostics::from_runs([], None, None), None);
+    assert_eq!(
+        AutoReviewDiagnostics::from_runs(
+            [],
+            /*active_target*/ None,
+            /*active_review_target*/ None
+        ),
+        None
+    );
 }
 
 #[test]
@@ -1082,7 +1089,7 @@ fn detail_lookup_rejects_unknown_ids_and_empty_budget() -> anyhow::Result<()> {
     store.save_output("run_1", &output)?;
 
     let missing = store
-        .finding_detail("run_1", "missing", 120)
+        .finding_detail("run_1", "missing", /*max_bytes*/ 120)
         .expect_err("missing finding should fail");
     let empty_budget = store
         .finding_detail("run_1", "f1", /*max_bytes*/ 0)
@@ -1562,7 +1569,8 @@ fn reconcile_orphaned_in_flight_marks_lost() -> anyhow::Result<()> {
     store.save_run(&running)?;
     store.save_run(&completed)?;
 
-    let changed = store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 99)?;
+    let changed = store
+        .reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 99)?;
 
     let running = store.load_run("running")?;
     let completed = store.load_run("completed")?;
@@ -1599,7 +1607,7 @@ fn reconcile_orphaned_in_flight_marks_manual_and_background_lost() -> anyhow::Re
     store.save_run(&background)?;
     store.save_run(&live_manual)?;
 
-    let changed = store.reconcile_orphaned_in_flight(["live_manual"], 99)?;
+    let changed = store.reconcile_orphaned_in_flight(["live_manual"], /*now_unix_secs*/ 99)?;
 
     let manual = store.load_run("manual")?;
     let background = store.load_run("background")?;

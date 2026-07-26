@@ -1479,7 +1479,14 @@ async fn invalid_image_bad_request_sanitizes_tool_image_and_retries() -> anyhow:
     } = &test;
 
     let rel_path = "assets/poisoned.png";
-    write_workspace_png(&test, rel_path, 8, 8, [10, 20, 30, 255]).await?;
+    write_workspace_png(
+        &test,
+        rel_path,
+        /*width*/ 8,
+        /*height*/ 8,
+        [10, 20, 30, 255],
+    )
+    .await?;
     let call_id = "view-image-invalid-request";
     let arguments = serde_json::json!({ "path": rel_path }).to_string();
 

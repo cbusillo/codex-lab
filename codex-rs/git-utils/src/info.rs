@@ -300,7 +300,7 @@ pub fn diff_fingerprint(diff: &str) -> Option<String> {
 }
 
 pub async fn get_worktree_changed_files(cwd: &Path) -> Option<Vec<PathBuf>> {
-    get_worktree_changed_files_from(cwd, None).await
+    get_worktree_changed_files_from(cwd, /*base_sha*/ None).await
 }
 
 pub async fn get_worktree_changed_files_since(

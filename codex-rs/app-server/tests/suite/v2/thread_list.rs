@@ -1176,12 +1176,16 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
             thread_list_params_with_relations(
                 Some(thread_id.clone()),
                 Some(thread_id.clone()),
-                None,
+                /*ancestor_thread_id*/ None,
             ),
             "descendantOfThreadId and parentThreadId are mutually exclusive",
         ),
         (
-            thread_list_params_with_relations(Some(thread_id.clone()), None, Some(thread_id)),
+            thread_list_params_with_relations(
+                Some(thread_id.clone()),
+                /*parent_thread_id*/ None,
+                Some(thread_id),
+            ),
             "descendantOfThreadId and ancestorThreadId are mutually exclusive",
         ),
     ] {
@@ -1198,8 +1202,8 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
     let request_id = mcp
         .send_thread_list_request(thread_list_params_with_relations(
             Some("not-a-thread-id".to_string()),
-            None,
-            None,
+            /*parent_thread_id*/ None,
+            /*ancestor_thread_id*/ None,
         ))
         .await?;
     let error = timeout(

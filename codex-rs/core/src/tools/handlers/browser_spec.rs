@@ -120,7 +120,7 @@ pub fn create_browser_tool(full_cdp_access: bool) -> ToolSpec {
         ),
         (
             "params".to_string(),
-            JsonSchema::object(BTreeMap::new(), None, Some(true.into())),
+            JsonSchema::object(BTreeMap::new(), /*required*/ None, Some(true.into())),
         ),
         (
             "target".to_string(),

@@ -488,7 +488,7 @@ impl BrowserManager {
                         self.start_idle_monitor().await;
                         self.update_activity().await;
                         // Cache last connection (ws only)
-                        global::set_last_connection(None, Some(ws.clone())).await;
+                        global::set_last_connection(/*port*/ None, Some(ws.clone())).await;
                         return Ok(());
                     }
                     Ok(Ok(Err(e))) => {
@@ -1419,7 +1419,7 @@ impl BrowserManager {
         self.start_viewport_monitor(Arc::clone(&page)).await;
         // TEMP: disable auto-corrections post-initial set to validate no unintended resizes
         // This affects both external and internal; explicit browser.setViewport still works
-        self.set_auto_viewport_correction(false).await;
+        self.set_auto_viewport_correction(/*enabled*/ false).await;
         info!(
             "[bm] get_or_create_page: complete in {:?}",
             overall_start.elapsed()
@@ -2716,10 +2716,10 @@ mod tests {
 
     #[test]
     fn handler_restarts_after_repeated_errors() {
-        assert!(!should_restart_handler(0));
-        assert!(!should_restart_handler(1));
-        assert!(!should_restart_handler(2));
-        assert!(should_restart_handler(3));
+        assert!(!should_restart_handler(/*consecutive_errors*/ 0));
+        assert!(!should_restart_handler(/*consecutive_errors*/ 1));
+        assert!(!should_restart_handler(/*consecutive_errors*/ 2));
+        assert!(should_restart_handler(/*consecutive_errors*/ 3));
     }
 
     #[test]

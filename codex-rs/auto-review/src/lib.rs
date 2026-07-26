@@ -1523,7 +1523,7 @@ impl AutoReviewFindingDigest {
             })
             .unwrap_or_else(|| "unknown location".to_string());
         let location = truncate_utf8(&location, SUMMARY_MAX_FIELD_BYTES);
-        let finding_id = truncate_utf8(&self.finding_id, 80);
+        let finding_id = truncate_utf8(&self.finding_id, /*max_bytes*/ 80);
         format!("[P{priority}] {finding_id}: {title} ({location})")
     }
 }

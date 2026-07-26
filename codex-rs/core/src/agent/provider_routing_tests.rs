@@ -26,7 +26,7 @@ fn route_with_available(
 #[test]
 fn independent_review_prefers_claude() {
     let decision = route_with_available(
-        None,
+        /*explicit_agent_type*/ None,
         AgentTaskKind::IndependentReview,
         AgentTaskSize::Normal,
         &[CLAUDE_SELECTOR, ANTIGRAVITY_SELECTOR],
@@ -43,7 +43,7 @@ fn independent_review_prefers_claude() {
 #[test]
 fn high_risk_work_prefers_antigravity() {
     let decision = route_with_available(
-        None,
+        /*explicit_agent_type*/ None,
         AgentTaskKind::Security,
         AgentTaskSize::Large,
         &[CLAUDE_SELECTOR, ANTIGRAVITY_SELECTOR],
@@ -56,7 +56,7 @@ fn high_risk_work_prefers_antigravity() {
 #[test]
 fn high_risk_work_uses_next_eligible_external_agent() {
     let decision = route_with_available(
-        None,
+        /*explicit_agent_type*/ None,
         AgentTaskKind::Infrastructure,
         AgentTaskSize::Normal,
         &[CLAUDE_SELECTOR],
@@ -69,7 +69,7 @@ fn high_risk_work_uses_next_eligible_external_agent() {
 #[test]
 fn tiny_high_risk_work_stays_native() {
     let decision = route_with_available(
-        None,
+        /*explicit_agent_type*/ None,
         AgentTaskKind::Security,
         AgentTaskSize::Tiny,
         &[ANTIGRAVITY_SELECTOR],
@@ -82,8 +82,12 @@ fn tiny_high_risk_work_stays_native() {
 
 #[test]
 fn unavailable_external_agents_produce_attributable_native_fallback() {
-    let decision =
-        route_with_available(None, AgentTaskKind::ProductRisk, AgentTaskSize::Normal, &[]);
+    let decision = route_with_available(
+        /*explicit_agent_type*/ None,
+        AgentTaskKind::ProductRisk,
+        AgentTaskSize::Normal,
+        &[],
+    );
 
     assert_eq!(decision.agent_type(), DEFAULT_ROLE_NAME);
     assert_eq!(decision.summary.kind, ProviderRoutingKind::NativeFallback);
@@ -133,7 +137,7 @@ fn explicit_external_agent_type_always_wins() {
 #[test]
 fn redacted_summary_preserves_routing_kind_without_selector() {
     let decision = route_with_available(
-        None,
+        /*explicit_agent_type*/ None,
         AgentTaskKind::IndependentReview,
         AgentTaskSize::Normal,
         &[CLAUDE_SELECTOR],

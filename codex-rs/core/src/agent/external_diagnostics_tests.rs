@@ -31,7 +31,7 @@ fn provenance_redacts_command_paths() {
             ..Default::default()
         },
         Path::new("/tmp/workspace"),
-        true,
+        /*is_read_only*/ true,
         Some("2.1.212".to_string()),
     );
 

@@ -662,9 +662,13 @@ impl Renderable for LoginAddAccountView {
                 lines.push(render_selectable_line(
                     "ChatGPT sign-in",
                     self.selected == 0,
-                    false,
+                    /*active*/ false,
                 ));
-                lines.push(render_selectable_line("API key", self.selected == 1, false));
+                lines.push(render_selectable_line(
+                    "API key",
+                    self.selected == 1,
+                    /*active*/ false,
+                ));
                 lines.push(Line::from(""));
                 lines.push(add_account_hint_line("Start", "Back"));
             }
@@ -799,7 +803,11 @@ impl Renderable for LoginAddAccountView {
                     Style::default().fg(Color::Red),
                 )));
                 lines.push(Line::from(""));
-                lines.push(render_selectable_line("Try again", true, false));
+                lines.push(render_selectable_line(
+                    "Try again",
+                    /*selected*/ true,
+                    /*active*/ false,
+                ));
                 lines.push(Line::from(""));
                 lines.push(add_account_hint_line("Retry", "Back"));
             }
@@ -814,7 +822,11 @@ impl Renderable for LoginAddAccountView {
                     Style::default().fg(Color::Red),
                 )));
                 lines.push(Line::from(""));
-                lines.push(render_selectable_line("Try again", true, false));
+                lines.push(render_selectable_line(
+                    "Try again",
+                    /*selected*/ true,
+                    /*active*/ false,
+                ));
                 lines.push(Line::from(""));
                 lines.push(add_account_hint_line("Retry", "Back"));
             }
@@ -928,7 +940,7 @@ impl Renderable for LoginAccountsView {
         lines.push(render_selectable_line(
             self.pool_behavior.account_action_label(),
             add_selected,
-            false,
+            /*active*/ false,
         ));
         lines.push(Line::from(""));
         let mut hint_spans = vec![

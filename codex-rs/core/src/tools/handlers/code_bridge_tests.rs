@@ -40,7 +40,7 @@ fn required_javascript_code_rejects_empty_and_oversized() {
 #[test]
 fn required_target_client_id_rejects_missing_and_empty() {
     assert_eq!(
-        required_target_client_id(None),
+        required_target_client_id(/*value*/ None),
         Err("targetClientId is required for this action".to_string())
     );
     assert_eq!(

@@ -861,14 +861,14 @@ async fn resumed_and_forked_threads_reuse_the_source_execution_lease() -> Result
         home.path(),
         &control,
         initial_time + Duration::hours(4),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
     record_rate_limits(
         home.path(),
         &execution,
         initial_time + Duration::minutes(10),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
 
@@ -901,14 +901,14 @@ async fn resumed_and_forked_threads_reuse_the_source_execution_lease() -> Result
         home.path(),
         &control,
         changed_time + Duration::minutes(5),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
     record_rate_limits(
         home.path(),
         &execution,
         changed_time + Duration::hours(3),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
 
@@ -1001,21 +1001,21 @@ async fn model_catalog_cache_isolated_per_account_and_provider_config_across_res
         home.path(),
         &control,
         initial_time + Duration::hours(5),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
     record_rate_limits(
         home.path(),
         &account_a,
         initial_time + Duration::minutes(10),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
     record_rate_limits(
         home.path(),
         &account_b,
         initial_time + Duration::minutes(30),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
 
@@ -1040,21 +1040,21 @@ async fn model_catalog_cache_isolated_per_account_and_provider_config_across_res
         home.path(),
         &control,
         changed_time + Duration::hours(5),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
     record_rate_limits(
         home.path(),
         &account_a,
         changed_time + Duration::hours(3),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
     record_rate_limits(
         home.path(),
         &account_b,
         changed_time + Duration::minutes(5),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
 

@@ -97,7 +97,7 @@ fn can_run_headed_browser_test() -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn internal_browser_can_open_local_http_server() -> Result<()> {
-    assert_manager_can_open_local_http_server(true).await
+    assert_manager_can_open_local_http_server(/*headless*/ true).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -109,5 +109,5 @@ async fn headed_internal_browser_can_open_local_http_server() -> Result<()> {
         return Ok(());
     }
 
-    assert_manager_can_open_local_http_server(false).await
+    assert_manager_can_open_local_http_server(/*headless*/ false).await
 }

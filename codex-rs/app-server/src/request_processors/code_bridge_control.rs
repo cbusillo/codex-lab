@@ -78,7 +78,10 @@ impl CodeBridgeRequestProcessor {
             },
         )
         .await?;
-        let mut events = client.events(&session, 0).await.map_err(map_client_error)?;
+        let mut events = client
+            .events(&session, /*last_event_id*/ 0)
+            .await
+            .map_err(map_client_error)?;
         let request_id = request_id("screenshot");
         expect_ack(
             client
@@ -115,7 +118,10 @@ impl CodeBridgeRequestProcessor {
             },
         )
         .await?;
-        let mut events = client.events(&session, 0).await.map_err(map_client_error)?;
+        let mut events = client
+            .events(&session, /*last_event_id*/ 0)
+            .await
+            .map_err(map_client_error)?;
         let request_id = request_id("javascript");
         expect_ack(
             client

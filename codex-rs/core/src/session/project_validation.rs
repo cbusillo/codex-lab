@@ -117,9 +117,9 @@ pub(crate) async fn run_project_validation(
         return ProjectValidationRun::Skipped(skipped_event(
             turn_context,
             Vec::new(),
-            None,
+            /*cwd*/ None,
             ProjectValidationSkipReason::NonRootAgent,
-            None,
+            /*changed_file_count*/ None,
         ));
     }
 
@@ -140,7 +140,7 @@ pub(crate) async fn run_project_validation(
                 turn_context,
                 Vec::new(),
                 cwd,
-                None,
+                /*changed_file_count*/ None,
             ));
         }
         return ProjectValidationRun::Skipped(skipped_event(
@@ -148,7 +148,7 @@ pub(crate) async fn run_project_validation(
             Vec::new(),
             cwd,
             ProjectValidationSkipReason::ValidationDisabled,
-            None,
+            /*changed_file_count*/ None,
         ));
     }
 
@@ -157,9 +157,9 @@ pub(crate) async fn run_project_validation(
             return ProjectValidationRun::Completed(completed_event(
                 turn_context,
                 command,
-                None,
+                /*cwd*/ None,
                 ProjectValidationStatus::InfrastructureFailure,
-                None,
+                /*exit_code*/ None,
                 "project validation requires exactly one local turn environment".to_string(),
                 Duration::ZERO,
             ));
@@ -167,9 +167,9 @@ pub(crate) async fn run_project_validation(
         return ProjectValidationRun::Skipped(skipped_event(
             turn_context,
             Vec::new(),
-            None,
+            /*cwd*/ None,
             ProjectValidationSkipReason::UnsupportedEnvironment,
-            None,
+            /*changed_file_count*/ None,
         ));
     };
 
@@ -178,7 +178,7 @@ pub(crate) async fn run_project_validation(
             turn_context,
             project_command.clone().unwrap_or_default(),
             Some(cwd),
-            None,
+            /*changed_file_count*/ None,
         ));
     }
 
@@ -196,7 +196,7 @@ pub(crate) async fn run_project_validation(
         return ProjectValidationRun::Completed(configuration_error(
             turn_context,
             command.clone(),
-            None,
+            /*cwd*/ None,
             "project validation executable was not found or is not executable",
         ));
     }
@@ -208,7 +208,7 @@ pub(crate) async fn run_project_validation(
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
                 ProjectValidationSkipReason::UnchangedFingerprint,
-                None,
+                /*changed_file_count*/ None,
             ));
         }
         Some(false) => {}
@@ -217,7 +217,7 @@ pub(crate) async fn run_project_validation(
                 turn_context,
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
-                None,
+                /*changed_file_count*/ None,
             ));
         }
     }
@@ -234,7 +234,7 @@ pub(crate) async fn run_project_validation(
                 turn_context,
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
-                None,
+                /*changed_file_count*/ None,
             ));
         };
         Some(lease)
@@ -249,7 +249,7 @@ pub(crate) async fn run_project_validation(
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
                 ProjectValidationSkipReason::UnchangedFingerprint,
-                None,
+                /*changed_file_count*/ None,
             ));
         }
         Some(false) => {}
@@ -258,7 +258,7 @@ pub(crate) async fn run_project_validation(
                 turn_context,
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
-                None,
+                /*changed_file_count*/ None,
             ));
         }
     }
@@ -268,7 +268,7 @@ pub(crate) async fn run_project_validation(
             turn_context,
             project_command.clone().unwrap_or_default(),
             Some(cwd),
-            None,
+            /*changed_file_count*/ None,
         ));
     }
 
@@ -279,7 +279,7 @@ pub(crate) async fn run_project_validation(
                 Vec::new(),
                 Some(cwd),
                 ProjectValidationStatus::InfrastructureFailure,
-                None,
+                /*exit_code*/ None,
                 "validated project command was unavailable".to_string(),
                 Duration::ZERO,
             ));
@@ -379,7 +379,7 @@ pub(crate) async fn run_project_validation(
                     automatic.command,
                     Some(automatic.cwd),
                     ProjectValidationStatus::InfrastructureFailure,
-                    None,
+                    /*exit_code*/ None,
                     "cargo validation requires an isolated execution directory".to_string(),
                     Duration::ZERO,
                 ));
@@ -395,7 +395,7 @@ pub(crate) async fn run_project_validation(
                     automatic.command,
                     Some(automatic.cwd),
                     ProjectValidationStatus::InfrastructureFailure,
-                    None,
+                    /*exit_code*/ None,
                     "cargo validation execution directory must be outside the repository"
                         .to_string(),
                     Duration::ZERO,
@@ -481,7 +481,7 @@ pub(crate) async fn run_project_validation(
         &turn_context.config.effective_workspace_roots(),
         &turn_context.config.codex_linux_sandbox_exe,
         turn_context.config.features.use_legacy_landlock(),
-        None,
+        /*stdout_stream*/ None,
     )
     .await;
 
@@ -575,7 +575,7 @@ pub(crate) async fn run_project_validation(
                 plan.command,
                 Some(plan.cwd),
                 ProjectValidationStatus::InfrastructureFailure,
-                None,
+                /*exit_code*/ None,
                 format!("{} infrastructure failure: {error}", plan.kind.label()),
                 Duration::ZERO,
             ),
@@ -604,7 +604,7 @@ fn validate_project_command(
         return Err(configuration_error(
             turn_context,
             command,
-            None,
+            /*cwd*/ None,
             "validation.project_command.command must include a non-empty executable",
         ));
     }
@@ -615,7 +615,7 @@ fn validate_project_command(
         return Err(configuration_error(
             turn_context,
             command,
-            None,
+            /*cwd*/ None,
             format!(
                 "validation.project_command.command must not exceed {PROJECT_VALIDATION_COMMAND_MAX_BYTES} bytes"
             ),
@@ -625,7 +625,7 @@ fn validate_project_command(
         return Err(configuration_error(
             turn_context,
             command,
-            None,
+            /*cwd*/ None,
             format!(
                 "validation.project_command.timeout_ms must be between 1 and {MAX_PROJECT_VALIDATION_TIMEOUT_MS}"
             ),
@@ -685,7 +685,7 @@ fn provider_error_event(
             error.command,
             error.cwd,
             ProjectValidationStatus::InfrastructureFailure,
-            None,
+            /*exit_code*/ None,
             error.message,
             Duration::ZERO,
         ),
@@ -916,7 +916,7 @@ fn configuration_error(
         command,
         cwd,
         ProjectValidationStatus::ConfigurationError,
-        None,
+        /*exit_code*/ None,
         message.into(),
         Duration::ZERO,
     )

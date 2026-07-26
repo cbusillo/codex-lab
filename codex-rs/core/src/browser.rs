@@ -138,7 +138,7 @@ async fn open(args: BrowserArgs) -> Result<BrowserActionResult, String> {
     let timeout_duration = browser_timeout(args.timeout_ms)?;
     let manager = global::get_or_create_browser_manager().await;
     if !manager.is_enabled().await {
-        timeout(timeout_duration, manager.set_enabled(true))
+        timeout(timeout_duration, manager.set_enabled(/*enabled*/ true))
             .await
             .map_err(|_| "browser startup timed out".to_string())?
             .map_err(|err| format!("browser startup failed: {err}"))?;
@@ -168,7 +168,7 @@ async fn close() -> Result<BrowserActionResult, String> {
         })));
     };
     manager
-        .set_enabled(false)
+        .set_enabled(/*enabled*/ false)
         .await
         .map_err(|err| format!("browser shutdown failed: {err}"))?;
     global::clear_browser_manager().await;
@@ -505,7 +505,7 @@ async fn fetch_browser(
 ) -> Result<BrowserActionResult, String> {
     let manager = global::get_or_create_browser_manager().await;
     if !manager.is_enabled().await {
-        timeout(timeout_duration, manager.set_enabled(true))
+        timeout(timeout_duration, manager.set_enabled(/*enabled*/ true))
             .await
             .map_err(|_| "browser startup timed out".to_string())?
             .map_err(|err| format!("browser startup failed: {err}"))?;

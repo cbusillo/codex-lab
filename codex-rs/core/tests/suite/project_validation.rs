@@ -1571,7 +1571,11 @@ async fn project_validation_owned_rerun_ignores_unchanged_worktree_gate() -> Res
 async fn project_validation_non_git_workspace_fails_open_before_turn_completion() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let events = run_validation_turn(shell_command("printf validation-pass", 5_000)).await?;
+    let events = run_validation_turn(shell_command(
+        "printf validation-pass",
+        /*timeout_ms*/ 5_000,
+    ))
+    .await?;
     let validation_events = validation_events(&events);
     assert_eq!(validation_events.len(), 1);
     let event = validation_events[0];
@@ -1648,7 +1652,8 @@ async fn project_validation_reports_bounded_actionable_failure() -> Result<()> {
         "i=0; while [ $i -lt 12000 ]; do printf x; i=$((i + 1)); done; ",
         "printf '\\nvalidation-end\\n' >&2; exit 7"
     );
-    let (events, requests) = run_validation_correction_turn(shell_command(script, 5_000)).await?;
+    let (events, requests) =
+        run_validation_correction_turn(shell_command(script, /*timeout_ms*/ 5_000)).await?;
     let validation_events = validation_events(&events);
     assert_eq!(validation_events.len(), 2);
     for event in &validation_events {
@@ -1810,7 +1815,7 @@ async fn automatic_shellcheck_provider_runs_one_correction_cycle() -> Result<()>
         &server,
         repo.path(),
         vec!["/bin/sh".to_string(), "fake-shellcheck".to_string()],
-        None,
+        /*project_command*/ None,
     )
     .await?;
 
@@ -2447,7 +2452,7 @@ async fn automatic_validation_reports_no_changed_files() -> Result<()> {
         &server,
         repo.path(),
         vec!["/usr/bin/true".to_string()],
-        None,
+        /*project_command*/ None,
     )
     .await?;
 
@@ -2486,7 +2491,7 @@ async fn automatic_validation_reports_no_applicable_provider() -> Result<()> {
         &server,
         repo.path(),
         vec!["/usr/bin/true".to_string()],
-        None,
+        /*project_command*/ None,
     )
     .await?;
 
@@ -2523,7 +2528,7 @@ async fn automatic_validation_reports_unsupported_environment() -> Result<()> {
         &server,
         workspace.path(),
         vec!["/usr/bin/true".to_string()],
-        None,
+        /*project_command*/ None,
     )
     .await?;
 
@@ -2544,7 +2549,7 @@ async fn explicit_project_command_preserves_unsupported_environment_failure() ->
 
     let server = start_mock_server().await;
     responses::mount_sse_once(&server, sse_completed("resp-unsupported-command")).await;
-    let test = build_validation_codex(&server, shell_command("true", 5_000)).await?;
+    let test = build_validation_codex(&server, shell_command("true", /*timeout_ms*/ 5_000)).await?;
 
     submit_user_input_without_environments(&test.codex, &test, "finish the work").await?;
     let events = collect_events_until_terminal(&test.codex).await?;
@@ -2978,7 +2983,7 @@ async fn project_validation_is_skipped_for_non_root_agents() -> Result<()> {
 async fn project_validation_reports_timeout_and_completes_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let events = run_validation_turn(shell_command("sleep 5", 50)).await?;
+    let events = run_validation_turn(shell_command("sleep 5", /*timeout_ms*/ 50)).await?;
     let validation_events = validation_events(&events);
     assert_eq!(validation_events.len(), 1);
     let event = validation_events[0];

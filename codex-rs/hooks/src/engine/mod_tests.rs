@@ -1638,7 +1638,7 @@ fn plugin_hooks_without_ids_keep_positional_keys() {
     )];
 
     let discovered = super::discovery::discover_handlers(
-        None,
+        /*config_layer_stack*/ None,
         plugin_hook_sources,
         Vec::new(),
         /*bypass_hook_trust*/ false,
@@ -1673,13 +1673,13 @@ fn adding_a_hook_id_preserves_the_existing_trusted_hash() {
     )];
 
     let before = super::discovery::discover_handlers(
-        None,
+        /*config_layer_stack*/ None,
         without_id,
         Vec::new(),
         /*bypass_hook_trust*/ false,
     );
     let after = super::discovery::discover_handlers(
-        None,
+        /*config_layer_stack*/ None,
         with_id,
         Vec::new(),
         /*bypass_hook_trust*/ false,
@@ -1708,7 +1708,7 @@ fn duplicate_plugin_hook_ids_fall_back_to_positional_keys() {
     )];
 
     let discovered = super::discovery::discover_handlers(
-        None,
+        /*config_layer_stack*/ None,
         plugin_hook_sources.clone(),
         Vec::new(),
         /*bypass_hook_trust*/ false,
@@ -1781,7 +1781,7 @@ fn skipped_plugin_hook_ids_do_not_shift_discoverable_plugin_keys() {
     )];
 
     let discovered = super::discovery::discover_handlers(
-        None,
+        /*config_layer_stack*/ None,
         plugin_hook_sources,
         Vec::new(),
         /*bypass_hook_trust*/ false,

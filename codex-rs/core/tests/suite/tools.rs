@@ -106,7 +106,7 @@ async fn producer_session(
             },
         )
         .await?;
-    let events = client.events(&session, 0).await?;
+    let events = client.events(&session, /*last_event_id*/ 0).await?;
     Ok((session, events))
 }
 

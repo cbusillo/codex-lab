@@ -488,7 +488,7 @@ fn upsert_account(
 fn select_fallback_active_account(data: &mut AccountsFile) {
     if let Some(account) = data.accounts.first_mut() {
         data.active_account_id = Some(account.id.clone());
-        touch_account(account, true);
+        touch_account(account, /*used*/ true);
     } else {
         data.active_account_id = None;
     }
@@ -732,7 +732,7 @@ pub fn set_active_account_id(
         && let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == id)
     {
         data.active_account_id = Some(id);
-        touch_account(account, true);
+        touch_account(account, /*used*/ true);
         updated = Some(account.clone());
     } else {
         data.active_account_id = None;
@@ -828,7 +828,7 @@ fn commit_stored_active_account(
         keyring_backend_kind,
     )?;
     data.active_account_id = Some(account_id.to_string());
-    touch_account(&mut data.accounts[account_index], true);
+    touch_account(&mut data.accounts[account_index], /*used*/ true);
     let activated = data.accounts[account_index].clone();
     if let Err(err) = write_accounts_file(codex_home, auth_credentials_store_mode, &data) {
         if let Err(rollback_err) = restore_previous_auth(
@@ -875,7 +875,11 @@ pub fn clear_active_account(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<()> {
-    set_active_account_id(codex_home, auth_credentials_store_mode, None)?;
+    set_active_account_id(
+        codex_home,
+        auth_credentials_store_mode,
+        /*account_id*/ None,
+    )?;
     crate::delete_auth(
         codex_home,
         auth_credentials_store_mode,
@@ -953,7 +957,7 @@ pub fn upsert_api_key_account(
     if make_active {
         data.active_account_id = Some(stored.id.clone());
         if let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == stored.id) {
-            touch_account(account, true);
+            touch_account(account, /*used*/ true);
             stored = account.clone();
         }
     }
@@ -989,7 +993,7 @@ pub(crate) fn insert_api_key_account_if_missing(
         created_at: None,
         last_used_at: None,
     };
-    touch_account(&mut account, false);
+    touch_account(&mut account, /*used*/ false);
     data.accounts.push(account.clone());
     write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(Some(account))
@@ -1022,7 +1026,7 @@ pub fn upsert_chatgpt_account(
     if make_active {
         data.active_account_id = Some(stored.id.clone());
         if let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == stored.id) {
-            touch_account(account, true);
+            touch_account(account, /*used*/ true);
             stored = account.clone();
         }
     }
@@ -1091,7 +1095,7 @@ pub(crate) fn insert_chatgpt_account_if_missing(
         created_at: None,
         last_used_at: None,
     };
-    touch_account(&mut account, false);
+    touch_account(&mut account, /*used*/ false);
     data.accounts.push(account.clone());
     write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(Some(account))

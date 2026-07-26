@@ -336,7 +336,7 @@ async fn control_session(
             },
         )
         .await?;
-    let events = client.events(&session, 0).await?;
+    let events = client.events(&session, /*last_event_id*/ 0).await?;
     Ok((client, session, events))
 }
 

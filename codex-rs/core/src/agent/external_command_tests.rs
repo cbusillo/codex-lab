@@ -73,7 +73,7 @@ printf 'tail-marker"}'
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
 
     let response = run_external_agent_inner(&launch)
@@ -108,7 +108,7 @@ async fn failed_json_response_without_message_stays_absent() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
 
     let response = run_external_agent_inner(&launch)
@@ -178,7 +178,7 @@ fn raw_cli_invocation_appends_mode_args_and_prompt() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
 
     let invocation = build_external_agent_invocation(&launch, "inspect this repo")
@@ -209,7 +209,7 @@ fn antigravity_invocation_adds_repo_dir_and_prompt_flag() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
 
     let invocation = build_external_agent_invocation(&launch, "inspect this repo")
@@ -260,7 +260,7 @@ fn third_party_cli_families_use_prompt_flag() {
                 timeout_ms: 5_000,
                 ..Default::default()
             },
-            false,
+            /*is_read_only*/ false,
         );
 
         let invocation = build_external_agent_invocation(&launch, "inspect this repo")
@@ -293,7 +293,7 @@ fn positional_prompt_families_keep_bare_prompt() {
                 timeout_ms: 5_000,
                 ..Default::default()
             },
-            false,
+            /*is_read_only*/ false,
         );
 
         let invocation = build_external_agent_invocation(&launch, "inspect this repo")
@@ -382,10 +382,14 @@ exit 2
         ..Default::default()
     };
 
-    let err =
-        preflight_external_agent_backend(Some("antigravity"), &backend, temp_dir.path(), true)
-            .await
-            .expect_err("signed-out Antigravity CLI should fail preflight");
+    let err = preflight_external_agent_backend(
+        Some("antigravity"),
+        &backend,
+        temp_dir.path(),
+        /*is_read_only*/ true,
+    )
+    .await
+    .expect_err("signed-out Antigravity CLI should fail preflight");
 
     assert_eq!(err.kind, ExternalAgentFailureKind::AuthenticationRequired);
     assert!(err.to_string().contains("Authentication required"));
@@ -417,10 +421,14 @@ exit 2
         ..Default::default()
     };
 
-    let provenance =
-        preflight_external_agent_backend(Some("antigravity"), &backend, temp_dir.path(), true)
-            .await
-            .expect("authenticated Antigravity CLI should pass preflight");
+    let provenance = preflight_external_agent_backend(
+        Some("antigravity"),
+        &backend,
+        temp_dir.path(),
+        /*is_read_only*/ true,
+    )
+    .await
+    .expect("authenticated Antigravity CLI should pass preflight");
 
     assert_eq!(
         provenance.cli_version.as_deref(),
@@ -456,7 +464,7 @@ echo "RUNTIME_OK"
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
     launch.preflight_completed = true;
 
@@ -515,13 +523,17 @@ exit 2
         ..Default::default()
     };
 
-    let provider =
-        preflight_external_agent_backend(Some("claude"), &backend, temp_dir.path(), true)
-            .await
-            .expect("backend PATH command should pass preflight");
+    let provider = preflight_external_agent_backend(
+        Some("claude"),
+        &backend,
+        temp_dir.path(),
+        /*is_read_only*/ true,
+    )
+    .await
+    .expect("backend PATH command should pass preflight");
     assert_eq!(provider.resolved_command(), Some(command_path.as_path()));
 
-    let mut launch = test_launch(&temp_dir, backend, true);
+    let mut launch = test_launch(&temp_dir, backend, /*is_read_only*/ true);
     launch.preflight_completed = true;
     launch.resolved_command = provider
         .resolved_command()
@@ -606,7 +618,7 @@ async fn first_party_and_custom_raw_cli_commands_require_executable_commands() {
                 timeout_ms: 5_000,
                 ..Default::default()
             },
-            false,
+            /*is_read_only*/ false,
         );
         let err = preflight_external_agent_backend(
             launch.role.as_deref(),
@@ -665,7 +677,7 @@ async fn raw_cli_auth_failure_is_classified() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
 
     let err = run_external_agent_inner(&launch)
@@ -693,7 +705,7 @@ async fn raw_cli_rate_limit_failure_is_classified() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
 
     let err = run_external_agent_inner(&launch)
@@ -717,7 +729,7 @@ async fn raw_cli_empty_output_is_classified() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
 
     let err = run_external_agent_inner(&launch)
@@ -738,7 +750,7 @@ async fn malformed_json_output_is_classified() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
 
     let err = run_external_agent_inner(&launch)
@@ -785,7 +797,7 @@ fn antigravity_launch_cwd_uses_private_cache_dir() {
             launch_family: Some("antigravity".to_string()),
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
 
     let launch_cwd = external_agent_launch_cwd(&launch);
@@ -807,7 +819,7 @@ async fn antigravity_launch_requires_existing_workspace_dir() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
     launch.cwd = missing_workspace.clone();
 
@@ -836,7 +848,7 @@ fn json_invocation_keeps_command_as_literal_path() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        true,
+        /*is_read_only*/ true,
     );
 
     let invocation = build_external_agent_invocation(&launch, "inspect this repo")
@@ -863,7 +875,7 @@ fn raw_cli_rejects_invalid_command_quoting() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
 
     let err = build_external_agent_invocation(&launch, "inspect this repo")
@@ -896,7 +908,7 @@ async fn raw_cli_uses_argv_prompt_and_configured_env() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
 
     let response = run_external_agent_inner(&launch)
@@ -937,7 +949,7 @@ fn external_agent_process_env_sets_artifact_target_scope() {
             ]),
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
 
     let env = external_agent_process_env(&launch);
@@ -977,7 +989,7 @@ async fn raw_cli_receives_artifact_target_scope_env() {
             timeout_ms: 5_000,
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
     let expected_thread_id = launch.thread_id.to_string();
 
@@ -1001,7 +1013,7 @@ async fn oversized_output_is_truncated_instead_of_failing_wrapper() {
             .expect("write oversized payload");
     });
 
-    let output = read_limited_output(reader, 8, "stdout")
+    let output = read_limited_output(reader, /*limit*/ 8, "stdout")
         .await
         .expect("oversized output should truncate, not fail");
     writer_task.await.expect("writer task should finish");
@@ -1027,7 +1039,7 @@ async fn oversized_subprocess_stdout_keeps_tail_without_sigpipe_failure() {
                 timeout_ms: 5_000,
                 ..Default::default()
             },
-            false,
+            /*is_read_only*/ false,
         );
 
     let response = run_external_agent_inner(&launch)
@@ -1055,7 +1067,7 @@ async fn timeout_kills_external_agent_background_children() {
             timeout_ms: 100,
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
 
     let err = run_external_agent_inner(&launch)
@@ -1088,7 +1100,7 @@ async fn timeout_kills_background_children_after_wrapper_exits() {
             timeout_ms: 100,
             ..Default::default()
         },
-        false,
+        /*is_read_only*/ false,
     );
 
     let err = run_external_agent_inner(&launch)
