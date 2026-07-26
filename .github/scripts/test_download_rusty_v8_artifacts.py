@@ -19,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/scripts/download-rusty-v8-artifacts.sh"
 ACTION = ROOT / ".github/actions/setup-rusty-v8/action.yml"
+WORKFLOWS = ROOT / ".github/workflows"
 TARGET = "x86_64-unknown-linux-musl"
 VERSION = "1.2.3"
 
@@ -245,6 +246,18 @@ class SetupRustyV8ActionTest(unittest.TestCase):
 
     def test_action_runs_the_download_script(self) -> None:
         self.assertIn("download-rusty-v8-artifacts.sh", ACTION.read_text())
+
+
+class WorkflowArtifactSourceTest(unittest.TestCase):
+    """CI may read upstream artifacts; the release path must not."""
+
+    def test_ci_reads_upstream_artifacts_explicitly(self) -> None:
+        workflow = (WORKFLOWS / "rust-ci-full.yml").read_text()
+        self.assertIn("artifact-repository: openai/codex", workflow)
+
+    def test_release_keeps_the_fail_closed_default(self) -> None:
+        workflow = (WORKFLOWS / "rust-release.yml").read_text()
+        self.assertNotIn("artifact-repository", workflow)
 
 
 if __name__ == "__main__":

@@ -86,6 +86,10 @@ The workflows in this directory are split so that pull requests get fast, review
   another repository. Pass `artifact-repository` to opt into a different source;
   `.github/scripts/download-rusty-v8-artifacts.sh` validates that input and
   `GITHUB_SERVER_URL` before either reaches a URL.
+- `rust-ci-full.yml` explicitly reads the exact-version, checksummed artifacts
+  from `openai/codex` because it only compiles and tests source; it publishes
+  nothing. `rust-release.yml` deliberately keeps the fail-closed default so a
+  fork release cannot redistribute V8 blobs published by another repository.
 - Codex Lab's own releases go through `codex-lab-release.yml`, which builds
   packed `.dSYM` sidecars and strips the managed engine before signing.
 

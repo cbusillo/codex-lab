@@ -352,6 +352,12 @@ jobs:
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: ${{ matrix.target }}
+          # Full CI only compiles and tests this repository; it publishes no
+          # artifacts. Read the exact-version V8 inputs from the repository
+          # that builds them. rust-release.yml intentionally keeps the
+          # fail-closed default so fork releases cannot redistribute V8 blobs
+          # published by another repository.
+          artifact-repository: openai/codex
 
       - name: Install cargo-chef
         if: ${{ matrix.profile == 'release' }}
