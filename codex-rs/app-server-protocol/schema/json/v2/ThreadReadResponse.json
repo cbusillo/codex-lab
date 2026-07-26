@@ -1521,6 +1521,14 @@
                 "null"
               ]
             },
+            "error": {
+              "default": null,
+              "description": "Failure detail persisted with the call, when the tool reported one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },

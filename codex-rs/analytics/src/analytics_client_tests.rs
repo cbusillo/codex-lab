@@ -4556,6 +4556,7 @@ async fn turn_event_counts_completed_tool_items() {
             status: DynamicToolCallStatus::Completed,
             content_items: None,
             success: Some(true),
+            error: None,
             duration_ms: Some(3),
         },
         ThreadItem::CollabAgentToolCall {

@@ -57,7 +57,7 @@ pub enum ConfigLayerSource {
         name: String,
     },
 
-    /// User config layer from $CODEX_HOME/config.toml. This layer is special
+    /// User config layer from $CODEX_LAB_HOME/config.toml. This layer is special
     /// in that it is expected to be:
     /// - writable by the user
     /// - generally outside the workspace directory
@@ -500,6 +500,11 @@ pub enum ConfiguredHookHandler {
     #[serde(rename = "command")]
     #[ts(rename = "command")]
     Command {
+        /// Stable identifier for this handler, when the user configured one. It
+        /// anchors persisted hook-state keys so reordering handlers does not
+        /// drop enable/disable decisions.
+        #[serde(default)]
+        id: Option<String>,
         command: String,
         #[serde(rename = "commandWindows")]
         #[ts(rename = "commandWindows")]

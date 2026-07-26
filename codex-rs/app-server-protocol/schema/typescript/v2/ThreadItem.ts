@@ -78,6 +78,10 @@ mcpAppResourceUri?: string, pluginId: string | null, result: McpToolCallResult |
  */
 durationMs: number | null, } | { "type": "dynamicToolCall", id: string, namespace: string | null, tool: string, arguments: JsonValue, status: DynamicToolCallStatus, contentItems: Array<DynamicToolCallOutputContentItem> | null, success: boolean | null,
 /**
+ * Failure detail persisted with the call, when the tool reported one.
+ */
+error: string | null,
+/**
  * The duration of the dynamic tool call in milliseconds.
  */
 durationMs: number | null, } | { "type": "collabAgentToolCall",

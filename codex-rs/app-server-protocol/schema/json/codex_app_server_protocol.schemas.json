@@ -3216,7 +3216,7 @@
               "$ref": "#/definitions/v2/AbsolutePathBuf"
             }
           ],
-          "description": "Absolute path to the server's $CODEX_HOME directory."
+          "description": "Absolute path to the server's $CODEX_LAB_HOME directory."
         },
         "platformFamily": {
           "description": "Platform family for the running app-server target, for example `\"unix\"` or `\"windows\"`.",
@@ -9608,7 +9608,7 @@
             "type": "object"
           },
           {
-            "description": "User config layer from $CODEX_HOME/config.toml. This layer is special in that it is expected to be: - writable by the user - generally outside the workspace directory",
+            "description": "User config layer from $CODEX_LAB_HOME/config.toml. This layer is special in that it is expected to be: - writable by the user - generally outside the workspace directory",
             "properties": {
               "file": {
                 "allOf": [
@@ -10077,6 +10077,14 @@
                 "type": "string"
               },
               "commandWindows": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "default": null,
+                "description": "Stable identifier for this handler, when the user configured one. It anchors persisted hook-state keys so reordering handlers does not drop enable/disable decisions.",
                 "type": [
                   "string",
                   "null"
@@ -20658,6 +20666,14 @@
                 "format": "int64",
                 "type": [
                   "integer",
+                  "null"
+                ]
+              },
+              "error": {
+                "default": null,
+                "description": "Failure detail persisted with the call, when the tool reported one.",
+                "type": [
+                  "string",
                   "null"
                 ]
               },

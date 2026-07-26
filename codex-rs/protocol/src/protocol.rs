@@ -4114,6 +4114,13 @@ pub struct SessionConfiguredEvent {
     #[ts(optional)]
     pub thread_name: Option<String>,
 
+    /// Persisted thread history contract selected when this thread was created.
+    ///
+    /// Defaulted on the wire so rollouts and clients written before this field
+    /// existed keep deserializing.
+    #[serde(default)]
+    pub history_mode: ThreadHistoryMode,
+
     /// Tell the client what model is being queried.
     pub model: String,
 
@@ -4179,6 +4186,8 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             thread_source: Option<ThreadSource>,
             #[serde(default)]
             thread_name: Option<String>,
+            #[serde(default)]
+            history_mode: ThreadHistoryMode,
             model: String,
             model_provider_id: String,
             service_tier: Option<String>,
@@ -4218,6 +4227,7 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             parent_thread_id: wire.parent_thread_id,
             thread_source: wire.thread_source,
             thread_name: wire.thread_name,
+            history_mode: wire.history_mode,
             model: wire.model,
             model_provider_id: wire.model_provider_id,
             service_tier: wire.service_tier,
@@ -4288,7 +4298,11 @@ pub struct ThreadGoalUpdatedEvent {
 }
 
 /// User's decision in response to an ExecApprovalRequest.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Display, JsonSchema, TS)]
+// `Deserialize` is hand-written in `review_decision_compat` so the legacy
+// unit-form `"denied"` payload keeps working alongside the current
+// `{"denied": {"rejection": "..."}}` form. Keep it out of the doc comment so it
+// does not leak into the published schema.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Display, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
     /// User has approved this command and the agent should execute it.
@@ -6501,6 +6515,7 @@ mod tests {
                 parent_thread_id: None,
                 thread_source: None,
                 thread_name: None,
+                history_mode: ThreadHistoryMode::Paginated,
                 model: "codex-mini-latest".to_string(),
                 model_provider_id: "openai".to_string(),
                 service_tier: None,
@@ -6522,6 +6537,7 @@ mod tests {
                 "type": "session_configured",
                 "session_id": "67e55044-10b1-426f-9247-bb680e5fe0c7",
                 "thread_id": "67e55044-10b1-426f-9247-bb680e5fe0c8",
+                "history_mode": "paginated",
                 "model": "codex-mini-latest",
                 "model_provider_id": "openai",
                 "approval_policy": "never",
@@ -6553,6 +6569,7 @@ mod tests {
 
         let event: SessionConfiguredEvent = serde_json::from_value(value)?;
         assert_eq!(event.permission_profile, PermissionProfile::read_only());
+        assert_eq!(event.history_mode, ThreadHistoryMode::Legacy);
         Ok(())
     }
 
