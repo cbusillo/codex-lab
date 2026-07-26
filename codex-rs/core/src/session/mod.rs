@@ -541,10 +541,10 @@ async fn resolve_execution_account_for_session(
         ExecutionAccountPooling::Disabled
     };
     // Ephemeral threads (sub-agents and forks of them) may reuse a durable
-    // source lease but must never write a destination lease of their own. A
-    // non-local thread store keeps thread state off this machine entirely, so a
-    // lease record under `codex_home` would be local state the thread does not
-    // own; treat those threads as ephemeral for lease writes too.
+    // source lease but must never write a destination lease of their own.
+    // In-memory thread stores are intentionally non-durable, so persisting a
+    // lease keyed by one of their non-resumable thread ids would leave orphaned
+    // local state under `codex_home`.
     let persistence = if config.ephemeral
         || !matches!(config.experimental_thread_store, ThreadStoreConfig::Local)
     {

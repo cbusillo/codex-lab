@@ -36,8 +36,8 @@ jobs:
   archive:
     name: Build nextest archive
     runs-on: ${{ inputs.archive_runner != '' && inputs.archive_runner || inputs.runner }}
-    # Cancelled at exactly 60 minutes on the current head; cold-cache Windows
-    # and ARM archive builds need headroom above that.
+    # Run 30205457451 cancelled the Linux ARM64 archive at exactly 60 minutes;
+    # cold-cache archive builds need headroom above that.
     timeout-minutes: 90
     defaults:
       run:
@@ -295,7 +295,9 @@ jobs:
     name: Tests shard ${{ matrix.shard }}/4
     needs: archive
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 60
+    # Slower hosted lanes can approach the former 60-minute wall after reducing
+    # process concurrency to match runner capacity.
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: codex-rs

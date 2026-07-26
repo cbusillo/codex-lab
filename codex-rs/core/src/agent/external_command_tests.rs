@@ -778,17 +778,79 @@ fn split_command_and_args_preserves_absolute_windows_paths() {
     assert_eq!(command, r"D:\tools\claude.exe");
     assert!(args.is_empty());
 
+    let (command, args) =
+        split_command_and_args("C:/Program Files/GitHub Copilot/copilot.exe").expect("split");
+    assert_eq!(command, "C:/Program Files/GitHub Copilot/copilot.exe");
+    assert!(args.is_empty());
+
     let (command, args) = split_command_and_args(r"\\build\share\agents\qwen.exe").expect("split");
     assert_eq!(command, r"\\build\share\agents\qwen.exe");
     assert!(args.is_empty());
 }
 
 #[test]
+fn split_command_and_args_splits_windows_paths_with_inline_args() {
+    let (command, args) =
+        split_command_and_args("C:/tools/copilot.exe --model fast").expect("split");
+    assert_eq!(command, "C:/tools/copilot.exe");
+    assert_eq!(args, vec!["--model".to_string(), "fast".to_string()]);
+
+    let (command, args) =
+        split_command_and_args(r"C:\Program Files\GitHub Copilot\copilot.exe --model fast")
+            .expect("split");
+    assert_eq!(command, r"C:\Program Files\GitHub Copilot\copilot.exe");
+    assert_eq!(args, vec!["--model".to_string(), "fast".to_string()]);
+
+    let (command, args) =
+        split_command_and_args(r#""C:\Program Files\GitHub Copilot\copilot.exe" --model fast"#)
+            .expect("split");
+
+    assert_eq!(command, r"C:\Program Files\GitHub Copilot\copilot.exe");
+    assert_eq!(args, vec!["--model".to_string(), "fast".to_string()]);
+
+    let (command, args) =
+        split_command_and_args(r#""\\build\share\GitHub Copilot\copilot.exe" --model fast"#)
+            .expect("split");
+    assert_eq!(command, r"\\build\share\GitHub Copilot\copilot.exe");
+    assert_eq!(args, vec!["--model".to_string(), "fast".to_string()]);
+
+    let (command, args) =
+        split_command_and_args(r"C:\Windows\System32\cmd.exe /c C:\tools\build.bat")
+            .expect("split");
+    assert_eq!(command, r"C:\Windows\System32\cmd.exe");
+    assert_eq!(
+        args,
+        vec!["/c".to_string(), r"C:\tools\build.bat".to_string()]
+    );
+
+    let (command, args) =
+        split_command_and_args(r"C:\tools\Copilot.EXE --config C:\cfg\app.json").expect("split");
+    assert_eq!(command, r"C:\tools\Copilot.EXE");
+    assert_eq!(
+        args,
+        vec!["--config".to_string(), r"C:\cfg\app.json".to_string()]
+    );
+
+    let (command, args) =
+        split_command_and_args(r#"C:\tools\Copilot.exe --config "C:\Program Files\config.json""#)
+            .expect("split");
+    assert_eq!(command, r"C:\tools\Copilot.exe");
+    assert_eq!(
+        args,
+        vec![
+            "--config".to_string(),
+            r"C:\Program Files\config.json".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn split_command_and_args_preserves_current_exe_path() {
     let current_exe = std::env::current_exe().expect("current test executable");
-    let rendered = current_exe.display().to_string();
+    let current_exe_text = current_exe.to_string_lossy();
+    let rendered = shlex::try_quote(current_exe_text.as_ref()).expect("quote");
 
-    let (command, args) = split_command_and_args(&rendered).expect("split");
+    let (command, args) = split_command_and_args(rendered.as_ref()).expect("split");
 
     assert_eq!(PathBuf::from(&command), current_exe);
     assert!(args.is_empty());

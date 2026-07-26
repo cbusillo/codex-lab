@@ -12,5 +12,19 @@
 # `insta` compares snapshot bodies literally, so CRLF fails every snapshot test.
 *.snap text eol=lf
 
+# Keep binary fixtures and packaged artifacts out of text normalization even
+# when a future file happens not to trip Git's binary-content heuristic.
+*.bin -text
+*.gz -text
+*.ico -text
+*.jpeg -text
+*.jpg -text
+*.png -text
+*.wasm -text
+*.wav -text
+*.webp -text
+*.zip -text
+*.zst -text
+
 codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated

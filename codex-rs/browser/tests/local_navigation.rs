@@ -87,50 +87,19 @@ async fn assert_manager_can_open_local_http_server(headless: bool) -> Result<()>
     Ok(())
 }
 
-/// Opt-in switch for the headed browser test on CI runners, which are headless
-/// and cannot launch a visible Chrome window.
-const HEADED_BROWSER_TEST_OPT_IN_ENV: &str = "CODEX_RUN_HEADED_BROWSER_TESTS";
-
-fn env_flag_is_set(name: &str) -> bool {
-    match env::var(name) {
-        Ok(value) => {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        }
-        Err(_) => false,
-    }
-}
-
-/// Returns why the headed browser test cannot run here, or `None` when it can.
-fn headed_browser_test_skip_reason() -> Option<&'static str> {
-    if env_flag_is_set(HEADED_BROWSER_TEST_OPT_IN_ENV) {
-        return None;
-    }
-
-    if env_flag_is_set("CI") {
-        return Some("running on CI without CODEX_RUN_HEADED_BROWSER_TESTS=1");
-    }
-
-    if cfg!(target_os = "linux")
-        && env::var_os("DISPLAY").is_none()
-        && env::var_os("WAYLAND_DISPLAY").is_none()
-    {
-        return Some("no DISPLAY or WAYLAND_DISPLAY available");
-    }
-
-    None
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn internal_browser_can_open_local_http_server() -> Result<()> {
     assert_manager_can_open_local_http_server(/*headless*/ true).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an interactive desktop; run explicitly with --ignored"]
 async fn headed_internal_browser_can_open_local_http_server() -> Result<()> {
-    if let Some(reason) = headed_browser_test_skip_reason() {
-        eprintln!("skipping headed browser regression test: {reason}");
-        return Ok(());
+    if cfg!(target_os = "linux")
+        && env::var_os("DISPLAY").is_none()
+        && env::var_os("WAYLAND_DISPLAY").is_none()
+    {
+        anyhow::bail!("headed browser test requires DISPLAY or WAYLAND_DISPLAY");
     }
 
     assert_manager_can_open_local_http_server(/*headless*/ false).await

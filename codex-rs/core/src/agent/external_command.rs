@@ -602,7 +602,8 @@ fn mode_args(backend: &ExternalCommandAgentBackendConfig, is_read_only: bool) ->
     }
 }
 
-/// Detects `C:\dir\tool.exe` and `\\server\share\tool.exe` style paths.
+/// Detects `C:\dir\tool.exe`, `C:/dir/tool.exe`, and
+/// `\\server\share\tool.exe` style paths.
 ///
 /// Shape-based rather than `cfg(windows)`-gated so the behaviour is identical
 /// (and testable) on every host: no POSIX command line legitimately starts with
@@ -620,22 +621,117 @@ fn is_windows_absolute_path(command: &str) -> bool {
         && matches!(chars.next(), Some('\\') | Some('/'))
 }
 
+fn quoted_windows_command(command: &str) -> Option<(&str, &str)> {
+    let quote = command.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+
+    let path_start = quote.len_utf8();
+    let path_end = command[path_start..].find(quote)? + path_start;
+    let path = &command[path_start..path_end];
+    if !is_windows_absolute_path(path) {
+        return None;
+    }
+
+    Some((path, command[path_end + quote.len_utf8()..].trim()))
+}
+
+fn windows_executable_end(command: &str) -> Option<usize> {
+    const EXECUTABLE_SUFFIXES: [&str; 4] = [".exe", ".com", ".cmd", ".bat"];
+
+    let lowercase = command.to_ascii_lowercase();
+    let mut executable_end = None;
+    for suffix in EXECUTABLE_SUFFIXES {
+        for (index, _) in lowercase.match_indices(suffix) {
+            let end = index + suffix.len();
+            let is_boundary = end == command.len()
+                || command[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace);
+            if is_boundary {
+                executable_end =
+                    Some(executable_end.map_or(end, |current: usize| current.min(end)));
+            }
+        }
+    }
+    executable_end
+}
+
+fn split_windows_inline_args(args: &str) -> anyhow::Result<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut active_quote = None;
+    let mut word_started = false;
+
+    for character in args.chars() {
+        match active_quote {
+            Some(quote) if character == quote => {
+                active_quote = None;
+                word_started = true;
+            }
+            Some(_) => {
+                current.push(character);
+                word_started = true;
+            }
+            None if matches!(character, '\'' | '"') => {
+                active_quote = Some(character);
+                word_started = true;
+            }
+            None if character.is_whitespace() => {
+                if word_started {
+                    words.push(std::mem::take(&mut current));
+                    word_started = false;
+                }
+            }
+            None => {
+                current.push(character);
+                word_started = true;
+            }
+        }
+    }
+
+    if active_quote.is_some() {
+        anyhow::bail!("external_command backend command has invalid shell quoting");
+    }
+    if word_started {
+        words.push(current);
+    }
+    Ok(words)
+}
+
+fn split_shell_words(command: &str) -> anyhow::Result<Vec<String>> {
+    shlex::split(command).ok_or_else(|| {
+        anyhow::anyhow!("external_command backend command has invalid shell quoting")
+    })
+}
+
 pub(super) fn split_command_and_args(command: &str) -> anyhow::Result<(String, Vec<String>)> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
+
+    if let Some((path, inline_args)) = quoted_windows_command(trimmed) {
+        return Ok((path.to_string(), split_windows_inline_args(inline_args)?));
+    }
+
     // POSIX shell quoting treats `\` as an escape, so running an absolute
     // Windows path through `shlex` silently rewrites `C:\dir\tool.exe` into
-    // `C:dirtool.exe`. Take such a command as the executable path verbatim:
-    // splitting it would also corrupt the unquoted spaces in paths like
-    // `C:\Program Files\...`, and backends declare arguments in `args` anyway.
+    // `C:dirtool.exe`, while splitting also corrupts unquoted spaces in paths
+    // like `C:/Program Files/...`. Split common executable suffixes without
+    // rewriting the path; commands without a recognized suffix stay verbatim
+    // and can declare arguments in the backend's `args` field.
     if is_windows_absolute_path(trimmed) {
+        if let Some(executable_end) = windows_executable_end(trimmed) {
+            let executable = trimmed[..executable_end].to_string();
+            let inline_args = trimmed[executable_end..].trim();
+            return Ok((executable, split_windows_inline_args(inline_args)?));
+        }
         return Ok((trimmed.to_string(), Vec::new()));
     }
-    let tokens = shlex::split(trimmed).ok_or_else(|| {
-        anyhow::anyhow!("external_command backend command has invalid shell quoting")
-    })?;
+    let tokens = split_shell_words(trimmed)?;
     match tokens.split_first() {
         Some((first, rest)) => Ok((first.clone(), rest.to_vec())),
         None => Ok((String::new(), Vec::new())),
