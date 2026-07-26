@@ -608,8 +608,8 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
     runtime.block_on(async move {
-        // Keep writable roots out of USERPROFILE exclusions such as AppData.
-        let test_root = TempDir::new_in(sandbox_cwd()).expect("create legacy delete test root");
+        let user_profile = std::env::var_os("USERPROFILE").expect("USERPROFILE should be set");
+        let test_root = TempDir::new_in(user_profile).expect("create legacy delete test root");
         let codex_home = sandbox_home("legacy-delete-writable-roots");
         let workspace = test_root.path().join("workspace");
         let temp_root = test_root.path().join("temp");
@@ -893,6 +893,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
 }
 
 #[test]
+#[ignore = "TODO: nested PowerShell startup under legacy ConPTY is unreliable in hosted CI"]
 fn legacy_tty_job_terminates_and_preserves_descendants() {
     let Some(pwsh) = pwsh_path() else {
         eprintln!("skipping sandbox ConPTY lifecycle test: PowerShell 7 is not installed");

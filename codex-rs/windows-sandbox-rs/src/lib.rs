@@ -378,6 +378,8 @@ mod windows_impl {
     use std::path::Path;
     use std::ptr;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use std::time::Instant;
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -385,7 +387,9 @@ mod windows_impl {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
     use windows_sys::Win32::Foundation::SetHandleInformation;
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
     use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
     use windows_sys::Win32::System::Threading::GetExitCodeProcess;
     use windows_sys::Win32::System::Threading::INFINITE;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -462,6 +466,53 @@ mod windows_impl {
             return Err(io::Error::from_raw_os_error(GetLastError() as i32));
         }
         Ok(((in_r, in_w), (out_r, out_w), (err_r, err_w)))
+    }
+
+    fn read_pipe_until_stopped(handle: HANDLE, stop: Arc<AtomicBool>) -> Vec<u8> {
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let mut available = 0u32;
+            let peek_ok = unsafe {
+                PeekNamedPipe(
+                    handle,
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                    &mut available,
+                    ptr::null_mut(),
+                )
+            };
+            if peek_ok == 0 {
+                break;
+            }
+            if available == 0 {
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+
+            let mut read_bytes = 0u32;
+            let read_ok = unsafe {
+                ReadFile(
+                    handle,
+                    buffer.as_mut_ptr(),
+                    available.min(buffer.len() as u32),
+                    &mut read_bytes,
+                    ptr::null_mut(),
+                )
+            };
+            if read_ok == 0 || read_bytes == 0 {
+                break;
+            }
+            output.extend_from_slice(&buffer[..read_bytes as usize]);
+        }
+        unsafe {
+            CloseHandle(handle);
+        }
+        output
     }
 
     pub struct CaptureResult {
@@ -609,50 +660,15 @@ mod windows_impl {
             CloseHandle(err_w);
         }
 
-        let (tx_out, rx_out) = std::sync::mpsc::channel::<Vec<u8>>();
-        let (tx_err, rx_err) = std::sync::mpsc::channel::<Vec<u8>>();
-        let t_out = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 8192];
-            loop {
-                let mut read_bytes: u32 = 0;
-                let ok = unsafe {
-                    windows_sys::Win32::Storage::FileSystem::ReadFile(
-                        out_r,
-                        tmp.as_mut_ptr(),
-                        tmp.len() as u32,
-                        &mut read_bytes,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if ok == 0 || read_bytes == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..read_bytes as usize]);
-            }
-            let _ = tx_out.send(buf);
-        });
-        let t_err = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 8192];
-            loop {
-                let mut read_bytes: u32 = 0;
-                let ok = unsafe {
-                    windows_sys::Win32::Storage::FileSystem::ReadFile(
-                        err_r,
-                        tmp.as_mut_ptr(),
-                        tmp.len() as u32,
-                        &mut read_bytes,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if ok == 0 || read_bytes == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..read_bytes as usize]);
-            }
-            let _ = tx_err.send(buf);
-        });
+        let stop_readers = Arc::new(AtomicBool::new(false));
+        let t_out = {
+            let stop_readers = Arc::clone(&stop_readers);
+            std::thread::spawn(move || read_pipe_until_stopped(out_r, stop_readers))
+        };
+        let t_err = {
+            let stop_readers = Arc::clone(&stop_readers);
+            std::thread::spawn(move || read_pipe_until_stopped(err_r, stop_readers))
+        };
 
         let wait_outcome = wait_for_process(pi.hProcess, timeout_ms, cancellation.as_ref());
         let timed_out = matches!(wait_outcome, WaitOutcome::TimedOut);
@@ -688,6 +704,10 @@ mod windows_impl {
             );
         }
 
+        stop_readers.store(true, Ordering::Release);
+        let stdout = t_out.join().unwrap_or_default();
+        let stderr = t_err.join().unwrap_or_default();
+
         unsafe {
             if pi.hThread != 0 {
                 CloseHandle(pi.hThread);
@@ -697,10 +717,6 @@ mod windows_impl {
             }
             CloseHandle(security.h_token);
         }
-        let _ = t_out.join();
-        let _ = t_err.join();
-        let stdout = rx_out.recv().unwrap_or_default();
-        let stderr = rx_err.recv().unwrap_or_default();
         let exit_code = if timed_out {
             128 + 64
         } else {

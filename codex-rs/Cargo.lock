@@ -9207,6 +9207,7 @@ dependencies = [
  "codex-mcp-server",
  "codex-terminal-detection",
  "codex-utils-cargo-bin",
+ "codex-version",
  "core_test_support",
  "os_info",
  "pretty_assertions",

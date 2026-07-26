@@ -2,10 +2,12 @@ use super::collect_output_until_exit;
 use super::combine_spawned_output;
 use super::find_python;
 use super::wait_for_output_contains;
+use crate::ProcessSignal;
 use crate::TerminalSize;
 use crate::spawn_pipe_process_no_stdin;
 use crate::spawn_pty_process;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::time::Duration;
 
@@ -258,11 +260,9 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Result<()> {
-    let Some(program) = find_powershell() else {
-        return Ok(());
-    };
-    let args = vec!["-NoLogo".to_string(), "-NoProfile".to_string()];
+async fn conpty_interrupt_signal_is_unsupported_and_leaves_session_usable() -> anyhow::Result<()> {
+    let program = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    let args = vec!["/D".to_string(), "/Q".to_string()];
     let env: HashMap<String, String> = std::env::vars().collect();
     let spawned = spawn_pty_process(
         &program,
@@ -276,11 +276,12 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
     .await?;
     let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
     let writer = session.writer_sender();
-    writer.send(b"ping.exe -4 -t localhost\n".to_vec()).await?;
-    wait_for_output_contains(&mut output_rx, "127.0.0.1", /*timeout_ms*/ 10_000).await?;
 
-    writer.send(vec![0x03]).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let error = session
+        .signal(ProcessSignal::Interrupt)
+        .expect_err("ConPTY interrupt should be unsupported on Windows");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
     writer.send(b"cmd.exe /D /C ver\n".to_vec()).await?;
     let mut output = wait_for_output_contains(
         &mut output_rx,
@@ -296,7 +297,7 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
     assert_eq!(
         exit_code,
         0,
-        "PowerShell did not resume after Ctrl-C: {:?}",
+        "ConPTY session did not stay usable after a rejected interrupt: {:?}",
         String::from_utf8_lossy(&output)
     );
     Ok(())

@@ -479,6 +479,12 @@ impl ModelProviderInfo {
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
     }
+
+    pub fn has_configured_credentials(&self) -> bool {
+        self.has_command_auth()
+            || self.env_key.is_some()
+            || self.experimental_bearer_token.is_some()
+    }
 }
 
 fn hash_canonical_json(digest: &mut Sha256, value: &serde_json::Value) {

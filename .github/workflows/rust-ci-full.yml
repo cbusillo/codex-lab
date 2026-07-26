@@ -492,14 +492,12 @@ jobs:
     uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
     with:
       runner: windows-11-arm
-      archive_runner: windows-2025
       target: aarch64-pc-windows-msvc
       profile: ci-test
       artifact_id: windows-arm64
       # Match the hosted runner's 4-vCPU capacity to avoid process-heavy test
       # timeouts from oversubscription, as on the Windows x64 lane above.
       test_threads: 4
-      use_sccache: true
     secrets: inherit
 
   # --- Gatherer job for the full post-merge workflow --------------------------

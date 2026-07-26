@@ -88,6 +88,7 @@ async fn assert_manager_can_open_local_http_server(headless: bool) -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a locally launchable Chrome; run explicitly with --ignored"]
 async fn internal_browser_can_open_local_http_server() -> Result<()> {
     assert_manager_can_open_local_http_server(/*headless*/ true).await
 }

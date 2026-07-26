@@ -215,12 +215,8 @@ pub fn environment_id_from_cwd(cwd: &Path) -> String {
     format!("cwd-{short}")
 }
 
-/// Computes the OS keyring account name used for the managed secrets namespace.
-pub fn compute_keyring_account(codex_home: &Path) -> String {
-    compute_keyring_account_for_namespace(codex_home, LocalSecretsNamespace::ManagedSecrets)
-}
-
-pub(crate) fn compute_keyring_account_for_namespace(
+/// Computes the OS keyring account name that stores one local namespace's encryption key.
+pub fn compute_keyring_account_for_namespace(
     codex_home: &Path,
     namespace: LocalSecretsNamespace,
 ) -> String {

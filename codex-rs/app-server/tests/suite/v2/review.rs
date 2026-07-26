@@ -61,6 +61,7 @@ use codex_protocol::protocol::ReviewLineRange;
 use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
 use codex_skills::system_cache_root_dir;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -604,7 +605,9 @@ async fn auto_review_summary_detail_and_disposition_round_trip_over_persisted_ru
     create_config_toml(codex_home.path(), &server.uri())?;
     let workspace = TempDir::new()?;
     // Canonicalize so the seeded run target matches the path the server records.
-    let workspace_path = std::fs::canonicalize(workspace.path())?;
+    let workspace_path =
+        AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(workspace.path())?)?
+            .into_path_buf();
 
     // Auto-env would relocate the thread's local environment to its own
     // workspace, which is the path Background Review scopes its store to.

@@ -70,6 +70,7 @@ runs:
           echo "CARGO_TARGET_DIR=$cargo_target_dir"
           echo "TEMP=$tmp"
           echo "TMP=$tmp"
+          echo "TMPDIR=$tmp"
         } >> "$GITHUB_ENV"
 
     - name: Prefer the Git CLI for Cargo git dependencies

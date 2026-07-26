@@ -88,6 +88,12 @@ async fn workspace_write_without_workspace_root_keeps_the_legacy_sandbox_summary
     )
     .await;
 
+    let expected_summary = if cfg!(target_os = "windows") {
+        "sandbox: read-only"
+    } else {
+        "sandbox: workspace-write [workdir"
+    };
+
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("--sandbox")
@@ -95,7 +101,7 @@ async fn workspace_write_without_workspace_root_keeps_the_legacy_sandbox_summary
         .arg("hello")
         .assert()
         .success()
-        .stderr(contains("sandbox: workspace-write [workdir"));
+        .stderr(contains(expected_summary));
 
     Ok(())
 }

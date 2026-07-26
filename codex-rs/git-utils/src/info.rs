@@ -40,8 +40,10 @@ use crate::GitSha;
 pub fn get_git_repo_root(base_dir: &Path) -> Option<PathBuf> {
     let base = if base_dir.is_dir() {
         base_dir
-    } else {
+    } else if base_dir.is_file() {
         base_dir.parent()?
+    } else {
+        return None;
     };
     find_ancestor_git_entry(base).map(|(repo_root, _)| repo_root)
 }
@@ -1011,6 +1013,17 @@ mod tests {
     use pretty_assertions::assert_eq;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn missing_path_does_not_inherit_an_ancestor_repository() {
+        let repository = tempfile::tempdir().expect("create repository root");
+        std::fs::create_dir(repository.path().join(".git")).expect("create git marker");
+
+        assert_eq!(
+            get_git_repo_root(&repository.path().join("missing/project")),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn git_metadata_commands_do_not_inherit_stdin() {

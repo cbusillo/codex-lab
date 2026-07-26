@@ -124,8 +124,8 @@ impl OpenAiModelsEndpoint {
 }
 
 impl ModelsEndpointClient for OpenAiModelsEndpoint {
-    fn has_command_auth(&self) -> bool {
-        self.provider_info.has_command_auth()
+    fn has_configured_credentials(&self) -> bool {
+        self.provider_info.has_configured_credentials()
     }
 
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
@@ -331,23 +331,23 @@ mod tests {
     }
 
     #[test]
-    fn command_auth_provider_reports_command_auth_without_cached_auth() {
+    fn command_auth_provider_reports_configured_credentials_without_cached_auth() {
         let endpoint = OpenAiModelsEndpoint::new(
             provider_info_with_command_auth(),
             /*auth_manager*/ None,
         );
 
-        assert!(endpoint.has_command_auth());
+        assert!(endpoint.has_configured_credentials());
     }
 
     #[test]
-    fn provider_without_command_auth_reports_no_command_auth() {
+    fn provider_without_credentials_reports_no_configured_credentials() {
         let endpoint = OpenAiModelsEndpoint::new(
             ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             /*auth_manager*/ None,
         );
 
-        assert!(!endpoint.has_command_auth());
+        assert!(!endpoint.has_configured_credentials());
     }
 
     #[tokio::test]

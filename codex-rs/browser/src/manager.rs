@@ -121,6 +121,10 @@ fn is_chrome_profile_lock_error_message(message: &str) -> bool {
         || message.contains("exitstatus(21)")
 }
 
+fn is_launch_phase_error_message(message: &str) -> bool {
+    message.starts_with("Failed to launch internal browser:")
+}
+
 fn chrome_logging_enabled() -> bool {
     env_truthy("CODE_SUBAGENT_DEBUG") || env_truthy("CODEX_BROWSER_LOG")
 }
@@ -2011,6 +2015,10 @@ impl BrowserManager {
                     | std::io::ErrorKind::BrokenPipe
             ),
             BrowserError::CdpError(msg) => {
+                if is_launch_phase_error_message(msg) {
+                    return false;
+                }
+
                 let msg_lower = msg.to_ascii_lowercase();
                 const RECOVERABLE_SUBSTRINGS: &[&str] = &[
                     "connection closed",
@@ -2717,6 +2725,7 @@ pub struct BrowserStatus {
 mod tests {
     use super::discover_ws_via_host_port;
     use super::is_chrome_profile_lock_error_message;
+    use super::is_launch_phase_error_message;
     use super::should_restart_handler;
     use super::should_stop_handler;
     use std::io::Read;
@@ -2747,6 +2756,16 @@ mod tests {
         ));
         assert!(!is_chrome_profile_lock_error_message(
             "Timeout while resolving websocket URL from browser process"
+        ));
+    }
+
+    #[test]
+    fn browser_launch_errors_are_not_navigation_retry_candidates() {
+        assert!(is_launch_phase_error_message(
+            "Failed to launch internal browser: Timeout while resolving websocket URL"
+        ));
+        assert!(!is_launch_phase_error_message(
+            "Load wait timed out after 5 seconds"
         ));
     }
 
@@ -2822,8 +2841,25 @@ mod tests {
             while !stop_thread.load(Ordering::Relaxed) && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).expect("set stream blocking");
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .expect("set stream read timeout");
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(5)))
+                            .expect("set stream write timeout");
+
+                        let mut request = Vec::new();
                         let mut buffer = [0u8; 1024];
-                        let _ = stream.read(&mut buffer);
+                        loop {
+                            let read = stream.read(&mut buffer).expect("read request");
+                            assert!(read > 0, "connection closed before request headers");
+                            request.extend_from_slice(&buffer[..read]);
+                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                            assert!(request.len() <= 64 * 1024, "request headers too large");
+                        }
 
                         let body = format!(r#"{{"webSocketDebuggerUrl":"{ws_url}"}}"#);
                         let response = format!(
@@ -2831,7 +2867,10 @@ mod tests {
                             body.len(),
                             body
                         );
-                        let _ = stream.write_all(response.as_bytes());
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("write response");
+                        stream.flush().expect("flush response");
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
