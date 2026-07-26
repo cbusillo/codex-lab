@@ -21,6 +21,10 @@ pub(super) enum ThreadBufferedEvent {
     Notification(ServerNotification),
     Request(ServerRequest),
     HistoryEntryResponse(HistoryLookupResponse),
+    AutoReviewSummaryLoaded {
+        run_id: String,
+        result: Box<Result<AutoReviewSummaryReadResponse, String>>,
+    },
     FeedbackSubmission(FeedbackThreadEvent),
 }
 
@@ -59,6 +63,7 @@ impl ThreadEventStore {
                 | ThreadBufferedEvent::Notification(ServerNotification::HookStarted(_))
                 | ThreadBufferedEvent::Notification(ServerNotification::HookCompleted(_))
                 | ThreadBufferedEvent::Notification(ServerNotification::McpServerStatusUpdated(_))
+                | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
                 | ThreadBufferedEvent::FeedbackSubmission(_)
         )
     }
@@ -182,6 +187,25 @@ impl ThreadEventStore {
         }
     }
 
+    pub(super) fn push_auto_review_summary(
+        &mut self,
+        run_id: String,
+        result: Result<AutoReviewSummaryReadResponse, String>,
+    ) {
+        self.buffer
+            .push_back(ThreadBufferedEvent::AutoReviewSummaryLoaded {
+                run_id,
+                result: Box::new(result),
+            });
+        if self.buffer.len() > self.capacity
+            && let Some(removed) = self.buffer.pop_front()
+            && let ThreadBufferedEvent::Request(request) = &removed
+        {
+            self.pending_interactive_replay
+                .note_evicted_server_request(request);
+        }
+    }
+
     pub(super) fn pending_replay_requests(&self) -> Vec<ServerRequest> {
         self.buffer
             .iter()
@@ -196,6 +220,7 @@ impl ThreadEventStore {
                 ThreadBufferedEvent::Request(_)
                 | ThreadBufferedEvent::Notification(_)
                 | ThreadBufferedEvent::HistoryEntryResponse(_)
+                | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
                 | ThreadBufferedEvent::FeedbackSubmission(_) => None,
             })
             .collect()
@@ -223,6 +248,7 @@ impl ThreadEventStore {
                 ThreadBufferedEvent::Request(_)
                 | ThreadBufferedEvent::Notification(_)
                 | ThreadBufferedEvent::HistoryEntryResponse(_)
+                | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
                 | ThreadBufferedEvent::FeedbackSubmission(_) => None,
             })
             .or_else(|| {
@@ -250,6 +276,7 @@ impl ThreadEventStore {
                         .should_replay_snapshot_request(request),
                     ThreadBufferedEvent::Notification(_)
                     | ThreadBufferedEvent::HistoryEntryResponse(_)
+                    | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
                     | ThreadBufferedEvent::FeedbackSubmission(_) => true,
                 })
                 .cloned()

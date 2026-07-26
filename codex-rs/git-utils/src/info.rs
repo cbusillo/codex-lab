@@ -14,6 +14,8 @@ use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::process::Command;
 use tokio::time::Duration as TokioDuration;
 use tokio::time::timeout;
@@ -275,6 +277,24 @@ pub async fn get_has_changes(cwd: &Path) -> Option<bool> {
     }
 
     Some(!output.stdout.is_empty())
+}
+
+pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
+    get_git_repo_root(cwd)?;
+    let Some(diff) = diff_against_sha(cwd, &GitSha::new("HEAD")).await else {
+        return Some("unknown".to_string());
+    };
+    diff_fingerprint(&diff)
+}
+
+pub fn diff_fingerprint(diff: &str) -> Option<String> {
+    if diff.trim().is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(diff.as_bytes());
+    Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, String>> {

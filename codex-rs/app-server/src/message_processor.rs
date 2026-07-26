@@ -1358,6 +1358,24 @@ impl MessageProcessor {
             ClientRequest::ReviewStart { params, .. } => {
                 self.turn_processor.review_start(&request_id, params).await
             }
+            ClientRequest::BackgroundAutoReviewControl { params, .. } => {
+                self.turn_processor
+                    .background_auto_review_control(&request_id, params)
+                    .await
+            }
+            ClientRequest::AutoReviewSummaryRead { params, .. } => {
+                self.turn_processor.auto_review_summary_read(params).await
+            }
+            ClientRequest::AutoReviewFindingDetailRead { params, .. } => {
+                self.turn_processor
+                    .auto_review_finding_detail_read(params)
+                    .await
+            }
+            ClientRequest::AutoReviewDispositionWrite { params, .. } => {
+                self.turn_processor
+                    .auto_review_disposition_write(params)
+                    .await
+            }
             ClientRequest::McpServerOauthLogin { params, .. } => {
                 self.mcp_processor.mcp_server_oauth_login(params).await
             }

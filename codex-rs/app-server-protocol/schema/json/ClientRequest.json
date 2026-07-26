@@ -206,6 +206,184 @@
         }
       ]
     },
+    "AutoReviewDispositionAction": {
+      "enum": [
+        "repair",
+        "defer",
+        "obsolete"
+      ],
+      "type": "string"
+    },
+    "AutoReviewDispositionWriteParams": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/AutoReviewDispositionAction"
+        },
+        "reason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutoReviewFindingDetailReadParams": {
+      "properties": {
+        "findingId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxBytes": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutoReviewSummaryReadParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "BackgroundAutoReviewControlAction": {
+      "enum": [
+        "cancel",
+        "supersede"
+      ],
+      "type": "string"
+    },
+    "BackgroundAutoReviewControlParams": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/BackgroundAutoReviewControlAction"
+        },
+        "reason": {
+          "$ref": "#/definitions/BackgroundAutoReviewControlReason"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "reason",
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "BackgroundAutoReviewControlReason": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "userRequested"
+              ],
+              "title": "UserRequestedBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UserRequestedBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "supersededByRun"
+              ],
+              "title": "SupersededByRunBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "runId",
+            "type"
+          ],
+          "title": "SupersededByRunBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "foregroundWorkStarted"
+              ],
+              "title": "ForegroundWorkStartedBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ForegroundWorkStartedBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "threadClosing"
+              ],
+              "title": "ThreadClosingBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ThreadClosingBackgroundAutoReviewControlReason",
+          "type": "object"
+        }
+      ]
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -3562,6 +3740,27 @@
           "type": "object"
         },
         {
+          "description": "Review the changes made by a completed turn.",
+          "properties": {
+            "fingerprint": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "currentTurnDiff"
+              ],
+              "title": "CurrentTurnDiffReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "fingerprint",
+            "type"
+          ],
+          "title": "CurrentTurnDiffReviewTarget",
+          "type": "object"
+        },
+        {
           "description": "Review changes between the current branch and the given base branch.",
           "properties": {
             "branch": {
@@ -6598,6 +6797,102 @@
         "params"
       ],
       "title": "Review/startRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "review/background/control"
+          ],
+          "title": "Review/background/controlRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/BackgroundAutoReviewControlParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Review/background/controlRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "review/summary/read"
+          ],
+          "title": "Review/summary/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutoReviewSummaryReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Review/summary/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "review/findingDetail/read"
+          ],
+          "title": "Review/findingDetail/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutoReviewFindingDetailReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Review/findingDetail/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "review/disposition/write"
+          ],
+          "title": "Review/disposition/writeRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutoReviewDispositionWriteParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Review/disposition/writeRequest",
       "type": "object"
     },
     {

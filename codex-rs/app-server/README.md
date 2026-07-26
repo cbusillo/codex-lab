@@ -208,6 +208,9 @@ Example with notification opt-out:
 - `thread/realtime/appendSpeech` — append text that the realtime model should speak to the user (experimental); returns `{}`.
 - `thread/realtime/stop` — stop the active realtime session for the thread (experimental); returns `{}`.
 - `review/start` — kick off Codex’s automated reviewer for a thread; responds like `turn/start`. Inline reviews emit `item/started`/`item/completed` notifications with `enteredReviewMode` and `exitedReviewMode` items, plus a final assistant `agentMessage` containing the review. Detached reviews stream ordinary turn items on the new review thread.
+- `review/summary/read` — read bounded Background Review summaries and diagnostics for a thread, including effective budgets, observed usage, terminal reasons, and finding disposition.
+- `review/findingDetail/read` — read bounded persisted detail for a Background Review run or one stable finding id.
+- `review/disposition/write` — disposition current Background Review findings as `repair`, `defer`, or `obsolete`; obsolete requires a reason and the response returns the durable disposition record.
 - `command/exec` — run a single command under the server sandbox without starting a thread/turn (handy for utilities and validation).
 - `command/exec/write` — write base64-decoded stdin bytes to a running `command/exec` session or close stdin; returns `{}`.
 - `command/exec/resize` — resize a running PTY-backed `command/exec` session by `processId`; returns `{}`.

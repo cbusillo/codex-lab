@@ -18,6 +18,7 @@ use anyhow::ensure;
 use codex_app_server_protocol::AppsInstalledParams;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsReadParams;
+use codex_app_server_protocol::BackgroundAutoReviewControlParams;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
@@ -1221,6 +1222,15 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("review/start", params).await
+    }
+
+    /// Send a `review/background/control` JSON-RPC request (v2).
+    pub async fn send_background_auto_review_control_request(
+        &mut self,
+        params: BackgroundAutoReviewControlParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("review/background/control", params).await
     }
 
     pub async fn send_windows_sandbox_setup_start_request(

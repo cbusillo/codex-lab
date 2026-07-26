@@ -3,6 +3,7 @@
 mod approved_command_prefix_saved;
 mod apps_availability_update;
 mod apps_instructions;
+mod auto_review_awareness;
 mod available_plugins_instructions;
 mod available_skills_instructions;
 mod contextual_user_message;
@@ -41,6 +42,8 @@ pub(crate) use apps_availability_update::APPS_UPDATE_OPEN_TAG;
 pub(crate) use apps_availability_update::AppsAvailability;
 pub(crate) use apps_availability_update::AppsAvailabilityUpdate;
 pub(crate) use apps_instructions::AppsInstructions;
+pub(crate) use auto_review_awareness::AutoReviewAwareness;
+pub(crate) use auto_review_awareness::build_auto_review_awareness;
 pub(crate) use available_plugins_instructions::AvailablePluginsInstructions;
 pub use available_skills_instructions::AvailableSkillsInstructions;
 pub(crate) use codex_context_fragments::AdditionalContextDeveloperFragment;

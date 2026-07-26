@@ -11,6 +11,11 @@ use crate::render::highlight::MAX_HIGHLIGHT_LINE_BYTES;
 use crate::session_state::ThreadSessionState;
 use crate::wrapping::word_wrap_lines;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AutoReviewFreshness;
+use codex_app_server_protocol::AutoReviewRunSource;
+use codex_app_server_protocol::AutoReviewRunSummary;
+use codex_app_server_protocol::AutoReviewSummaryReadResponse;
+use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::McpAuthStatus;
 use codex_config::types::McpServerConfig;
 use codex_otel::RuntimeMetricTotals;
@@ -220,6 +225,59 @@ fn raw_lines_from_source_preserves_trailing_blank_but_not_trailing_newline() {
         vec!["alpha".to_string(), String::new()]
     );
     assert_eq!(raw_lines_from_source(""), Vec::<Line<'static>>::new());
+}
+
+fn auto_review_summary(
+    run_id: &str,
+    freshness: AutoReviewFreshness,
+    rendered_findings: usize,
+    content: &str,
+) -> AutoReviewRunSummary {
+    AutoReviewRunSummary {
+        run_id: run_id.to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: Some("code-gpt-5.5".to_string()),
+        error_summary: None,
+        rendered_findings,
+        omitted_findings: 0,
+        truncated: false,
+        content: content.to_string(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    }
+}
+
+#[test]
+fn auto_review_summary_findings_snapshot() {
+    let mut summary = auto_review_summary(
+        "run-findings",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 2,
+        "[P1] Fix request ordering\nThe resumed turn can miss sandbox propagation.",
+    );
+    summary.omitted_findings = 1;
+    summary.truncated = true;
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(summary.clone()),
+        current: Some(summary),
+        status_counts: Vec::new(),
+        diagnostics: None,
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
+! Background Review found 2 findings · run-findings
+  completed · current · code-gpt-5.5 · 1 omitted · truncated
+  [P1] Fix request ordering
+  The resumed turn can miss sandbox propagation.
+");
 }
 
 #[test]

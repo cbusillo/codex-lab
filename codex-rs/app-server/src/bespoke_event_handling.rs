@@ -13,6 +13,7 @@ use crate::thread_status::ThreadWatchActiveGuard;
 use crate::thread_status::ThreadWatchManager;
 use codex_app_server_protocol::AccountRateLimitsUpdatedNotification;
 use codex_app_server_protocol::AdditionalPermissionProfile as V2AdditionalPermissionProfile;
+use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::CodexErrorInfo as V2CodexErrorInfo;
 use codex_app_server_protocol::CommandAction as V2ParsedCommand;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
@@ -1025,6 +1026,20 @@ pub(crate) async fn apply_bespoke_event_handling(
                 &event_turn_id,
             );
             outgoing.send_server_notification(notification).await;
+        }
+        EventMsg::BackgroundAutoReviewStatus(event) => {
+            let notification = BackgroundAutoReviewStatusChangedNotification {
+                thread_id: conversation_id.to_string(),
+                run_id: event.run_id,
+                status: event.status.into(),
+                review_target: event.review_target.into(),
+                error_summary: event.error_summary,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::BackgroundAutoReviewStatusChanged(
+                    notification,
+                ))
+                .await;
         }
         msg @ (EventMsg::PatchApplyUpdated(_) | EventMsg::TerminalInteraction(_)) => {
             let notification = item_event_to_server_notification(

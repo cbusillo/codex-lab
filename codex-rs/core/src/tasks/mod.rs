@@ -193,6 +193,10 @@ impl SessionTaskContext {
         Arc::clone(&self.turn_extension_data)
     }
 
+    pub(crate) async fn codex_home(&self) -> codex_utils_absolute_path::AbsolutePathBuf {
+        self.session.codex_home().await
+    }
+
     pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
         Arc::clone(&self.session.services.auth_manager)
     }
@@ -213,6 +217,10 @@ pub(crate) trait SessionTask: Send + Sync + 'static {
 
     /// Returns the tracing name for a spawned task span.
     fn span_name(&self) -> &'static str;
+
+    fn background_review_trigger_eligible(&self) -> bool {
+        false
+    }
 
     /// Executes the task until completion or cancellation.
     ///
@@ -253,6 +261,8 @@ pub(crate) trait AnySessionTask: Send + Sync + 'static {
 
     fn span_name(&self) -> &'static str;
 
+    fn background_review_trigger_eligible(&self) -> bool;
+
     fn run(
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
@@ -278,6 +288,10 @@ where
 
     fn span_name(&self) -> &'static str {
         SessionTask::span_name(self)
+    }
+
+    fn background_review_trigger_eligible(&self) -> bool {
+        SessionTask::background_review_trigger_eligible(self)
     }
 
     fn run(
@@ -325,6 +339,11 @@ impl Session {
     ) {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
+        let background_review_trigger_eligible = task.background_review_trigger_eligible();
+        if task_kind == TaskKind::Regular {
+            self.cancel_background_auto_review_for_foreground_work()
+                .await;
+        }
         let span_name = task.span_name();
         let started_at = Instant::now();
         let turn_started_at_unix_ms = turn_context
@@ -344,6 +363,11 @@ impl Session {
             .lock()
             .await
             .clear_turn(&turn_context.sub_id);
+
+        if background_review_trigger_eligible {
+            self.record_background_auto_review_turn_start(turn_context.as_ref())
+                .await;
+        }
 
         let pending_items = self.input_queue.get_pending_input(&self.active_turn).await;
         let turn_state = {
@@ -436,6 +460,7 @@ impl Session {
             done,
             handle: AbortOnDropHandle::new(handle),
             kind: task_kind,
+            background_review_trigger_eligible,
             task,
             cancellation_token,
             turn_context: Arc::clone(&turn_context),
@@ -595,23 +620,33 @@ impl Session {
             let mut active = self.active_turn.lock().await;
             active.as_mut().and_then(|active_turn| {
                 let task = active_turn.task.take()?;
+                let background_review_trigger_eligible = task.background_review_trigger_eligible;
                 task.handle.detach();
-                Some(Arc::clone(&active_turn.turn_state))
+                Some((
+                    Arc::clone(&active_turn.turn_state),
+                    background_review_trigger_eligible,
+                ))
             })
         };
-        let Some(turn_state) = turn_state else {
+        let Some((turn_state, background_review_trigger_eligible)) = turn_state else {
             return;
         };
         let pending_input = self
             .input_queue
             .take_pending_input_for_turn_state(turn_state.as_ref())
             .await;
-        let (turn_had_memory_citation, turn_tool_calls, token_usage_at_turn_start) = {
+        let (
+            turn_had_memory_citation,
+            turn_tool_calls,
+            token_usage_at_turn_start,
+            completed_turn_diff,
+        ) = {
             let ts = turn_state.lock().await;
             (
                 ts.has_memory_citation,
                 ts.tool_calls,
                 ts.token_usage_at_turn_start.clone(),
+                ts.completed_turn_diff.clone(),
             )
         };
         if !pending_input.is_empty() {
@@ -825,6 +860,13 @@ impl Session {
             }
         };
         if cleared_active_turn {
+            if background_review_trigger_eligible {
+                self.maybe_schedule_background_auto_review(
+                    Arc::clone(&turn_context),
+                    completed_turn_diff,
+                )
+                .await;
+            }
             self.emit_thread_idle_lifecycle_if_idle().await;
         }
         // Regular items were flushed before this terminal event was appended; buffering
@@ -864,6 +906,9 @@ impl Session {
         let sub_id = task.turn_context.sub_id.clone();
         if task.cancellation_token.is_cancelled() {
             return;
+        }
+        if task.background_review_trigger_eligible {
+            self.clear_background_auto_review_turn(&sub_id).await;
         }
 
         trace!(task_kind = ?task.kind, sub_id, "aborting running task");

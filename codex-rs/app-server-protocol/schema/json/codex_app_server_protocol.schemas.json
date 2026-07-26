@@ -1532,6 +1532,102 @@
             },
             "method": {
               "enum": [
+                "review/background/control"
+              ],
+              "title": "Review/background/controlRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/BackgroundAutoReviewControlParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/background/controlRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "review/summary/read"
+              ],
+              "title": "Review/summary/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AutoReviewSummaryReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/summary/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "review/findingDetail/read"
+              ],
+              "title": "Review/findingDetail/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AutoReviewFindingDetailReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/findingDetail/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "review/disposition/write"
+              ],
+              "title": "Review/disposition/writeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AutoReviewDispositionWriteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/disposition/writeRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "model/list"
               ],
               "title": "Model/listRequestMethod",
@@ -4635,6 +4731,26 @@
           "properties": {
             "method": {
               "enum": [
+                "review/backgroundStatus/changed"
+              ],
+              "title": "Review/backgroundStatus/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/BackgroundAutoReviewStatusChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Review/backgroundStatus/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "hook/started"
               ],
               "title": "Hook/startedNotificationMethod",
@@ -7390,12 +7506,730 @@
           }
         ]
       },
+      "AutoReviewBudget": {
+        "properties": {
+          "maxElapsedMs": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "maxFindings": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "maxOutputBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "maxScopeBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "maxTotalTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "maxElapsedMs",
+          "maxFindings",
+          "maxOutputBytes",
+          "maxScopeBytes",
+          "maxTotalTokens"
+        ],
+        "type": "object"
+      },
       "AutoReviewDecisionSource": {
         "description": "[UNSTABLE] Source that produced a terminal approval auto-review decision.",
         "enum": [
           "agent"
         ],
         "type": "string"
+      },
+      "AutoReviewDetailKind": {
+        "enum": [
+          "run",
+          "finding"
+        ],
+        "type": "string"
+      },
+      "AutoReviewDiagnosticsSummary": {
+        "properties": {
+          "cancelledRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "compact": {
+            "type": "string"
+          },
+          "duplicateSkippedRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "failedRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "inFlightRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "lostRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "recentRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "skippedRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "supersededRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "suppressedStaleRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "terminalRuns": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cancelledRuns",
+          "compact",
+          "duplicateSkippedRuns",
+          "failedRuns",
+          "inFlightRuns",
+          "lostRuns",
+          "recentRuns",
+          "skippedRuns",
+          "supersededRuns",
+          "suppressedStaleRuns",
+          "terminalRuns"
+        ],
+        "type": "object"
+      },
+      "AutoReviewDispositionAction": {
+        "enum": [
+          "repair",
+          "defer",
+          "obsolete"
+        ],
+        "type": "string"
+      },
+      "AutoReviewDispositionActor": {
+        "enum": [
+          "user",
+          "agent",
+          "system"
+        ],
+        "type": "string"
+      },
+      "AutoReviewDispositionWriteParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "action": {
+            "$ref": "#/definitions/v2/AutoReviewDispositionAction"
+          },
+          "reason": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "runId",
+          "threadId"
+        ],
+        "title": "AutoReviewDispositionWriteParams",
+        "type": "object"
+      },
+      "AutoReviewDispositionWriteResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "findingDisposition": {
+            "$ref": "#/definitions/v2/AutoReviewFindingDispositionRecord"
+          },
+          "runId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "findingDisposition",
+          "runId"
+        ],
+        "title": "AutoReviewDispositionWriteResponse",
+        "type": "object"
+      },
+      "AutoReviewFindingDetailReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "findingId": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maxBytes": {
+            "default": null,
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "runId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId",
+          "threadId"
+        ],
+        "title": "AutoReviewFindingDetailReadParams",
+        "type": "object"
+      },
+      "AutoReviewFindingDetailReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "bytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "content": {
+            "type": "string"
+          },
+          "detailKind": {
+            "$ref": "#/definitions/v2/AutoReviewDetailKind"
+          },
+          "findingCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "findingId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maxBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "omittedFindings": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "originalBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "bytes",
+          "content",
+          "detailKind",
+          "findingCount",
+          "maxBytes",
+          "omittedFindings",
+          "originalBytes",
+          "runId",
+          "truncated"
+        ],
+        "title": "AutoReviewFindingDetailReadResponse",
+        "type": "object"
+      },
+      "AutoReviewFindingDisposition": {
+        "enum": [
+          "needsAttention",
+          "repairing",
+          "deferred",
+          "obsolete"
+        ],
+        "type": "string"
+      },
+      "AutoReviewFindingDispositionRecord": {
+        "properties": {
+          "actor": {
+            "$ref": "#/definitions/v2/AutoReviewDispositionActor"
+          },
+          "disposition": {
+            "$ref": "#/definitions/v2/AutoReviewFindingDisposition"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "actor",
+          "disposition",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "AutoReviewFreshness": {
+        "enum": [
+          "current",
+          "stale",
+          "detached"
+        ],
+        "type": "string"
+      },
+      "AutoReviewRunSource": {
+        "enum": [
+          "manual",
+          "background"
+        ],
+        "type": "string"
+      },
+      "AutoReviewRunSummary": {
+        "properties": {
+          "budget": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewBudget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "errorSummary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "findingDisposition": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewFindingDispositionRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "freshness": {
+            "$ref": "#/definitions/v2/AutoReviewFreshness"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "omittedFindings": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "renderedFindings": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/definitions/v2/AutoReviewRunSource"
+          },
+          "startedAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/BackgroundAutoReviewStatus"
+          },
+          "terminalReason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewTerminalReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "usage": {
+            "$ref": "#/definitions/v2/AutoReviewUsage"
+          }
+        },
+        "required": [
+          "content",
+          "freshness",
+          "omittedFindings",
+          "renderedFindings",
+          "runId",
+          "source",
+          "startedAt",
+          "status",
+          "truncated",
+          "usage"
+        ],
+        "type": "object"
+      },
+      "AutoReviewStatusCount": {
+        "properties": {
+          "count": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "freshness": {
+            "$ref": "#/definitions/v2/AutoReviewFreshness"
+          },
+          "source": {
+            "$ref": "#/definitions/v2/AutoReviewRunSource"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/BackgroundAutoReviewStatus"
+          },
+          "targetMatches": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "count",
+          "freshness",
+          "source",
+          "status",
+          "targetMatches"
+        ],
+        "type": "object"
+      },
+      "AutoReviewSummaryReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "AutoReviewSummaryReadParams",
+        "type": "object"
+      },
+      "AutoReviewSummaryReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewRunSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diagnostics": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewDiagnosticsSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewRunSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "statusCounts": {
+            "items": {
+              "$ref": "#/definitions/v2/AutoReviewStatusCount"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "statusCounts"
+        ],
+        "title": "AutoReviewSummaryReadResponse",
+        "type": "object"
+      },
+      "AutoReviewTerminalReason": {
+        "enum": [
+          "budgetScope",
+          "budgetElapsed",
+          "budgetTotalTokens",
+          "budgetOutput",
+          "budgetFindingCount",
+          "emptyOutput",
+          "staleTarget"
+        ],
+        "type": "string"
+      },
+      "AutoReviewUsage": {
+        "properties": {
+          "elapsedMs": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "findingCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outputBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "scopeBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "totalTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "BackgroundAutoReviewControlAction": {
+        "enum": [
+          "cancel",
+          "supersede"
+        ],
+        "type": "string"
+      },
+      "BackgroundAutoReviewControlParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "action": {
+            "$ref": "#/definitions/v2/BackgroundAutoReviewControlAction"
+          },
+          "reason": {
+            "$ref": "#/definitions/v2/BackgroundAutoReviewControlReason"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "reason",
+          "runId",
+          "threadId"
+        ],
+        "title": "BackgroundAutoReviewControlParams",
+        "type": "object"
+      },
+      "BackgroundAutoReviewControlReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "userRequested"
+                ],
+                "title": "UserRequestedBackgroundAutoReviewControlReasonType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "UserRequestedBackgroundAutoReviewControlReason",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "runId": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "supersededByRun"
+                ],
+                "title": "SupersededByRunBackgroundAutoReviewControlReasonType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "runId",
+              "type"
+            ],
+            "title": "SupersededByRunBackgroundAutoReviewControlReason",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "foregroundWorkStarted"
+                ],
+                "title": "ForegroundWorkStartedBackgroundAutoReviewControlReasonType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ForegroundWorkStartedBackgroundAutoReviewControlReason",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "threadClosing"
+                ],
+                "title": "ThreadClosingBackgroundAutoReviewControlReasonType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ThreadClosingBackgroundAutoReviewControlReason",
+            "type": "object"
+          }
+        ]
+      },
+      "BackgroundAutoReviewControlResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "BackgroundAutoReviewControlResponse",
+        "type": "object"
+      },
+      "BackgroundAutoReviewStatus": {
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed",
+          "cancelled",
+          "superseded",
+          "skipped"
+        ],
+        "type": "string"
+      },
+      "BackgroundAutoReviewStatusChangedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "errorSummary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewTarget": {
+            "$ref": "#/definitions/v2/ReviewTarget"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/BackgroundAutoReviewStatus"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reviewTarget",
+          "runId",
+          "status",
+          "threadId"
+        ],
+        "title": "BackgroundAutoReviewStatusChangedNotification",
+        "type": "object"
       },
       "BrowserUseRequirements": {
         "properties": {
@@ -17340,6 +18174,27 @@
               "type"
             ],
             "title": "UncommittedChangesReviewTarget",
+            "type": "object"
+          },
+          {
+            "description": "Review the changes made by a completed turn.",
+            "properties": {
+              "fingerprint": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "currentTurnDiff"
+                ],
+                "title": "CurrentTurnDiffReviewTargetType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "fingerprint",
+              "type"
+            ],
+            "title": "CurrentTurnDiffReviewTarget",
             "type": "object"
           },
           {

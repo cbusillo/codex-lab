@@ -659,7 +659,17 @@ pub enum Op {
     ThreadRollback { num_turns: u32 },
 
     /// Request a code review from the agent.
-    Review { review_request: ReviewRequest },
+    Review {
+        review_request: ReviewRequest,
+        persistence: Option<ReviewPersistence>,
+    },
+
+    /// Control a scheduler-owned background auto-review run.
+    BackgroundAutoReviewControl {
+        run_id: String,
+        action: BackgroundAutoReviewControlAction,
+        reason: BackgroundAutoReviewControlReason,
+    },
 
     /// Record that the user approved one retry of a concrete Guardian-denied action.
     ApproveGuardianDeniedAction { event: GuardianAssessmentEvent },
@@ -713,6 +723,24 @@ impl FromStr for ThreadHistoryMode {
             _ => Err(format!("unknown thread history mode `{value}`")),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BackgroundAutoReviewControlAction {
+    Cancel,
+    Supersede,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+#[ts(tag = "reason", rename_all = "snake_case")]
+pub enum BackgroundAutoReviewControlReason {
+    UserRequested,
+    SupersededByRun { run_id: String },
+    ForegroundWorkStarted,
+    ThreadClosing,
 }
 
 impl From<Vec<UserInput>> for Op {
@@ -880,6 +908,7 @@ impl Op {
             Self::SetThreadMemoryMode { .. } => "set_thread_memory_mode",
             Self::ThreadRollback { .. } => "thread_rollback",
             Self::Review { .. } => "review",
+            Self::BackgroundAutoReviewControl { .. } => "background_auto_review_control",
             Self::ApproveGuardianDeniedAction { .. } => "approve_guardian_denied_action",
             Self::Shutdown => "shutdown",
             Self::RunUserShellCommand { .. } => "run_user_shell_command",
@@ -1443,6 +1472,9 @@ pub enum EventMsg {
 
     /// Entered review mode.
     EnteredReviewMode(EnteredReviewModeEvent),
+
+    /// Automatic background review lifecycle status changed.
+    BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent),
 
     /// Exited review mode with an optional final result to apply.
     ExitedReviewMode(ExitedReviewModeEvent),
@@ -3403,6 +3435,36 @@ pub struct GitInfo {
 pub enum ReviewDelivery {
     Inline,
     Detached,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPersistence {
+    ManualAutoReview,
+    BackgroundAutoReview,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BackgroundAutoReviewStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Superseded,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+pub struct BackgroundAutoReviewStatusEvent {
+    pub run_id: String,
+    pub status: BackgroundAutoReviewStatus,
+    pub review_target: ReviewTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_summary: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]

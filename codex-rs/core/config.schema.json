@@ -345,6 +345,36 @@
     },
     "AutoReviewToml": {
       "properties": {
+        "background_max_diff_bytes": {
+          "description": "Maximum diff size in bytes for automatic background reviews. Defaults to 120000. Reviews whose diff exceeds this limit are recorded as skipped rather than launched.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "background_max_elapsed_seconds": {
+          "description": "Maximum wall-clock runtime in seconds for automatic background reviews.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "background_max_findings": {
+          "description": "Maximum number of findings accepted from one background review.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "background_max_output_bytes": {
+          "description": "Maximum serialized reviewer output size in bytes.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "background_max_total_tokens": {
+          "description": "Maximum cumulative token usage for automatic background reviews.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
