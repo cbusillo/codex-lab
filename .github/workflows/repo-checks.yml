@@ -73,6 +73,13 @@ jobs:
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      - name: Test upstream convergence controls
+        env:
+          CONVERGENCE_LINT_REQUIRED: "1"
+        run: >-
+          python3 -m unittest discover -s .github/scripts
+          -p 'test_upstream_convergence_*.py'
+
       - name: Test repo-check helper scripts
         # One discovery run over the whole directory instead of a per-file
         # pattern list, so a new `.github/scripts/test_*.py` is executed the
