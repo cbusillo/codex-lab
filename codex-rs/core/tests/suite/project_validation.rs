@@ -2532,7 +2532,7 @@ async fn automatic_validation_reports_unsupported_environment() -> Result<()> {
     )
     .await?;
 
-    submit_user_input(&test.codex, &test, "inspect this workspace").await?;
+    submit_user_input_without_environments(&test.codex, &test, "inspect this workspace").await?;
     let events = collect_events_until_terminal(&test.codex).await?;
 
     let event =

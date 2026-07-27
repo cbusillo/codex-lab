@@ -62,10 +62,7 @@ mod deny_read_state;
 mod desktop;
 #[cfg(target_os = "windows")]
 mod dpapi;
-// Compiled under `test` on every host so the environment-shaping unit tests run
-// outside Windows; nothing links against it there.
-#[cfg(any(target_os = "windows", test))]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg(target_os = "windows")]
 mod env;
 #[cfg(target_os = "windows")]
 mod helper_materialization;

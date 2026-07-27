@@ -12,7 +12,6 @@ use crate::cap::workspace_write_root_specificity;
 use crate::deny_read_state::sync_persistent_deny_read_acls;
 use crate::env::apply_no_network_to_env;
 use crate::env::ensure_non_interactive_pager;
-use crate::env::ensure_windows_startup_env_floor;
 use crate::env::inherit_path_env;
 use crate::env::normalize_null_device_env;
 use crate::identity::SandboxCreds;
@@ -98,7 +97,6 @@ fn prepare_spawn_context_common(
 
     normalize_null_device_env(env_map);
     ensure_non_interactive_pager(env_map);
-    ensure_windows_startup_env_floor(env_map);
     if options.inherit_path {
         inherit_path_env(env_map);
     }
@@ -302,7 +300,8 @@ pub(crate) fn apply_legacy_session_acl_rules(
         }
         for p in &deny {
             for root_sid in deny_root_capabilities_for_path(p, acl_sids.write_root_sids) {
-                let _ = add_deny_write_ace(p, root_sid.sid.as_ptr());
+                add_deny_write_ace(p, root_sid.sid.as_ptr())
+                    .with_context(|| format!("apply deny-write ACL to {}", p.display()))?;
             }
         }
         if !additional_deny_read_paths.is_empty() {
@@ -339,8 +338,21 @@ pub(crate) fn apply_legacy_session_acl_rules(
         {
             let canonical_cwd = canonicalize_path(current_dir);
             if is_command_cwd_root(&workspace_sid.root, &canonical_cwd) {
-                let _ = protect_workspace_codex_dir(current_dir, workspace_sid.sid.as_ptr());
-                let _ = protect_workspace_agents_dir(current_dir, workspace_sid.sid.as_ptr());
+                protect_workspace_codex_dir(current_dir, workspace_sid.sid.as_ptr()).with_context(
+                    || {
+                        format!(
+                            "protect workspace .codex directory under {}",
+                            current_dir.display()
+                        )
+                    },
+                )?;
+                protect_workspace_agents_dir(current_dir, workspace_sid.sid.as_ptr())
+                    .with_context(|| {
+                        format!(
+                            "protect workspace .agents directory under {}",
+                            current_dir.display()
+                        )
+                    })?;
             }
         }
     }
@@ -364,7 +376,6 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
 ) -> Result<ElevatedSpawnContext> {
     normalize_null_device_env(env_map);
     ensure_non_interactive_pager(env_map);
-    ensure_windows_startup_env_floor(env_map);
     inherit_path_env(env_map);
     inject_git_safe_directory(env_map, cwd);
 
@@ -568,41 +579,6 @@ mod tests {
         assert_eq!(
             env_map.get("HTTP_PROXY"),
             Some(&"http://user.proxy:8080".to_string())
-        );
-    }
-
-    #[test]
-    fn common_spawn_env_floor_respects_inherit_path_opt_out() {
-        let codex_home = TempDir::new().expect("tempdir");
-        let cwd = TempDir::new().expect("tempdir");
-        let mut env_map = HashMap::new();
-        let workspace_roots = workspace_roots_for(cwd.path());
-
-        prepare_spawn_context_common(
-            &PermissionProfile::workspace_write(),
-            workspace_roots.as_slice(),
-            codex_home.path(),
-            cwd.path(),
-            &mut env_map,
-            &["cmd.exe".to_string()],
-            SpawnPrepOptions {
-                inherit_path: false,
-                add_git_safe_directory: false,
-            },
-        )
-        .expect("startup env floor prep");
-
-        for excluded in ["PATH", "PATHEXT", "PSModulePath"] {
-            assert!(
-                !env_map.keys().any(|key| key.eq_ignore_ascii_case(excluded)),
-                "inherit_path=false must not gain {excluded}, got {env_map:?}"
-            );
-        }
-        assert!(
-            env_map
-                .keys()
-                .any(|key| key.eq_ignore_ascii_case("ComSpec")),
-            "startup env floor should provide ComSpec, got {env_map:?}"
         );
     }
 

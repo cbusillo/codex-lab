@@ -115,8 +115,7 @@ const UNIX_CORE_ENV_VARS: &[&str] = &[
     "USER",
 ];
 
-/// Defined on every target so that Windows-only consumers can keep their own
-/// environment allowlists aligned with this one in cross-platform tests.
+#[cfg(target_os = "windows")]
 pub const WINDOWS_CORE_ENV_VARS: &[&str] = &[
     // Core path resolution
     "PATH",
@@ -147,6 +146,7 @@ pub const WINDOWS_CORE_ENV_VARS: &[&str] = &[
     // Common shells/pwsh hints
     "POWERSHELL",
     "PWSH",
+    "PSMODULEPATH",
 ];
 
 #[cfg(all(test, target_os = "windows"))]
@@ -169,6 +169,7 @@ mod windows_tests {
             ("SystemRoot", "C:\\Windows"),
             ("AppData", "C:\\Users\\codex\\AppData\\Roaming"),
             ("TmpDir", "C:\\Temp\\custom"),
+            ("PSModulePath", "C:\\Program Files\\PowerShell\\Modules"),
             ("OPENAI_API_KEY", "secret"),
         ]);
 
@@ -191,6 +192,10 @@ mod windows_tests {
                 "C:\\Users\\codex\\AppData\\Roaming".to_string(),
             ),
             ("TmpDir".to_string(), "C:\\Temp\\custom".to_string()),
+            (
+                "PSModulePath".to_string(),
+                "C:\\Program Files\\PowerShell\\Modules".to_string(),
+            ),
         ]);
 
         assert_eq!(result, expected);
