@@ -8,6 +8,36 @@ class SetupCiActionTests(unittest.TestCase):
 
         self.assertIn("RUNNER_NAME_VALUE: ${{ runner.name }}", action)
         self.assertIn('ci_build_root="$HOME/.cache/codex-ci/$runner_slug"', action)
+        self.assertIn('cache_scope="self-hosted-$runner_slug"', action)
+        self.assertIn(
+            'echo "SCCACHE_SERVER_PORT=$((20000 + runner_checksum % 10000))"',
+            action,
+        )
+
+    def test_external_cache_keys_include_the_runner_scope(self) -> None:
+        prepare_bazel = Path(
+            ".github/actions/prepare-bazel-ci/action.yml"
+        ).read_text(encoding="utf-8")
+        full_ci = Path(".github/workflows/rust-ci-full.yml").read_text(
+            encoding="utf-8"
+        )
+        nextest = Path(
+            ".github/workflows/rust-ci-full-nextest-platform.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("bazel-cache-v2-${CACHE_RUNNER_SCOPE}", prepare_bazel)
+        self.assertIn(
+            "cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}", full_ci
+        )
+        self.assertIn(
+            "sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}", full_ci
+        )
+        self.assertIn(
+            "cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}", nextest
+        )
+        self.assertIn(
+            "sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}", nextest
+        )
 
     def test_run_scoped_bazel_repository_contents_use_runner_temp(self) -> None:
         action = Path(".github/actions/setup-ci/action.yml").read_text(encoding="utf-8")
