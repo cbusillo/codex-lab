@@ -14,7 +14,12 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   build:
+    needs: authorize_self_hosted
     # Bazel compilation runs only in trusted postmerge/manual contexts. Runtime
     # tests are owned by rust-ci-full, where each platform has the dependencies
     # and isolation its test suite expects.
@@ -112,6 +117,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   clippy:
+    needs: authorize_self_hosted
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -188,6 +194,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   verify-release-build:
+    needs: authorize_self_hosted
     timeout-minutes: 60
     strategy:
       fail-fast: false

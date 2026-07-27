@@ -15,8 +15,10 @@ The workflows in this directory are split so that pull requests get fast, review
   of compiling the full Bazel/V8 graph on an ephemeral PR runner.
 - `codex-lab-app.yml` builds the macOS ARM64 `Codex Lab.app` distribution when
   fork-owned packaging, workflow, or Rust CLI paths change. Pull-request builds
-  use the `ci-app` Cargo profile and run only for branches in this repository;
-  release builds retain the full release profile.
+  use the base branch's `pull_request_target` workflow, reject any initiating or
+  triggering actor outside the trusted allowlist on a hosted runner, require a
+  same-repository branch, then check out the exact pull-request head SHA.
+  Release builds retain the full release profile.
 - Repository policy, spelling, dependency, and workflow-routing checks remain
   merge-blocking through their dedicated reusable workflows.
 
@@ -48,6 +50,23 @@ The workflows in this directory are split so that pull requests get fast, review
   `[self-hosted, macOS, ARM64, codex-lab-app]` labels. These fork-owned labels
   are intentionally explicit instead of imitating upstream organization runner
   groups or renaming a persistent runner to an upstream alias.
+- Every persistent-runner workflow first calls
+  `authorize-self-hosted.yml`, which requires both `github.actor` and
+  `github.triggering_actor` to be either `cbusillo` or `shiny-code-bot` before a
+  self-hosted job can be assigned. Each persistent host also installs
+  `.github/scripts/authorize-self-hosted-runner-job.sh` outside the runner work
+  tree as an `ACTIONS_RUNNER_HOOK_JOB_STARTED` hook; `chris-testing` keeps that
+  copy root-owned. Changing a workflow therefore cannot bypass the same
+  repository and actor allowlist before repository code executes.
+- `chris-testing` exposes four Codex Lab lanes named `chris-testing-codex`
+  through `chris-testing-codex-4`. Each carries the shared
+  `codex-lab-linux` label, runs under a lane-specific service account, and
+  uses a separate runner install, work directory, home directory, Cargo target,
+  Bazel output root, and temporary tree. The host budgets ten CPUs and 24 GiB
+  per lane, leaving ten CPUs and 32 GiB available for the host and other runner
+  fleets when all four Codex Lab lanes are active. Remote-environment tests
+  require the host Docker daemon, so only these allowlisted lane accounts share
+  the existing Docker group; runner work and build caches remain isolated.
 - Upstream Windows Bazel jobs require authenticated RBE and custom Windows exec
   toolchains, so they are not part of public-fork blocking CI. `rust-ci-full.yml`
   retains Windows validation after merge on GitHub-hosted Windows runners.

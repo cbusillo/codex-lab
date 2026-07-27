@@ -29,8 +29,13 @@ on:
         type: boolean
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   archive:
     name: Build nextest archive
+    needs: authorize_self_hosted
     runs-on: ${{ inputs.runner }}
     # Run 30205457451 cancelled the Linux ARM64 archive at exactly 60 minutes;
     # cold-cache archive builds need headroom above that.
