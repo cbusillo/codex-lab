@@ -67,3 +67,27 @@ fn elevated_token_includes_network_proxy_restricting_sid() -> Result<()> {
     assert!(has_network_proxy_sid?);
     Ok(())
 }
+
+#[test]
+fn workspace_write_token_uses_restricted_code_instead_of_world() -> Result<()> {
+    let capability_sid = LocalSid::from_string("S-1-5-21-10-20-30-40")?;
+    let restricted_code_sid = LocalSid::from_string(SID_RESTRICTED_CODE)?;
+    let mut world_sid = unsafe { world_sid()? };
+    let base_token = unsafe { get_current_token_for_restriction()? };
+    let restricted_token = unsafe {
+        create_workspace_write_token_with_caps_from(base_token, &[capability_sid.as_ptr()])?
+    };
+
+    let has_restricted_code =
+        unsafe { token_has_restricting_sid(restricted_token, restricted_code_sid.as_ptr()) };
+    let has_world =
+        unsafe { token_has_restricting_sid(restricted_token, world_sid.as_mut_ptr().cast()) };
+    unsafe {
+        CloseHandle(restricted_token);
+        CloseHandle(base_token);
+    }
+
+    assert!(has_restricted_code?);
+    assert!(!has_world?);
+    Ok(())
+}

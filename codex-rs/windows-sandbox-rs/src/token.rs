@@ -44,6 +44,7 @@ const LUA_TOKEN: u32 = 0x04;
 const WRITE_RESTRICTED: u32 = 0x08;
 const GENERIC_ALL: u32 = 0x1000_0000;
 const WIN_WORLD_SID: i32 = 1;
+const SID_RESTRICTED_CODE: &str = "S-1-5-12";
 const SE_GROUP_LOGON_ID: u32 = 0xC0000000;
 
 #[repr(C)]
@@ -455,10 +456,10 @@ unsafe fn create_token_with_caps_from(
     }
     let mut logon_sid_bytes = get_logon_sid_bytes(base_token)?;
     let psid_logon = logon_sid_bytes.as_mut_ptr() as *mut c_void;
-    let mut everyone = world_sid()?;
-    let psid_everyone = everyone.as_mut_ptr() as *mut c_void;
+    let restricted_code = LocalSid::from_string(SID_RESTRICTED_CODE)?;
+    let psid_restricted_code = restricted_code.as_ptr();
 
-    // Exact order: Capabilities..., ExtraRestricting..., Logon, Everyone
+    // Exact order: Capabilities..., ExtraRestricting..., Logon, RestrictedCode
     let mut entries: Vec<SID_AND_ATTRIBUTES> =
         vec![std::mem::zeroed(); psid_capabilities.len() + extra_restricting_sids.len() + 2];
     for (i, psid) in psid_capabilities.iter().enumerate() {
@@ -473,7 +474,7 @@ unsafe fn create_token_with_caps_from(
     let logon_idx = extras_idx + extra_restricting_sids.len();
     entries[logon_idx].Sid = psid_logon;
     entries[logon_idx].Attributes = 0;
-    entries[logon_idx + 1].Sid = psid_everyone;
+    entries[logon_idx + 1].Sid = psid_restricted_code;
     entries[logon_idx + 1].Attributes = 0;
 
     let mut new_token: HANDLE = 0;
@@ -495,6 +496,8 @@ unsafe fn create_token_with_caps_from(
 
     // Additional restricting SIDs are identity markers, not capabilities. Deliberately exclude
     // them from the default DACL so possessing a route identity cannot grant object access.
+    let mut everyone = world_sid()?;
+    let psid_everyone = everyone.as_mut_ptr() as *mut c_void;
     let mut dacl_sids: Vec<*mut c_void> = Vec::with_capacity(psid_capabilities.len() + 2);
     dacl_sids.push(psid_logon);
     dacl_sids.push(psid_everyone);

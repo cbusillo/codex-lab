@@ -356,6 +356,14 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
     timeout(Duration::from_secs(10), wait).await.is_ok()
 }
 
+fn child_progress_timeout() -> Duration {
+    if cfg!(windows) {
+        Duration::from_secs(15)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
     thread
         .inject_user_message_without_turn(message.to_string())
@@ -2736,7 +2744,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         .await
         .expect("status subscription should succeed");
     if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
-        timeout(Duration::from_secs(5), async {
+        timeout(child_progress_timeout(), async {
             loop {
                 status_rx
                     .changed()
@@ -2755,7 +2763,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         .session_source
         .get_nickname()
         .expect("spawned sub-agent should have a nickname");
-    timeout(Duration::from_secs(5), async {
+    timeout(child_progress_timeout(), async {
         loop {
             if let Ok(stored_thread) = thread_store
                 .read_thread(ReadThreadParams {

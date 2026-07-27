@@ -94,6 +94,11 @@ class RepoCheckWiringTest(unittest.TestCase):
         self.assertIn("Convergence comparison base:", contents)
         self.assertIn("$GITHUB_STEP_SUMMARY", contents)
 
+    def test_bazel_does_not_run_history_dependent_github_script_suite(self) -> None:
+        contents = (WORKFLOWS / "bazel.yml").read_text(encoding="utf-8")
+
+        self.assertNotIn("just test-github-scripts", contents)
+
     def test_convergence_summary_jq_program_executes(self) -> None:
         require("jq", self)
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")

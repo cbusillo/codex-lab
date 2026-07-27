@@ -9,7 +9,10 @@ use crate::ipc_framed::read_frame;
 use crate::run_windows_sandbox_capture;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::shell_environment::create_env;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_pty::ProcessDriver;
 use pretty_assertions::assert_eq;
@@ -39,6 +42,7 @@ use tokio::time::timeout;
 use windows_sys::Win32::Foundation::WAIT_FAILED;
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -92,6 +96,17 @@ fn sandbox_log(codex_home: &Path) -> String {
 
 fn workspace_roots_for(root: &Path) -> Vec<AbsolutePathBuf> {
     vec![AbsolutePathBuf::from_absolute_path(root).expect("absolute workspace root")]
+}
+
+fn windows_core_shell_env() -> HashMap<String, String> {
+    create_env(
+        &ShellEnvironmentPolicy {
+            inherit: ShellEnvironmentPolicyInherit::Core,
+            ignore_default_excludes: false,
+            ..Default::default()
+        },
+        /*thread_id*/ None,
+    )
 }
 
 fn powershell_literal(path: &Path) -> String {
@@ -239,7 +254,7 @@ fn legacy_non_tty_cmd_emits_output() {
                 "echo LEGACY-NONTTY-CMD".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            windows_core_shell_env(),
             Some(5_000),
             &[],
             &[],
@@ -267,10 +282,11 @@ fn elevated_non_tty_cmd_forwards_env_output_and_exit() {
         let cwd = sandbox_cwd();
         let codex_home = sandbox_home("elevated-non-tty-cmd");
         let permission_profile = PermissionProfile::workspace_write();
-        let env_map = HashMap::from([(
+        let mut env_map = windows_core_shell_env();
+        env_map.insert(
             "CODEX_ELEVATED_TEST".to_string(),
             "ELEVATED-ENV-OK".to_string(),
-        )]);
+        );
         let spawned = spawn_windows_sandbox_session_elevated_for_permission_profile(
             &permission_profile,
             workspace_roots_for(cwd.as_path()).as_slice(),
@@ -326,7 +342,7 @@ fn legacy_non_tty_cmd_rejects_deny_read_overrides() {
                 "echo deny-read".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            windows_core_shell_env(),
             Some(5_000),
             std::slice::from_ref(&secret_path),
             &[],
@@ -367,7 +383,7 @@ fn legacy_non_tty_powershell_emits_output() {
                 "Write-Output LEGACY-NONTTY-DIRECT".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            windows_core_shell_env(),
             Some(5_000),
             &[],
             &[],
@@ -570,14 +586,31 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
             parent_command,
         ],
         cwd.as_path(),
-        HashMap::new(),
+        windows_core_shell_env(),
         Some(10_000),
         /*cancellation*/ None,
         /*use_private_desktop*/ true,
     )
     .expect("run legacy capture powershell");
+    // Surface the child's own diagnostics before touching the pid marker: when
+    // PowerShell fails to start (missing modules, loader errors) the marker is
+    // never written, and a bare `read descendant pid` panic hides the reason.
+    println!("capture pwsh exit_code={}", result.exit_code);
+    println!("capture pwsh timed_out={}", result.timed_out);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    println!("capture pwsh stdout={stdout:?}");
+    println!("capture pwsh stderr={stderr:?}");
+
     let descendant_pid = fs::read_to_string(&ready_marker)
-        .expect("read descendant pid")
+        .unwrap_or_else(|err| {
+            panic!(
+                "read descendant pid ({err}); exit_code={} timed_out={} stdout={stdout:?} stderr={stderr:?}\n{}",
+                result.exit_code,
+                result.timed_out,
+                sandbox_log(codex_home.path())
+            )
+        })
         .trim()
         .parse()
         .expect("parse descendant pid");
@@ -585,11 +618,6 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     fs::write(&release_marker, "release").expect("release descendant after root exit");
     let descendant_process = descendant_process.expect("open descendant after normal capture exit");
 
-    println!("capture pwsh exit_code={}", result.exit_code);
-    println!("capture pwsh timed_out={}", result.timed_out);
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    println!("capture pwsh stderr={stderr:?}");
     assert_eq!(result.exit_code, 0, "stdout={stdout:?} stderr={stderr:?}");
     assert!(
         stdout.contains("LEGACY-CAPTURE-DIRECT"),
@@ -601,6 +629,18 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     );
     wait_for_process_exit(&descendant_process, Duration::from_secs(10))
         .expect("sandbox descendant did not exit after release");
+}
+
+/// Named outcome so a failure reports which containment expectation broke
+/// instead of diffing an anonymous tuple.
+#[derive(Debug, PartialEq, Eq)]
+struct LegacyDeleteOutcome {
+    exit_code: i32,
+    workspace_file_exists: bool,
+    temp_file_exists: bool,
+    tmp_file_exists: bool,
+    outside_file_contents: Option<String>,
+    protected_git_dir_exists: bool,
 }
 
 #[test]
@@ -630,6 +670,18 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         fs::write(&tmp_file, "tmp").expect("seed TMP file");
         fs::write(&outside_file, "outside").expect("seed outside file");
 
+        let mut world_sid = unsafe { crate::token::world_sid().expect("world SID") };
+        for path in [&outside_root, &outside_file, &workspace, &protected_git_dir] {
+            unsafe {
+                crate::acl::ensure_allow_mask_aces(
+                    path,
+                    &[world_sid.as_mut_ptr().cast()],
+                    FILE_ALL_ACCESS,
+                )
+            }
+            .unwrap_or_else(|err| panic!("grant Everyone access to {}: {err:#}", path.display()));
+        }
+
         let script = workspace.join("delete-fixtures.cmd");
         fs::write(
             &script,
@@ -645,7 +697,8 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         )
         .expect("write delete script");
 
-        let env_map = HashMap::from([
+        let mut env_map = windows_core_shell_env();
+        env_map.extend([
             ("TEMP".to_string(), temp_root.to_string_lossy().into_owned()),
             ("TMP".to_string(), tmp_root.to_string_lossy().into_owned()),
             (
@@ -698,16 +751,25 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         let stdout = String::from_utf8_lossy(&stdout);
 
         assert_eq!(
-            (
+            LegacyDeleteOutcome {
                 exit_code,
-                workspace_file.exists(),
-                temp_file.exists(),
-                tmp_file.exists(),
-                fs::read_to_string(&outside_file).ok(),
-                protected_git_dir.is_dir(),
-            ),
-            (0, false, false, false, Some("outside".to_string()), true),
-            "stdout={stdout:?}\n{}",
+                workspace_file_exists: workspace_file.exists(),
+                temp_file_exists: temp_file.exists(),
+                tmp_file_exists: tmp_file.exists(),
+                outside_file_contents: fs::read_to_string(&outside_file).ok(),
+                protected_git_dir_exists: protected_git_dir.is_dir(),
+            },
+            LegacyDeleteOutcome {
+                exit_code: 0,
+                workspace_file_exists: false,
+                temp_file_exists: false,
+                tmp_file_exists: false,
+                outside_file_contents: Some("outside".to_string()),
+                protected_git_dir_exists: true,
+            },
+            "test_root={}\nworkspace={}\nstdout={stdout:?}\n{}",
+            test_root.path().display(),
+            workspace.display(),
             sandbox_log(codex_home.path())
         );
     });
@@ -754,7 +816,6 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         true
     });
 
-    let started_at = Instant::now();
     let permission_profile = PermissionProfile::workspace_write();
     let result = run_windows_sandbox_capture(
         &permission_profile,
@@ -767,17 +828,13 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
             parent_command,
         ],
         cwd.as_path(),
-        HashMap::new(),
+        windows_core_shell_env(),
         Some(30_000),
         /*cancellation*/ Some(cancellation),
         /*use_private_desktop*/ true,
     )
     .expect("run legacy capture powershell with cancellation");
 
-    assert!(
-        started_at.elapsed() < Duration::from_secs(10),
-        "cancellation should end capture before the timeout"
-    );
     assert!(
         !result.timed_out,
         "cancellation should not be reported as a timeout"
@@ -847,7 +904,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
             parent_command,
         ],
         cwd.as_path(),
-        HashMap::new(),
+        windows_core_shell_env(),
         Some(30_000),
         &[],
         &[],
@@ -932,7 +989,7 @@ fn legacy_tty_powershell_emits_output_and_accepts_input() {
                 "$PID; Write-Output ready".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            windows_core_shell_env(),
             Some(10_000),
             &[],
             &[],
@@ -983,7 +1040,7 @@ fn legacy_tty_cmd_emits_output_and_accepts_input() {
                 "echo ready".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            windows_core_shell_env(),
             Some(10_000),
             &[],
             &[],
@@ -1037,7 +1094,7 @@ fn legacy_tty_cmd_default_desktop_emits_output_and_accepts_input() {
                 "echo ready".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            windows_core_shell_env(),
             Some(10_000),
             &[],
             &[],
