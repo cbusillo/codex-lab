@@ -42,7 +42,6 @@ use tokio::time::timeout;
 use windows_sys::Win32::Foundation::WAIT_FAILED;
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
-use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -648,8 +647,12 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
     runtime.block_on(async move {
-        let user_profile = std::env::var_os("USERPROFILE").expect("USERPROFILE should be set");
-        let test_root = TempDir::new_in(user_profile).expect("create legacy delete test root");
+        let scratch_root = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| sandbox_cwd().join("target"))
+            .join("windows-sandbox-tests");
+        fs::create_dir_all(&scratch_root).expect("create legacy delete scratch root");
+        let test_root = TempDir::new_in(scratch_root).expect("create legacy delete test root");
         let codex_home = sandbox_home("legacy-delete-writable-roots");
         let workspace = test_root.path().join("workspace");
         let temp_root = test_root.path().join("temp");
@@ -669,18 +672,6 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         fs::write(&temp_file, "temp").expect("seed TEMP file");
         fs::write(&tmp_file, "tmp").expect("seed TMP file");
         fs::write(&outside_file, "outside").expect("seed outside file");
-
-        let mut world_sid = unsafe { crate::token::world_sid().expect("world SID") };
-        for path in [&outside_root, &outside_file, &workspace, &protected_git_dir] {
-            unsafe {
-                crate::acl::ensure_allow_mask_aces(
-                    path,
-                    &[world_sid.as_mut_ptr().cast()],
-                    FILE_ALL_ACCESS,
-                )
-            }
-            .unwrap_or_else(|err| panic!("grant Everyone access to {}: {err:#}", path.display()));
-        }
 
         let script = workspace.join("delete-fixtures.cmd");
         fs::write(

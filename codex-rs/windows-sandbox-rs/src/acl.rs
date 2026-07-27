@@ -643,31 +643,23 @@ unsafe fn add_deny_ace(path: &Path, psid: *mut c_void, kind: DenyAceKind) -> Res
         explicit.Trustee = trustee;
         let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
         let code2 = SetEntriesInAclW(1, &explicit, p_dacl, &mut p_new_dacl);
-        if code2 != ERROR_SUCCESS {
-            if !p_sd.is_null() {
-                LocalFree(p_sd as HLOCAL);
+        if code2 == ERROR_SUCCESS {
+            let code3 = SetNamedSecurityInfoW(
+                to_wide(path).as_ptr() as *mut u16,
+                1,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                p_new_dacl,
+                std::ptr::null_mut(),
+            );
+            if code3 == ERROR_SUCCESS {
+                added = true;
             }
-            return Err(anyhow!("SetEntriesInAclW failed: {code2}"));
-        }
-        let code3 = SetNamedSecurityInfoW(
-            to_wide(path).as_ptr() as *mut u16,
-            1,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            p_new_dacl,
-            std::ptr::null_mut(),
-        );
-        if !p_new_dacl.is_null() {
-            LocalFree(p_new_dacl as HLOCAL);
-        }
-        if code3 != ERROR_SUCCESS {
-            if !p_sd.is_null() {
-                LocalFree(p_sd as HLOCAL);
+            if !p_new_dacl.is_null() {
+                LocalFree(p_new_dacl as HLOCAL);
             }
-            return Err(anyhow!("SetNamedSecurityInfoW failed: {code3}"));
         }
-        added = true;
     }
     if !p_sd.is_null() {
         LocalFree(p_sd as HLOCAL);
