@@ -24,10 +24,17 @@ runs:
       shell: bash
       env:
         RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        RUNNER_NAME_VALUE: ${{ runner.name }}
         RUNNER_OS_NAME: ${{ runner.os }}
       run: |
         if [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" && "${RUNNER_OS_NAME}" == "macOS" ]]; then
           ci_build_root="${RUNNER_TEMP}/codex-ci"
+        elif [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" ]]; then
+          runner_slug="$(printf '%s' "${RUNNER_NAME_VALUE:-unnamed}" | tr -cs 'A-Za-z0-9._-' '-')"
+          runner_slug="${runner_slug#-}"
+          runner_slug="${runner_slug%-}"
+          [[ -n "$runner_slug" ]] || runner_slug="unnamed"
+          ci_build_root="$HOME/.cache/codex-ci/$runner_slug"
         else
           ci_build_root="$HOME/.cache/codex-ci"
         fi

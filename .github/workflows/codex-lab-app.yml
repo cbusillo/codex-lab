@@ -2,7 +2,9 @@ name: codex-lab-app
 
 on:
   workflow_dispatch:
-  pull_request:
+  # Use the base branch's trusted workflow definition. The hosted authorization
+  # job rejects untrusted actors before the persistent macOS runner is assigned.
+  pull_request_target:
     paths:
       - ".github/workflows/codex-lab-app.yml"
       - ".github/workflows/codex-lab-release.yml"
@@ -15,13 +17,18 @@ on:
       - "codex-rs/**"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   build-macos-aarch64:
     name: Build macOS ARM64 Codex Lab app
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: authorize_self_hosted
     runs-on:
       - self-hosted
       - macOS
@@ -33,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0

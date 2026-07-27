@@ -18,8 +18,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   release-metadata:
     name: Resolve Codex Lab release metadata
+    needs: authorize_self_hosted
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
