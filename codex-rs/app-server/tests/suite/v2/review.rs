@@ -65,6 +65,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::path::Path;
+use std::process::Command;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
@@ -608,6 +610,8 @@ async fn auto_review_summary_detail_and_disposition_round_trip_over_persisted_ru
     let workspace_path =
         AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(workspace.path())?)?
             .into_path_buf();
+    init_git_repo(&workspace_path)?;
+    let head_sha = git_head_sha(&workspace_path)?;
 
     // Auto-env would relocate the thread's local environment to its own
     // workspace, which is the path Background Review scopes its store to.
@@ -629,7 +633,7 @@ async fn auto_review_summary_detail_and_disposition_round_trip_over_persisted_ru
     let thread_id = thread.id;
 
     let store = AutoReviewStore::for_scope(codex_home.path(), &workspace_path);
-    seed_completed_background_review(&store, &workspace_path)?;
+    seed_completed_background_review(&store, &workspace_path, &head_sha)?;
 
     let summary: AutoReviewSummaryReadResponse = mcp
         .request(|request_id| ClientRequest::AutoReviewSummaryRead {
@@ -735,10 +739,57 @@ const SEEDED_RUN_ID: &str = "seeded-background-review";
 const SEEDED_STARTED_AT: i64 = 1_700_000_000;
 const SEEDED_COMPLETED_AT: i64 = 1_700_000_060;
 
+fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git").args(args).current_dir(cwd).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+fn init_git_repo(path: &Path) -> Result<()> {
+    for args in [
+        &["init", "--quiet", "-b", "main"][..],
+        &["config", "user.email", "background-review@example.invalid"][..],
+        &["config", "user.name", "Background Review"][..],
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "baseline",
+        ][..],
+    ] {
+        run_git(path, args)?;
+    }
+    Ok(())
+}
+
+fn git_head_sha(path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
 /// Persists a completed background review whose target matches what the
-/// app-server computes for a plain (non-git) workspace, so the run reads as
-/// current for the thread.
-fn seed_completed_background_review(store: &AutoReviewStore, cwd: &std::path::Path) -> Result<()> {
+/// app-server computes for a clean single-commit workspace repository.
+fn seed_completed_background_review(
+    store: &AutoReviewStore,
+    cwd: &Path,
+    head_sha: &str,
+) -> Result<()> {
     let output = ReviewOutputEvent {
         findings: vec![ReviewFinding {
             title: "Guard the new branch".to_string(),
@@ -761,13 +812,13 @@ fn seed_completed_background_review(store: &AutoReviewStore, cwd: &std::path::Pa
         freshness: AutoReviewRunFreshness::Current,
         source: CoreAutoReviewRunSource::Background,
         target: AutoReviewRunTarget {
-            branch: None,
-            head_sha: None,
+            branch: Some("main".to_string()),
+            head_sha: Some(head_sha.to_string()),
             base_sha: None,
             worktree_path: Some(cwd.to_path_buf()),
             snapshot_epoch: None,
-            snapshot_commit: None,
-            head_at_launch: None,
+            snapshot_commit: Some(head_sha.to_string()),
+            head_at_launch: Some(head_sha.to_string()),
             worktree_diff_fingerprint: None,
         },
         review_target: CoreReviewTarget::UncommittedChanges,

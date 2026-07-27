@@ -8,6 +8,7 @@ use super::session::SessionConfiguration;
 use super::*;
 use crate::mcp::McpRuntimeProjection;
 use codex_mcp::ElicitationReviewerHandle;
+use codex_mcp::McpStartupReconnectPolicy;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 
 pub(super) struct McpDesiredState {
@@ -168,6 +169,9 @@ impl Session {
         (
             McpRuntimeInput {
                 config: mcp_config,
+                // The thread runtime outlives any single Apps outage, so let a
+                // failed Codex Apps startup recover in the background.
+                startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
                 plugins_available,
                 ready_selected_capability_roots: ready_selected_capability_roots.to_vec(),
                 mcp_servers,

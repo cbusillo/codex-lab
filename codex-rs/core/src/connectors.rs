@@ -35,6 +35,7 @@ use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpRuntimeInput;
+use codex_mcp::McpStartupReconnectPolicy;
 use codex_mcp::ToolInfo;
 use codex_mcp::ToolPluginProvenance;
 use codex_mcp::effective_mcp_servers;
@@ -264,6 +265,9 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         .flatten();
     let mcp_runtime = McpRuntime::new(McpRuntimeInput {
         config: Arc::clone(&mcp_config),
+        // Discovery shuts this runtime down as soon as it has an answer, so a
+        // background reconnect would outlive the caller it reports to.
+        startup_reconnect_policy: McpStartupReconnectPolicy::FailureIsFinal,
         plugins_available: false,
         ready_selected_capability_roots: Vec::new(),
         mcp_servers: mcp_servers.clone(),

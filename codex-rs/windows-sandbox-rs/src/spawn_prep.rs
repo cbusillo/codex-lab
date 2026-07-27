@@ -300,7 +300,8 @@ pub(crate) fn apply_legacy_session_acl_rules(
         }
         for p in &deny {
             for root_sid in deny_root_capabilities_for_path(p, acl_sids.write_root_sids) {
-                let _ = add_deny_write_ace(p, root_sid.sid.as_ptr());
+                add_deny_write_ace(p, root_sid.sid.as_ptr())
+                    .with_context(|| format!("apply deny-write ACL to {}", p.display()))?;
             }
         }
         if !additional_deny_read_paths.is_empty() {
@@ -337,8 +338,21 @@ pub(crate) fn apply_legacy_session_acl_rules(
         {
             let canonical_cwd = canonicalize_path(current_dir);
             if is_command_cwd_root(&workspace_sid.root, &canonical_cwd) {
-                let _ = protect_workspace_codex_dir(current_dir, workspace_sid.sid.as_ptr());
-                let _ = protect_workspace_agents_dir(current_dir, workspace_sid.sid.as_ptr());
+                protect_workspace_codex_dir(current_dir, workspace_sid.sid.as_ptr()).with_context(
+                    || {
+                        format!(
+                            "protect workspace .codex directory under {}",
+                            current_dir.display()
+                        )
+                    },
+                )?;
+                protect_workspace_agents_dir(current_dir, workspace_sid.sid.as_ptr())
+                    .with_context(|| {
+                        format!(
+                            "protect workspace .agents directory under {}",
+                            current_dir.display()
+                        )
+                    })?;
             }
         }
     }
