@@ -46,7 +46,10 @@ runs:
         bazel_output_base="$CI_BUILD_ROOT/o"
         bazel_output_user_root="$CI_BUILD_ROOT/b"
         bazel_repository_cache="$CI_BUILD_ROOT/bazel-repository-cache"
-        bazel_repo_contents_cache="$CI_BUILD_ROOT/bazel-repo-contents-cache-$GITHUB_RUN_ID-$GITHUB_JOB"
+        # Repository contents are keyed to this job and are never reused by a
+        # later run. Keep them under the runner-owned temporary directory so
+        # self-hosted Linux jobs cannot accumulate one persistent tree per run.
+        bazel_repo_contents_cache="$RUNNER_TEMP/bazel-repo-contents-cache"
         cargo_target_dir="$CI_BUILD_ROOT/cargo-target"
         tmp="$CI_BUILD_ROOT/tmp"
 
