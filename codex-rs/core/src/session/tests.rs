@@ -3901,9 +3901,17 @@ async fn thread_rollback_fails_when_turn_in_progress() {
     let initial_context = build_initial_context(&sess, &tc).await;
     sess.record_conversation_items(tc.as_ref(), &initial_context)
         .await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    )
+    .await;
     let history_before_rollback = sess.clone_history().await;
 
-    *sess.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
     handlers::thread_rollback(&sess, "sub-1".to_string(), /*num_turns*/ 1).await;
 
     let error_event = wait_for_thread_rollback_failed(&rx).await;
@@ -3914,6 +3922,7 @@ async fn thread_rollback_fails_when_turn_in_progress() {
 
     let history = sess.clone_history().await;
     assert_eq!(history_before_rollback.raw_items(), history.raw_items());
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[tokio::test]

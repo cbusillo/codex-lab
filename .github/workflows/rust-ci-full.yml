@@ -460,6 +460,7 @@ jobs:
       profile: ci-test
       artifact_id: linux-x64-remote
       remote_env: true
+      test_threads: 4
       use_sccache: true
     secrets: inherit
 
