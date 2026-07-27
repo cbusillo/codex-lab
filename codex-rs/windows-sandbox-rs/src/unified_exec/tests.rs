@@ -123,7 +123,7 @@ fn run_icacls(root: &Path, args: &[String]) {
 
 fn current_user_sid() -> String {
     let output = std::process::Command::new("whoami.exe")
-        .args(["/user", "/fo", "csv", "/nh"])
+        .args(["/user", "/FO", "csv", "/nh"])
         .output()
         .expect("run whoami for current user SID");
     assert!(
