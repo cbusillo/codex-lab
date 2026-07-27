@@ -123,7 +123,7 @@ fn run_icacls(root: &Path, args: &[String]) {
 
 fn current_user_sid() -> String {
     let output = std::process::Command::new("whoami.exe")
-        .args(["/user", "/FO", "csv", "/nh"])
+        .arg("/user")
         .output()
         .expect("run whoami for current user SID");
     assert!(
@@ -134,9 +134,7 @@ fn current_user_sid() -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout)
-        .split(',')
-        .map(str::trim)
-        .map(|field| field.trim_matches('"'))
+        .split_ascii_whitespace()
         .find(|field| field.starts_with("S-1-"))
         .map(str::to_string)
         .expect("whoami output should include a user SID")
