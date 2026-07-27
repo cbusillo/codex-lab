@@ -67,7 +67,9 @@ The workflows in this directory are split so that pull requests get fast, review
   per lane, leaving ten CPUs and 32 GiB available for the host and other runner
   fleets when all four Codex Lab lanes are active. Remote-environment tests
   require the host Docker daemon, so only these allowlisted lane accounts share
-  the existing Docker group; runner work and build caches remain isolated.
+  the existing Docker group. External cache keys include the runner instance,
+  and each lane uses its own sccache server endpoint, so restored archives and
+  compiler daemons cannot cross lane homes.
 - Upstream Windows Bazel jobs require authenticated RBE and custom Windows exec
   toolchains, so they are not part of public-fork blocking CI. `rust-ci-full.yml`
   retains Windows validation after merge on GitHub-hosted Windows runners.

@@ -221,7 +221,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-ci
+      - id: setup_ci
+        uses: ./.github/actions/setup-ci
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
@@ -279,9 +280,9 @@ jobs:
             ${{ github.workspace }}/.cargo-home/registry/index/
             ${{ github.workspace }}/.cargo-home/registry/cache/
             ${{ github.workspace }}/.cargo-home/git/db/
-          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
           restore-keys: |
-            cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
+            cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
 
       # Install and restore sccache cache
       - name: Install sccache
@@ -316,10 +317,10 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
           restore-keys: |
-            sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-
-            sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
+            sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-
+            sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Prepare APT cache directories (musl)
@@ -409,7 +410,7 @@ jobs:
             ${{ github.workspace }}/.cargo-home/registry/index/
             ${{ github.workspace }}/.cargo-home/registry/cache/
             ${{ github.workspace }}/.cargo-home/git/db/
-          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
         if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
@@ -417,7 +418,7 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
 
       - name: sccache stats
         if: always() && env.USE_SCCACHE == 'true'
