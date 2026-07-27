@@ -15,9 +15,10 @@ The workflows in this directory are split so that pull requests get fast, review
   of compiling the full Bazel/V8 graph on an ephemeral PR runner.
 - `codex-lab-app.yml` builds the macOS ARM64 `Codex Lab.app` distribution when
   fork-owned packaging, workflow, or Rust CLI paths change. Pull-request builds
-  use the base branch's `pull_request_target` workflow, reject any initiating or
-  triggering actor outside the trusted allowlist on a hosted runner, require a
-  same-repository branch, then check out the exact pull-request head SHA.
+  reject any initiating or triggering actor outside the trusted allowlist on a
+  hosted runner, require a same-repository branch, then check out the exact
+  pull-request head SHA. The host-managed pre-job hook independently enforces
+  the same actor boundary before repository steps run on the macOS lane.
   Release builds retain the full release profile.
 - Repository policy, spelling, dependency, and workflow-routing checks remain
   merge-blocking through their dedicated reusable workflows.
