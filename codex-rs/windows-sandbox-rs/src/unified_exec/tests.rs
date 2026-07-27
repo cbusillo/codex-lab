@@ -108,19 +108,47 @@ fn windows_core_shell_env() -> HashMap<String, String> {
     )
 }
 
-fn remove_inherited_world_write_access(root: &Path) {
-    for args in [&["/inheritance:d"][..], &["/remove:g", "*S-1-1-0"][..]] {
-        let status = std::process::Command::new("icacls.exe")
-            .arg(root)
-            .args(args)
-            .status()
-            .unwrap_or_else(|err| panic!("run icacls for {} with {args:?}: {err}", root.display()));
-        assert!(
-            status.success(),
-            "icacls failed for {} with {args:?}: {status}",
-            root.display()
-        );
+fn run_icacls(root: &Path, args: &[String]) {
+    let status = std::process::Command::new("icacls.exe")
+        .arg(root)
+        .args(args)
+        .status()
+        .unwrap_or_else(|err| panic!("run icacls for {} with {args:?}: {err}", root.display()));
+    assert!(
+        status.success(),
+        "icacls failed for {} with {args:?}: {status}",
+        root.display()
+    );
+}
+
+fn current_user_sid() -> String {
+    let output = std::process::Command::new("whoami.exe")
+        .arg("/user")
+        .output()
+        .expect("run whoami for current user SID");
+    assert!(
+        output.status.success(),
+        "whoami failed: status={} stdout={:?} stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .split_ascii_whitespace()
+        .find(|field| field.starts_with("S-1-"))
+        .map(str::to_string)
+        .expect("whoami output should include a user SID")
+}
+
+fn isolate_test_root_acl(root: &Path) {
+    for sid in [
+        current_user_sid(),
+        "S-1-5-18".to_string(),
+        "S-1-5-32-544".to_string(),
+    ] {
+        run_icacls(root, &["/grant:r".to_string(), format!("*{sid}:(OI)(CI)F")]);
     }
+    run_icacls(root, &["/inheritance:r".to_string()]);
 }
 
 fn powershell_literal(path: &Path) -> String {
@@ -668,7 +696,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             .join("windows-sandbox-tests");
         fs::create_dir_all(&scratch_root).expect("create legacy delete scratch root");
         let test_root = TempDir::new_in(scratch_root).expect("create legacy delete test root");
-        remove_inherited_world_write_access(test_root.path());
+        isolate_test_root_acl(test_root.path());
         let codex_home = sandbox_home("legacy-delete-writable-roots");
         let workspace = test_root.path().join("workspace");
         let temp_root = test_root.path().join("temp");
@@ -794,7 +822,7 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
     let descendant_marker = codex_home.path().join("descendant-survived");
     let ready_marker = codex_home.path().join("descendant-started");
     let descendant_command = format!(
-        "Set-Content -LiteralPath '{}' -Value $PID; Start-Sleep -Seconds 1; Set-Content -LiteralPath '{}' -Value survived",
+        "Set-Content -LiteralPath '{}' -Value $PID; Start-Sleep -Seconds 20; Set-Content -LiteralPath '{}' -Value survived",
         powershell_literal(&ready_marker),
         powershell_literal(&descendant_marker),
     );
@@ -802,7 +830,7 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         &pwsh,
         codex_home.path(),
         &descendant_command,
-        "Start-Sleep -Seconds 30",
+        "Start-Sleep -Seconds 300",
     );
     let descendant_process = Arc::new(Mutex::new(None));
     let descendant_process_for_cancellation = Arc::clone(&descendant_process);
@@ -836,7 +864,7 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         ],
         cwd.as_path(),
         windows_core_shell_env(),
-        Some(30_000),
+        /*timeout_ms*/ Some(75_000),
         /*cancellation*/ Some(cancellation),
         /*use_private_desktop*/ true,
     )
