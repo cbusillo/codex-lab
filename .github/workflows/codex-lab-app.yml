@@ -2,9 +2,7 @@ name: codex-lab-app
 
 on:
   workflow_dispatch:
-  # Use the base branch's trusted workflow definition. The hosted authorization
-  # job rejects untrusted actors before the persistent macOS runner is assigned.
-  pull_request_target:
+  pull_request:
     paths:
       - ".github/workflows/codex-lab-app.yml"
       - ".github/workflows/codex-lab-release.yml"
@@ -40,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0

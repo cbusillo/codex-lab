@@ -125,19 +125,29 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
                     self.assertIn(job_name, blocks)
                     self.assertTrue(depends_on_authorization(job_name, blocks))
 
-    def test_persistent_runner_workflows_do_not_use_pull_request(self) -> None:
+    def test_only_the_host_hook_protected_app_workflow_uses_pull_request(self) -> None:
         trigger = re.compile(r"^  pull_request:$", re.MULTILINE)
 
         for path in persistent_runner_workflows():
             with self.subTest(workflow=path.name):
                 contents = path.read_text(encoding="utf-8")
-                self.assertNotRegex(contents, trigger)
+                if path.name == "codex-lab-app.yml":
+                    self.assertRegex(contents, trigger)
+                    self.assertIn(
+                        "github.event.pull_request.head.repo.full_name == github.repository",
+                        contents,
+                    )
+                else:
+                    self.assertNotRegex(contents, trigger)
 
-    def test_pull_request_app_build_uses_the_base_branch_workflow(self) -> None:
+    def test_pull_request_app_build_keeps_the_stacked_pr_trigger(self) -> None:
         contents = (WORKFLOWS / "codex-lab-app.yml").read_text(encoding="utf-8")
 
-        self.assertRegex(contents, re.compile(r"^  pull_request_target:$", re.MULTILINE))
-        self.assertNotRegex(contents, re.compile(r"^  pull_request:$", re.MULTILINE))
+        self.assertRegex(contents, re.compile(r"^  pull_request:$", re.MULTILINE))
+        self.assertNotRegex(
+            contents,
+            re.compile(r"^  pull_request_target:$", re.MULTILINE),
+        )
 
 
 class RunnerHostHookTest(unittest.TestCase):
