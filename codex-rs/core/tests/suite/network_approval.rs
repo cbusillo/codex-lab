@@ -1246,7 +1246,7 @@ fn network_fetch_args(environment_id: &str) -> Value {
 
 fn network_exec_args(command: &str) -> Value {
     json!({
-        "shell": "/bin/sh",
+        "shell": "bash",
         "cmd": command,
         "login": false,
         "yield_time_ms": 1_000,

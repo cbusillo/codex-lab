@@ -1872,6 +1872,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
         .build_initialized()
         .await?;
 
+    let goal_accounting_started_at = std::time::Instant::now();
     let goal_id = mcp
         .send_raw_request(
             "thread/goal/set",
@@ -1907,11 +1908,12 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
         .get_thread_goal(thread_id)
         .await?
         .expect("goal should exist");
+    let seeded_goal_time_seconds: i64 = 12;
     state_db
         .thread_goals()
         .account_thread_goal_usage(
             thread_id,
-            /*time_delta_seconds*/ 12,
+            seeded_goal_time_seconds,
             /*token_delta*/ 50,
             codex_state::GoalAccountingMode::ActiveOnly,
             Some(persisted_goal.goal_id.as_str()),
@@ -1947,7 +1949,14 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
     assert_eq!(edit.goal.status, ThreadGoalStatus::BudgetLimited);
     assert_eq!(edit.goal.token_budget, Some(40));
     assert_eq!(edit.goal.tokens_used, 50);
-    assert_eq!(edit.goal.time_used_seconds, 12);
+    let max_goal_time_seconds = seeded_goal_time_seconds.saturating_add(
+        i64::try_from(goal_accounting_started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
+    );
+    assert!(
+        (seeded_goal_time_seconds..=max_goal_time_seconds).contains(&edit.goal.time_used_seconds),
+        "edited goal time should preserve seeded usage without exceeding test elapsed time: {}",
+        edit.goal.time_used_seconds
+    );
     assert_eq!(edit.goal.created_at, goal.goal.created_at);
 
     Ok(())

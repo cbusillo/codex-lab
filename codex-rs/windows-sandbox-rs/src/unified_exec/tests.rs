@@ -108,6 +108,21 @@ fn windows_core_shell_env() -> HashMap<String, String> {
     )
 }
 
+fn remove_inherited_world_write_access(root: &Path) {
+    for args in [&["/inheritance:d"][..], &["/remove:g", "*S-1-1-0"][..]] {
+        let status = std::process::Command::new("icacls.exe")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap_or_else(|err| panic!("run icacls for {} with {args:?}: {err}", root.display()));
+        assert!(
+            status.success(),
+            "icacls failed for {} with {args:?}: {status}",
+            root.display()
+        );
+    }
+}
+
 fn powershell_literal(path: &Path) -> String {
     path.to_string_lossy().replace('\'', "''")
 }
@@ -653,6 +668,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             .join("windows-sandbox-tests");
         fs::create_dir_all(&scratch_root).expect("create legacy delete scratch root");
         let test_root = TempDir::new_in(scratch_root).expect("create legacy delete test root");
+        remove_inherited_world_write_access(test_root.path());
         let codex_home = sandbox_home("legacy-delete-writable-roots");
         let workspace = test_root.path().join("workspace");
         let temp_root = test_root.path().join("temp");

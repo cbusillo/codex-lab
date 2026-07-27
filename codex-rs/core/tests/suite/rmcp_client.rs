@@ -172,6 +172,7 @@ enum McpCallEvent {
 }
 
 const REMOTE_MCP_ENVIRONMENT: &str = "remote";
+const REMOTE_MCP_WORKDIR: &str = "/tmp/codex-remote-env";
 
 pub(super) fn remote_aware_environment_id() -> String {
     if is_remote_test_environment() {
@@ -206,11 +207,15 @@ pub(super) fn remote_aware_stdio_server_bin() -> anyhow::Result<String> {
     copy_binary_to_remote_env(&container_name, Path::new(&bin), "test_stdio_server")
 }
 
+pub(super) fn remote_aware_stdio_server_cwd() -> Option<PathBuf> {
+    test_docker_container_name().map(|_| PathBuf::from(REMOTE_MCP_WORKDIR))
+}
+
 /// Builds a collision-resistant in-container path for copied test binaries.
 fn unique_remote_path(binary_name: &str) -> anyhow::Result<String> {
     let unique_suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     Ok(format!(
-        "/tmp/codex-remote-env/{binary_name}-{}-{unique_suffix}",
+        "{REMOTE_MCP_WORKDIR}/{binary_name}-{}-{unique_suffix}",
         std::process::id()
     ))
 }
@@ -223,13 +228,7 @@ fn copy_binary_to_remote_env(
 ) -> anyhow::Result<String> {
     let remote_path = unique_remote_path(binary_name)?;
     let mkdir_output = StdCommand::new("docker")
-        .args([
-            "exec",
-            container_name,
-            "mkdir",
-            "-p",
-            "/tmp/codex-remote-env",
-        ])
+        .args(["exec", container_name, "mkdir", "-p", REMOTE_MCP_WORKDIR])
         .output()
         .context("create remote MCP test binary directory")?;
     ensure!(
@@ -295,7 +294,12 @@ fn stdio_transport(
     env: Option<HashMap<String, String>>,
     env_vars: Vec<McpServerEnvVar>,
 ) -> McpServerTransportConfig {
-    stdio_transport_with_cwd(command, env, env_vars, /*cwd*/ None)
+    let remote_command_prefix = format!("{REMOTE_MCP_WORKDIR}/");
+    let cwd = command
+        .starts_with(&remote_command_prefix)
+        .then(remote_aware_stdio_server_cwd)
+        .flatten();
+    stdio_transport_with_cwd(command, env, env_vars, cwd)
 }
 
 fn stdio_transport_with_cwd(

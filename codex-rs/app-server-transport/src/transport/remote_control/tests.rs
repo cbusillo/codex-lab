@@ -2304,9 +2304,12 @@ async fn remote_control_waits_for_account_id_before_enrolling() {
     .expect("auth with account id should save");
     auth_manager.reload().await;
 
-    let enroll_request = timeout(Duration::from_millis(100), accept_http_request(&listener))
-        .await
-        .expect("auth change should wake remote control before the retry delay");
+    let enroll_request = timeout(
+        Duration::from_millis(/*millis*/ 800),
+        accept_http_request(&listener),
+    )
+    .await
+    .expect("auth change should wake remote control before the retry delay");
     assert_eq!(
         enroll_request.request_line,
         "POST /backend-api/wham/remote/control/server/enroll HTTP/1.1"

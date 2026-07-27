@@ -55,6 +55,7 @@ use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -438,6 +439,24 @@ pub async fn compact(sess: &Arc<Session>, sub_id: String) {
         .await;
 }
 
+async fn wait_for_turn_teardown_before_rollback(sess: &Session) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 1);
+    loop {
+        {
+            let active_turn = sess.active_turn.lock().await;
+            match active_turn.as_ref() {
+                None => return true,
+                Some(active_turn) if active_turn.task.is_some() => return false,
+                Some(_) => {}
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+    }
+}
+
 pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32) {
     if num_turns == 0 {
         sess.send_event_raw(Event {
@@ -451,8 +470,7 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         return;
     }
 
-    let has_active_turn = { sess.active_turn.lock().await.is_some() };
-    if has_active_turn {
+    if !wait_for_turn_teardown_before_rollback(sess).await {
         sess.send_event_raw(Event {
             id: sub_id,
             msg: EventMsg::Error(ErrorEvent {
