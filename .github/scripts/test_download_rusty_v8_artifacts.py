@@ -130,6 +130,13 @@ class DownloadRustyV8Test(unittest.TestCase):
             ],
         )
 
+    def test_retries_transient_download_failures(self) -> None:
+        script = SCRIPT.read_text()
+
+        self.assertIn("--retry 5", script)
+        self.assertIn("--retry-all-errors", script)
+        self.assertIn("--retry-max-time 120", script)
+
     def test_never_falls_back_to_upstream(self) -> None:
         result = self.run_script()
 

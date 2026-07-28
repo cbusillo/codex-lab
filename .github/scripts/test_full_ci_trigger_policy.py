@@ -192,7 +192,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "python3 ./tools/argument-comment-lint/run-prebuilt-linter.py",
+            "python3 ./tools/argument-comment-lint/run-prebuilt-linter.py -- --ignore-rust-version",
             workflow,
         )
         self.assertIn("rustup toolchain install nightly-2025-09-18", workflow)

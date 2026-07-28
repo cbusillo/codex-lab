@@ -163,7 +163,10 @@ jobs:
               --component rustc-dev \
               --component rust-src \
               --no-self-update
-            python3 ./tools/argument-comment-lint/run-prebuilt-linter.py
+            # The packaged Dylint library is ABI-coupled to this nightly. Cargo
+            # still fails if a dependency actually uses unsupported language
+            # features, but newer rust-version metadata alone must not block it.
+            python3 ./tools/argument-comment-lint/run-prebuilt-linter.py -- --ignore-rust-version
             exit 0
           fi
 
