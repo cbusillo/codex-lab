@@ -91,6 +91,20 @@ fn caps_rendered_tools_fragment_after_xml_escaping() {
     assert!(rendered.contains(" additional namespaces omitted.\n"));
 }
 
+#[test]
+fn retained_matcher_recognizes_rendered_tools() {
+    let state = ToolsState::new([("app".to_string(), "control the Codex App".to_string())]);
+    let fragment = state
+        .render_diff(PreviousSectionState::Absent)
+        .expect("tools state should render");
+
+    assert!(ToolsState::has_retained_fragment_matcher());
+    assert!(ToolsState::matches_retained_fragment(
+        fragment.role(),
+        &fragment.render()
+    ));
+}
+
 /// The `<tools>` fragment sits right at the >1K-token manual-review threshold. Pin the ceiling so
 /// a future change to `MAX_RENDERED_FRAGMENT_BYTES` cannot quietly cross it.
 #[test]
