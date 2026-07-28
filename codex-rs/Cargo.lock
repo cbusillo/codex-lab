@@ -4415,6 +4415,7 @@ dependencies = [
  "codex-utils-sandbox-summary",
  "codex-utils-sleep-inhibitor",
  "codex-utils-string",
+ "codex-version",
  "codex-windows-sandbox",
  "color-eyre",
  "core_test_support",

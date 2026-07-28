@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -81,12 +82,18 @@ class CodexLabProvenanceTest(unittest.TestCase):
             repo, commit = self.make_repo(root)
             source = root / "source-codex-lab"
             write_fake_binary(source, commit, "clean")
+            orphan = root / "artifacts" / "dogfood" / "candidates" / ".staging-old"
+            orphan.mkdir(parents=True)
+            (orphan / "partial").write_text("partial\n", encoding="utf-8")
             report = PROVENANCE.stage_candidate(repo, source, root / "artifacts")
             candidate = Path(report["binary_path"])
 
             self.assertEqual("current", report["status"])
+            self.assertFalse(orphan.exists())
+            os.utime(candidate.parent, ns=(1, 1))
             cached = PROVENANCE.stage_candidate(repo, source, root / "artifacts")
             self.assertEqual(candidate, Path(cached["binary_path"]))
+            self.assertGreater(candidate.parent.stat().st_mtime_ns, 1)
             candidate.chmod(0o755)
             writable = PROVENANCE.stage_candidate(repo, source, root / "artifacts")
             self.assertEqual("unverifiable", writable["status"])
@@ -103,6 +110,56 @@ class CodexLabProvenanceTest(unittest.TestCase):
             (linked_root / commit).symlink_to(escaped, target_is_directory=True)
             with self.assertRaises(PROVENANCE.ProvenanceError):
                 PROVENANCE.stage_candidate(repo, candidate, root / "linked")
+
+    def test_prunes_old_candidates_and_preserves_active_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate_root = Path(temp_dir) / "candidates"
+            candidate_root.mkdir()
+            candidates: list[Path] = []
+            for index in range(PROVENANCE.MAX_STAGED_CANDIDATES + 2):
+                commit = f"{index + 1:040x}"
+                digest = f"{index + 1:064x}"
+                candidate = candidate_root / commit / "clean" / digest
+                candidate.mkdir(parents=True)
+                binary = candidate / "codex-lab"
+                binary.write_text("candidate\n", encoding="utf-8")
+                binary.chmod(0o555)
+                os.utime(candidate, ns=(index + 1, index + 1))
+                candidates.append(candidate)
+            unknown = candidate_root / "operator-notes"
+            unknown.mkdir()
+            linked = candidate_root / ("f" * 40)
+            linked.symlink_to(unknown, target_is_directory=True)
+
+            active_candidate = candidates[0]
+            PROVENANCE.prune_staged_candidates(candidate_root, active_candidate)
+
+            retained = PROVENANCE.staged_candidate_directories(candidate_root)
+            self.assertEqual(PROVENANCE.MAX_STAGED_CANDIDATES, len(retained))
+            self.assertIn(active_candidate, retained)
+            self.assertFalse(candidates[1].exists())
+            self.assertFalse(candidates[2].exists())
+            self.assertTrue(all(candidate.exists() for candidate in candidates[3:]))
+            self.assertTrue(unknown.is_dir())
+            self.assertTrue(linked.is_symlink())
+
+    def test_rejects_symlinked_orphaned_staging_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            candidate_root = root / "candidates"
+            candidate_root.mkdir()
+            escaped = root / "escaped"
+            escaped.mkdir()
+            staging_link = candidate_root / ".staging-link"
+            staging_link.symlink_to(escaped, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                PROVENANCE.ProvenanceError,
+                "staging path must be an owner-controlled directory",
+            ):
+                PROVENANCE.reap_orphaned_staging_directories(candidate_root)
+            self.assertTrue(escaped.is_dir())
+            self.assertTrue(staging_link.is_symlink())
 
     def test_verifier_distinguishes_stale_and_unverifiable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -159,6 +160,38 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
     def test_rejects_unsupported_policy_version(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported policy version"):
             inventory.rules_for_policy(999)
+
+    def test_tui_provenance_diagnostics_require_manual_review(self) -> None:
+        path = "codex-rs/tui/src/debug_config.rs"
+        self.assertEqual(
+            inventory.classify_path(path),
+            {
+                "path": path,
+                "lane": "red_manual_review",
+                "contracts": ["RELEASE-1"],
+                "reason": "local build provenance diagnostics",
+            },
+        )
+        self.assertEqual(
+            "green_bulk_adopt",
+            inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION)["lane"],
+        )
+
+    def test_dogfood_launcher_is_intentionally_owned(self) -> None:
+        path = "scripts/local/install-codex-lab-dev.sh"
+        self.assertEqual(
+            inventory.classify_path(path),
+            {
+                "path": path,
+                "lane": "intentionally_owned",
+                "contracts": ["RELEASE-1"],
+                "reason": "Every Code distribution authority",
+            },
+        )
+        self.assertEqual(
+            "green_bulk_adopt",
+            inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION)["lane"],
+        )
 
     def test_classify_path_omits_conflict_type(self) -> None:
         self.assertNotIn(
@@ -484,6 +517,20 @@ class CheckedInSnapshotTest(unittest.TestCase):
                     summary["summary"]["residualLocalInfluence"],
                     len(residuals["residuals"]),
                 )
+                residual_lane_counts = dict(
+                    sorted(Counter(item["lane"] for item in residuals["residuals"]).items())
+                )
+                self.assertEqual(
+                    residual_lane_counts,
+                    summary["residualLaneCounts"],
+                )
+                self.assertEqual(
+                    residual_lane_counts,
+                    residuals["residualLaneCounts"],
+                )
+                markdown = (snapshot / "inventory.md").read_text(encoding="utf-8")
+                for lane, count in residual_lane_counts.items():
+                    self.assertIn(f"| Residual lane `{lane}` | {count} |", markdown)
 
     def test_no_snapshot_claims_residual_paths_were_rejected(self) -> None:
         for snapshot in self.snapshots():

@@ -22,6 +22,7 @@ SCHEMA_VERSION = 1
 COMMAND_TIMEOUT_SECONDS = 30
 COMMIT_LENGTHS = {40, 64}
 DIRTY_STATES = {"clean", "dirty"}
+MAX_STAGED_CANDIDATES = 8
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 
 
@@ -281,6 +282,93 @@ def verify_published_candidate(
     return report
 
 
+def staged_candidate_directories(candidate_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for commit_root in candidate_root.iterdir():
+        if (
+            commit_root.is_symlink()
+            or not commit_root.is_dir()
+            or not is_commit(commit_root.name)
+        ):
+            continue
+        for state_root in commit_root.iterdir():
+            if (
+                state_root.is_symlink()
+                or not state_root.is_dir()
+                or state_root.name not in DIRTY_STATES
+            ):
+                continue
+            for candidate in state_root.iterdir():
+                binary = candidate / "codex-lab"
+                if (
+                    candidate.is_symlink()
+                    or not candidate.is_dir()
+                    or len(candidate.name) != 64
+                    or not is_commit(candidate.name)
+                    or binary.is_symlink()
+                    or not binary.is_file()
+                ):
+                    continue
+                candidates.append(candidate)
+    return candidates
+
+
+def remove_staging_directory(staging_dir: Path) -> None:
+    if staging_dir.is_symlink() or not staging_dir.is_dir():
+        raise ProvenanceError(
+            f"staging path must be an owner-controlled directory: {staging_dir}"
+        )
+    staging_dir.chmod(0o700)
+    shutil.rmtree(staging_dir)
+
+
+def reap_orphaned_staging_directories(candidate_root: Path) -> None:
+    for staging_dir in candidate_root.iterdir():
+        if staging_dir.name.startswith(".staging-"):
+            remove_staging_directory(staging_dir)
+
+
+def prune_staged_candidates(candidate_root: Path, active_candidate: Path) -> None:
+    candidates = staged_candidate_directories(candidate_root)
+    if len(candidates) <= MAX_STAGED_CANDIDATES:
+        return
+    candidates.sort(
+        key=lambda candidate: (candidate.stat().st_mtime_ns, str(candidate)),
+        reverse=True,
+    )
+    retained = {active_candidate}
+    for candidate in candidates:
+        if len(retained) >= MAX_STAGED_CANDIDATES:
+            break
+        retained.add(candidate)
+    for candidate in candidates:
+        if candidate in retained:
+            continue
+        state_root = candidate.parent
+        commit_root = state_root.parent
+        shutil.rmtree(candidate)
+        for directory in (state_root, commit_root):
+            try:
+                directory.rmdir()
+            except OSError:
+                break
+
+
+def verify_touch_and_prune_candidate(
+    repo_root: Path,
+    expected: dict[str, str],
+    candidate_root: Path,
+    final_binary: Path,
+    digest: str,
+) -> dict[str, Any]:
+    report = verify_published_candidate(repo_root, expected, final_binary, digest)
+    if report["status"] == "current":
+        final_dir = final_binary.parent
+        os.utime(final_dir, follow_symlinks=False)
+        prune_staged_candidates(candidate_root, final_dir)
+    return report
+
+
 def stage_candidate(
     repo_root: Path, binary_path: Path, artifact_root: Path
 ) -> dict[str, Any]:
@@ -302,6 +390,7 @@ def stage_candidate(
         ensure_private_directory(directory)
     with (candidate_root / ".stage.lock").open("a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        reap_orphaned_staging_directories(candidate_root)
         return stage_candidate_locked(repo_root, source, candidate_root, expected)
 
 
@@ -319,7 +408,9 @@ def stage_candidate_locked(
     final_dir = state_root / digest
     final_binary = final_dir / "codex-lab"
     if final_dir.exists():
-        return verify_published_candidate(repo_root, expected, final_binary, digest)
+        return verify_touch_and_prune_candidate(
+            repo_root, expected, candidate_root, final_binary, digest
+        )
 
     staging_dir = Path(tempfile.mkdtemp(prefix=".staging-", dir=candidate_root))
     staged_binary = staging_dir / "codex-lab"
@@ -343,11 +434,12 @@ def stage_candidate_locked(
         except OSError:
             if final_dir.is_symlink() or not final_dir.is_dir():
                 raise
-        return verify_published_candidate(repo_root, expected, final_binary, digest)
+        return verify_touch_and_prune_candidate(
+            repo_root, expected, candidate_root, final_binary, digest
+        )
     finally:
         if staging_dir is not None:
-            staging_dir.chmod(0o700)
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            remove_staging_directory(staging_dir)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
