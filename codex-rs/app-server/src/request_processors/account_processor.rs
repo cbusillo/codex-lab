@@ -993,6 +993,9 @@ impl AccountRequestProcessor {
         } else {
             previous_active_account_id
         };
+        self.thread_manager
+            .rebind_loaded_threads_after_account_removal(&params.account_id)
+            .await;
 
         Ok(RemoveAccountResponse {
             status: RemoveAccountStatus::Removed,

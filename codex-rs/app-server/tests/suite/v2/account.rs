@@ -34,6 +34,8 @@ use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
+use codex_app_server_protocol::RemoveAccountResponse;
+use codex_app_server_protocol::RemoveAccountStatus;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
@@ -3090,13 +3092,14 @@ fn add_active_chatgpt_account(
 // that account when the control account changes underneath it. This only holds when the login path
 // runs the loaded-thread reconciliation; a bare `AuthManager::reload` lets the thread follow the
 // new control credentials.
-async fn login_account_api_key_pins_execution_auth_for_loaded_thread() -> Result<()> {
+async fn login_account_api_key_pins_execution_auth_until_pinned_account_is_removed() -> Result<()> {
     let mock_server = MockServer::start().await;
     let response_mock = responses::mount_sse_sequence(
         &mock_server,
         vec![
             create_final_assistant_message_sse_response("Leased account turn")?,
             create_final_assistant_message_sse_response("Still leased account turn")?,
+            create_final_assistant_message_sse_response("Control account turn")?,
         ],
     )
     .await;
@@ -3113,6 +3116,9 @@ async fn login_account_api_key_pins_execution_auth_for_loaded_thread() -> Result
     )?;
     write_models_cache(codex_home.path())?;
     add_active_chatgpt_account(codex_home.path(), "leased-account", "access-leased-account")?;
+    let leased_account_id =
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)?
+            .expect("leased account should be active");
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -3131,8 +3137,20 @@ async fn login_account_api_key_pins_execution_auth_for_loaded_thread() -> Result
 
     complete_text_turn(&mut mcp, &thread_id, "Still on the leased account").await?;
 
+    let remove_req = mcp
+        .send_raw_request(
+            "account/remove",
+            Some(json!({ "accountId": leased_account_id })),
+        )
+        .await?;
+    let removed: RemoveAccountResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(remove_req)).await??;
+    assert_eq!(removed.status, RemoveAccountStatus::Removed);
+
+    complete_text_turn(&mut mcp, &thread_id, "Use the control account").await?;
+
     let requests = response_mock.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(
         requests
             .iter()
@@ -3141,6 +3159,7 @@ async fn login_account_api_key_pins_execution_auth_for_loaded_thread() -> Result
         vec![
             Some("Bearer access-leased-account".to_string()),
             Some("Bearer access-leased-account".to_string()),
+            Some("Bearer sk-new".to_string()),
         ]
     );
 

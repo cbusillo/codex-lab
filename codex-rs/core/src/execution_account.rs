@@ -725,6 +725,60 @@ impl ExecutionAccountLease {
         }
     }
 
+    pub(crate) async fn rebind_after_account_removal(&self, removed_account_id: &str) -> bool {
+        loop {
+            let current = self.inner.current.load_full();
+            if current.stored_account_id.as_deref() != Some(removed_account_id) {
+                return false;
+            }
+            let active_account_id = self
+                .inner
+                .config
+                .matching_control_account_id(&self.inner.control_auth_manager)
+                .unwrap_or_else(|error| {
+                    warn!("failed to resolve control account after account removal: {error}");
+                    None
+                });
+            let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+            let replacement = match active_account_id.as_deref() {
+                Some(account_id) => {
+                    Self::load_account(
+                        &self.inner.config,
+                        account_id,
+                        Some(account_id),
+                        Arc::clone(&self.inner.control_auth_manager),
+                        generation,
+                    )
+                    .await
+                }
+                None => None,
+            }
+            .unwrap_or_else(|| {
+                Arc::new(ExecutionAccount::from_control(
+                    active_account_id,
+                    Arc::clone(&self.inner.control_auth_manager),
+                    generation,
+                ))
+            });
+            let previous = self
+                .inner
+                .current
+                .compare_and_swap(&current, Arc::clone(&replacement));
+            if !Arc::ptr_eq(&current, &*previous) {
+                continue;
+            }
+            let account_id = replacement.stored_account_id.clone();
+            if let Err(error) = self.inner.config.write_lease_record(
+                self.inner.thread_id,
+                account_id.as_deref(),
+                &self.inner.base_cache_identity,
+            ) {
+                warn!("failed to persist execution account lease after account removal: {error}");
+            }
+            return true;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_auth_manager_for_testing(&self, auth_manager: Arc<AuthManager>) {
         let stored_account_id = auth_manager

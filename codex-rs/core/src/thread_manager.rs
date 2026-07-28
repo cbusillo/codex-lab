@@ -644,6 +644,32 @@ impl ThreadManager {
         }
     }
 
+    pub async fn rebind_loaded_threads_after_account_removal(&self, removed_account_id: &str) {
+        let threads = self
+            .state
+            .threads
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for thread in threads {
+            let rebound = thread
+                .session
+                .services
+                .execution_account
+                .rebind_after_account_removal(removed_account_id)
+                .await;
+            if rebound && !thread.session_source.is_internal() {
+                thread
+                    .session
+                    .services
+                    .model_client
+                    .invalidate_cached_websocket_session();
+            }
+        }
+    }
+
     pub fn skills_service(&self) -> Arc<SkillsService> {
         self.state.skills_service.clone()
     }
