@@ -842,6 +842,54 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
 }
 
 #[tokio::test]
+async fn removed_detached_execution_account_rebinds_to_control_account() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    let thread_id = ThreadId::default();
+    persist_lease(codex_home.path(), thread_id, &execution.id).expect("persist execution lease");
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&control_manager),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Resumed,
+        ),
+    )
+    .await;
+    assert_eq!(
+        lease.identity().stored_account_id,
+        Some(execution.id.clone())
+    );
+    assert!(!Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(lease.prompt_cache_discriminator(), None);
+
+    codex_login::remove_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        &execution.id,
+    )
+    .expect("remove execution account")
+    .expect("stored execution account");
+    assert!(lease.rebind_after_account_removal(&execution.id).await);
+
+    assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
+    assert!(lease.prompt_cache_discriminator().is_some());
+    assert_eq!(
+        lease
+            .auth_manager()
+            .auth_cached()
+            .and_then(|auth| auth.get_account_id()),
+        Some("control".to_string())
+    );
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), thread_id),
+        Some(control.id)
+    );
+    assert!(!lease.rebind_after_account_removal(&execution.id).await);
+}
+
+#[tokio::test]
 async fn legacy_resume_preserves_the_original_control_cache_namespace_when_possible() {
     let (codex_home, control_manager, control, execution) = test_accounts().await;
     let thread_id = ThreadId::new();

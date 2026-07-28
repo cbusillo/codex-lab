@@ -1583,7 +1583,17 @@ impl App {
             return;
         }
 
-        if !matches!(self.app_server_target, crate::AppServerTarget::Embedded) {
+        let embedded_app_server =
+            matches!(self.app_server_target, crate::AppServerTarget::Embedded);
+        let was_default_active = embedded_app_server
+            && codex_login::get_active_account_id(
+                &self.config.codex_home,
+                self.config.cli_auth_credentials_store_mode,
+            )
+            .ok()
+            .flatten()
+            .is_some_and(|active_id| active_id == selection.account_id);
+        if !embedded_app_server || !was_default_active {
             let feedback = match app_server
                 .remove_account(selection.account_id.clone())
                 .await
@@ -1607,13 +1617,6 @@ impl App {
             return;
         }
 
-        let was_default_active = codex_login::get_active_account_id(
-            &self.config.codex_home,
-            self.config.cli_auth_credentials_store_mode,
-        )
-        .ok()
-        .flatten()
-        .is_some_and(|active_id| active_id == selection.account_id);
         let current_session_uses_default_auth_home =
             self.config.auth_home == self.config.codex_home;
         let needs_session_restart = was_default_active && current_session_uses_default_auth_home;
