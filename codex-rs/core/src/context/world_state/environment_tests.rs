@@ -149,6 +149,29 @@ fn snapshots() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn retained_matcher_recognizes_rendered_environment() -> Result<()> {
+    let state = EnvironmentsState {
+        environments: [(
+            LOCAL_ENVIRONMENT_ID.to_string(),
+            available("file:///repo", "zsh")?,
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let fragment = state
+        .render_diff(PreviousSectionState::Absent)
+        .expect("environment state should render");
+
+    assert!(EnvironmentsState::has_retained_fragment_matcher());
+    assert!(EnvironmentsState::matches_retained_fragment(
+        fragment.role(),
+        &fragment.render()
+    ));
+    Ok(())
+}
+
 fn available(cwd: &str, shell: &str) -> Result<EnvironmentState> {
     Ok(EnvironmentState {
         cwd: PathUri::parse(cwd)?,
