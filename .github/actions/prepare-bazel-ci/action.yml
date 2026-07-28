@@ -32,11 +32,12 @@ runs:
       shell: bash
       env:
         CACHE_SCOPE: ${{ inputs.cache-scope }}
+        CACHE_RUNNER_SCOPE: ${{ steps.setup_bazel.outputs.cache-scope }}
         TARGET: ${{ inputs.target }}
         CACHE_HASH: ${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
       run: |
-        echo "repository-cache-key=bazel-cache-${CACHE_SCOPE}-${TARGET}-${CACHE_HASH}" >> "${GITHUB_OUTPUT}"
-        echo "repository-cache-restore-key=bazel-cache-${CACHE_SCOPE}-${TARGET}-" >> "${GITHUB_OUTPUT}"
+        echo "repository-cache-key=bazel-cache-v2-${CACHE_RUNNER_SCOPE}-${CACHE_SCOPE}-${TARGET}-${CACHE_HASH}" >> "${GITHUB_OUTPUT}"
+        echo "repository-cache-restore-key=bazel-cache-v2-${CACHE_RUNNER_SCOPE}-${CACHE_SCOPE}-${TARGET}-" >> "${GITHUB_OUTPUT}"
 
     # Restore the Bazel repository cache explicitly so external dependencies
     # do not need to be re-downloaded on every CI run. Keep restore failures

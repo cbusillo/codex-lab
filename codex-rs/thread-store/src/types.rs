@@ -16,6 +16,7 @@ use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode as MemoryMode;
@@ -81,6 +82,8 @@ pub struct CreateThreadParams {
     pub parent_thread_id: Option<ThreadId>,
     /// Runtime source for the thread.
     pub source: SessionSource,
+    /// Optional external launch provenance supplied by an orchestrator.
+    pub session_provenance: Option<SessionProvenance>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Effective originator used for this thread's Responses requests and analytics events.
@@ -572,6 +575,8 @@ pub struct StoredThread {
     pub cli_version: String,
     /// Runtime source for the thread.
     pub source: SessionSource,
+    /// Optional external launch provenance supplied by an orchestrator.
+    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.

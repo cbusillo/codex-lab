@@ -4,7 +4,11 @@
 - Upstream snapshot: `4462b9deef211723b781b426f5e5d36a5777115f`
 - Local baseline: `8add494682f7c0674672e8dc5b38a4565cd7629b`
 - Conflicts: 295
-- Silent local-influence paths rejected by an upstream-first merge: 478
+- Residual local-influence paths retained by an upstream-first merge: 478
+
+Residual paths merge cleanly, so no reviewer sees them. The merge keeps
+local content there instead of upstream content; it does not reject it.
+`residuals.json` lists every one with its contract lane.
 
 ## Counts
 
@@ -13,10 +17,14 @@
 | Conflict `add/add` | 9 |
 | Conflict `content` | 279 |
 | Conflict `modify/delete` | 7 |
-| Lane `amber_contract_adapt` | 110 |
-| Lane `green_bulk_adopt` | 166 |
-| Lane `intentionally_owned` | 12 |
+| Lane `amber_contract_adapt` | 107 |
+| Lane `green_bulk_adopt` | 150 |
+| Lane `intentionally_owned` | 31 |
 | Lane `red_manual_review` | 7 |
+| Residual lane `amber_contract_adapt` | 103 |
+| Residual lane `green_bulk_adopt` | 190 |
+| Residual lane `intentionally_owned` | 182 |
+| Residual lane `red_manual_review` | 3 |
 
 ## Contract-reviewed conflicts
 
@@ -66,7 +74,7 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/message_processor.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/account_processor.rs` | app-server and wire compatibility |
-| `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/external_agent_config_processor.rs` | app-server and wire compatibility |
+| `intentionally_owned` | `AGENT-1`, `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/external_agent_config_processor.rs` | app-server and wire compatibility; Every Code orchestration and review behavior |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/thread_processor.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/thread_processor_tests.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/src/request_processors/thread_resume_redaction.rs` | app-server and wire compatibility |
@@ -78,9 +86,9 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/common/test_app_server.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3`, `PROTOCOL-1` | `codex-rs/app-server/tests/suite/auth.rs` | credential persistence and account selection; app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/conversation_summary.rs` | app-server and wire compatibility |
-| `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/mod.rs` | app-server and wire compatibility |
+| `intentionally_owned` | `AGENT-1`, `INTEGRATION-1`, `PROTOCOL-1`, `VALIDATION-1` | `codex-rs/app-server/tests/suite/mod.rs` | app-server and wire compatibility; registration point for owned integration proofs |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/connection_handling_websocket.rs` | app-server and wire compatibility |
-| `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/external_agent_config.rs` | app-server and wire compatibility |
+| `intentionally_owned` | `AGENT-1`, `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/external_agent_config.rs` | app-server and wire compatibility; Every Code orchestration and review behavior |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/plugin_list.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/remote_thread_store.rs` | app-server and wire compatibility |
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/review.rs` | app-server and wire compatibility |
@@ -94,19 +102,34 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `PROTOCOL-1` | `codex-rs/app-server/tests/suite/v2/thread_unarchive.rs` | app-server and wire compatibility |
 | `red_manual_review` | `IDENTITY-1` | `codex-rs/cli/src/login.rs` | visible or executable product identity |
 | `red_manual_review` | `IDENTITY-1` | `codex-rs/cli/src/main.rs` | visible or executable product identity |
+| `intentionally_owned` | `HOOKS-1` | `codex-rs/config/src/hook_config.rs` | hook identity and persisted hook state |
+| `intentionally_owned` | `HOOKS-1` | `codex-rs/config/src/hooks_tests.rs` | hook identity and persisted hook state |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/control.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/control/spawn.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/control_tests.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/registry.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/agent/role_tests.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `HISTORY-1` | `codex-rs/core/src/context/world_state/environment_render_tests.rs` | durable environment baseline across resume and fork |
+| `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/context_manager/history.rs` | model-visible context bounds and history-rewrite exceptions |
+| `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/context_manager/history_tests.rs` | model-visible context bounds and history-rewrite exceptions |
+| `intentionally_owned` | `HISTORY-1` | `codex-rs/core/src/session/rollout_reconstruction_tests.rs` | durable environment baseline across resume and fork |
+| `intentionally_owned` | `CONTEXT-1` | `codex-rs/core/src/session/turn.rs` | model-visible context bounds and history-rewrite exceptions |
+| `intentionally_owned` | `HISTORY-1` | `codex-rs/core/src/session/turn_context.rs` | durable environment baseline across resume and fork |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/state/session.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tasks/review.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_common.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_v2/close_agent.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `AGENT-1`, `INTEGRATION-1`, `VALIDATION-1` | `codex-rs/core/tests/suite/mod.rs` | registration point for owned integration proofs |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/core/tests/suite/multi_agent_resume.rs` | Every Code orchestration and review behavior |
 | `amber_contract_adapt` | `HISTORY-1` | `codex-rs/core/tests/suite/sqlite_state.rs` | durable history and resume semantics |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/core/tests/suite/subagent_notifications.rs` | Every Code orchestration and review behavior |
 | `intentionally_owned` | `AGENT-1` | `codex-rs/external-agent-migration/src/sessions/export.rs` | Every Code orchestration and review behavior |
+| `intentionally_owned` | `HOOKS-1` | `codex-rs/hooks/src/engine/discovery.rs` | hook identity and persisted hook state |
+| `intentionally_owned` | `HOOKS-1` | `codex-rs/hooks/src/engine/mod_tests.rs` | hook identity and persisted hook state |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3` | `codex-rs/login/Cargo.toml` | credential persistence and account selection |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3` | `codex-rs/login/src/auth/auth_tests.rs` | credential persistence and account selection |
 | `amber_contract_adapt` | `AUTH-1`, `AUTH-2`, `AUTH-3` | `codex-rs/login/src/auth/manager.rs` | credential persistence and account selection |
@@ -153,4 +176,5 @@ takes upstream unchanged. The JSON companion records every conflict path.
 | `amber_contract_adapt` | `HISTORY-1` | `codex-rs/thread-store/src/thread_metadata_sync.rs` | durable history and resume semantics |
 | `amber_contract_adapt` | `HISTORY-1` | `codex-rs/thread-store/src/types.rs` | durable history and resume semantics |
 | `red_manual_review` | `IDENTITY-1` | `codex-rs/tui/src/app.rs` | visible or executable product identity |
+| `intentionally_owned` | `AGENT-1` | `codex-rs/tui/src/app/thread_routing.rs` | Every Code orchestration and review behavior |
 | `red_manual_review` | `IDENTITY-1` | `codex-rs/tui/src/lib.rs` | visible or executable product identity |

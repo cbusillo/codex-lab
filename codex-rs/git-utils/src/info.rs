@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::ffi::OsStr;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -14,6 +16,8 @@ use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::process::Command;
 use tokio::time::Duration as TokioDuration;
 use tokio::time::timeout;
@@ -36,8 +40,10 @@ use crate::GitSha;
 pub fn get_git_repo_root(base_dir: &Path) -> Option<PathBuf> {
     let base = if base_dir.is_dir() {
         base_dir
-    } else {
+    } else if base_dir.is_file() {
         base_dir.parent()?
+    } else {
+        return None;
     };
     find_ancestor_git_entry(base).map(|(repo_root, _)| repo_root)
 }
@@ -275,6 +281,108 @@ pub async fn get_has_changes(cwd: &Path) -> Option<bool> {
     }
 
     Some(!output.stdout.is_empty())
+}
+
+pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
+    get_git_repo_root(cwd)?;
+    let Some(diff) = diff_against_sha(cwd, &GitSha::new("HEAD")).await else {
+        return Some("unknown".to_string());
+    };
+    diff_fingerprint(&diff)
+}
+
+pub fn diff_fingerprint(diff: &str) -> Option<String> {
+    if diff.trim().is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(diff.as_bytes());
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
+pub async fn get_worktree_changed_files(cwd: &Path) -> Option<Vec<PathBuf>> {
+    get_worktree_changed_files_from(cwd, /*base_sha*/ None).await
+}
+
+pub async fn get_worktree_changed_files_since(
+    cwd: &Path,
+    base_sha: &GitSha,
+) -> Option<Vec<PathBuf>> {
+    get_worktree_changed_files_from(cwd, Some(base_sha)).await
+}
+
+async fn get_worktree_changed_files_from(
+    cwd: &Path,
+    base_sha: Option<&GitSha>,
+) -> Option<Vec<PathBuf>> {
+    let repo_root = get_git_repo_root(cwd)?;
+    let tracked_output = if let Some(base_sha) = base_sha {
+        // One base ref intentionally compares its tree with the current index
+        // and worktree, covering committed and uncommitted turn changes.
+        run_git_command_with_timeout(
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=ACMR",
+                "-z",
+                &base_sha.0,
+                "--",
+            ],
+            &repo_root,
+        )
+        .await?
+    } else if get_head_commit_hash(&repo_root).await.is_some() {
+        run_git_command_with_timeout(
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=ACMR",
+                "-z",
+                "HEAD",
+                "--",
+            ],
+            &repo_root,
+        )
+        .await?
+    } else {
+        run_git_command_with_timeout(&["ls-files", "--cached", "-z"], &repo_root).await?
+    };
+    if !tracked_output.status.success() {
+        return None;
+    }
+    let mut files = parse_nul_separated_paths(&tracked_output.stdout)?;
+
+    let untracked_output = run_git_command_with_timeout(
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        &repo_root,
+    )
+    .await?;
+    if !untracked_output.status.success() {
+        return None;
+    }
+    files.extend(parse_nul_separated_paths(&untracked_output.stdout)?);
+    files.sort();
+    files.dedup();
+    Some(files)
+}
+
+fn parse_nul_separated_paths(output: &[u8]) -> Option<Vec<PathBuf>> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(path_from_git_bytes)
+        .collect()
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(path: &[u8]) -> Option<PathBuf> {
+    Some(PathBuf::from(std::ffi::OsString::from_vec(path.to_vec())))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(path: &[u8]) -> Option<PathBuf> {
+    String::from_utf8(path.to_vec()).ok().map(PathBuf::from)
 }
 
 fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, String>> {
@@ -905,6 +1013,17 @@ mod tests {
     use pretty_assertions::assert_eq;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn missing_path_does_not_inherit_an_ancestor_repository() {
+        let repository = tempfile::tempdir().expect("create repository root");
+        std::fs::create_dir(repository.path().join(".git")).expect("create git marker");
+
+        assert_eq!(
+            get_git_repo_root(&repository.path().join("missing/project")),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn git_metadata_commands_do_not_inherit_stdin() {

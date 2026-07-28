@@ -245,6 +245,22 @@ fn project_layers_for_cwd(cwd: &Path) -> Vec<ConfigLayerEntry> {
 }
 
 async fn make_config_for_cwd(codex_home: &TempDir, cwd: PathBuf) -> TestConfig {
+    let project_layers = project_layers_for_cwd(&cwd);
+    make_config_for_cwd_with_project_layers(codex_home, cwd, project_layers).await
+}
+
+async fn make_config_for_cwd_without_project_layers(
+    codex_home: &TempDir,
+    cwd: PathBuf,
+) -> TestConfig {
+    make_config_for_cwd_with_project_layers(codex_home, cwd, Vec::new()).await
+}
+
+async fn make_config_for_cwd_with_project_layers(
+    codex_home: &TempDir,
+    cwd: PathBuf,
+    project_layers: Vec<ConfigLayerEntry>,
+) -> TestConfig {
     let user_config_path = codex_home.path().join(CONFIG_TOML_FILE);
     let system_config_path = codex_home.path().join("etc/codex/config.toml");
     fs::create_dir_all(
@@ -269,7 +285,7 @@ async fn make_config_for_cwd(codex_home: &TempDir, cwd: PathBuf) -> TestConfig {
             TomlValue::Table(toml::map::Map::new()),
         ),
     ];
-    layers.extend(project_layers_for_cwd(&cwd));
+    layers.extend(project_layers);
 
     let cwd_abs = cwd.abs();
     TestConfig {
@@ -2910,7 +2926,7 @@ async fn non_git_repo_skills_search_does_not_walk_parents() {
         "from outer",
     );
 
-    let cfg = make_config_for_cwd(&codex_home, nested_dir).await;
+    let cfg = make_config_for_cwd_without_project_layers(&codex_home, nested_dir).await;
 
     let outcome = load_skills_for_test(&cfg).await;
     assert!(
@@ -2959,7 +2975,7 @@ async fn skill_roots_include_admin_with_lowest_priority() {
     let cfg = make_config(&codex_home).await;
 
     let scopes: Vec<SkillScope> = super::skill_roots(
-        Some(Arc::clone(&LOCAL_FS)),
+        /*fs*/ None,
         &cfg.config_layer_stack,
         &cfg.cwd,
         Vec::new(),

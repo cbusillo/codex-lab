@@ -1065,6 +1065,7 @@ mod tests {
             strict_config: false,
             cloud_config_bundle: cloud_config_bundle_loader_for_storage(
                 codex_home_path.clone(),
+                codex_home_path.clone(),
                 /*enable_codex_api_key_env*/ false,
                 AuthCredentialsStoreMode::File,
                 AuthKeyringBackendKind::default(),
@@ -1081,6 +1082,7 @@ mod tests {
             config_warnings: Vec::new(),
             session_source: serde_json::from_value(serde_json::json!("cli"))
                 .expect("cli session source should deserialize"),
+            session_provenance: None,
             enable_codex_api_key_env: false,
             client_name: "test".to_string(),
             client_version: "test".to_string(),

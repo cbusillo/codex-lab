@@ -42,6 +42,21 @@ impl Handler {
             .list_agents(&turn.session_source, args.path_prefix.as_deref())
             .await
             .map_err(collab_spawn_error)?;
+        let agents = if turn.config.multi_agent_v2.hide_spawn_agent_metadata {
+            agents
+                .into_iter()
+                .map(ListedAgent::redact_external_metadata)
+                .collect()
+        } else {
+            agents
+        };
+        // Agent completion messages and external-agent failure text are agent/process-authored and
+        // otherwise unbounded. `list_agents` output is model-visible, so it carries the same
+        // completion-payload budget as inter-agent notifications.
+        let agents = agents
+            .into_iter()
+            .map(ListedAgent::bounded_for_model)
+            .collect();
 
         Ok(boxed_tool_output(ListAgentsResult { agents }))
     }

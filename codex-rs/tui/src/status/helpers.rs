@@ -10,8 +10,11 @@ use codex_utils_path_uri::PathUri;
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
+/// Render an instruction-source path the way the rest of the TUI renders paths: simplified for
+/// Windows verbatim prefixes and compacted to `~` when it lives under the home directory. Relative
+/// paths are left alone, and the summary never truncates.
 fn normalize_agents_display_path(path: &Path) -> String {
-    dunce::simplified(path).display().to_string()
+    format_directory_display(dunce::simplified(path), /*max_width*/ None)
 }
 
 pub(crate) fn compose_model_display(
@@ -245,6 +248,26 @@ mod tests {
                 &[PathUri::from_abs_path(&global_agents_path.abs())]
             ),
             format_directory_display(&global_agents_path, /*max_width*/ None)
+        );
+    }
+
+    #[tokio::test]
+    async fn compose_agents_summary_compacts_global_agents_path_under_home() {
+        let home = dirs::home_dir().expect("resolved home directory");
+        let codex_home = TempDir::new_in(&home).expect("temp codex home under home");
+        let cwd = TempDir::new().expect("temp cwd");
+        let global_agents_path = codex_home.path().join("global.md");
+        let relative = global_agents_path
+            .strip_prefix(&home)
+            .expect("global agents path under home");
+        let config = test_config(&codex_home, &cwd).await;
+
+        assert_eq!(
+            compose_agents_summary(
+                &config,
+                &[PathUri::from_abs_path(&global_agents_path.abs())]
+            ),
+            format!("~{}{}", std::path::MAIN_SEPARATOR, relative.display())
         );
     }
 

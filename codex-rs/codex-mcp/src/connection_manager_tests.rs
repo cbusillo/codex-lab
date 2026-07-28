@@ -12,6 +12,7 @@ use crate::rmcp_client::ManagedClientFuture;
 use crate::rmcp_client::StartupOutcomeError;
 use crate::rmcp_client::list_tools_for_client_uncached;
 use crate::runtime::McpRuntimeContext;
+use crate::runtime::McpStartupReconnectPolicy;
 use crate::server::EffectiveMcpServer;
 use crate::server::McpServerMetadata;
 use crate::server::McpServerOrigin;
@@ -460,6 +461,7 @@ async fn create_test_manager_with_ready_apps_client(
 fn create_test_manager_with_failed_apps_startup(
     cached_tools: Vec<ToolInfo>,
     reconnect_factory: Arc<dyn Fn() -> ManagedClientFuture + Send + Sync>,
+    startup_reconnect_policy: McpStartupReconnectPolicy,
 ) -> McpConnectionSet {
     let client: ManagedClientFuture = futures::future::ready(Err(StartupOutcomeError::Failed {
         error: "startup failed".to_string(),
@@ -490,7 +492,11 @@ fn create_test_manager_with_failed_apps_startup(
             codex_apps_tools_cache_context: Some(cache_context),
             tool_catalog_cache_context: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            startup_reconnect: Some(Arc::new(CodexAppsStartupReconnect::new(reconnect_factory))),
+            // Mirror the production gate so these tests exercise the same
+            // policy predicate that `AsyncManagedClient::new` applies.
+            startup_reconnect: startup_reconnect_policy
+                .reconnects_codex_apps_in_background()
+                .then(|| Arc::new(CodexAppsStartupReconnect::new(reconnect_factory))),
             cancel_token: CancellationToken::new(),
         },
     );
@@ -1894,7 +1900,11 @@ async fn list_all_tools_reconnects_failed_codex_apps_startup_and_reuses_client()
         .boxed()
         .shared()
     });
-    let mut manager = create_test_manager_with_failed_apps_startup(Vec::new(), reconnect_factory);
+    let mut manager = create_test_manager_with_failed_apps_startup(
+        Vec::new(),
+        reconnect_factory,
+        McpStartupReconnectPolicy::ReconnectInBackground,
+    );
     manager
         .servers
         .get_mut(CODEX_APPS_MCP_SERVER_NAME)
@@ -1946,6 +1956,51 @@ async fn list_all_tools_reconnects_failed_codex_apps_startup_and_reuses_client()
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn failure_is_final_policy_never_reconnects_failed_codex_apps_startup() {
+    let recovered_client = create_test_managed_client(vec![create_test_tool(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "drive_search",
+    )])
+    .await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_reconnect = Arc::clone(&attempts);
+    let reconnect_factory = Arc::new(move || {
+        attempts_for_reconnect.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let recovered_client = recovered_client.clone();
+        async move { Ok(recovered_client) }.boxed().shared()
+    });
+    let manager = Arc::new(create_test_manager_with_failed_apps_startup(
+        vec![create_test_tool(
+            CODEX_APPS_MCP_SERVER_NAME,
+            "cached_drive_search",
+        )],
+        reconnect_factory,
+        McpStartupReconnectPolicy::FailureIsFinal,
+    ));
+
+    for _ in 0..3 {
+        let tools = manager.list_all_tools().await;
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.callable_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cached_drive_search"]
+        );
+        // A background reconnect would be spawned, not awaited, so give any
+        // escaped task a chance to run before asserting it never started.
+        tokio::task::yield_now().await;
+    }
+    let step = capture_binding(&manager).await;
+    assert!(
+        step.prepare_call(CODEX_APPS_MCP_SERVER_NAME, "drive_search")
+            .is_none(),
+        "a failed one-shot startup must not recover a live Apps client"
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn later_tool_list_retries_after_failed_reconnect_and_keeps_cached_tools() {
     let recovered_client = create_test_managed_client(vec![create_test_tool(
@@ -1982,6 +2037,7 @@ async fn later_tool_list_retries_after_failed_reconnect_and_keeps_cached_tools()
             "cached_drive_search",
         )],
         reconnect_factory,
+        McpStartupReconnectPolicy::ReconnectInBackground,
     );
 
     let first_reconnect_finished = reconnect_finished.notified();
@@ -2086,6 +2142,7 @@ async fn tool_lists_do_not_block_and_share_codex_apps_startup_reconnect() {
             "cached_drive_search",
         )],
         reconnect_factory,
+        McpStartupReconnectPolicy::ReconnectInBackground,
     );
     manager.set_test_server_metadata(
         CODEX_APPS_MCP_SERVER_NAME,
@@ -2218,6 +2275,95 @@ fn server_metadata_preserves_tool_approval_policy() {
     );
 }
 
+/// Builds a Codex Apps connection through the production reconciliation path
+/// and reports whether it kept a background startup reconnect.
+async fn codex_apps_startup_reconnect_is_configured(
+    startup_reconnect_policy: McpStartupReconnectPolicy,
+) -> bool {
+    let codex_home = tempdir().expect("tempdir");
+    let cancel_token = CancellationToken::new();
+    let mcp_servers = HashMap::from([(
+        CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        EffectiveMcpServer::configured(McpServerConfig {
+            auth: Default::default(),
+            transport: McpServerTransportConfig::StreamableHttp {
+                url: "http://127.0.0.1:1".to_string(),
+                bearer_token_env_var: None,
+                http_headers: None,
+                env_http_headers: None,
+            },
+            environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+            enabled: true,
+            required: false,
+            supports_parallel_tool_calls: false,
+            disabled_reason: None,
+            startup_timeout_sec: None,
+            tool_timeout_sec: None,
+            default_tools_approval_mode: None,
+            enabled_tools: None,
+            disabled_tools: None,
+            scopes: None,
+            oauth: None,
+            oauth_resource: None,
+            tools: HashMap::new(),
+        }),
+    )]);
+    let manager = McpConnectionSet::new(
+        /*previous*/ None,
+        McpPublicationGate::already_published(),
+        McpRuntimeInput {
+            config: Arc::new(crate::mcp::tests::test_mcp_config(
+                codex_home.path().to_path_buf(),
+            )),
+            startup_reconnect_policy,
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            mcp_servers,
+            submit_id: String::new(),
+            tx_event: None,
+            startup_cancellation_token: cancel_token.clone(),
+            runtime_context: McpRuntimeContext::new(
+                Arc::new(environment_manager_without_environments()),
+                PathBuf::from("/tmp"),
+            ),
+            codex_apps_tools_cache: ConnectorRuntimeManager::<ToolInfo>::default(),
+            tool_catalog_cache: McpToolCatalogCache::default(),
+            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
+            ),
+            supports_openai_form_elicitation: false,
+            auth: None,
+            codex_apps_auth: None,
+            elicitation_reviewer: None,
+            elicitation_lifecycle: None,
+        },
+        ElicitationRequestRouter::default(),
+    )
+    .await;
+    let configured = manager
+        .test_client(CODEX_APPS_MCP_SERVER_NAME)
+        .startup_reconnect
+        .is_some();
+    cancel_token.cancel();
+    configured
+}
+
+#[tokio::test]
+async fn startup_reconnect_policy_gates_codex_apps_background_reconnect() {
+    assert!(
+        codex_apps_startup_reconnect_is_configured(
+            McpStartupReconnectPolicy::ReconnectInBackground
+        )
+        .await,
+        "long-lived runtimes must keep recovering a failed Codex Apps startup"
+    );
+    assert!(
+        !codex_apps_startup_reconnect_is_configured(McpStartupReconnectPolicy::FailureIsFinal)
+            .await,
+        "one-shot runtimes must not leave a reconnect behind"
+    );
+}
+
 #[tokio::test]
 async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
     let codex_home = tempdir().expect("tempdir");
@@ -2285,6 +2431,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
             config: Arc::new(crate::mcp::tests::test_mcp_config(
                 codex_home.path().to_path_buf(),
             )),
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers,
@@ -2601,6 +2748,7 @@ async fn reconcile_reusable_server(
             config: Arc::new(crate::mcp::tests::test_mcp_config(
                 codex_home.path().to_path_buf(),
             )),
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers: HashMap::from([(

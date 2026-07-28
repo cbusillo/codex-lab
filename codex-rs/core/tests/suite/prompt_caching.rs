@@ -201,6 +201,9 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
     };
     expected_tools_names.extend([
         "update_plan",
+        "auto_review_disposition",
+        "code_bridge",
+        "browser",
         "request_user_input",
         "apply_patch",
         "view_image",

@@ -670,6 +670,12 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadItemsListResponse,
     },
+    #[experimental("thread/turns/items/list")]
+    ThreadTurnsItemsList => "thread/turns/items/list" {
+        params: v2::ThreadTurnsItemsListParams,
+        serialization: None,
+        response: v2::ThreadTurnsItemsListResponse,
+    },
     /// Append raw Responses API items to the thread history without starting a user turn.
     ThreadInjectItems => "thread/inject_items" {
         params: v2::ThreadInjectItemsParams,
@@ -885,6 +891,26 @@ client_request_definitions! {
         params: v2::ReviewStartParams,
         serialization: thread_id(params.thread_id),
         response: v2::ReviewStartResponse,
+    },
+    BackgroundAutoReviewControl => "review/background/control" {
+        params: v2::BackgroundAutoReviewControlParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::BackgroundAutoReviewControlResponse,
+    },
+    AutoReviewSummaryRead => "review/summary/read" {
+        params: v2::AutoReviewSummaryReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutoReviewSummaryReadResponse,
+    },
+    AutoReviewFindingDetailRead => "review/findingDetail/read" {
+        params: v2::AutoReviewFindingDetailReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutoReviewFindingDetailReadResponse,
+    },
+    AutoReviewDispositionWrite => "review/disposition/write" {
+        params: v2::AutoReviewDispositionWriteParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutoReviewDispositionWriteResponse,
     },
 
     ModelList => "model/list" {
@@ -1717,6 +1743,8 @@ server_notification_definitions! {
     ThreadSettingsUpdated => "thread/settings/updated" (v2::ThreadSettingsUpdatedNotification),
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
     TurnStarted => "turn/started" (v2::TurnStartedNotification),
+    ProjectValidationCompleted => "validation/completed" (v2::ProjectValidationCompletedNotification),
+    BackgroundAutoReviewStatusChanged => "review/backgroundStatus/changed" (v2::BackgroundAutoReviewStatusChangedNotification),
     HookStarted => "hook/started" (v2::HookStartedNotification),
     TurnCompleted => "turn/completed" (v2::TurnCompletedNotification),
     HookCompleted => "hook/completed" (v2::HookCompletedNotification),
@@ -2832,6 +2860,7 @@ mod tests {
                     cwd: cwd.clone(),
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
+                    session_provenance: None,
                     can_accept_direct_input: None,
                     thread_source: None,
                     agent_nickname: None,
@@ -2889,6 +2918,7 @@ mod tests {
                         "source": "exec",
                         "canAcceptDirectInput": null,
                         "threadSource": null,
+                        "sessionProvenance": null,
                         "agentNickname": null,
                         "agentRole": null,
                         "gitInfo": null,
@@ -3000,6 +3030,59 @@ mod tests {
                 "params": {
                     "type": "chatgpt",
                     "appBrand": null
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    /// Adding an account must not revoke and remove the account already stored. The TUI account
+    /// pane requests that by setting `preserveExistingAccount`, so the flag has to survive
+    /// serialization: omitting it is what makes the server take the revoke-and-remove path.
+    /// `codex_login::server::tests::persist_tokens_async_preserves_previous_account_when_adding_account`
+    /// pins what the server then does with it.
+    #[test]
+    fn serialize_account_login_chatgpt_preserves_existing_account() -> Result<()> {
+        let request = ClientRequest::LoginAccount {
+            request_id: RequestId::Integer(3),
+            params: v2::LoginAccountParams::Chatgpt {
+                app_brand: None,
+                codex_streamlined_login: false,
+                use_hosted_login_success_page: false,
+                preserve_existing_account: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "account/login/start",
+                "id": 3,
+                "params": {
+                    "type": "chatgpt",
+                    "appBrand": null,
+                    "preserveExistingAccount": true
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_login_chatgpt_device_code_preserves_existing_account() -> Result<()> {
+        let request = ClientRequest::LoginAccount {
+            request_id: RequestId::Integer(4),
+            params: v2::LoginAccountParams::ChatgptDeviceCode {
+                preserve_existing_account: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "account/login/start",
+                "id": 4,
+                "params": {
+                    "type": "chatgptDeviceCode",
+                    "preserveExistingAccount": true
                 }
             }),
             serde_json::to_value(&request)?,

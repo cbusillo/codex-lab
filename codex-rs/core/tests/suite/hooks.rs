@@ -4727,7 +4727,7 @@ async fn post_tool_use_blocks_when_exec_session_completes_via_write_stdin() -> R
     let command = "sleep 1; printf session-post-hook-output".to_string();
     let start_args = serde_json::json!({
         "cmd": command,
-        "shell": "/bin/sh",
+        "shell": "bash",
         "login": false,
         "tty": false,
         "yield_time_ms": 250,

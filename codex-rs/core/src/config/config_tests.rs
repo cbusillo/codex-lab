@@ -7521,6 +7521,7 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7558,6 +7559,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("Use the user-configured guardian policy.".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7588,6 +7590,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("   ".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7656,6 +7659,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
                     description: Some("Research role".to_string()),
                     config_file: Some(missing_path.abs()),
                     nickname_candidates: None,
+                    backend: None,
                 },
             )]),
         }),
@@ -8669,6 +8673,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
                         "  Hypatia  ".to_string(),
                         "Noether".to_string(),
                     ]),
+                    backend: None,
                 },
             )]),
         }),
@@ -8712,6 +8717,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(Vec::new()),
+                    backend: None,
                 },
             )]),
         }),
@@ -8752,6 +8758,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Hypatia".to_string(), " Hypatia ".to_string()]),
+                    backend: None,
                 },
             )]),
         }),
@@ -8792,6 +8799,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Agent <One>".to_string()]),
+                    backend: None,
                 },
             )]),
         }),

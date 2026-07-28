@@ -170,11 +170,12 @@ Example with notification opt-out:
 - `thread/resume` — reopen an existing thread by id so subsequent `turn/start` calls append to it. Accepts the same permission override rules as `thread/start`.
 - `thread/fork` — fork an existing thread into a new thread id by copying the stored history; pass an optional `lastTurnId` to copy history only through that turn, inclusive, and drop later turns from the fork. An in-progress `lastTurnId` boundary is rejected. Experimental `beforeTurnId` instead copies history strictly before the referenced turn, including when that turn is in progress, and cannot be combined with `lastTurnId`. If both boundaries are null while the source thread is mid-turn, the fork records the same interruption marker as `turn/interrupt` instead of inheriting an unmarked partial turn suffix. The returned `thread.forkedFromId` points at the source thread when known. Accepts `ephemeral: true` for an in-memory temporary fork, emits `thread/started` (including the current `thread.status`), and auto-subscribes you to turn/item events for the new thread. Experimental clients can pass `excludeTurns: true` when they plan to page fork history via `thread/turns/list` instead of receiving the full turn array immediately, or `deferGoalContinuation: true` to carry the source thread's current goal into the fork and run an explicit turn before automatic continuation resumes. Deferred goal continuation is persisted until that turn starts and cannot be combined with `ephemeral: true`. Accepts the same permission override rules as `thread/start`.
 - `thread/start`, `thread/resume`, and `thread/fork` responses include the legacy `sandbox` compatibility projection. `instructionSources` lists loaded instruction files using each source environment's native absolute path syntax, including files loaded from remote environments. Experimental clients can read `runtimeWorkspaceRoots` for the thread-scoped runtime roots and `activePermissionProfile` for the named or implicit built-in profile identity/provenance when known. Their deprecated experimental `multiAgentMode` field, and the corresponding thread setting, always report `explicitRequestOnly`; Ultra reasoning effort is the source of proactive multi-agent behavior.
-- `thread/list` — page through stored threads; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `isPinned`, `cwd`, and `searchTerm` filters. Experimental clients can use `parentThreadId` for direct spawned children or `ancestorThreadId` for spawned descendants at any depth; the two filters are mutually exclusive. Review and Guardian threads are not included because they do not participate in that spawn-edge lifecycle. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded. Subagent threads also include `parentThreadId` when the immediate parent is known.
+- `thread/list` — page through stored threads; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `isPinned`, `cwd`, and `searchTerm` filters. Use `descendantOfThreadId` for spawned descendants at any depth. Experimental clients can additionally use `parentThreadId` for direct spawned children or `ancestorThreadId` (the experimental spelling of `descendantOfThreadId`); the three filters are mutually exclusive. Review and Guardian threads are not included because they do not participate in that spawn-edge lifecycle. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded. Subagent threads also include `parentThreadId` when the immediate parent is known.
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded. For loaded threads, experimental clients can use `canAcceptDirectInput` to determine whether `turn/start` and `turn/steer` are accepted; unloaded stored threads report `null` when that capability is unavailable.
 - `thread/turns/list` — experimental; page through a stored thread’s turn history without resuming it; supports cursor-based pagination with `sortDirection`, `itemsView`, `nextCursor`, and `backwardsCursor`.
 - `thread/items/list` — experimental; page through persisted thread items without resuming the thread. Pass `turnId` to restrict results to one turn, or omit it to page items across the thread. The active thread store must support item pagination.
+- `thread/turns/items/list` — experimental compatibility route for older clients; requires `turnId` and serves the same data as `thread/items/list` with the items unwrapped (no per-item `turnId`).
 - `thread/searchOccurrences` — experimental; find literal, case-insensitive matches in visible user messages and summary-selected final assistant messages within one paginated thread.
 - `thread/metadata/update` — patch stored thread metadata in sqlite; supports updating persisted `gitInfo` fields and `isPinned`, and returns the refreshed `thread`.
 - `thread/settings/update` — experimental; queue a partial update to a loaded thread’s next-turn settings without starting a turn or adding transcript items. Omitted fields leave settings unchanged; `serviceTier: null` clears the tier; deprecated `multiAgentMode` is ignored, while Ultra reasoning effort enables proactive multi-agent behavior; `sandboxPolicy` and `permissions` cannot be combined. Returns `{}` when the update is accepted and emits `thread/settings/updated` with the full effective settings only if they actually change. `turn/start` settings overrides emit the same notification when they change the stored settings.
@@ -208,6 +209,9 @@ Example with notification opt-out:
 - `thread/realtime/appendSpeech` — append text that the realtime model should speak to the user (experimental); returns `{}`.
 - `thread/realtime/stop` — stop the active realtime session for the thread (experimental); returns `{}`.
 - `review/start` — kick off Codex’s automated reviewer for a thread; responds like `turn/start`. Inline reviews emit `item/started`/`item/completed` notifications with `enteredReviewMode` and `exitedReviewMode` items, plus a final assistant `agentMessage` containing the review. Detached reviews stream ordinary turn items on the new review thread.
+- `review/summary/read` — read bounded Background Review summaries and diagnostics for a thread, including effective budgets, observed usage, terminal reasons, and finding disposition.
+- `review/findingDetail/read` — read bounded persisted detail for a Background Review run or one stable finding id.
+- `review/disposition/write` — disposition current Background Review findings as `repair`, `defer`, or `obsolete`; obsolete requires a reason and the response returns the durable disposition record.
 - `command/exec` — run a single command under the server sandbox without starting a thread/turn (handy for utilities and validation).
 - `command/exec/write` — write base64-decoded stdin bytes to a running `command/exec` session or close stdin; returns `{}`.
 - `command/exec/resize` — resize a running PTY-backed `command/exec` session by `processId`; returns `{}`.
@@ -424,6 +428,7 @@ Like `thread/resume`, experimental clients can pass `excludeTurns: true` to `thr
 - `cwd` — restrict results to threads whose session cwd exactly matches this path, or one of these paths when an array is provided. Relative paths are resolved against the app-server process cwd before matching.
 - `useStateDbOnly` — when `true`, return from the state DB without scanning JSONL rollouts to repair metadata. Omit or pass `false` to preserve the default scan-and-repair behavior.
 - `searchTerm` — restrict results to threads whose extracted title contains this substring (case-sensitive).
+- `descendantOfThreadId` — restrict results to persisted spawned descendants of this thread at any depth, excluding the thread itself. This is the stable spelling of the experimental `ancestorThreadId` filter; it is mutually exclusive with both `parentThreadId` and `ancestorThreadId`.
 - Responses include `nextCursor` to continue in the same direction and `backwardsCursor` to pass as `cursor` when reversing `sortDirection`.
 - Responses include `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available.
 
@@ -450,7 +455,7 @@ When `nextCursor` is `null`, you’ve reached the final page.
 
 ### Example: List descendant threads
 
-Enable `capabilities.experimentalApi` during initialization, then use `thread/list` with `ancestorThreadId` to page through every spawned descendant of a thread from persisted spawn-edge state. The ancestor itself is excluded, and each result's `parentThreadId` remains its immediate parent. Use `parentThreadId` instead when only direct children are wanted; sending both filters is invalid. Review and Guardian threads are not included because they do not participate in the spawn-edge lifecycle. When `modelProviders` or `sourceKinds` is omitted, relationship-filtered requests include every provider or source kind, respectively. Explicit filters retain the ordinary `thread/list` behavior, including the interactive-only default for an empty `sourceKinds` list.
+Use `thread/list` with `descendantOfThreadId` to page through every spawned descendant of a thread from persisted spawn-edge state; `ancestorThreadId` is the equivalent experimental spelling and requires `capabilities.experimentalApi` during initialization. The ancestor itself is excluded, and each result's `parentThreadId` remains its immediate parent. Use `parentThreadId` instead when only direct children are wanted; sending more than one relationship filter is invalid. Review and Guardian threads are not included because they do not participate in the spawn-edge lifecycle. When `modelProviders` or `sourceKinds` is omitted, relationship-filtered requests include every provider or source kind, respectively. Explicit filters retain the ordinary `thread/list` behavior, including the interactive-only default for an empty `sourceKinds` list.
 
 ```json
 { "method": "thread/list", "id": 21, "params": {
@@ -581,6 +586,10 @@ unfiltered pages into turns. Omit `turnId` or pass `null` to page items across t
 cursors can be reused with or without `turnId`; the filter does not change the cursor's scope.
 Thread stores that do not implement item pagination return JSON-RPC `-32601` with message
 `thread/items/list is not supported yet`.
+
+Older clients may continue to call `thread/turns/items/list` with a required `turnId`. It delegates
+to `thread/items/list` and returns the legacy response shape, where `data` holds bare items rather
+than `{ turnId, item }` entries, because the turn is already pinned by the request.
 
 `thread/searchOccurrences` searches one paginated thread without replaying its rollout. It returns
 occurrences in chronological message order from every visible user message, including steering
@@ -1480,6 +1489,7 @@ The app-server streams JSON-RPC notifications while a turn is running. Each turn
 - `model/rerouted` — `{ threadId, turnId, fromModel, toModel, reason }` when the backend reroutes a request to a different model (for example, due to high-risk cyber safety checks).
 - `model/verification` — `{ threadId, turnId, verifications }` when the backend flags additional account verification, such as `trustedAccessForCyber`.
 - `turn/moderationMetadata` — experimental; `{ threadId, turnId, metadata }` when a first-party backend supplies turn-scoped moderation metadata for client-side presentation.
+- `validation/completed` — `{ threadId, turnId, command, commandTruncated, cwd, status, skipReason, changedFileCount, exitCode, output, outputTruncated, durationMs }` for the terminal Automatic Validation disposition. `status` is `passed`, `actionableFailure`, `configurationError`, `timedOut`, `infrastructureFailure`, `cancelled`, or `skipped`. A skipped disposition carries `skipReason` as `validationDisabled`, `noChangedFiles`, `noApplicableProvider`, `nonRootAgent`, `unchangedFingerprint`, or `unsupportedEnvironment`.
 
 `turn/started` carries no items. `turn/completed` carries only the final agent message as a summary fallback; continue consuming `item/*` notifications for the full canonical item list.
 
@@ -1501,6 +1511,7 @@ The app-server streams JSON-RPC notifications while a turn is running. Each turn
 - `enteredReviewMode` — `{id, review}` sent when the reviewer starts; `review` is a short user-facing label such as `"current changes"` or the requested target description.
 - `exitedReviewMode` — `{id, review}` emitted when the reviewer finishes; `review` is the full plain-text review (usually, overall notes plus bullet point findings).
 - `contextCompaction` — `{id}` emitted when codex compacts the conversation history. This can happen automatically.
+- `projectValidation` — `{id, command, commandTruncated, cwd, status, skipReason, changedFileCount, exitCode, output, outputTruncated, durationMs}` persists each Automatic Validation disposition in thread history, including skipped and cancelled attempts.
 - `compacted` - `{threadId, turnId}` when codex compacts the conversation history. This can happen automatically. **Deprecated:** Use `contextCompaction` instead.
 
 All items emit shared lifecycle events:

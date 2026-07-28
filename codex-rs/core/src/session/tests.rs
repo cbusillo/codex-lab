@@ -1595,6 +1595,7 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
             group: codex_config::MatcherGroup {
                 matcher: None,
                 hooks: vec![codex_config::HookHandlerConfig::Command {
+                    id: None,
                     command: "python3 /tmp/user.py".to_string(),
                     command_windows: None,
                     timeout_sec: Some(600),
@@ -3285,6 +3286,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -3899,9 +3901,17 @@ async fn thread_rollback_fails_when_turn_in_progress() {
     let initial_context = build_initial_context(&sess, &tc).await;
     sess.record_conversation_items(tc.as_ref(), &initial_context)
         .await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    )
+    .await;
     let history_before_rollback = sess.clone_history().await;
 
-    *sess.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
     handlers::thread_rollback(&sess, "sub-1".to_string(), /*num_turns*/ 1).await;
 
     let error_event = wait_for_thread_rollback_failed(&rx).await;
@@ -3912,6 +3922,7 @@ async fn thread_rollback_fails_when_turn_in_progress() {
 
     let history = sess.clone_history().await;
     assert_eq!(history_before_rollback.raw_items(), history.raw_items());
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[tokio::test]
@@ -3977,6 +3988,7 @@ async fn set_rate_limits_retains_previous_credits() {
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -4086,6 +4098,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -4342,6 +4355,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -4632,6 +4646,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -5077,6 +5092,7 @@ enabled = false
             description: None,
             config_file: Some(role_path.to_path_buf()),
             nickname_candidates: None,
+            backend: None,
         },
     );
     crate::agent::role::apply_role_to_config(&mut child_config, Some("custom"))
@@ -5370,6 +5386,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -5418,6 +5435,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         /*supports_openai_form_elicitation*/ false,
         AgentControl::default(),
         environment_manager,
+        Arc::new(ProjectValidationCoordinator::default()),
         /*inherited_environments*/ None,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -5512,6 +5530,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -5643,6 +5662,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
+        project_validation_coordinator: Arc::new(ProjectValidationCoordinator::default()),
     };
 
     let plugins_input = per_turn_config.plugins_config_input();
@@ -5780,6 +5800,7 @@ async fn make_session_with_config_and_rx(
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -5829,6 +5850,7 @@ async fn make_session_with_config_and_rx(
         /*supports_openai_form_elicitation*/ false,
         AgentControl::default(),
         environment_manager,
+        Arc::new(ProjectValidationCoordinator::default()),
         /*inherited_environments*/ None,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -5898,6 +5920,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: session_source.clone(),
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -5947,6 +5970,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         /*supports_openai_form_elicitation*/ false,
         agent_control,
         environment_manager,
+        Arc::new(ProjectValidationCoordinator::default()),
         /*inherited_environments*/ None,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -7197,6 +7221,7 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -7276,6 +7301,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -7712,6 +7738,7 @@ where
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -7842,6 +7869,7 @@ where
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
+        project_validation_coordinator: Arc::new(ProjectValidationCoordinator::default()),
     };
 
     let plugins_input = per_turn_config.plugins_config_input();
@@ -9701,6 +9729,7 @@ async fn attach_in_memory_thread_store(
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),

@@ -27,6 +27,7 @@ use crate::types::ToolSuggestConfig;
 use crate::types::Tui;
 use crate::types::UriBasedFileOpener;
 use crate::types::WindowsToml;
+use crate::validation::ValidationConfig;
 use codex_features::FeaturesToml;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
@@ -144,7 +145,7 @@ pub struct OrchestratorFeatureToml {
     pub enabled: Option<bool>,
 }
 
-/// Base config deserialized from ~/.codex/config.toml.
+/// Base config deserialized from ~/.codex-lab/config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ConfigToml {
@@ -177,6 +178,10 @@ pub struct ConfigToml {
     /// Optional policy instructions for the guardian auto-reviewer.
     #[serde(default)]
     pub auto_review: Option<AutoReviewToml>,
+
+    /// Patch-local validation policy.
+    #[serde(default)]
+    pub validation: Option<ValidationConfig>,
 
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
@@ -317,12 +322,12 @@ pub struct ConfigToml {
     pub history: Option<History>,
 
     /// Directory where Codex stores the SQLite state DB.
-    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`.
+    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_LAB_HOME`.
     pub sqlite_home: Option<AbsolutePathBuf>,
 
     /// Directory where Codex writes log files. Setting this value explicitly
     /// also enables the TUI text log in this directory.
-    /// Defaults to `$CODEX_HOME/log`.
+    /// Defaults to `$CODEX_LAB_HOME/log`.
     pub log_dir: Option<AbsolutePathBuf>,
 
     /// Debugging and reproducibility settings.
@@ -349,6 +354,11 @@ pub struct ConfigToml {
     pub model_reasoning_summary: Option<ReasoningSummary>,
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
     pub model_verbosity: Option<Verbosity>,
+
+    /// Removed reasoning-summary override retained as a no-op for
+    /// compatibility. Model capabilities now come from the model catalog.
+    #[schemars(skip)]
+    pub model_supports_reasoning_summaries: Option<bool>,
 
     /// Optional path to a JSON model catalog (applied on startup only).
     /// Per-thread `config` overrides are accepted but do not reapply this (no-ops).
@@ -564,6 +574,18 @@ pub enum ThreadStoreToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
+    /// Maximum diff size in bytes for automatic background reviews. Defaults
+    /// to 120000. Reviews whose diff exceeds this limit are recorded as
+    /// skipped rather than launched.
+    pub background_max_diff_bytes: Option<usize>,
+    /// Maximum wall-clock runtime in seconds for automatic background reviews.
+    pub background_max_elapsed_seconds: Option<u64>,
+    /// Maximum cumulative token usage for automatic background reviews.
+    pub background_max_total_tokens: Option<u64>,
+    /// Maximum serialized reviewer output size in bytes.
+    pub background_max_output_bytes: Option<usize>,
+    /// Maximum number of findings accepted from one background review.
+    pub background_max_findings: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -736,6 +758,46 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+
+    /// Optional non-Codex backend used to run agents spawned with this role.
+    pub backend: Option<AgentRoleBackendToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(deny_unknown_fields)]
+pub enum AgentRoleBackendToml {
+    ExternalCommand(ExternalCommandAgentBackendToml),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCommandProtocolToml {
+    #[default]
+    Json,
+    RawCli,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ExternalCommandAgentBackendToml {
+    /// Command to execute for each spawned external agent.
+    #[schemars(length(min = 1))]
+    pub command: String,
+    /// Protocol to communicate with the external agent.
+    #[serde(default)]
+    pub protocol: ExternalCommandProtocolToml,
+    /// Arguments passed to the command after the executable path.
+    pub args: Option<Vec<String>>,
+    /// Arguments appended when the agent is running in read-only mode.
+    pub args_read_only: Option<Vec<String>>,
+    /// Arguments appended when the agent is running in workspace-write mode.
+    pub args_write: Option<Vec<String>>,
+    /// Environment variables to set for the spawned agent.
+    pub env: Option<HashMap<String, String>>,
+    /// Maximum process runtime in milliseconds.
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

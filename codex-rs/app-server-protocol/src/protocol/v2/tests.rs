@@ -197,6 +197,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             cwd: absolute_path("tmp"),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
+            session_provenance: None,
             can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: None,
@@ -326,6 +327,59 @@ fn thread_items_list_round_trips() {
         }))
         .expect("deserialize params without turn"),
         params_without_turn
+    );
+}
+
+#[test]
+fn thread_turns_items_list_legacy_shape_round_trips() {
+    let params = ThreadTurnsItemsListParams {
+        thread_id: "thr_123".to_string(),
+        turn_id: "turn_456".to_string(),
+        cursor: Some("cursor_1".to_string()),
+        limit: Some(50),
+        sort_direction: Some(SortDirection::Asc),
+    };
+
+    assert_eq!(
+        serde_json::to_value(&params).expect("serialize legacy params"),
+        json!({
+            "threadId": "thr_123",
+            "turnId": "turn_456",
+            "cursor": "cursor_1",
+            "limit": 50,
+            "sortDirection": "asc",
+        })
+    );
+    assert_eq!(
+        ThreadItemsListParams::from(params),
+        ThreadItemsListParams {
+            thread_id: "thr_123".to_string(),
+            turn_id: Some("turn_456".to_string()),
+            cursor: Some("cursor_1".to_string()),
+            limit: Some(50),
+            sort_direction: Some(SortDirection::Asc),
+        }
+    );
+
+    // The turn is pinned by the request, so the legacy response keeps items
+    // unwrapped instead of echoing the per-item turn id.
+    let response = ThreadTurnsItemsListResponse::from(ThreadItemsListResponse {
+        data: vec![ThreadItemEntry {
+            turn_id: "turn_456".to_string(),
+            item: ThreadItem::ContextCompaction {
+                id: "item_1".to_string(),
+            },
+        }],
+        next_cursor: None,
+        backwards_cursor: Some("cursor_0".to_string()),
+    });
+    assert_eq!(
+        serde_json::to_value(response).expect("serialize legacy response"),
+        json!({
+            "data": [{"type": "contextCompaction", "id": "item_1"}],
+            "nextCursor": null,
+            "backwardsCursor": "cursor_0",
+        })
     );
 }
 
@@ -2615,6 +2669,36 @@ fn network_requirements_serializes_canonical_and_legacy_fields() {
     );
 }
 
+/// `dynamicToolCall.error` is published from the persisted core item, so
+/// historical items that recorded a failure keep reporting it.
+#[test]
+fn dynamic_tool_call_error_is_published_from_persisted_items() {
+    let persisted = serde_json::from_value::<DynamicToolCallItem>(json!({
+        "id": "dynamic-2",
+        "tool": "lookup",
+        "arguments": {},
+        "status": "failed",
+        "success": false,
+        "error": "dynamic tool call was cancelled before receiving a response",
+    }))
+    .expect("persisted dynamic tool call item");
+
+    assert_eq!(
+        ThreadItem::from(TurnItem::DynamicToolCall(persisted)),
+        ThreadItem::DynamicToolCall {
+            id: "dynamic-2".to_string(),
+            namespace: None,
+            tool: "lookup".to_string(),
+            arguments: json!({}),
+            status: DynamicToolCallStatus::Failed,
+            content_items: None,
+            success: Some(false),
+            error: Some("dynamic tool call was cancelled before receiving a response".to_string()),
+            duration_ms: None,
+        }
+    );
+}
+
 #[test]
 fn core_turn_item_into_thread_item_converts_supported_variants() {
     let user_item = TurnItem::UserMessage(UserMessageItem {
@@ -2843,6 +2927,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                 },
             ]),
             success: Some(true),
+            error: None,
             duration_ms: Some(5),
         }
     );

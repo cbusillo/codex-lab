@@ -216,6 +216,7 @@ async fn config_summary_entries_include_runtime_workspace_roots() {
         parent_thread_id: None,
         thread_source: None,
         thread_name: None,
+        history_mode: codex_protocol::protocol::ThreadHistoryMode::default(),
         model: "gpt-5.4".to_string(),
         model_provider_id: config.model_provider_id.clone(),
         service_tier: None,
@@ -516,4 +517,209 @@ fn turn_interrupted_clears_stale_final_message() {
     assert_eq!(processor.final_message, None);
     assert!(!processor.final_message_rendered);
     assert!(!processor.emit_final_message_on_shutdown);
+}
+
+/// The human renderer is the only project-validation surface `codex exec` shows
+/// by default, and it is where a mislabeled status or a swallowed failure log
+/// would actually reach the user. These tests drive the real
+/// `process_server_notification` path and read back what it wrote to stderr.
+#[cfg(unix)]
+mod project_validation_rendering {
+    use super::*;
+    use crate::event_processor::CodexStatus;
+    use ::pretty_assertions::assert_eq;
+    use codex_app_server_protocol::ProjectValidationCompletedNotification;
+    use codex_app_server_protocol::ProjectValidationSkipReason;
+    use codex_app_server_protocol::ProjectValidationStatus;
+    use std::io::Read;
+
+    fn plain_processor() -> EventProcessorWithHumanOutput {
+        EventProcessorWithHumanOutput {
+            bold: Style::new(),
+            cyan: Style::new(),
+            dimmed: Style::new(),
+            green: Style::new(),
+            italic: Style::new(),
+            magenta: Style::new(),
+            red: Style::new(),
+            yellow: Style::new(),
+            show_agent_reasoning: true,
+            show_raw_agent_reasoning: false,
+            last_message_path: None,
+            final_message: None,
+            final_message_rendered: false,
+            emit_final_message_on_shutdown: false,
+            last_total_token_usage: None,
+        }
+    }
+
+    fn notification(
+        status: ProjectValidationStatus,
+        skip_reason: Option<ProjectValidationSkipReason>,
+    ) -> ProjectValidationCompletedNotification {
+        ProjectValidationCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: None,
+            command: vec!["just".to_string(), "test".to_string()],
+            command_truncated: false,
+            cwd: None,
+            status,
+            skip_reason,
+            changed_file_count: None,
+            exit_code: Some(3),
+            output: "cargo test failed".to_string(),
+            output_truncated: false,
+            duration_ms: 12,
+        }
+    }
+
+    /// Renders one notification with stderr redirected to a pipe so the test can
+    /// assert on exactly what the user sees. Redirection is process-wide, which
+    /// is safe under the repo's `just test` (nextest) runner because it executes
+    /// each test in its own process.
+    fn render(notification: ProjectValidationCompletedNotification) -> (Vec<String>, CodexStatus) {
+        let mut pipe_fds = [0; 2];
+        // SAFETY: `pipe` writes two descriptors into a two-element array.
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let [read_fd, write_fd] = pipe_fds;
+        // SAFETY: stderr is a valid descriptor for the lifetime of the process.
+        let saved_stderr = unsafe { libc::dup(libc::STDERR_FILENO) };
+        assert!(saved_stderr >= 0);
+        // SAFETY: both descriptors are open and owned by this test.
+        assert!(unsafe { libc::dup2(write_fd, libc::STDERR_FILENO) } >= 0);
+        // SAFETY: the write end now lives on as the duplicated stderr.
+        unsafe { libc::close(write_fd) };
+
+        let status = plain_processor().process_server_notification(
+            ServerNotification::ProjectValidationCompleted(notification),
+        );
+
+        // Restoring stderr drops the last writer so the read below sees EOF.
+        // SAFETY: `saved_stderr` is the descriptor duplicated above.
+        assert!(unsafe { libc::dup2(saved_stderr, libc::STDERR_FILENO) } >= 0);
+        // SAFETY: the saved copy is no longer needed.
+        unsafe { libc::close(saved_stderr) };
+
+        // SAFETY: `read_fd` is an owned pipe descriptor, transferred to the File.
+        let mut reader = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(read_fd) };
+        let mut rendered = String::new();
+        reader.read_to_string(&mut rendered).expect("read stderr");
+        (
+            rendered.lines().map(str::to_string).collect::<Vec<_>>(),
+            status,
+        )
+    }
+
+    #[test]
+    fn failure_statuses_render_their_label_and_replay_the_output() {
+        let cases = [
+            (
+                ProjectValidationStatus::ActionableFailure,
+                "validation: failed with exit code 3 just test",
+            ),
+            (
+                ProjectValidationStatus::ConfigurationError,
+                "validation: configuration error just test",
+            ),
+            (
+                ProjectValidationStatus::TimedOut,
+                "validation: timed out just test",
+            ),
+            (
+                ProjectValidationStatus::InfrastructureFailure,
+                "validation: infrastructure failure just test",
+            ),
+            (
+                ProjectValidationStatus::Cancelled,
+                "validation: cancelled just test",
+            ),
+        ];
+
+        for (status, expected_headline) in cases {
+            let (lines, codex_status) = render(notification(status, /*skip_reason*/ None));
+
+            assert_eq!(
+                lines,
+                vec![
+                    expected_headline.to_string(),
+                    "cargo test failed".to_string()
+                ],
+                "unexpected rendering for {status:?}"
+            );
+            assert_eq!(codex_status, CodexStatus::Running);
+        }
+    }
+
+    /// A passing or skipped validation must not dump the command output into the
+    /// transcript; only the one-line headline is worth the user's attention.
+    #[test]
+    fn passed_and_skipped_statuses_suppress_the_command_output() {
+        let (passed, _) = render(notification(
+            ProjectValidationStatus::Passed,
+            /*skip_reason*/ None,
+        ));
+        assert_eq!(passed, vec!["validation: passed just test".to_string()]);
+
+        let (skipped, _) = render(notification(
+            ProjectValidationStatus::Skipped,
+            /*skip_reason*/ None,
+        ));
+        assert_eq!(skipped, vec!["validation: skipped just test".to_string()]);
+    }
+
+    #[test]
+    fn every_skip_reason_renders_its_own_label() {
+        let cases = [
+            (
+                ProjectValidationSkipReason::ValidationDisabled,
+                "validation: skipped: validation disabled just test",
+            ),
+            (
+                ProjectValidationSkipReason::NoChangedFiles,
+                "validation: skipped: no changed files just test",
+            ),
+            (
+                ProjectValidationSkipReason::NoApplicableProvider,
+                "validation: skipped: no applicable provider just test",
+            ),
+            (
+                ProjectValidationSkipReason::NonRootAgent,
+                "validation: skipped: non-root agent just test",
+            ),
+            (
+                ProjectValidationSkipReason::UnchangedFingerprint,
+                "validation: skipped: unchanged worktree just test",
+            ),
+            (
+                ProjectValidationSkipReason::UnsupportedEnvironment,
+                "validation: skipped: unsupported environment just test",
+            ),
+        ];
+
+        for (skip_reason, expected) in cases {
+            let (lines, _) = render(notification(
+                ProjectValidationStatus::Skipped,
+                Some(skip_reason),
+            ));
+
+            assert_eq!(lines, vec![expected.to_string()]);
+        }
+    }
+
+    /// An unknown validation command still has to report its status; the command
+    /// suffix is simply dropped rather than rendering a dangling separator.
+    #[test]
+    fn empty_command_renders_the_status_alone() {
+        let (lines, _) = render(ProjectValidationCompletedNotification {
+            command: Vec::new(),
+            output: String::new(),
+            ..notification(
+                ProjectValidationStatus::ConfigurationError,
+                /*skip_reason*/ None,
+            )
+        });
+
+        assert_eq!(lines, vec!["validation: configuration error".to_string()]);
+    }
 }

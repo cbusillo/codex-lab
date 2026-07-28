@@ -113,6 +113,53 @@ fn register_session_root_skips_threads_with_explicit_parent() {
     assert_eq!(control.state.agent_id_for_path(&AgentPath::root()), None);
 }
 
+#[tokio::test]
+async fn interrupt_agent_cancels_and_releases_external_agent() {
+    let harness = AgentControlHarness::new().await;
+    let agent_id = ThreadId::new();
+    let backend = crate::config::ExternalCommandAgentBackendConfig {
+        command: "/bin/true".to_string(),
+        ..Default::default()
+    };
+    let provider = ExternalAgentProviderProvenance::new(
+        Some("fixture_external"),
+        &backend,
+        harness.config.cwd.as_path(),
+        /*is_read_only*/ true,
+        /*cli_version*/ None,
+    );
+    let cancellation_token = harness.control.state.register_external_agent(
+        agent_id,
+        ThreadId::new(),
+        AgentStatus::Running,
+        provider,
+    );
+
+    harness
+        .control
+        .interrupt_agent(agent_id)
+        .await
+        .expect("running external agent interrupt should succeed");
+    assert!(cancellation_token.is_cancelled());
+    assert_eq!(
+        harness.control.get_status(agent_id).await,
+        AgentStatus::Running
+    );
+
+    harness
+        .control
+        .update_external_agent_status(agent_id, AgentStatus::Completed(Some("done".to_string())));
+    harness
+        .control
+        .interrupt_agent(agent_id)
+        .await
+        .expect("completed external agent cleanup should succeed");
+    assert_eq!(
+        harness.control.get_status(agent_id).await,
+        AgentStatus::NotFound
+    );
+}
+
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,
@@ -307,6 +354,14 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
     // CI can take several seconds to schedule the detached completion watcher,
     // especially on slower Windows runners.
     timeout(Duration::from_secs(10), wait).await.is_ok()
+}
+
+fn child_progress_timeout() -> Duration {
+    if cfg!(windows) {
+        Duration::from_secs(15)
+    } else {
+        Duration::from_secs(5)
+    }
 }
 
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
@@ -2587,6 +2642,7 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
             description: Some("Research role".to_string()),
             config_file: None,
             nickname_candidates: Some(vec!["Atlas".to_string()]),
+            backend: None,
         },
     );
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;
@@ -2688,7 +2744,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         .await
         .expect("status subscription should succeed");
     if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
-        timeout(Duration::from_secs(5), async {
+        timeout(child_progress_timeout(), async {
             loop {
                 status_rx
                     .changed()
@@ -2707,7 +2763,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         .session_source
         .get_nickname()
         .expect("spawned sub-agent should have a nickname");
-    timeout(Duration::from_secs(5), async {
+    timeout(child_progress_timeout(), async {
         loop {
             if let Ok(stored_thread) = thread_store
                 .read_thread(ReadThreadParams {

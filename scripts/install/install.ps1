@@ -871,10 +871,15 @@ switch ($architecture) {
     }
 }
 
-$codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-    Join-Path $env:USERPROFILE ".codex"
+# Must match install.sh and the runtime home resolution in
+# `codex-rs/utils/home-dir`: Codex Lab reads `CODEX_LAB_HOME` and otherwise
+# defaults to `~/.codex-lab`. Legacy `CODEX_HOME` is deliberately not honored,
+# because the runtime ignores it entirely -- honoring it here would install the
+# standalone package into a directory Codex Lab never reads.
+$codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_LAB_HOME)) {
+    Join-Path $env:USERPROFILE ".codex-lab"
 } else {
-    $env:CODEX_HOME
+    $env:CODEX_LAB_HOME
 }
 $standaloneRoot = Join-Path $codexHome "packages\standalone"
 $releasesDir = Join-Path $standaloneRoot "releases"

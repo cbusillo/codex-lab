@@ -380,7 +380,7 @@ mod tests {
         record_rate_limit_snapshot(
             temp.path(),
             "acct/one",
-            snapshot(reset_at_seconds, 42.0),
+            snapshot(reset_at_seconds, /*used_percent*/ 42.0),
             now,
         )
         .expect("record snapshot");
@@ -398,8 +398,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
         let reset_at = now + Duration::hours(2);
-        record_rate_limit_snapshot(temp.path(), "acct", snapshot(3600, 1.0), now)
-            .expect("record snapshot");
+        record_rate_limit_snapshot(
+            temp.path(),
+            "acct",
+            snapshot(/*resets_in_seconds*/ 3600, /*used_percent*/ 1.0),
+            now,
+        )
+        .expect("record snapshot");
         record_usage_limit_hint(
             temp.path(),
             "acct",

@@ -125,6 +125,7 @@ async fn get_conversation_summary_by_thread_id_reads_pathless_store_thread() -> 
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Cli,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -164,6 +165,7 @@ async fn get_conversation_summary_by_thread_id_reads_pathless_store_thread() -> 
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {

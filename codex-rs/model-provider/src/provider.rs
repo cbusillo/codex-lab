@@ -418,8 +418,11 @@ mod tests {
         }
     }
 
-    fn test_codex_home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("codex-model-provider-test-{}", std::process::id()))
+    /// Per-test codex home. A PID-derived directory is shared by every test in
+    /// the binary, so concurrent model-catalog caches collide; keep each test
+    /// on its own temp dir instead.
+    fn test_codex_home() -> tempfile::TempDir {
+        tempfile::tempdir().expect("temp codex home should be creatable")
     }
 
     fn provider_for(base_url: String) -> ModelProviderInfo {
@@ -690,8 +693,11 @@ mod tests {
             ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
             /*auth_manager*/ None,
         );
-        let manager =
-            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+        let codex_home = test_codex_home();
+        let manager = provider.models_manager(
+            codex_home.path().to_path_buf(),
+            /*config_model_catalog*/ None,
+        );
         let uncached_manager =
             provider.models_manager_without_cache(/*config_model_catalog*/ None);
 
@@ -768,8 +774,9 @@ mod tests {
             ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
             /*auth_manager*/ None,
         );
+        let codex_home = test_codex_home();
         let manager = provider.models_manager(
-            test_codex_home(),
+            codex_home.path().to_path_buf(),
             Some(ModelsResponse {
                 models: vec![configured_model],
             }),
@@ -820,8 +827,11 @@ mod tests {
             )),
         );
 
-        let manager =
-            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+        let codex_home = test_codex_home();
+        let manager = provider.models_manager(
+            codex_home.path().to_path_buf(),
+            /*config_model_catalog*/ None,
+        );
         let catalog = manager
             .raw_model_catalog(
                 RefreshStrategy::Online,

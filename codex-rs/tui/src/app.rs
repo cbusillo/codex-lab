@@ -90,6 +90,9 @@ use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AutoReviewSummaryReadParams;
+use codex_app_server_protocol::AutoReviewSummaryReadResponse;
+use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 use codex_app_server_protocol::ConfigBatchWriteParams;
@@ -181,6 +184,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
@@ -200,6 +204,17 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::task::JoinHandle;
 use toml::Value as TomlValue;
 use uuid::Uuid;
+
+fn background_auto_review_status_has_summary(status: BackgroundAutoReviewStatus) -> bool {
+    matches!(
+        status,
+        BackgroundAutoReviewStatus::Completed
+            | BackgroundAutoReviewStatus::Failed
+            | BackgroundAutoReviewStatus::Cancelled
+            | BackgroundAutoReviewStatus::Superseded
+            | BackgroundAutoReviewStatus::Skipped
+    )
+}
 mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_status_feed;
@@ -584,6 +599,7 @@ pub(crate) struct App {
     primary_session_configured: Option<ThreadSessionState>,
     pending_primary_events: VecDeque<ThreadBufferedEvent>,
     pending_app_server_requests: PendingAppServerRequests,
+    pending_auto_review_summary_fetches: HashSet<(ThreadId, String)>,
     pending_startup_thread_start: bool,
     /// Invalidates in-flight full rate-limit reads when a newer rolling hard stop arrives.
     rate_limit_hard_stop_generation: u64,
@@ -1129,6 +1145,7 @@ See the Codex keymap documentation for supported actions and examples."
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
+            pending_auto_review_summary_fetches: HashSet::new(),
             pending_startup_thread_start,
             rate_limit_hard_stop_generation: 0,
             pending_plugin_enabled_writes: HashMap::new(),

@@ -36,6 +36,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RealtimeConversationListVoicesResponseEvent;
 use codex_protocol::protocol::RealtimeVoicesList;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadMemoryMode;
@@ -54,6 +55,7 @@ use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -437,6 +439,24 @@ pub async fn compact(sess: &Arc<Session>, sub_id: String) {
         .await;
 }
 
+async fn wait_for_turn_teardown_before_rollback(sess: &Session) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 1);
+    loop {
+        {
+            let active_turn = sess.active_turn.lock().await;
+            match active_turn.as_ref() {
+                None => return true,
+                Some(active_turn) if active_turn.task.is_some() => return false,
+                Some(_) => {}
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+    }
+}
+
 pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32) {
     if num_turns == 0 {
         sess.send_event_raw(Event {
@@ -450,8 +470,7 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         return;
     }
 
-    let has_active_turn = { sess.active_turn.lock().await.is_some() };
-    if has_active_turn {
+    if !wait_for_turn_teardown_before_rollback(sess).await {
         sess.send_event_raw(Event {
             id: sub_id,
             msg: EventMsg::Error(ErrorEvent {
@@ -579,6 +598,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
     }
     let _ = sess.conversation.shutdown().await;
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    sess.cancel_background_auto_review().await;
     sess.services
         .unified_exec_manager
         .terminate_all_processes()
@@ -660,6 +680,7 @@ pub async fn review(
     config: &Arc<Config>,
     sub_id: String,
     review_request: ReviewRequest,
+    persistence: Option<ReviewPersistence>,
 ) {
     let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
     sess.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
@@ -673,6 +694,7 @@ pub async fn review(
                 turn_context.clone(),
                 sub_id,
                 resolved,
+                persistence,
             )
             .await;
         }
@@ -817,8 +839,20 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::Shutdown => shutdown(&sess, sub.id.clone()).await,
-                Op::Review { review_request } => {
-                    review(&sess, &config, sub.id.clone(), review_request).await;
+                Op::Review {
+                    review_request,
+                    persistence,
+                } => {
+                    review(&sess, &config, sub.id.clone(), review_request, persistence).await;
+                    false
+                }
+                Op::BackgroundAutoReviewControl {
+                    run_id,
+                    action,
+                    reason,
+                } => {
+                    sess.control_background_auto_review(&run_id, action, reason)
+                        .await;
                     false
                 }
                 Op::ApproveGuardianDeniedAction { event } => {

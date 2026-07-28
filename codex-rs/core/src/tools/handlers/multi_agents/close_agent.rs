@@ -125,7 +125,7 @@ async fn handle_close_agent(
     result?;
 
     Ok(CloseAgentResult {
-        previous_status: status,
+        previous_status: crate::session_prefix::bounded_status(&status),
     })
 }
 

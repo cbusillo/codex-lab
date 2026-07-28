@@ -1,0 +1,58 @@
+name: full-ci
+
+# This is the single entrypoint for comprehensive verification that is
+# intentionally outside the merge-blocking suite. Keep it scheduled or manual
+# so ordinary main pushes do not queue the full cross-platform fan-out.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"
+
+concurrency:
+  group: full-ci::${{ github.workflow }}::${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Keep reusable workflow calls alphabetized. Each child retains its own
+  # workflow_dispatch trigger so maintainers can rerun flaky suites directly.
+  bazel:
+    name: Bazel
+    uses: ./.github/workflows/bazel.yml
+    secrets: inherit
+
+  rust-ci-full:
+    name: rust-ci-full
+    uses: ./.github/workflows/rust-ci-full.yml
+    secrets: inherit
+
+  sdk-integration:
+    name: sdk-integration
+    uses: ./.github/workflows/sdk-integration.yml
+    secrets: inherit
+
+  v8-canary:
+    name: v8-canary
+    uses: ./.github/workflows/v8-canary.yml
+    secrets: inherit
+
+  results:
+    name: Full CI results
+    needs:
+      - bazel
+      - rust-ci-full
+      - sdk-integration
+      - v8-canary
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      # Scheduled runs use the default branch and manual runs use the selected
+      # ref, so this helper comes from the revision that defined the workflow.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require successful dependencies
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/check_ci_results.py

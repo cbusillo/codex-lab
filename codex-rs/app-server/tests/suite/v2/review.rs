@@ -5,6 +5,24 @@ use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_shell_command_sse_response;
+use codex_app_server_protocol::AutoReviewDetailKind;
+use codex_app_server_protocol::AutoReviewDispositionAction;
+use codex_app_server_protocol::AutoReviewDispositionActor;
+use codex_app_server_protocol::AutoReviewDispositionWriteParams;
+use codex_app_server_protocol::AutoReviewDispositionWriteResponse;
+use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
+use codex_app_server_protocol::AutoReviewFindingDetailReadResponse;
+use codex_app_server_protocol::AutoReviewFindingDisposition;
+use codex_app_server_protocol::AutoReviewFreshness;
+use codex_app_server_protocol::AutoReviewRunSource;
+use codex_app_server_protocol::AutoReviewRunSummary;
+use codex_app_server_protocol::AutoReviewSummaryReadParams;
+use codex_app_server_protocol::AutoReviewSummaryReadResponse;
+use codex_app_server_protocol::AutoReviewUsage;
+use codex_app_server_protocol::BackgroundAutoReviewControlAction;
+use codex_app_server_protocol::BackgroundAutoReviewControlParams;
+use codex_app_server_protocol::BackgroundAutoReviewControlReason;
+use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -27,17 +45,70 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_auto_review::AutoReviewRun;
+use codex_auto_review::AutoReviewRunFreshness;
+use codex_auto_review::AutoReviewRunSource as CoreAutoReviewRunSource;
+use codex_auto_review::AutoReviewRunStatus;
+use codex_auto_review::AutoReviewRunTarget;
+use codex_auto_review::AutoReviewStore;
+use codex_auto_review::DETAIL_MAX_BYTES;
+use codex_auto_review::SCHEMA_VERSION;
+use codex_auto_review::finding_digests;
 use codex_features::Feature;
+use codex_protocol::protocol::ReviewCodeLocation;
+use codex_protocol::protocol::ReviewFinding;
+use codex_protocol::protocol::ReviewLineRange;
+use codex_protocol::protocol::ReviewOutputEvent;
+use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
 use codex_skills::system_cache_root_dir;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::path::Path;
+use std::process::Command;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 const COLLIDING_REVIEW_SKILL_MARKER: &str = "COLLIDING_REVIEW_SKILL_MARKER";
+
+#[tokio::test]
+async fn background_auto_review_control_rejects_empty_run_id() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let thread_id = start_default_thread(&mut mcp).await?;
+
+    let request_id = mcp
+        .send_background_auto_review_control_request(BackgroundAutoReviewControlParams {
+            thread_id,
+            run_id: "  \t  ".to_string(),
+            action: BackgroundAutoReviewControlAction::Cancel,
+            reason: BackgroundAutoReviewControlReason::UserRequested,
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error.error.message.contains("runId must not be empty"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn review_start_rejects_detached_delivery_for_paginated_parent() -> Result<()> {
@@ -523,6 +594,250 @@ async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
         error.error.message
     );
 
+    Ok(())
+}
+
+/// Clients read Background Review results and write dispositions purely over
+/// the v2 RPC surface, so summary/read, findingDetail/read, and
+/// disposition/write must agree with each other over one persisted run.
+#[tokio::test]
+async fn auto_review_summary_detail_and_disposition_round_trip_over_persisted_run() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let workspace = TempDir::new()?;
+    // Canonicalize so the seeded run target matches the path the server records.
+    let workspace_path =
+        AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(workspace.path())?)?
+            .into_path_buf();
+    init_git_repo(&workspace_path)?;
+    let head_sha = git_head_sha(&workspace_path)?;
+
+    // Auto-env would relocate the thread's local environment to its own
+    // workspace, which is the path Background Review scopes its store to.
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                model: Some("mock-model".to_string()),
+                cwd: Some(workspace_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        })
+        .await?;
+    let thread_id = thread.id;
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), &workspace_path);
+    seed_completed_background_review(&store, &workspace_path, &head_sha)?;
+
+    let summary: AutoReviewSummaryReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams {
+                thread_id: thread_id.clone(),
+            },
+        })
+        .await?;
+    let current = summary.current.clone().expect("current run summary");
+    assert_eq!(summary.latest, Some(current.clone()));
+    assert_eq!(
+        current,
+        AutoReviewRunSummary {
+            run_id: SEEDED_RUN_ID.to_string(),
+            status: BackgroundAutoReviewStatus::Completed,
+            source: AutoReviewRunSource::Background,
+            freshness: AutoReviewFreshness::Current,
+            started_at: SEEDED_STARTED_AT,
+            completed_at: Some(SEEDED_COMPLETED_AT),
+            model: Some("mock-model".to_string()),
+            error_summary: None,
+            rendered_findings: 1,
+            omitted_findings: 0,
+            truncated: false,
+            content: "[P1] f1: Guard the new branch (/tmp/feature.rs:1-3)".to_string(),
+            budget: None,
+            usage: AutoReviewUsage::default(),
+            terminal_reason: None,
+            finding_disposition: None,
+        }
+    );
+
+    let detail: AutoReviewFindingDetailReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewFindingDetailRead {
+            request_id,
+            params: AutoReviewFindingDetailReadParams {
+                thread_id: thread_id.clone(),
+                run_id: SEEDED_RUN_ID.to_string(),
+                finding_id: Some("f1".to_string()),
+                max_bytes: None,
+            },
+        })
+        .await?;
+    let expected_content = "finding_id=f1 priority=1 confidence=0.9 location=/tmp/feature.rs:1-3\ntitle: Guard the new branch\nbody:\nThe new branch is unreachable without a guard.";
+    assert_eq!(
+        detail,
+        AutoReviewFindingDetailReadResponse {
+            run_id: SEEDED_RUN_ID.to_string(),
+            detail_kind: AutoReviewDetailKind::Finding,
+            finding_id: Some("f1".to_string()),
+            finding_count: 1,
+            omitted_findings: 0,
+            bytes: expected_content.len(),
+            original_bytes: expected_content.len(),
+            max_bytes: DETAIL_MAX_BYTES,
+            truncated: false,
+            content: expected_content.to_string(),
+        }
+    );
+
+    let write: AutoReviewDispositionWriteResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewDispositionWrite {
+            request_id,
+            params: AutoReviewDispositionWriteParams {
+                thread_id: thread_id.clone(),
+                run_id: SEEDED_RUN_ID.to_string(),
+                action: AutoReviewDispositionAction::Defer,
+                reason: Some("  handled in a follow-up  ".to_string()),
+            },
+        })
+        .await?;
+    assert_eq!(write.run_id, SEEDED_RUN_ID);
+    assert_eq!(
+        write.finding_disposition.disposition,
+        AutoReviewFindingDisposition::Deferred
+    );
+    assert_eq!(
+        write.finding_disposition.actor,
+        AutoReviewDispositionActor::User
+    );
+    assert_eq!(
+        write.finding_disposition.reason.as_deref(),
+        Some("handled in a follow-up")
+    );
+
+    // The write must be durable and visible to the next read.
+    let summary: AutoReviewSummaryReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams { thread_id },
+        })
+        .await?;
+    assert_eq!(
+        summary.current.and_then(|run| run.finding_disposition),
+        Some(write.finding_disposition)
+    );
+
+    Ok(())
+}
+
+const SEEDED_RUN_ID: &str = "seeded-background-review";
+const SEEDED_STARTED_AT: i64 = 1_700_000_000;
+const SEEDED_COMPLETED_AT: i64 = 1_700_000_060;
+
+fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git").args(args).current_dir(cwd).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+fn init_git_repo(path: &Path) -> Result<()> {
+    for args in [
+        &["init", "--quiet", "-b", "main"][..],
+        &["config", "user.email", "background-review@example.invalid"][..],
+        &["config", "user.name", "Background Review"][..],
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "baseline",
+        ][..],
+    ] {
+        run_git(path, args)?;
+    }
+    Ok(())
+}
+
+fn git_head_sha(path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Persists a completed background review whose target matches what the
+/// app-server computes for a clean single-commit workspace repository.
+fn seed_completed_background_review(
+    store: &AutoReviewStore,
+    cwd: &Path,
+    head_sha: &str,
+) -> Result<()> {
+    let output = ReviewOutputEvent {
+        findings: vec![ReviewFinding {
+            title: "Guard the new branch".to_string(),
+            body: "The new branch is unreachable without a guard.".to_string(),
+            confidence_score: 0.9,
+            priority: 1,
+            code_location: ReviewCodeLocation {
+                absolute_file_path: std::path::PathBuf::from("/tmp/feature.rs"),
+                line_range: ReviewLineRange { start: 1, end: 3 },
+            },
+        }],
+        overall_correctness: "needs attention".to_string(),
+        overall_explanation: "One finding needs attention.".to_string(),
+        overall_confidence_score: 0.8,
+    };
+    let run = AutoReviewRun {
+        schema_version: SCHEMA_VERSION,
+        run_id: SEEDED_RUN_ID.to_string(),
+        status: AutoReviewRunStatus::Completed,
+        freshness: AutoReviewRunFreshness::Current,
+        source: CoreAutoReviewRunSource::Background,
+        target: AutoReviewRunTarget {
+            branch: Some("main".to_string()),
+            head_sha: Some(head_sha.to_string()),
+            base_sha: None,
+            worktree_path: Some(cwd.to_path_buf()),
+            snapshot_epoch: None,
+            snapshot_commit: Some(head_sha.to_string()),
+            head_at_launch: Some(head_sha.to_string()),
+            worktree_diff_fingerprint: None,
+        },
+        review_target: CoreReviewTarget::UncommittedChanges,
+        started_at_unix_secs: SEEDED_STARTED_AT,
+        completed_at_unix_secs: Some(SEEDED_COMPLETED_AT),
+        model: Some("mock-model".to_string()),
+        reasoning_effort: None,
+        prompt_token_estimate: None,
+        token_count: None,
+        saved_token_estimate: None,
+        superseded_by: None,
+        cancel_reason: None,
+        error_summary: None,
+        finding_count: output.findings.len(),
+        finding_digests: finding_digests(&output),
+        omitted_finding_digest_count: 0,
+    };
+    store.save_run(&run)?;
+    store.save_output(SEEDED_RUN_ID, &output)?;
     Ok(())
 }
 

@@ -7,6 +7,10 @@
 - Use GitHub issues labeled `plan` and `plan:active` for active cross-session
   work. Do not rely on local handoff files or local plan drafts as the source of
   truth for GitHub-backed work.
+- For upstream refresh, fork synchronization, or convergence work, use the
+  `$upstream-convergence` skill. Treat `upstream/convergence-policy.json`,
+  `upstream/convergence-contracts.md`, and the repository-local convergence
+  command as the authority for this repository.
 - New implementation work belongs in this repo unless the user explicitly says
   otherwise.
 - When sibling restored sources are present, use

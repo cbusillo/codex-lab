@@ -1,5 +1,9 @@
 use crate::shell::ShellType;
 
+use crate::context::world_state::environment_limits::MAX_ENVIRONMENT_CONTEXT_BODY_BYTES;
+use crate::context::world_state::environment_limits::MAX_RENDERED_NETWORK_DOMAINS;
+use crate::context::world_state::environment_limits::MAX_RENDERED_WORKSPACE_ROOTS;
+
 use super::*;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -343,4 +347,131 @@ fn serialize_environment_context_prefers_environment_shell_when_present() {
     );
 
     assert_eq!(context.render(), expected);
+}
+
+#[test]
+fn environment_context_render_bounds_workspace_roots_network_and_subagents() {
+    let roots = (0..MAX_RENDERED_WORKSPACE_ROOTS * 3)
+        .map(|index| PathUri::from_abs_path(&test_abs_path(&format!("/root-{index}"))))
+        .collect::<Vec<_>>();
+    let domains = |prefix: &str| {
+        (0..MAX_RENDERED_NETWORK_DOMAINS * 3)
+            .map(|index| format!("{prefix}-{index}.example.com"))
+            .collect::<Vec<_>>()
+    };
+    let subagent_lines = (0..MAX_RENDERED_SUBAGENT_LINES * 3)
+        .map(|index| format!("- agent-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut context = environment_state(
+        [environment(
+            "local",
+            PathUri::from_abs_path(&test_abs_path("/repo")),
+            fake_shell_name(),
+        )],
+        /*current_date*/ None,
+        /*timezone*/ None,
+        Some(NetworkContext::new(domains("allowed"), domains("denied"))),
+        /*subagents*/ None,
+    );
+    context = context.with_subagents(subagent_lines);
+    context.filesystem = Some(FileSystemContext::from_permission_profile(
+        &PermissionProfile::Disabled,
+        &roots,
+    ));
+
+    let rendered = context.render();
+
+    assert_eq!(
+        rendered.matches("<root>").count(),
+        MAX_RENDERED_WORKSPACE_ROOTS
+    );
+    assert_eq!(
+        rendered.matches("allowed-").count(),
+        MAX_RENDERED_NETWORK_DOMAINS
+    );
+    assert_eq!(
+        rendered.matches("denied-").count(),
+        MAX_RENDERED_NETWORK_DOMAINS
+    );
+    // The `- ...` elision marker occupies the last of the capped lines.
+    assert_eq!(
+        rendered.matches("- agent-").count(),
+        MAX_RENDERED_SUBAGENT_LINES - 1
+    );
+    assert!(rendered.contains("- ..."));
+}
+
+#[test]
+fn environment_context_render_is_byte_capped() {
+    let subagent_lines = (0..MAX_RENDERED_SUBAGENT_LINES)
+        .map(|index| format!("- {}-{index}", "a".repeat(4_096)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = environment_state(
+        [environment(
+            "local",
+            PathUri::from_abs_path(&test_abs_path("/repo")),
+            fake_shell_name(),
+        )],
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    )
+    .with_subagents(subagent_lines);
+
+    let body = context.body();
+
+    assert!(body.len() <= MAX_ENVIRONMENT_CONTEXT_BODY_BYTES);
+    assert!(body.contains("environment context exceeded its size limit"));
+}
+
+fn numbered_environments(count: usize) -> Vec<(String, EnvironmentState)> {
+    (0..count)
+        .map(|index| {
+            environment(
+                &format!("env-{index:02}"),
+                PathUri::from_abs_path(&test_abs_path(&format!("/repo-{index}"))),
+                fake_shell_name(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn environment_context_renders_every_environment_at_the_shipped_maximum() {
+    let context = environment_state(
+        numbered_environments(MAX_TURN_ENVIRONMENT_SELECTIONS),
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    );
+
+    let rendered = context.render();
+
+    assert_eq!(
+        rendered.matches("<environment id=").count(),
+        MAX_TURN_ENVIRONMENT_SELECTIONS
+    );
+}
+
+#[test]
+fn environment_context_render_caps_the_rendered_environment_count() {
+    let context = environment_state(
+        numbered_environments(MAX_RENDERED_ENVIRONMENTS * 3),
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    );
+
+    let rendered = context.render();
+
+    assert_eq!(
+        rendered.matches("<environment id=").count(),
+        MAX_RENDERED_ENVIRONMENTS
+    );
 }

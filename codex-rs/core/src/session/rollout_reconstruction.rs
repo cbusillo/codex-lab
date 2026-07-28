@@ -421,6 +421,14 @@ impl Session {
             }
         }
 
+        // Rollouts recorded before world-state items existed carry the durable
+        // environment baseline on the surviving turn context instead.
+        let world_state_baseline = world_state_baseline.or_else(|| {
+            reference_context_item
+                .as_ref()
+                .and_then(WorldStateSnapshot::from_legacy_turn_context_item)
+        });
+
         let window = window.or(initial_window).unwrap_or(ReconstructedWindow {
             number: fallback_window_number,
             first_id: None,

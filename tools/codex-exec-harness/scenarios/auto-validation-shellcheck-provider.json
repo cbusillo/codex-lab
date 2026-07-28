@@ -1,0 +1,84 @@
+{
+  "name": "auto-validation-shellcheck-provider",
+  "characterization": {
+    "issue": 309,
+    "implementation_issue": 310,
+    "selected_provider": "shellcheck",
+    "source_revision": "4339c3743917725b3b685864b3384af259a35964",
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.5",
+  "prompt": "Apply the requested shell fixture. AUTO_VALIDATION_SHELLCHECK_PROVIDER_MARKER",
+  "files": {
+    "fake-shellcheck": "set -eu\nif [ \"$#\" -ne 3 ] || [ \"$1\" != \"-f\" ] || [ \"$2\" != \"gcc\" ] || [ \"$3\" != \"scripts/bad.sh\" ]; then\n  printf 'unexpected shellcheck argv: %s\\n' \"$*\" >&2\n  exit 64\nfi\nif [ -f .shellcheck-provider-ran ]; then\n  printf 'shellcheck fixture passed\\n'\n  exit 0\nfi\ntouch .shellcheck-provider-ran\nprintf 'scripts/bad.sh:1:1: error: deterministic shellcheck finding [SC1000]\\n' >&2\nexit 1\n"
+  },
+  "config_toml": "model_provider = \"harness\"\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n\n[validation.groups]\nfunctional = true\nstylistic = false\n\n[validation.providers.shellcheck]\nenabled = true\ncommand = [\"/bin/sh\", \"fake-shellcheck\"]\ntimeout_ms = 5000\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-shellcheck-provider-patch",
+        "events": [
+          {
+            "item": {
+              "type": "custom_tool_call",
+              "name": "apply_patch",
+              "input": "*** Begin Patch\n*** Add File: scripts/bad.sh\n+#!/bin/sh\n+printf '%s\\n' \"$value\"\n*** End Patch",
+              "call_id": "call-shellcheck-provider-patch"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-shellcheck-provider-complete"
+      },
+      {
+        "response_id": "resp-shellcheck-provider-correction"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 3,
+    "turn_count": 1,
+    "thread_id": "required",
+    "event_types": {
+      "validation.completed": 2,
+      "turn.completed": 1
+    },
+    "events": [
+      {
+        "type": "validation.completed",
+        "occurrence": 0,
+        "contains_all": [
+          "\"status\":\"actionable_failure\"",
+          "\"exit_code\":1",
+          "\"command\":[\"/bin/sh\",\"fake-shellcheck\",\"-f\",\"gcc\",\"scripts/bad.sh\"]",
+          "deterministic shellcheck finding [SC1000]",
+          "\"output_truncated\":false"
+        ]
+      },
+      {
+        "type": "validation.completed",
+        "occurrence": 1,
+        "contains_all": [
+          "\"status\":\"passed\"",
+          "\"exit_code\":0",
+          "shellcheck fixture passed",
+          "\"output_truncated\":false"
+        ]
+      }
+    ],
+    "responses": [
+      {
+        "request": 2,
+        "scope": "input",
+        "contains": "<project_validation_failure>",
+        "count": {
+          "<project_validation_failure>": 1,
+          "deterministic shellcheck finding [SC1000]": 1
+        }
+      }
+    ]
+  },
+  "timeout_seconds": 60
+}

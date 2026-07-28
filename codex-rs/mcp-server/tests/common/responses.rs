@@ -3,10 +3,31 @@ use std::path::Path;
 use core_test_support::responses;
 use serde_json::json;
 
+/// Which shell startup semantics the mocked `shell_command` call requests.
+///
+/// Tests pick `NonLogin` when they only care about running the command, so the
+/// child shell never sources user profiles. That keeps `powershell.exe` startup
+/// bounded on Windows CI workers where a profile can add seconds of latency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellLoginPolicy {
+    Login,
+    NonLogin,
+}
+
+impl ShellLoginPolicy {
+    fn as_login_argument(self) -> bool {
+        match self {
+            Self::Login => true,
+            Self::NonLogin => false,
+        }
+    }
+}
+
 pub fn create_shell_command_sse_response(
     command: Vec<String>,
     workdir: Option<&Path>,
     timeout_ms: Option<u64>,
+    login_policy: ShellLoginPolicy,
     call_id: &str,
 ) -> anyhow::Result<String> {
     let command_str = shlex::try_join(command.iter().map(String::as_str))?;
@@ -14,6 +35,7 @@ pub fn create_shell_command_sse_response(
         "command": command_str,
         "workdir": workdir.map(|w| w.to_string_lossy()),
         "timeout_ms": timeout_ms,
+        "login": login_policy.as_login_argument(),
     }))?;
     let response_id = format!("resp-{call_id}");
     Ok(responses::sse(vec![

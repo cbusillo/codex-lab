@@ -18,8 +18,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   release-metadata:
     name: Resolve Codex Lab release metadata
+    needs: authorize_self_hosted
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -45,9 +50,55 @@ jobs:
           }
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
 
+  full-bazel:
+    name: Full verification / Bazel
+    needs: release-metadata
+    uses: ./.github/workflows/bazel.yml
+    secrets: inherit
+
+  full-rust:
+    name: Full verification / Rust
+    needs: release-metadata
+    uses: ./.github/workflows/rust-ci-full.yml
+    secrets: inherit
+
+  full-sdk-integration:
+    name: Full verification / SDK integration
+    needs: release-metadata
+    uses: ./.github/workflows/sdk-integration.yml
+    secrets: inherit
+
+  full-v8-canary:
+    name: Full verification / V8 canary
+    needs: release-metadata
+    uses: ./.github/workflows/v8-canary.yml
+    secrets: inherit
+
+  full-verification:
+    name: Full verification results
+    needs:
+      - full-bazel
+      - full-rust
+      - full-sdk-integration
+      - full-v8-canary
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require successful dependencies
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/check_ci_results.py
+
   build-macos-aarch64:
     name: Build macOS ARM64 Codex Lab release artifacts
-    needs: release-metadata
+    needs:
+      - release-metadata
+      - full-verification
     runs-on:
       - self-hosted
       - macOS
@@ -58,6 +109,12 @@ jobs:
       contents: read
     outputs:
       release_tag: ${{ needs.release-metadata.outputs.release_tag }}
+    env:
+      # The release profile builds with `debug = "line-tables-only"` and
+      # `split-debuginfo = "off"`, which leaves the debug map inside the shipped
+      # engine. Pack it into a `.dSYM` sidecar so the engine can be stripped
+      # before signing while staying symbolicateable.
+      CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: packed
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -125,6 +182,69 @@ jobs:
           name: codex-lab-release-cargo-timings
           path: ${{ runner.temp }}/codex-lab-release-cargo-timings/*.html
           if-no-files-found: ignore
+
+      - name: Archive engine symbols and strip Codex Lab engine
+        id: symbols
+        env:
+          SYMBOLS_TARGET: aarch64-apple-darwin
+          SYMBOLS_ARTIFACT_NAME: codex-lab-aarch64-apple-darwin
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$(dirname "$CODEX_LAB_BIN")"
+          dsym_dir="${release_dir}/codex-lab.dSYM"
+          staged_dir="${RUNNER_TEMP}/codex-lab-engine-staging"
+          symbols_dir="${RUNNER_TEMP}/codex-lab-symbols"
+          rm -rf "$staged_dir" "$symbols_dir"
+          mkdir -p "$staged_dir" "$symbols_dir"
+          if [[ ! -d "$dsym_dir" ]]; then
+            echo "Cargo did not emit ${dsym_dir}; expected CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed" >&2
+            exit 1
+          fi
+          # Strip a staged copy. The persistent Cargo target cache keeps the
+          # symbolicateable binary its fingerprints still describe, so a later
+          # incremental run cannot reuse an already-stripped artifact.
+          cp "$CODEX_LAB_BIN" "${staged_dir}/codex-lab"
+          cp -RL "$dsym_dir" "${staged_dir}/codex-lab.dSYM"
+          chmod 0755 "${staged_dir}/codex-lab"
+          unstripped_bytes="$(wc -c < "${staged_dir}/codex-lab" | tr -d '[:space:]')"
+          bash .github/scripts/archive-release-symbols-and-strip-binaries.sh \
+            --target "$SYMBOLS_TARGET" \
+            --artifact-name "$SYMBOLS_ARTIFACT_NAME" \
+            --release-dir "$staged_dir" \
+            --archive-dir "$symbols_dir" \
+            --binaries codex-lab
+          stripped_bytes="$(wc -c < "${staged_dir}/codex-lab" | tr -d '[:space:]')"
+          debug_map_entries="$(nm -pa "${staged_dir}/codex-lab" | grep -c ' OSO ' || true)"
+          if [[ "$debug_map_entries" != "0" ]]; then
+            echo "Stripped engine still carries ${debug_map_entries} debug map entries" >&2
+            exit 1
+          fi
+          if (( stripped_bytes >= unstripped_bytes )); then
+            echo "Strip did not shrink the engine (${unstripped_bytes} -> ${stripped_bytes} bytes)" >&2
+            exit 1
+          fi
+          symbols_archive="${symbols_dir}/codex-symbols-${SYMBOLS_ARTIFACT_NAME}.tar.gz"
+          tar -tzf "$symbols_archive" |
+            grep -F "codex-symbols-${SYMBOLS_ARTIFACT_NAME}/codex-lab.dSYM/Contents/Resources/DWARF/codex-lab"
+          # Every later step -- bundle, smoke, signing, archiving -- must consume
+          # the stripped engine, so repoint CODEX_LAB_BIN before they run.
+          echo "CODEX_LAB_BIN=${staged_dir}/codex-lab" >> "$GITHUB_ENV"
+          {
+            echo "- Engine bytes before strip: \`$unstripped_bytes\`"
+            echo "- Engine bytes after strip: \`$stripped_bytes\`"
+            echo "- Engine symbols archive: \`$(basename "$symbols_archive")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "symbols_dir=$symbols_dir" >> "$GITHUB_OUTPUT"
+
+      # Upload before signing and packaging so a later failure still leaves the
+      # symbols needed to symbolicate the exact bytes that were built.
+      - name: Upload Codex Lab engine symbols
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-lab-release-symbols-aarch64-apple-darwin
+          path: ${{ steps.symbols.outputs.symbols_dir }}/*
+          if-no-files-found: error
 
       - name: Build Codex Lab app bundle
         id: package

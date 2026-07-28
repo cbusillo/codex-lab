@@ -1,4 +1,6 @@
 use crate::agent::AgentStatus;
+use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
+use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -55,6 +57,7 @@ use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
 
 mod execution;
+mod external;
 mod legacy;
 mod residency;
 mod spawn;
@@ -71,6 +74,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
+    pub(crate) external_agent_provider: Option<ExternalAgentProviderProvenance>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +88,12 @@ pub(crate) struct LiveAgent {
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider: Option<ExternalAgentProviderProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure: Option<ExternalAgentFailureDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) duration_ms: Option<u64>,
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -144,6 +154,11 @@ impl AgentControl {
         agent_id: ThreadId,
         input: Vec<UserInput>,
     ) -> CodexResult<String> {
+        if self.state.external_agent_status(agent_id).is_some() {
+            return Err(CodexErr::UnsupportedOperation(
+                "external agents do not accept direct input after spawn".to_string(),
+            ));
+        }
         let state = self.upgrade()?;
         self.ensure_execution_capacity_for_turn_start(agent_id, /*starts_turn*/ true)
             .await?;
@@ -171,6 +186,11 @@ impl AgentControl {
         communication: InterAgentCommunication,
         agent_communication_context: AgentCommunicationContext,
     ) -> CodexResult<String> {
+        if self.state.external_agent_status(agent_id).is_some() {
+            return Err(CodexErr::UnsupportedOperation(
+                "external command agents do not accept follow-up messages".to_string(),
+            ));
+        }
         let state = self.upgrade()?;
         self.ensure_execution_capacity_for_turn_start(agent_id, communication.trigger_turn)
             .await?;
@@ -227,6 +247,14 @@ impl AgentControl {
 
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+        if self.state.cancel_external_agent(agent_id) {
+            self.close_thread_spawn_edge(agent_id).await;
+            return Ok(String::new());
+        }
+        if self.state.external_agent_status(agent_id).is_some() {
+            self.close_external_agent(agent_id).await;
+            return Ok(String::new());
+        }
         let state = self.upgrade()?;
         self.handle_thread_request_result(
             agent_id,
@@ -255,6 +283,9 @@ impl AgentControl {
 
     /// Fetch the last known status for `agent_id`, returning `NotFound` when unavailable.
     pub(crate) async fn get_status(&self, agent_id: ThreadId) -> AgentStatus {
+        if let Some(status) = self.state.external_agent_status(agent_id) {
+            return status;
+        }
         let Ok(state) = self.upgrade() else {
             // No agent available if upgrade fails.
             return AgentStatus::NotFound;
@@ -298,6 +329,9 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
     ) -> Option<ThreadConfigSnapshot> {
+        if self.state.external_agent_status(agent_id).is_some() {
+            return None;
+        }
         let Ok(state) = self.upgrade() else {
             return None;
         };
@@ -333,6 +367,9 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
     ) -> CodexResult<watch::Receiver<AgentStatus>> {
+        if let Some(status_rx) = self.state.external_agent_status_rx(agent_id) {
+            return Ok(status_rx);
+        }
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
         Ok(thread.subscribe_status())
@@ -401,6 +438,9 @@ impl AgentControl {
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
                 agent_status: root_thread.agent_status().await,
+                provider: None,
+                failure: None,
+                duration_ms: None,
             });
         }
 
@@ -415,17 +455,30 @@ impl AgentControl {
                 continue;
             }
 
-            let Ok(thread) = state.get_thread(thread_id).await else {
-                continue;
-            };
             let agent_name = metadata
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
+            let (agent_status, provider, failure, duration_ms) =
+                if let Some(snapshot) = self.state.external_agent_snapshot(thread_id) {
+                    (
+                        snapshot.status,
+                        Some(snapshot.provider),
+                        snapshot.failure,
+                        Some(snapshot.duration_ms),
+                    )
+                } else if let Ok(thread) = state.get_thread(thread_id).await {
+                    (thread.agent_status().await, None, None, None)
+                } else {
+                    continue;
+                };
             agents.push(ListedAgent {
                 agent_name,
-                agent_status: thread.agent_status().await,
+                agent_status,
+                provider,
+                failure,
+                duration_ms,
             });
         }
 
@@ -645,6 +698,21 @@ impl AgentControl {
         let mut children_by_parent = HashMap::<ThreadId, Vec<(ThreadId, AgentMetadata)>>::new();
 
         for (parent_thread_id, child_thread_id) in state.list_live_thread_spawn_edges().await {
+            children_by_parent
+                .entry(parent_thread_id)
+                .or_default()
+                .push((
+                    child_thread_id,
+                    self.state
+                        .agent_metadata_for_thread(child_thread_id)
+                        .unwrap_or(AgentMetadata {
+                            agent_id: Some(child_thread_id),
+                            ..Default::default()
+                        }),
+                ));
+        }
+
+        for (parent_thread_id, child_thread_id) in self.state.live_external_thread_spawn_edges() {
             children_by_parent
                 .entry(parent_thread_id)
                 .or_default()

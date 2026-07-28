@@ -73,6 +73,7 @@ use codex_goal_extension::GoalService;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::StateDbHandle;
@@ -211,6 +212,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) state_db: Option<StateDbHandle>,
     pub(crate) config_warnings: Vec<ConfigWarningNotification>,
     pub(crate) session_source: SessionSource,
+    pub(crate) session_provenance: Option<SessionProvenance>,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) installation_id: String,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
@@ -235,6 +237,7 @@ impl MessageProcessor {
             state_db,
             config_warnings,
             session_source,
+            session_provenance,
             auth_manager,
             installation_id,
             code_mode_session_provider,
@@ -258,12 +261,13 @@ impl MessageProcessor {
         );
         let goal_service = Arc::new(GoalService::new());
         let thread_manager = Arc::new_cyclic(|thread_manager| {
-            let manager = ThreadManager::new(
+            let manager = ThreadManager::new_with_session_provenance(
                 config.as_ref(),
                 auth_manager.clone(),
                 codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
                 codex_core::CodexAppsToolsCache::default(),
                 session_source,
+                session_provenance,
                 environment_manager,
                 thread_extensions(
                     guardian_agent_spawner(thread_manager.clone()),
@@ -311,7 +315,11 @@ impl MessageProcessor {
         thread_manager
             .plugins_manager()
             .set_analytics_events_client(analytics_events_client.clone());
-        let skills_watcher = SkillsWatcher::new(thread_manager.skills_service(), outgoing.clone());
+        let skills_watcher = SkillsWatcher::new(
+            thread_manager.skills_service(),
+            &config.codex_home,
+            outgoing.clone(),
+        );
 
         let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
         let thread_watch_manager =
@@ -1207,6 +1215,9 @@ impl MessageProcessor {
             ClientRequest::ThreadItemsList { params, .. } => {
                 self.thread_processor.thread_items_list(params).await
             }
+            ClientRequest::ThreadTurnsItemsList { params, .. } => {
+                self.thread_processor.thread_turns_items_list(params).await
+            }
             ClientRequest::ThreadShellCommand { params, .. } => {
                 self.thread_processor
                     .thread_shell_command(&request_id, params)
@@ -1357,6 +1368,24 @@ impl MessageProcessor {
             }
             ClientRequest::ReviewStart { params, .. } => {
                 self.turn_processor.review_start(&request_id, params).await
+            }
+            ClientRequest::BackgroundAutoReviewControl { params, .. } => {
+                self.turn_processor
+                    .background_auto_review_control(&request_id, params)
+                    .await
+            }
+            ClientRequest::AutoReviewSummaryRead { params, .. } => {
+                self.turn_processor.auto_review_summary_read(params).await
+            }
+            ClientRequest::AutoReviewFindingDetailRead { params, .. } => {
+                self.turn_processor
+                    .auto_review_finding_detail_read(params)
+                    .await
+            }
+            ClientRequest::AutoReviewDispositionWrite { params, .. } => {
+                self.turn_processor
+                    .auto_review_disposition_write(params)
+                    .await
             }
             ClientRequest::McpServerOauthLogin { params, .. } => {
                 self.mcp_processor.mcp_server_oauth_login(params).await

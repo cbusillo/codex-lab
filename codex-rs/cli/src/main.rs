@@ -35,6 +35,7 @@ use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
 use codex_tui::UpdateAction;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::ProfileV2Name;
 use codex_utils_cli::SharedCliOptions;
@@ -86,6 +87,7 @@ use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
@@ -438,7 +440,7 @@ type HostSandboxArgs = UnsupportedSandboxArgs;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Debug, Parser)]
 struct UnsupportedSandboxArgs {
-    /// Layer $CODEX_HOME/<name>.config.toml on top of the base user config.
+    /// Layer $CODEX_LAB_HOME/<name>.config.toml on top of the base user config.
     #[arg(long = "profile", short = 'p')]
     pub config_profile: Option<ProfileV2Name>,
 
@@ -2004,6 +2006,9 @@ async fn run_debug_prompt_input_command(
 ) -> anyhow::Result<()> {
     let loader_overrides = loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
     let shared = interactive.shared.into_inner();
+    shared
+        .validate_workspace_root_mode()
+        .map_err(anyhow::Error::msg)?;
     let mut cli_kv_overrides = root_config_overrides
         .parse_overrides()
         .map_err(anyhow::Error::msg)?;
@@ -2024,11 +2029,36 @@ async fn run_debug_prompt_input_command(
     } else {
         shared.sandbox_mode.map(Into::into)
     };
+    let workspace_base = match shared.cwd.as_deref() {
+        Some(path) => {
+            AbsolutePathBuf::from_absolute_path(canonicalize_existing_preserving_symlinks(path)?)?
+        }
+        None => AbsolutePathBuf::current_dir()?,
+    };
+    let workspace_roots = (!shared.workspace_root.is_empty()).then(|| {
+        shared
+            .workspace_root
+            .iter()
+            .cloned()
+            .map(|path| AbsolutePathBuf::resolve_path_against_base(path, workspace_base.as_path()))
+            .collect()
+    });
+    let exact_workspace_profile = workspace_roots.as_ref().is_some_and(|_| {
+        sandbox_mode == Some(codex_protocol::config_types::SandboxMode::WorkspaceWrite)
+    });
+    let sandbox_mode_override = if exact_workspace_profile {
+        None
+    } else {
+        sandbox_mode
+    };
     let overrides = ConfigOverrides {
         model: shared.model,
         approval_policy,
-        sandbox_mode,
+        sandbox_mode: sandbox_mode_override,
+        default_permissions: exact_workspace_profile
+            .then(|| BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
         cwd: shared.cwd,
+        workspace_roots,
         codex_self_exe: arg0_paths.codex_self_exe,
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe,
         main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe,
@@ -2957,6 +2987,54 @@ mod tests {
         assert_eq!(args.prompt.as_deref(), Some("re-review"));
     }
 
+    fn help_texts(command: &clap::Command, texts: &mut Vec<(String, String)>) {
+        texts.push((
+            command.get_name().to_string(),
+            command.clone().render_long_help().to_string(),
+        ));
+        for subcommand in command.get_subcommands() {
+            help_texts(subcommand, texts);
+        }
+    }
+
+    /// This binary resolves its home from `CODEX_LAB_HOME`, so help text must
+    /// not point users at the upstream `CODEX_HOME` variable or `~/.codex`.
+    #[test]
+    fn help_text_never_advertises_the_upstream_codex_home() {
+        let mut texts = Vec::new();
+        help_texts(&MultitoolCli::command(), &mut texts);
+
+        let offenders: Vec<&str> = texts
+            .iter()
+            .filter(|(_, help)| help.contains("CODEX_HOME") || help.contains("~/.codex/"))
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        assert_eq!(offenders, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn deprecated_on_failure_approval_alias_is_accepted() {
+        let cli = MultitoolCli::try_parse_from(["codex", "--ask-for-approval", "on-failure"])
+            .expect("deprecated approval alias should parse");
+
+        assert_matches!(
+            cli.interactive.approval_policy,
+            Some(codex_utils_cli::ApprovalModeCliArg::OnRequest)
+        );
+    }
+
+    #[test]
+    fn deprecated_on_failure_approval_alias_is_accepted_for_resume() {
+        let resumed =
+            finalize_resume_from_args(["codex", "resume", "sid", "-a", "on-failure"].as_ref());
+
+        assert_matches!(
+            resumed.approval_policy,
+            Some(codex_utils_cli::ApprovalModeCliArg::OnRequest)
+        );
+    }
+
     #[test]
     fn dangerous_bypass_conflicts_with_approval_policy() {
         let err = MultitoolCli::try_parse_from([
@@ -3203,6 +3281,38 @@ mod tests {
             err.to_string(),
             "--force requires a session UUID; names must be confirmed interactively"
         );
+    }
+
+    #[test]
+    fn archive_inherits_root_auth_profile_flag() {
+        let (_target, interactive, _remote) = finalize_archive_from_args(&[
+            "codex",
+            "--auth-profile",
+            "work",
+            "archive",
+            "session-id",
+        ]);
+
+        assert_eq!(interactive.auth_profile.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn root_workspace_root_is_inherited_by_archive_scope() {
+        let (_target, interactive, _remote) = finalize_archive_from_args(&[
+            "codex",
+            "--sandbox",
+            "workspace-write",
+            "--workspace-root",
+            "tenant",
+            "archive",
+            "session-id",
+        ]);
+
+        assert_eq!(
+            interactive.workspace_root,
+            vec![std::path::PathBuf::from("tenant")]
+        );
+        assert!(interactive.validate_workspace_root_mode().is_ok());
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]

@@ -1,0 +1,118 @@
+{
+  "name": "provider-routing-high-risk-external",
+  "characterization": {
+    "issue": 370,
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.6-sol",
+  "prompt": "Delegate a normal-sized security review, wait for it, list its terminal status, and finish.",
+  "files": {
+    "fixture-antigravity.sh": "sleep 1\nprintf 'AUTO_ROUTED_ANTIGRAVITY_COMPLETED cwd=%s prompt=%s\\n' \"$PWD\" \"$1\"\n"
+  },
+  "config_toml": "model_provider = \"harness\"\n\n[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = false\n\n[agents.antigravity]\ndescription = \"Deterministic Antigravity-family fixture used to prove automatic provider routing.\"\n\n[agents.antigravity.backend]\ntype = \"external_command\"\ncommand = \"/bin/sh\"\nprotocol = \"raw_cli\"\nargs = [\"fixture-antigravity.sh\"]\ntimeout_ms = 5000\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-provider-routing-spawn",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "namespace": "collaboration",
+              "name": "spawn_agent",
+              "arguments": "{\"message\":\"Perform an independent security review and return the fixture completion marker.\",\"task_name\":\"security_review\",\"task_kind\":\"security\",\"task_size\":\"normal\"}",
+              "call_id": "call-provider-routing-spawn"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-provider-routing-wait",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "namespace": "collaboration",
+              "name": "wait_agent",
+              "arguments": "{\"timeout_ms\":10000}",
+              "call_id": "call-provider-routing-wait"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-provider-routing-list",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "namespace": "collaboration",
+              "name": "list_agents",
+              "arguments": "{}",
+              "call_id": "call-provider-routing-list"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-provider-routing-complete",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-provider-routing-complete",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Provider-diverse routing completed."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 4,
+    "turn_count": 1,
+    "thread_id": "required",
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "contains_all": [
+          "task_kind",
+          "task_size",
+          "eligible installed third-party agent"
+        ]
+      },
+      {
+        "request": 2,
+        "scope": "input",
+        "contains_all": ["AUTO_ROUTED_ANTIGRAVITY_COMPLETED", "security_review"]
+      }
+    ],
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-provider-routing-spawn",
+        "contains_all": ["security_review", "antigravity", "automatic_external"]
+      },
+      {
+        "request": 2,
+        "call_id": "call-provider-routing-wait",
+        "contains": "\"timed_out\":false"
+      },
+      {
+        "request": 3,
+        "call_id": "call-provider-routing-list",
+        "contains_all": ["security_review", "AUTO_ROUTED_ANTIGRAVITY_COMPLETED"]
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}

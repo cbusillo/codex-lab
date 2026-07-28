@@ -51,12 +51,14 @@ use codex_login::AuthRouteConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::enforce_login_restrictions;
+use codex_login::profile_home;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::SandboxMode;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_rollout::StateDbHandle;
 use codex_rollout::state_db;
 use codex_state::log_db;
@@ -90,6 +92,7 @@ pub(crate) use codex_app_server_client::legacy_core;
 mod account_label;
 mod additional_dirs;
 mod agent_install_helpers;
+mod agent_session_env;
 mod app;
 mod app_backtrack;
 mod app_command;
@@ -565,8 +568,8 @@ where
         state_db,
         environment_manager,
         config_warnings,
-        session_source: serde_json::from_value(serde_json::json!("cli"))
-            .unwrap_or_else(|err| panic!("cli session source should deserialize: {err}")),
+        session_source: codex_protocol::protocol::SessionSource::Cli,
+        session_provenance: agent_session_env::session_provenance_from_agent_env(),
         enable_codex_api_key_env: false,
         client_name: "codex-tui".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -634,6 +637,7 @@ async fn lookup_session_target_by_name_with_app_server(
                 source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
                 archived: Some(false),
                 is_pinned: None,
+                descendant_of_thread_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
                 cwd: None,
@@ -749,6 +753,7 @@ fn latest_session_lookup_params(
         source_kinds: Some(resume_source_kinds(include_non_interactive)),
         archived: Some(false),
         is_pinned: None,
+        descendant_of_thread_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
         cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().to_string())),
@@ -967,11 +972,22 @@ pub async fn run_main(
         launch_loader_overrides.user_config_path = Some(user_config_path);
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
+    #[allow(clippy::print_stderr)]
+    let auth_home = match cli.auth_profile.as_deref() {
+        Some(profile) => match profile_home(&codex_home, profile) {
+            Ok(auth_home) => auth_home,
+            Err(err) => {
+                eprintln!("invalid --auth-profile {profile:?}: {err}");
+                std::process::exit(1);
+            }
+        },
+        None => codex_home.clone(),
+    };
     let reuse_implicit_local_daemon = can_reuse_implicit_local_daemon(
         &cli_kv_overrides,
         &launch_loader_overrides,
         strict_config,
-        cli.bypass_hook_trust,
+        cli.bypass_hook_trust || cli.auth_profile.is_some(),
     );
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
         maybe_probe_default_daemon_socket(&codex_home).await
@@ -1039,6 +1055,7 @@ pub async fn run_main(
         AuthRouteConfig::from_http_client_factory(bootstrap_http_client_factory);
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
+        auth_home.clone(),
         /*enable_codex_api_key_env*/ false,
         bootstrap_config_toml
             .cli_auth_credentials_store
@@ -1112,11 +1129,37 @@ pub async fn run_main(
     };
 
     let additional_dirs = cli.add_dir.clone();
+    let workspace_roots = if cli.workspace_root.is_empty() {
+        None
+    } else {
+        let workspace_base = config_cwd.as_ref().ok_or_else(|| {
+            std::io::Error::other("--workspace-root is unavailable for remote workspaces")
+        })?;
+        Some(
+            cli.workspace_root
+                .iter()
+                .cloned()
+                .map(|path| {
+                    AbsolutePathBuf::resolve_path_against_base(path, workspace_base.as_path())
+                })
+                .collect(),
+        )
+    };
+    let exact_workspace_profile = workspace_roots
+        .as_ref()
+        .is_some_and(|_| sandbox_mode == Some(SandboxMode::WorkspaceWrite));
+    let sandbox_mode_override = if exact_workspace_profile {
+        None
+    } else {
+        sandbox_mode
+    };
 
     let overrides = ConfigOverrides {
         model,
         approval_policy,
-        sandbox_mode,
+        sandbox_mode: sandbox_mode_override,
+        default_permissions: exact_workspace_profile
+            .then(|| BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
         cwd: cwd_override,
         model_provider: model_provider_override.clone(),
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
@@ -1125,6 +1168,7 @@ pub async fn run_main(
         show_raw_agent_reasoning: cli.oss.then_some(true),
         bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
         additional_writable_roots: additional_dirs,
+        workspace_roots,
         ..Default::default()
     };
 
@@ -1134,11 +1178,13 @@ pub async fn run_main(
         loader_overrides.clone(),
         cloud_config_bundle.clone(),
         strict_config,
+        Some(auth_home.clone()),
     )
     .await;
 
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         config.codex_home.to_path_buf(),
+        config.auth_home.to_path_buf(),
         /*enable_codex_api_key_env*/ false,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
@@ -1215,7 +1261,7 @@ pub async fn run_main(
         let auth_route_config = config.auth_route_config();
         #[allow(clippy::print_stderr)]
         if let Err(err) = enforce_login_restrictions(&AuthConfig {
-            codex_home: config.codex_home.to_path_buf(),
+            codex_home: config.auth_home.to_path_buf(),
             auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
             keyring_backend_kind: config.auth_keyring_backend_kind(),
             forced_login_method: config.forced_login_method,
@@ -1485,6 +1531,7 @@ async fn run_ratatui_app(
         if show_login_screen && !uses_remote_workspace {
             cloud_config_bundle = cloud_config_bundle_loader_for_storage(
                 initial_config.codex_home.to_path_buf(),
+                initial_config.auth_home.to_path_buf(),
                 /*enable_codex_api_key_env*/ false,
                 initial_config.cli_auth_credentials_store_mode,
                 initial_config.auth_keyring_backend_kind(),
@@ -1505,6 +1552,7 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
+                Some(initial_config.auth_home.to_path_buf()),
             )
             .await
         } else {
@@ -1687,6 +1735,7 @@ async fn run_ratatui_app(
         resume_picker::SessionSelection::StartFresh
     ) && (cli.resume_picker || cli.fork_picker);
 
+    let session_auth_home = config.auth_home.to_path_buf();
     let mut config = match &session_selection {
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
             load_config_or_exit_with_fallback_cwd(
@@ -1695,6 +1744,7 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
+                Some(session_auth_home.clone()),
                 fallback_cwd,
             )
             .await
@@ -1706,6 +1756,7 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
+                Some(session_auth_home),
             )
             .await
         }
@@ -1936,6 +1987,7 @@ async fn load_config_or_exit(
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
+    auth_home: Option<PathBuf>,
 ) -> Config {
     load_config_or_exit_with_fallback_cwd(
         cli_kv_overrides,
@@ -1943,6 +1995,7 @@ async fn load_config_or_exit(
         loader_overrides,
         cloud_config_bundle,
         strict_config,
+        auth_home,
         /*fallback_cwd*/ None,
     )
     .await
@@ -1954,19 +2007,21 @@ async fn load_config_or_exit_with_fallback_cwd(
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
+    auth_home: Option<PathBuf>,
     fallback_cwd: Option<PathBuf>,
 ) -> Config {
-    #[allow(clippy::print_stderr)]
-    match ConfigBuilder::default()
+    let mut builder = ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides)
         .harness_overrides(overrides)
         .loader_overrides(loader_overrides)
         .strict_config(strict_config)
         .cloud_config_bundle(cloud_config_bundle)
-        .fallback_cwd(fallback_cwd)
-        .build()
-        .await
-    {
+        .fallback_cwd(fallback_cwd);
+    if let Some(auth_home) = auth_home {
+        builder = builder.auth_home(auth_home);
+    }
+    #[allow(clippy::print_stderr)]
+    match builder.build().await {
         Ok(config) => config,
         Err(err) => {
             eprintln!("Error loading configuration: {err}");

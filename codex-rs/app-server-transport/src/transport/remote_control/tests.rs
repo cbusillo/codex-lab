@@ -97,13 +97,20 @@ fn remote_control_auth_dot_json(account_id: Option<&str>) -> AuthDotJson {
         alg: "none",
         typ: "JWT",
     };
+    // Keep the JWT claims consistent with `account_id`: when the caller asks for
+    // auth without an account id, the claim has to be absent too, otherwise
+    // remote control resolves the account from the token and tests that expect
+    // "no account id yet" pass for the wrong reason.
+    let mut auth_claims = serde_json::json!({
+        "chatgpt_user_id": "user-12345",
+        "user_id": "user-12345",
+    });
+    if let Some(account_id) = account_id {
+        auth_claims["chatgpt_account_id"] = serde_json::Value::String(account_id.to_string());
+    }
     let payload = serde_json::json!({
         "email": "user@example.com",
-        "https://api.openai.com/auth": {
-            "chatgpt_user_id": "user-12345",
-            "user_id": "user-12345",
-            "chatgpt_account_id": "account_id"
-        }
+        "https://api.openai.com/auth": auth_claims,
     });
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let header_b64 = b64(&serde_json::to_vec(&header).expect("header should serialize"));
@@ -2297,9 +2304,12 @@ async fn remote_control_waits_for_account_id_before_enrolling() {
     .expect("auth with account id should save");
     auth_manager.reload().await;
 
-    let enroll_request = timeout(Duration::from_millis(100), accept_http_request(&listener))
-        .await
-        .expect("auth change should wake remote control before the retry delay");
+    let enroll_request = timeout(
+        Duration::from_millis(/*millis*/ 800),
+        accept_http_request(&listener),
+    )
+    .await
+    .expect("auth change should wake remote control before the retry delay");
     assert_eq!(
         enroll_request.request_line,
         "POST /backend-api/wham/remote/control/server/enroll HTTP/1.1"

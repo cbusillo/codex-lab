@@ -10,7 +10,7 @@ export type InitializeResponse = { userAgent: string,
  */
 serverBuild: ServerBuildInfo | null,
 /**
- * Absolute path to the server's $CODEX_HOME directory.
+ * Absolute path to the server's $CODEX_LAB_HOME directory.
  */
 codexHome: AbsolutePathBuf,
 /**

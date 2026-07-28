@@ -2,6 +2,7 @@ mod agents_md;
 mod apps_instructions;
 mod collaboration_mode;
 mod environment;
+pub(crate) mod environment_limits;
 mod environments_instructions;
 mod multi_agent_mode;
 mod permissions;
@@ -38,6 +39,7 @@ const WORLD_STATE_TRUNCATION_NOTICE: &str = "\nâ€¦world-state content truncatedâ
 pub(crate) use agents_md::AgentsMdState;
 pub(crate) use apps_instructions::AppsInstructionsState;
 pub(crate) use collaboration_mode::CollaborationModeState;
+pub(crate) use environment::EnvironmentsSnapshot;
 pub(crate) use environment::EnvironmentsState;
 pub(crate) use environments_instructions::EnvironmentsInstructionsState;
 pub(crate) use multi_agent_mode::MultiAgentModeState;
@@ -515,6 +517,21 @@ pub(crate) struct WorldStateSnapshot {
 }
 
 impl WorldStateSnapshot {
+    /// Seed a baseline from a rollout `TurnContextItem` for rollouts recorded
+    /// before world-state items were persisted.
+    ///
+    /// Only the sections that the turn context durably recorded are seeded; the
+    /// rest keep the history-based fallback used when no baseline is available.
+    pub(crate) fn from_legacy_turn_context_item(
+        turn_context_item: &codex_protocol::protocol::TurnContextItem,
+    ) -> Option<Self> {
+        let environments = EnvironmentsSnapshot::from_turn_context_item(turn_context_item)?;
+        let environments = serde_json::to_value(environments).ok()?;
+        Some(Self {
+            sections: BTreeMap::from([(EnvironmentsState::ID.to_string(), environments)]),
+        })
+    }
+
     pub(crate) fn into_value(self) -> Value {
         Value::Object(self.sections.into_iter().collect())
     }

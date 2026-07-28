@@ -23,12 +23,16 @@ base64 = { workspace = true }
 bm25 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
+codex-code-bridge-client = { workspace = true }
+codex-code-bridge-protocol = { workspace = true }
 codex-analytics = { workspace = true }
 codex-agent-graph-store = { workspace = true }
 codex-api = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-apply-patch = { workspace = true }
+codex-auto-review = { workspace = true }
 codex-async-utils = { workspace = true }
+codex-browser = { workspace = true }
 codex-code-mode = { workspace = true }
 codex-connectors = { workspace = true }
 codex-context-fragments = { workspace = true }
@@ -85,6 +89,7 @@ dunce = { workspace = true }
 eventsource-stream = { workspace = true }
 futures = { workspace = true }
 fs2 = { workspace = true }
+globset = { workspace = true }
 http = { workspace = true }
 iana-time-zone = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "webp"] }
@@ -139,6 +144,7 @@ codex-shell-escalation = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
+codex-code-bridge-service = { workspace = true }
 codex-exec-server-test-support = { workspace = true }
 codex-image-generation-extension = { workspace = true }
 codex-home = { workspace = true }

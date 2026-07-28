@@ -25,6 +25,9 @@ const RETRY_PROMPT: &str = "Handle the safety-buffered request";
 const COMMITTED_STEER: &str = "Keep the accepted steer";
 const UNSENT_DRAFT: &str = "Keep this unsent draft";
 const RETRY_GOAL: &str = "Preserve this goal across the retry";
+const ASSISTANT_REPLY: &str = "done";
+/// Trailing cell every replayed turn renders once automatic validation reports in.
+const VALIDATION_CELL: &str = "Automatic Validation";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SafetyRetryScenario {
@@ -36,7 +39,7 @@ enum SafetyRetryScenario {
 fn response_chunks(response_id: &str) -> Vec<StreamingSseChunk> {
     [
         ev_response_created(response_id),
-        ev_assistant_message(&format!("message-{response_id}"), "done"),
+        ev_assistant_message(&format!("message-{response_id}"), ASSISTANT_REPLY),
         ev_completed(response_id),
     ]
     .into_iter()
@@ -82,6 +85,34 @@ fn submit_prompt(app: &mut App, prompt: &str) {
     app.chat_widget.apply_external_edit(prompt.to_string());
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+}
+
+/// Whether the replayed history holds every cell the fork-lineage assertions read.
+///
+/// The replay ends with the lineage header, the retried prompt, and — when the source turn
+/// completed after a committed steer — that steer, the assistant reply it produced, and the
+/// automatic-validation cell that closes the replayed turn.
+fn fork_replay_is_complete(
+    replayed_history: &str,
+    scenario: SafetyRetryScenario,
+    committed_steer: Option<&str>,
+) -> bool {
+    if scenario == SafetyRetryScenario::InterruptedPrevious
+        && !replayed_history.contains("Conversation interrupted")
+    {
+        return false;
+    }
+    let Some((_, forked_history)) = replayed_history.rsplit_once("Thread forked from") else {
+        return false;
+    };
+    if !forked_history.contains(RETRY_PROMPT) {
+        return false;
+    }
+    committed_steer.is_none_or(|steer| {
+        forked_history.contains(steer)
+            && forked_history.contains(ASSISTANT_REPLY)
+            && forked_history.contains(VALIDATION_CELL)
+    })
 }
 
 fn drain_active_thread_events(app: &mut App) {
@@ -354,7 +385,7 @@ async fn run_safety_retry(
         gate: None,
         body: responses::sse(vec![
             ev_response_created("goal-continuation-response"),
-            ev_assistant_message("goal-continuation-message", "done"),
+            ev_assistant_message("goal-continuation-message", ASSISTANT_REPLY),
             ev_completed_with_tokens("goal-continuation-response", /*total_tokens*/ 1_000),
         ]),
     }]);
@@ -441,6 +472,7 @@ goals = true
     )
     .await
     .expect("state db should initialize");
+    let goal_accounting_started_at = std::time::Instant::now();
     state_db
         .thread_goals()
         .replace_thread_goal(
@@ -458,11 +490,12 @@ goals = true
         .expect("source goal should be readable")
         .expect("source goal")
         .goal_id;
+    let seeded_goal_time_seconds: i64 = 12;
     state_db
         .thread_goals()
         .account_thread_goal_usage(
             source_thread_id,
-            /*time_delta_seconds*/ 12,
+            seeded_goal_time_seconds,
             /*token_delta*/ 50,
             codex_state::GoalAccountingMode::ActiveOrStopped,
             Some(source_goal_id.as_str()),
@@ -650,13 +683,30 @@ goals = true
     }
 
     drive_until_request_count(&mut app, &mut app_server, &server, expected_request_count).await;
+    // `drive_until_request_count` returns as soon as the mock server has seen the expected
+    // requests, which can be before the queued thread events that render the fork replay have been
+    // handled. Draining once would then sample a partial history, so wait for the replay's
+    // terminal cells instead.
+    let replay_deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(/*secs*/ 30);
     let mut replayed_history = String::new();
-    while let Ok(event) = app_event_rx.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = event {
-            replayed_history.push_str(&lines_to_single_string(
-                &cell.transcript_lines(/*width*/ 80),
-            ));
+    loop {
+        drain_active_thread_events(&mut app);
+        while let Ok(event) = app_event_rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                replayed_history.push_str(&lines_to_single_string(
+                    &cell.transcript_lines(/*width*/ 80),
+                ));
+            }
         }
+        if fork_replay_is_complete(&replayed_history, scenario, committed_steer) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < replay_deadline,
+            "timed out waiting for the safety retry fork replay: {replayed_history}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(/*millis*/ 10)).await;
     }
     assert_eq!(
         replayed_history.contains("Conversation interrupted"),
@@ -729,12 +779,20 @@ goals = true
         .goal
         .expect("retry goal");
     let expected_source_tokens = if committed_steer.is_some() { 150 } else { 50 };
+    let max_source_goal_time_seconds = seeded_goal_time_seconds.saturating_add(
+        i64::try_from(goal_accounting_started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
+    );
     assert_eq!(source_goal.objective, RETRY_GOAL);
     assert_eq!(source_goal.tokens_used, expected_source_tokens);
-    assert_eq!(source_goal.time_used_seconds, 12);
+    assert!(
+        (seeded_goal_time_seconds..=max_source_goal_time_seconds)
+            .contains(&source_goal.time_used_seconds),
+        "source goal time should preserve seeded usage without exceeding test elapsed time: {}",
+        source_goal.time_used_seconds
+    );
     assert_eq!(retry_goal.objective, RETRY_GOAL);
     assert!(retry_goal.tokens_used >= expected_source_tokens);
-    assert!(retry_goal.time_used_seconds >= 12);
+    assert!(retry_goal.time_used_seconds >= seeded_goal_time_seconds);
 
     let request_bodies = server
         .requests()

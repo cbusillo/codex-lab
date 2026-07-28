@@ -6,9 +6,12 @@
 //! and service tier unless the role layer sets them. It does not decide when to spawn a sub-agent
 //! or which role to use; the multi-agent tool handler owns that orchestration.
 
+use crate::config::AgentRoleBackendConfig;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigOverrides;
+use crate::config::ExternalCommandAgentBackendConfig;
+use crate::config::ExternalCommandProtocol;
 use crate::config::agent_roles::parse_agent_role_file_contents;
 use crate::config::deserialize_config_toml_with_base;
 use anyhow::anyhow;
@@ -41,8 +44,7 @@ pub(crate) async fn apply_role_to_config(
 ) -> Result<(), String> {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
 
-    let role = resolve_role_config(config, role_name)
-        .cloned()
+    let role = resolve_role_config_owned(config, role_name)
         .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
 
     apply_role_to_config_inner(config, role_name, &role)
@@ -124,6 +126,15 @@ pub(crate) fn resolve_role_config<'a>(
         .agent_roles
         .get(role_name)
         .or_else(|| built_in::configs().get(role_name))
+}
+
+pub(crate) fn resolve_role_config_owned(
+    config: &Config,
+    role_name: &str,
+) -> Option<AgentRoleConfig> {
+    resolve_role_config(config, role_name)
+        .cloned()
+        .or_else(|| built_in::external_agent_role_config(role_name))
 }
 
 mod reload {
@@ -233,12 +244,18 @@ pub(crate) mod spawn_tool_spec {
     /// Builds the spawn-agent tool description text from built-in and configured roles.
     pub(crate) fn build(user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>) -> String {
         let built_in_roles = built_in::configs();
-        build_from_configs(built_in_roles, user_defined_agent_roles)
+        let external_agent_roles = built_in::external_agent_configs();
+        build_from_configs(
+            built_in_roles,
+            external_agent_roles,
+            user_defined_agent_roles,
+        )
     }
 
     // This function is not inlined for testing purpose.
     fn build_from_configs(
         built_in_roles: &BTreeMap<String, AgentRoleConfig>,
+        external_agent_roles: &BTreeMap<String, AgentRoleConfig>,
         user_defined_roles: &BTreeMap<String, AgentRoleConfig>,
     ) -> String {
         let mut seen = BTreeSet::new();
@@ -249,6 +266,11 @@ pub(crate) mod spawn_tool_spec {
             }
         }
         for (name, declaration) in built_in_roles {
+            if seen.insert(name.as_str()) {
+                formatted_roles.push(format_role(name, declaration));
+            }
+        }
+        for (name, declaration) in external_agent_roles {
             if seen.insert(name.as_str()) {
                 formatted_roles.push(format_role(name, declaration));
             }
@@ -315,6 +337,8 @@ pub(crate) mod spawn_tool_spec {
 mod built_in {
     use super::*;
 
+    const BUILT_IN_EXTERNAL_AGENT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+
     /// Returns the cached built-in role declarations defined in this module.
     pub(super) fn configs() -> &'static BTreeMap<String, AgentRoleConfig> {
         static CONFIG: LazyLock<BTreeMap<String, AgentRoleConfig>> = LazyLock::new(|| {
@@ -325,6 +349,7 @@ mod built_in {
                         description: Some("Default agent.".to_string()),
                         config_file: None,
                         nickname_candidates: None,
+                        backend: None,
                     }
                 ),
                 (
@@ -339,6 +364,7 @@ Rules:
 - Reuse existing explorers for related questions."#.to_string()),
                         config_file: Some("explorer.toml".to_string().parse().unwrap_or_default()),
                         nickname_candidates: None,
+                        backend: None,
                     }
                 ),
                 (
@@ -354,6 +380,7 @@ Rules:
 - Always tell workers they are **not alone in the codebase**, and they should not revert the edits made by others, and they should adjust their implementation to accommodate the changes made by others. This is important because there may be multiple workers making changes in parallel, and they need to be aware of each other's work to avoid conflicts and ensure a cohesive final product."#.to_string()),
                         config_file: None,
                         nickname_candidates: None,
+                        backend: None,
                     }
                 ),
                 // Awaiter is temp removed
@@ -377,6 +404,55 @@ Rules:
             ])
         });
         &CONFIG
+    }
+
+    pub(super) fn external_agent_configs() -> &'static BTreeMap<String, AgentRoleConfig> {
+        static CONFIG: LazyLock<BTreeMap<String, AgentRoleConfig>> = LazyLock::new(|| {
+            codex_config::agent_defaults::enabled_agent_model_specs()
+                .into_iter()
+                .map(|spec| {
+                    (
+                        spec.slug.to_string(),
+                        external_agent_role_config_from_spec(spec),
+                    )
+                })
+                .collect()
+        });
+        &CONFIG
+    }
+
+    pub(super) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
+        external_agent_configs()
+            .get(role_name)
+            .cloned()
+            .or_else(|| {
+                codex_config::agent_defaults::agent_model_spec(role_name)
+                    .filter(|spec| spec.is_enabled())
+                    .map(external_agent_role_config_from_spec)
+            })
+    }
+
+    fn external_agent_role_config_from_spec(
+        spec: &'static codex_config::agent_defaults::AgentModelSpec,
+    ) -> AgentRoleConfig {
+        let defaults = codex_config::agent_defaults::agent_config_from_spec(spec);
+        AgentRoleConfig {
+            description: Some(spec.description.to_string()),
+            config_file: None,
+            nickname_candidates: None,
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: defaults.command,
+                    protocol: ExternalCommandProtocol::RawCli,
+                    args: defaults.args,
+                    args_read_only: defaults.args_read_only.unwrap_or_default(),
+                    args_write: defaults.args_write.unwrap_or_default(),
+                    env: defaults.env.unwrap_or_default(),
+                    timeout_ms: BUILT_IN_EXTERNAL_AGENT_TIMEOUT_MS,
+                    launch_family: Some(spec.family.to_string()),
+                },
+            )),
+        }
     }
 
     /// Resolves a built-in role `config_file` path to embedded content.

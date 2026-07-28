@@ -2,15 +2,28 @@ use super::collect_output_until_exit;
 use super::combine_spawned_output;
 use super::find_python;
 use super::wait_for_output_contains;
+use crate::ProcessSignal;
 use crate::TerminalSize;
 use crate::spawn_pipe_process_no_stdin;
 use crate::spawn_pty_process;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::time::Duration;
 
 const READY_MARKER: &str = "__CODEX_CHILD_READY__";
 const VALUE_MARKER: &str = "__CODEX_CHILD_VALUE__";
+
+/// How long the root process waits for its detached child to publish the ready
+/// marker. Loaded Windows CI workers regularly need more than a few seconds to
+/// start a second Python interpreter.
+const NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS: u64 = 30;
+
+/// How long the harness waits for the root process to exit. This must stay
+/// strictly larger than the child-readiness budget: if the two deadlines are
+/// equal, the harness can give up in the same instant the root is deciding its
+/// exit code, which reports a harness timeout instead of the real behavior.
+const NORMAL_EXIT_ROOT_TIMEOUT_MS: u64 = 45_000;
 
 struct WindowsShell {
     name: &'static str,
@@ -128,10 +141,24 @@ async fn assert_normal_exit_preserves_descendant(
         utf8_hex(&ready_marker.to_string_lossy()),
         utf8_hex(&survival_marker.to_string_lossy())
     );
+    // The root reports each stage on stdout so a failure says whether the
+    // detached child was never spawned, never became ready, or was ready and the
+    // root still failed to exit.
     let code = format!(
-        "import pathlib,subprocess,sys,time; code=bytes.fromhex('{}').decode(); ready=pathlib.Path(bytes.fromhex('{}').decode()); subprocess.Popen([sys.executable,'-u','-c',code],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP); deadline=time.time()+10\nwhile not ready.exists() and time.time()<deadline: time.sleep(.05)\nsys.exit(0 if ready.exists() else 2)",
-        utf8_hex(&child_code),
-        utf8_hex(&ready_marker.to_string_lossy())
+        "import pathlib,subprocess,sys,time\n\
+         code=bytes.fromhex('{child_code_hex}').decode()\n\
+         ready=pathlib.Path(bytes.fromhex('{ready_marker_hex}').decode())\n\
+         child=subprocess.Popen([sys.executable,'-u','-c',code],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP)\n\
+         print('ROOT_SPAWNED_CHILD pid='+str(child.pid),flush=True)\n\
+         deadline=time.time()+{NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS}\n\
+         while not ready.exists() and time.time()<deadline: time.sleep(.05)\n\
+         if not ready.exists():\n\
+         \x20   print('ROOT_CHILD_NOT_READY after {NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS}s',flush=True)\n\
+         \x20   sys.exit(2)\n\
+         print('ROOT_CHILD_READY',flush=True)\n\
+         sys.exit(0)\n",
+        child_code_hex = utf8_hex(&child_code),
+        ready_marker_hex = utf8_hex(&ready_marker.to_string_lossy())
     );
     let args = vec!["-u".to_string(), "-c".to_string(), code];
     let spawned = if backend == "pipe" {
@@ -149,14 +176,26 @@ async fn assert_normal_exit_preserves_descendant(
         .await?
     };
     let (session, output_rx, exit_rx) = combine_spawned_output(spawned);
-    let (_, exit_code) = collect_output_until_exit(output_rx, exit_rx, /*timeout_ms*/ 10_000).await;
-    assert_eq!(exit_code, 0, "{backend} root did not exit normally");
+    let (root_output, exit_code) = collect_output_until_exit(
+        output_rx,
+        exit_rx,
+        /*timeout_ms*/ NORMAL_EXIT_ROOT_TIMEOUT_MS,
+    )
+    .await;
+    let root_output = String::from_utf8_lossy(&root_output).into_owned();
+    assert_eq!(
+        exit_code, 0,
+        "{backend} root did not exit normally: root_output={root_output:?}"
+    );
     drop(session);
 
     let survived = wait_for_path(&survival_marker, Duration::from_secs(10)).await;
     let _ = std::fs::remove_file(ready_marker);
     let _ = std::fs::remove_file(survival_marker);
-    assert!(survived, "{backend} descendant did not survive normal exit");
+    assert!(
+        survived,
+        "{backend} descendant did not survive normal exit: root_output={root_output:?}"
+    );
     Ok(())
 }
 
@@ -258,11 +297,9 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Result<()> {
-    let Some(program) = find_powershell() else {
-        return Ok(());
-    };
-    let args = vec!["-NoLogo".to_string(), "-NoProfile".to_string()];
+async fn conpty_interrupt_signal_is_unsupported_and_leaves_session_usable() -> anyhow::Result<()> {
+    let program = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    let args = vec!["/D".to_string(), "/Q".to_string()];
     let env: HashMap<String, String> = std::env::vars().collect();
     let spawned = spawn_pty_process(
         &program,
@@ -276,11 +313,12 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
     .await?;
     let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
     let writer = session.writer_sender();
-    writer.send(b"ping.exe -4 -t localhost\n".to_vec()).await?;
-    wait_for_output_contains(&mut output_rx, "127.0.0.1", /*timeout_ms*/ 10_000).await?;
 
-    writer.send(vec![0x03]).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let error = session
+        .signal(ProcessSignal::Interrupt)
+        .expect_err("ConPTY interrupt should be unsupported on Windows");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
     writer.send(b"cmd.exe /D /C ver\n".to_vec()).await?;
     let mut output = wait_for_output_contains(
         &mut output_rx,
@@ -296,7 +334,7 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
     assert_eq!(
         exit_code,
         0,
-        "PowerShell did not resume after Ctrl-C: {:?}",
+        "ConPTY session did not stay usable after a rejected interrupt: {:?}",
         String::from_utf8_lossy(&output)
     );
     Ok(())
