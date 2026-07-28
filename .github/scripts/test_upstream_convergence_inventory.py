@@ -162,25 +162,35 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
             inventory.rules_for_policy(999)
 
     def test_tui_provenance_diagnostics_require_manual_review(self) -> None:
+        path = "codex-rs/tui/src/debug_config.rs"
         self.assertEqual(
-            inventory.classify_path("codex-rs/tui/src/debug_config.rs"),
+            inventory.classify_path(path),
             {
-                "path": "codex-rs/tui/src/debug_config.rs",
+                "path": path,
                 "lane": "red_manual_review",
                 "contracts": ["RELEASE-1"],
                 "reason": "local build provenance diagnostics",
             },
         )
+        self.assertEqual(
+            "green_bulk_adopt",
+            inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION)["lane"],
+        )
 
     def test_dogfood_launcher_is_intentionally_owned(self) -> None:
+        path = "scripts/local/install-codex-lab-dev.sh"
         self.assertEqual(
-            inventory.classify_path("scripts/local/install-codex-lab-dev.sh"),
+            inventory.classify_path(path),
             {
-                "path": "scripts/local/install-codex-lab-dev.sh",
+                "path": path,
                 "lane": "intentionally_owned",
                 "contracts": ["RELEASE-1"],
                 "reason": "Every Code distribution authority",
             },
+        )
+        self.assertEqual(
+            "green_bulk_adopt",
+            inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION)["lane"],
         )
 
     def test_classify_path_omits_conflict_type(self) -> None:

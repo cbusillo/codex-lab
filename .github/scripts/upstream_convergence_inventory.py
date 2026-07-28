@@ -175,15 +175,6 @@ POLICY_V1_RULES = (
     ),
     Rule(
         patterns=(
-            "codex-rs/tui/Cargo.toml",
-            "codex-rs/tui/src/debug_config.rs",
-        ),
-        lane="red_manual_review",
-        contracts=("RELEASE-1",),
-        reason="local build provenance diagnostics",
-    ),
-    Rule(
-        patterns=(
             "codex-rs/login/**",
             "codex-rs/secrets/**",
             "codex-rs/core/src/account_switching*",
@@ -424,9 +415,6 @@ POLICY_V1_RULES = (
             "codex-rs/version/**",
             "scripts/codex_lab_package/**",
             "scripts/*codex_lab*",
-            "scripts/local/cargo-build-env.sh",
-            "scripts/local/install-codex-lab-dev.sh",
-            "scripts/local/test_install_codex_lab_dev.py",
         ),
         lane="intentionally_owned",
         contracts=("RELEASE-1",),
@@ -458,7 +446,29 @@ GOVERNANCE_RULES = (
     ),
 )
 
-POLICY_V2_RULES = (*GOVERNANCE_RULES, *POLICY_V1_RULES)
+POST_ANCHOR_RULES = (
+    Rule(
+        patterns=(
+            "codex-rs/tui/Cargo.toml",
+            "codex-rs/tui/src/debug_config.rs",
+        ),
+        lane="red_manual_review",
+        contracts=("RELEASE-1",),
+        reason="local build provenance diagnostics",
+    ),
+    Rule(
+        patterns=(
+            "scripts/local/cargo-build-env.sh",
+            "scripts/local/install-codex-lab-dev.sh",
+            "scripts/local/test_install_codex_lab_dev.py",
+        ),
+        lane="intentionally_owned",
+        contracts=("RELEASE-1",),
+        reason="Every Code distribution authority",
+    ),
+)
+
+POLICY_V2_RULES = (*GOVERNANCE_RULES, *POST_ANCHOR_RULES, *POLICY_V1_RULES)
 
 
 def git_environment(**updates: str) -> dict[str, str]:
@@ -939,11 +949,12 @@ def build_guard_manifest(
     recomputing it from the candidate would bake the anchor's losses into the
     contract.
 
-    `current_tree` covers owned paths in the candidate itself. Owned work created
-    or restored *after* the baseline is invisible to the baseline source, so
-    without this the manifest had to be hand-edited to protect new proofs -- and a
-    hand-edited generated artifact drifts silently. Adding a path can only
-    increase protection, so this source cannot launder an anchor loss.
+    `current_tree` covers owned paths in the candidate itself using the current
+    classifier policy. Owned work created or restored *after* the baseline is
+    invisible to the baseline source, so without this the manifest had to be
+    hand-edited to protect new proofs -- and a hand-edited generated artifact
+    drifts silently. Adding a path can only increase protection, so this source
+    cannot launder an anchor loss or rewrite historical classification.
     """
 
     base = resolve_commit(repo, base_ref)
@@ -954,10 +965,13 @@ def build_guard_manifest(
 
     guarded: dict[str, dict[str, object]] = {}
     for source, ref in (("ownership_baseline", local), ("current_tree", current)):
+        source_policy_version = (
+            policy_version if source == "ownership_baseline" else POLICY_VERSION
+        )
         for path, baseline_blob in sorted(tree_objects(repo, ref).items()):
             if path in guarded:
                 continue
-            classified = classify_path(path, policy_version)
+            classified = classify_path(path, source_policy_version)
             if classified["lane"] not in GUARDED_LANES:
                 continue
             upstream_blob = upstream_objects.get(path)
