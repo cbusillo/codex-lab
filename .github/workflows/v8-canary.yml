@@ -1,7 +1,7 @@
 name: v8-canary
 
 # Do not use trigger-level path filters here. This workflow is also called by
-# postmerge-ci, and GitHub cannot share a path filter between pull_request and
+# full-ci, and GitHub cannot share a path filter between pull_request and
 # workflow_call. v8_canary_changes.py is the single source of truth instead;
 # unrelated events run only the cheap metadata job below.
 on:
@@ -54,9 +54,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Manual runs have no meaningful before/after range. Force every V8
-          # variant so workflow_dispatch remains a reliable retry path.
-          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+          # Manual and scheduled runs have no meaningful before/after range.
+          # Force every V8 variant so both entrypoints remain reliable.
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${EVENT_NAME}" == "schedule" ]]; then
             output="$(python3 .github/scripts/v8_canary_changes.py --force)"
           else
             output="$(python3 .github/scripts/v8_canary_changes.py \
@@ -83,7 +83,7 @@ jobs:
       name: bazel
       deployment: false
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - runner: ubuntu-24.04
@@ -309,7 +309,7 @@ jobs:
     permissions:
       contents: read
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - runner: windows-2025
