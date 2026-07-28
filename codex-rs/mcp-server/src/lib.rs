@@ -29,6 +29,9 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
+#[cfg(test)]
+#[path = "approval_response_compat_tests.rs"]
+mod approval_response_compat_tests;
 mod codex_tool_config;
 mod codex_tool_runner;
 mod exec_approval;

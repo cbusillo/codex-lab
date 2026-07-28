@@ -859,7 +859,7 @@ async fn start_usage_limit_failover(
         "Bearer Access Token".to_string(),
         vec![account_model(
             model_slug,
-            200_000,
+            /*context_window*/ 200_000,
             /*supports_parallel_tool_calls*/ true,
             &["priority"],
         )],
@@ -3856,7 +3856,7 @@ async fn startup_selected_execution_account_routes_first_response_and_persists_l
         format!("Bearer access-{}", accounts.candidate_chatgpt_id),
         vec![account_model(
             "execution-default",
-            345_000,
+            /*context_window*/ 345_000,
             /*supports_parallel_tool_calls*/ true,
             &["priority"],
         )],
@@ -3943,7 +3943,7 @@ async fn usage_limit_failover_refreshes_model_metadata_and_service_tier() -> any
         model_slug,
         vec![account_model(
             model_slug,
-            300_000,
+            /*context_window*/ 300_000,
             /*supports_parallel_tool_calls*/ false,
             &[],
         )],
@@ -3991,7 +3991,7 @@ async fn usage_limit_failover_preserves_missing_model_slug_with_fallback_metadat
         model_slug,
         vec![account_model(
             "candidate-other-model",
-            300_000,
+            /*context_window*/ 300_000,
             /*supports_parallel_tool_calls*/ false,
             &[],
         )],

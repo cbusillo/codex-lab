@@ -451,6 +451,7 @@ fn append_matcher_groups(
     event_name: codex_protocol::protocol::HookEventName,
     groups: Vec<MatcherGroup>,
 ) {
+    let mut seen_keys = HashSet::new();
     for (group_index, group) in groups.into_iter().enumerate() {
         let matcher = matcher_pattern_for_event(event_name, group.matcher.as_deref());
         if let Some(matcher) = matcher
@@ -465,6 +466,7 @@ fn append_matcher_groups(
         for (handler_index, handler) in group.hooks.iter().cloned().enumerate() {
             match handler {
                 HookHandlerConfig::Command {
+                    id,
                     command,
                     command_windows,
                     timeout_sec,
@@ -524,7 +526,11 @@ fn append_matcher_groups(
                     };
                     let normalized_additional_context_limit = additional_context_limit
                         .filter(|limit| *limit != DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT);
+                    // `id` is deliberately excluded from the trust hash: adding
+                    // or changing an id must not invalidate an existing
+                    // `trusted_hash` for an otherwise unchanged command.
                     let normalized_handler = HookHandlerConfig::Command {
+                        id: None,
                         command: command.clone(),
                         command_windows: None,
                         timeout_sec: Some(timeout_sec),
@@ -537,9 +543,29 @@ fn append_matcher_groups(
                     let command = source.env.iter().fold(command, |command, (key, value)| {
                         command.replace(&format!("${{{key}}}"), value)
                     });
-                    // TODO(abhinav): replace this positional suffix with a durable hook id.
-                    let key =
-                        crate::hook_key(&source.key_source, event_name, group_index, handler_index);
+                    let requested_key = crate::hook_key(
+                        &source.key_source,
+                        event_name,
+                        group_index,
+                        handler_index,
+                        id.as_deref(),
+                    );
+                    let key = if seen_keys.insert(requested_key.clone()) {
+                        requested_key
+                    } else {
+                        warnings.push(format!(
+                            "duplicate hook id {:?} in {}; using positional hook key instead",
+                            id.as_deref().unwrap_or_default(),
+                            source.path.display()
+                        ));
+                        crate::hook_key(
+                            &source.key_source,
+                            event_name,
+                            group_index,
+                            handler_index,
+                            /*id*/ None,
+                        )
+                    };
                     let state = source.hook_states.get(&key);
                     let enabled = hook_enabled(source.is_managed, state);
                     let trusted_hash = hook_trusted_hash(source.is_managed, state);
@@ -821,6 +847,7 @@ mod tests {
         MatcherGroup {
             matcher: matcher.map(str::to_string),
             hooks: vec![HookHandlerConfig::Command {
+                id: None,
                 command: "echo hello".to_string(),
                 command_windows: None,
                 timeout_sec: None,
@@ -837,6 +864,7 @@ mod tests {
         MatcherGroup {
             matcher: None,
             hooks: vec![HookHandlerConfig::Command {
+                id: None,
                 command: "echo hello".to_string(),
                 command_windows: None,
                 timeout_sec: None,
@@ -1025,6 +1053,7 @@ mod tests {
                 matcher: Some("other".to_string()),
                 hooks: vec![
                     HookHandlerConfig::Command {
+                        id: None,
                         command: "echo default".to_string(),
                         command_windows: None,
                         timeout_sec: None,
@@ -1033,6 +1062,7 @@ mod tests {
                         additional_context_limit: None,
                     },
                     HookHandlerConfig::Command {
+                        id: None,
                         command: "echo clamped".to_string(),
                         command_windows: None,
                         timeout_sec: Some(600),
@@ -1221,6 +1251,7 @@ mod tests {
                 session_start: vec![MatcherGroup {
                     matcher: None,
                     hooks: vec![HookHandlerConfig::Command {
+                        id: None,
                         command: "echo hello".to_string(),
                         command_windows: None,
                         timeout_sec: None,
@@ -1252,6 +1283,7 @@ mod tests {
             vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
+                    id: None,
                     command: "echo unix".to_string(),
                     command_windows: Some("echo windows".to_string()),
                     timeout_sec: None,

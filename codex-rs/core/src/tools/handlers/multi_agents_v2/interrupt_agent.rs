@@ -60,6 +60,14 @@ async fn handle_interrupt_agent(
         FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
     })?;
     let status = session.services.agent_control.get_status(agent_id).await;
+    let status = if turn.config.multi_agent_v2.hide_spawn_agent_metadata {
+        session
+            .services
+            .agent_control
+            .redact_external_status(agent_id, status)
+    } else {
+        status
+    };
     let result = match session
         .services
         .agent_control
@@ -91,7 +99,7 @@ async fn handle_interrupt_agent(
     .await;
 
     Ok(InterruptAgentResult {
-        previous_status: status,
+        previous_status: crate::session_prefix::bounded_status(&status),
     })
 }
 

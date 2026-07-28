@@ -54,6 +54,7 @@ use crate::connection_manager::McpConnectionSet;
 use crate::runtime::McpPublicationGate;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::McpRuntimeInput;
+use crate::runtime::McpStartupReconnectPolicy;
 use crate::server::EffectiveMcpServer;
 use crate::tools::ToolInfo;
 
@@ -354,6 +355,8 @@ pub async fn read_mcp_resource(
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             config: Arc::new(runtime_config),
+            // The connection set is cancelled as soon as the read completes.
+            startup_reconnect_policy: McpStartupReconnectPolicy::FailureIsFinal,
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers,
@@ -431,6 +434,8 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             config: Arc::new(runtime_config),
+            // The connection set is cancelled as soon as the snapshot is taken.
+            startup_reconnect_policy: McpStartupReconnectPolicy::FailureIsFinal,
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers,

@@ -236,6 +236,7 @@ mod tests {
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::SessionConfiguredEvent;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
@@ -302,6 +303,7 @@ mod tests {
                 parent_thread_id: None,
                 thread_source: None,
                 thread_name: None,
+                history_mode: ThreadHistoryMode::default(),
                 model: "gpt-4o".to_string(),
                 model_provider_id: "test-provider".to_string(),
                 service_tier: None,
@@ -348,6 +350,7 @@ mod tests {
             parent_thread_id: None,
             thread_source: None,
             thread_name: None,
+            history_mode: ThreadHistoryMode::default(),
             model: "gpt-4o".to_string(),
             model_provider_id: "test-provider".to_string(),
             service_tier: None,
@@ -388,6 +391,7 @@ mod tests {
                 "type": "session_configured",
                 "session_id": session_configured_event.session_id,
                 "thread_id": session_configured_event.thread_id,
+                "history_mode": "legacy",
                 "model": "gpt-4o",
                 "model_provider_id": "test-provider",
                 "approval_policy": "never",
@@ -416,6 +420,7 @@ mod tests {
             parent_thread_id: None,
             thread_source: None,
             thread_name: None,
+            history_mode: ThreadHistoryMode::default(),
             model: "gpt-4o".to_string(),
             model_provider_id: "test-provider".to_string(),
             service_tier: None,
@@ -457,6 +462,7 @@ mod tests {
                 "type": "session_configured",
                 "session_id": session_configured_event.session_id,
                 "thread_id": session_configured_event.thread_id,
+                "history_mode": "legacy",
                 "model": "gpt-4o",
                 "model_provider_id": "test-provider",
                 "approval_policy": "never",

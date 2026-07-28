@@ -1,9 +1,14 @@
+use codex_auto_review::AutoReviewRunSource;
+use codex_auto_review::AutoReviewRunStatus;
+use codex_auto_review::AutoReviewStore;
 use codex_core::CodexThread;
 use codex_core::REVIEW_PROMPT;
 use codex_core::config::Config;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::BackgroundAutoReviewStatus;
+use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
 use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExitedReviewModeEvent;
@@ -12,6 +17,7 @@ use codex_protocol::protocol::ReviewCodeLocation;
 use codex_protocol::protocol::ReviewFinding;
 use codex_protocol::protocol::ReviewLineRange;
 use codex_protocol::protocol::ReviewOutputEvent;
+use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::RolloutItem;
@@ -80,6 +86,7 @@ async fn review_op_emits_lifecycle_and_review_output() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -271,6 +278,65 @@ async fn review_op_emits_lifecycle_and_review_output() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_review_persists_run_without_review_mode_events() {
+    skip_if_no_network!();
+
+    let review_json = serde_json::json!({
+        "findings": [],
+        "overall_correctness": "patch is correct",
+        "overall_explanation": "Background review completed.",
+        "overall_confidence_score": 0.8
+    })
+    .to_string();
+    let (server, _request_log) = start_responses_server_with_sse(
+        assistant_message_sse(&review_json),
+        /*expected_requests*/ 1,
+    )
+    .await;
+    let codex_home = Arc::new(TempDir::new().expect("create codex home"));
+    let codex = new_conversation_for_server(&server, Arc::clone(&codex_home), |_| {}).await;
+    let review_target = ReviewTarget::Custom {
+        instructions: "background review".to_string(),
+    };
+
+    codex
+        .submit(Op::Review {
+            review_request: ReviewRequest {
+                target: review_target.clone(),
+                user_facing_hint: None,
+            },
+            persistence: Some(ReviewPersistence::BackgroundAutoReview),
+        })
+        .await
+        .expect("submit background review");
+
+    let running = wait_for_background_review_status(
+        &codex,
+        BackgroundAutoReviewStatus::Running,
+        /*expected_run_id*/ None,
+    )
+    .await;
+    let completed = wait_for_background_review_status(
+        &codex,
+        BackgroundAutoReviewStatus::Completed,
+        Some(running.run_id.as_str()),
+    )
+    .await;
+    assert_eq!(completed.review_target, review_target);
+    assert_eq!(completed.error_summary, None);
+
+    let run = load_single_auto_review_run(codex_home.path()).expect("load persisted review run");
+    assert_eq!(run.run_id, completed.run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Completed);
+    assert_eq!(run.source, AutoReviewRunSource::Background);
+    assert_eq!(run.review_target, review_target);
+    assert!(run.completed_at_unix_secs.is_some());
+    assert_eq!(run.error_summary, None);
+
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_review_does_not_forward_delegate_mcp_startup() {
     skip_if_no_network!();
 
@@ -300,6 +366,7 @@ async fn cancelled_review_does_not_forward_delegate_mcp_startup() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -384,6 +451,7 @@ async fn review_op_with_plain_text_emits_review_fallback() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -440,6 +508,7 @@ async fn review_filters_agent_message_related_events() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -514,6 +583,7 @@ async fn review_does_not_emit_agent_message_on_structured_output() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -571,6 +641,7 @@ async fn review_uses_custom_review_model_from_config() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -622,6 +693,7 @@ async fn review_uses_session_model_when_review_model_unset() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -739,6 +811,7 @@ async fn review_input_isolated_from_parent_history() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -852,6 +925,7 @@ async fn review_history_surfaces_in_parent_session() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -1002,6 +1076,7 @@ async fn review_uses_overridden_cwd_for_base_branch_merge_base() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .unwrap();
@@ -1039,6 +1114,55 @@ fn assistant_message_sse(text: &str) -> Vec<serde_json::Value> {
 
 fn completed_sse() -> Vec<serde_json::Value> {
     vec![responses::ev_completed("resp-1")]
+}
+
+fn load_single_auto_review_run(
+    codex_home: &std::path::Path,
+) -> anyhow::Result<codex_auto_review::AutoReviewRun> {
+    let review_dir = codex_home.join("state/review");
+    let mut runs = Vec::new();
+    for entry in std::fs::read_dir(&review_dir)
+        .map_err(|err| anyhow::anyhow!("auto review state dir: {err}"))?
+    {
+        let store = AutoReviewStore::from_store_root(entry?.path().join("auto-review"));
+        runs.extend(store.list_runs()?);
+    }
+    if runs.len() != 1 {
+        anyhow::bail!("expected exactly one auto review run, found {}", runs.len());
+    }
+    Ok(runs.remove(0))
+}
+
+async fn wait_for_background_review_status(
+    codex: &CodexThread,
+    expected_status: BackgroundAutoReviewStatus,
+    expected_run_id: Option<&str>,
+) -> BackgroundAutoReviewStatusEvent {
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), codex.next_event())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("timeout waiting for background review status {expected_status:?}")
+            })
+            .unwrap_or_else(|err| panic!("background review event stream ended: {err}"));
+        match event.msg {
+            EventMsg::BackgroundAutoReviewStatus(status)
+                if status.status == expected_status
+                    && expected_run_id.is_none_or(|run_id| run_id == status.run_id) =>
+            {
+                return status;
+            }
+            EventMsg::BackgroundAutoReviewStatus(status) => {
+                panic!(
+                    "unexpected background review status while waiting for {expected_status:?}: {status:?}"
+                );
+            }
+            review_mode @ (EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_)) => {
+                panic!("background review emitted review mode event: {review_mode:?}");
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Start a mock Responses API server and mount the given SSE events.

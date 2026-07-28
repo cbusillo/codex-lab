@@ -1,0 +1,72 @@
+{
+  "name": "auto-validation-bounded-apply-patch-feedback",
+  "characterization": {
+    "issue": 284,
+    "source_revision": "4339c3743917725b3b685864b3384af259a35964",
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.5",
+  "prompt": "Apply the requested fixture patch. AUTO_VALIDATION_CHARACTERIZATION_MARKER",
+  "config_toml": "model_provider = \"harness\"\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n\n[validation.groups]\nfunctional = true\nstylistic = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-auto-validation-patch",
+        "events": [
+          {
+            "item": {
+              "type": "custom_tool_call",
+              "name": "apply_patch",
+              "input": "*** Begin Patch\n*** Add File: bad-01.json\n+{ invalid\n*** Add File: bad-02.json\n+{ invalid\n*** Add File: bad-03.json\n+{ invalid\n*** Add File: bad-04.json\n+{ invalid\n*** Add File: bad-05.json\n+{ invalid\n*** Add File: bad-06.json\n+{ invalid\n*** Add File: bad-07.json\n+{ invalid\n*** Add File: bad-08.json\n+{ invalid\n*** Add File: bad-09.json\n+{ invalid\n*** Add File: bad-10.json\n+{ invalid\n*** Add File: bad-11.json\n+{ invalid\n*** Add File: bad-12.json\n+{ invalid\n*** Add File: bad-13.json\n+{ invalid\n*** End Patch",
+              "call_id": "call-auto-validation-patch"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-auto-validation-complete"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 2,
+    "turn_count": 1,
+    "thread_id": "required",
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "contains": "AUTO_VALIDATION_CHARACTERIZATION_MARKER"
+      },
+      {
+        "request": 1,
+        "scope": "input",
+        "contains": "AUTO_VALIDATION_CHARACTERIZATION_MARKER"
+      }
+    ],
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-auto-validation-patch",
+        "contains": "Success. Updated the following files:",
+        "count": {
+          "bad-": 25
+        },
+        "json_suffix": {
+          "contains_all": [
+            "\"checks\":[\"json-parse\"]",
+            "\"issue_count\":13",
+            "\"truncated\":true",
+            "invalid JSON"
+          ],
+          "count": {
+            "\"tool\":\"json-parse\"": 12,
+            "bad-": 12
+          }
+        }
+      }
+    ]
+  },
+  "timeout_seconds": 60
+}

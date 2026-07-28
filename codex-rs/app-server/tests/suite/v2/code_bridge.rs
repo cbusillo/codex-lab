@@ -489,7 +489,7 @@ async fn producer_session(
             test_metadata("producer"),
         )
         .await?;
-    let events = client.events(&producer, 0).await?;
+    let events = client.events(&producer, /*last_event_id*/ 0).await?;
     Ok((producer, events))
 }
 

@@ -1,5 +1,38 @@
-use super::*;
 use std::sync::atomic::AtomicBool;
+
+use codex_auto_review::ReviewCoordination;
+use codex_auto_review::ReviewLockGuard;
+use codex_protocol::protocol::BackgroundAutoReviewStatus;
+use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
+use codex_protocol::protocol::ReviewPersistence;
+use codex_protocol::protocol::ReviewRequest;
+
+use super::*;
+use crate::review_persistence::ReviewPersistenceContext;
+use crate::state::BackgroundAutoReviewRunningHandle;
+use crate::tasks::SessionTask;
+use crate::tasks::SessionTaskContext;
+
+const ESTIMATED_BYTES_PER_REVIEW_PROMPT_TOKEN: u64 = 4;
+
+pub(super) struct PreparedReviewThread {
+    pub(super) turn_context: Arc<TurnContext>,
+    pub(super) input: Vec<TurnInput>,
+    pub(super) task: ReviewTask,
+    manual_review_request: Option<ReviewRequest>,
+}
+
+impl PreparedReviewThread {
+    pub(super) fn with_persistence(mut self, persistence: ReviewPersistenceContext) -> Self {
+        self.task = self.task.replace_persistence(persistence);
+        self
+    }
+}
+
+pub(super) enum ReviewPersistenceSpec {
+    Mode(ReviewPersistence),
+    Context(Box<ReviewPersistenceContext>),
+}
 
 /// Spawn a review thread using the given prompt.
 pub(super) async fn spawn_review_thread(
@@ -8,7 +41,111 @@ pub(super) async fn spawn_review_thread(
     parent_turn_context: Arc<TurnContext>,
     sub_id: String,
     resolved: crate::review_prompts::ResolvedReviewRequest,
+    persistence: Option<ReviewPersistence>,
 ) {
+    let mut prepared = prepare_review_thread(
+        Arc::clone(&sess),
+        config,
+        parent_turn_context,
+        sub_id,
+        resolved,
+        persistence.map(ReviewPersistenceSpec::Mode),
+    )
+    .await;
+
+    let manual_review_request = prepared.manual_review_request.clone();
+    if let Some(review_request) = manual_review_request {
+        sess.cancel_background_auto_review_for_foreground_work()
+            .await;
+        if let Some(persistence) = prepared.task.persistence_context()
+            && persistence.is_manual()
+        {
+            prepared = match record_started_manual_auto_review(&sess, persistence).await {
+                Some(persistence) => prepared.with_persistence(persistence),
+                None => {
+                    sess.send_event(
+                        prepared.turn_context.as_ref(),
+                        EventMsg::Error(ErrorEvent {
+                            message: "failed to start persisted manual review".to_string(),
+                            codex_error_info: Some(CodexErrorInfo::Other),
+                        }),
+                    )
+                    .await;
+                    return;
+                }
+            };
+        }
+        sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+        sess.clear_connector_selection().await;
+        let turn_context = Arc::clone(&prepared.turn_context);
+        sess.start_task(prepared.turn_context, prepared.input, prepared.task)
+            .await;
+        let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
+            id: uuid::Uuid::now_v7().to_string(),
+            target: review_request.target,
+            user_facing_hint: review_request.user_facing_hint.unwrap_or_default(),
+        });
+        sess.emit_turn_item_started(turn_context.as_ref(), &item)
+            .await;
+        sess.emit_turn_item_completed(turn_context.as_ref(), item)
+            .await;
+    } else {
+        sess.spawn_task(prepared.turn_context, prepared.input, prepared.task)
+            .await;
+    }
+}
+
+async fn record_started_manual_auto_review(
+    sess: &Arc<Session>,
+    persistence: ReviewPersistenceContext,
+) -> Option<ReviewPersistenceContext> {
+    let codex_home = sess.codex_home().await;
+    let coordination = ReviewCoordination::for_scope(&codex_home, persistence.store_scope());
+    let mut published = None;
+    let result = coordination.publish_next_snapshot_epoch_after(|snapshot_epoch| {
+        let pending = persistence.clone().with_snapshot_epoch(snapshot_epoch);
+        if pending.save_pending(&codex_home) {
+            published = Some(pending);
+            true
+        } else {
+            false
+        }
+    });
+    match result {
+        Ok(Some(_snapshot_epoch)) => published,
+        Ok(None) => {
+            tracing::warn!(
+                run_id = %persistence.run_id(),
+                "failed to persist pending manual auto review run"
+            );
+            None
+        }
+        Err(err) => {
+            if let Some(pending) = published {
+                pending.save_failed(
+                    &codex_home,
+                    format!("failed to publish manual auto review snapshot epoch: {err}"),
+                    /*token_usage*/ None,
+                );
+            }
+            tracing::warn!(
+                run_id = %persistence.run_id(),
+                error = %err,
+                "failed to publish manual auto review snapshot epoch"
+            );
+            None
+        }
+    }
+}
+
+pub(super) async fn prepare_review_thread(
+    sess: Arc<Session>,
+    config: Arc<Config>,
+    parent_turn_context: Arc<TurnContext>,
+    sub_id: String,
+    resolved: crate::review_prompts::ResolvedReviewRequest,
+    persistence: Option<ReviewPersistenceSpec>,
+) -> PreparedReviewThread {
     let model = config
         .review_model
         .clone()
@@ -154,6 +291,7 @@ pub(super) async fn spawn_review_thread(
     };
 
     // Seed the child task with the review prompt as the initial user message.
+    let prompt_token_estimate = estimate_review_prompt_tokens(&review_prompt);
     let input = vec![TurnInput::UserInput {
         content: vec![UserInput::Text {
             text: review_prompt,
@@ -166,17 +304,111 @@ pub(super) async fn spawn_review_thread(
     if tc.environments.single_local_environment_cwd().is_some() {
         tc.turn_metadata_state.spawn_git_enrichment_task();
     }
-    // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
-    // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
-    // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
-    sess.spawn_task(tc.clone(), input, ReviewTask::new()).await;
-
-    // Announce entering review mode so UIs can switch modes.
-    let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
-        id: uuid::Uuid::now_v7().to_string(),
-        target: resolved.target,
-        user_facing_hint: resolved.user_facing_hint,
+    let should_emit_review_mode = persistence.as_ref().is_none_or(|persistence| {
+        matches!(
+            persistence,
+            ReviewPersistenceSpec::Mode(ReviewPersistence::ManualAutoReview)
+        )
     });
-    sess.emit_turn_item_started(&tc, &item).await;
-    sess.emit_turn_item_completed(&tc, item).await;
+    let manual_review_request = if should_emit_review_mode {
+        Some(ReviewRequest {
+            target: resolved.target.clone(),
+            user_facing_hint: Some(resolved.user_facing_hint.clone()),
+        })
+    } else {
+        None
+    };
+    let task = if let Some(persistence) = persistence {
+        let persistence = match persistence {
+            ReviewPersistenceSpec::Mode(mode) => {
+                let selected_cwd = tc.environments.single_local_environment_cwd();
+                let target_cwd = selected_cwd
+                    .as_ref()
+                    .map(std::convert::AsRef::as_ref)
+                    .unwrap_or_else(|| tc.config.cwd.as_ref());
+                ReviewPersistenceContext::new(
+                    review_turn_id,
+                    mode,
+                    resolved.target,
+                    tc.config.codex_home.as_ref(),
+                    target_cwd,
+                    Some(model),
+                    tc.effective_reasoning_effort()
+                        .map(|effort| effort.to_string()),
+                    /*prompt_token_estimate*/ None,
+                )
+                .await
+            }
+            ReviewPersistenceSpec::Context(persistence) => *persistence,
+        }
+        .with_prompt_token_estimate(prompt_token_estimate);
+        ReviewTask::with_persistence(persistence)
+    } else {
+        ReviewTask::new()
+    };
+    PreparedReviewThread {
+        turn_context: tc,
+        input,
+        task,
+        manual_review_request,
+    }
+}
+
+fn estimate_review_prompt_tokens(prompt: &str) -> Option<u64> {
+    let bytes = u64::try_from(prompt.len()).ok()?;
+    Some(
+        bytes.saturating_add(ESTIMATED_BYTES_PER_REVIEW_PROMPT_TOKEN - 1)
+            / ESTIMATED_BYTES_PER_REVIEW_PROMPT_TOKEN,
+    )
+}
+
+pub(super) fn spawn_detached_review_thread(
+    sess: Arc<Session>,
+    prepared: PreparedReviewThread,
+    running_review: BackgroundAutoReviewRunningHandle,
+    review_lock_guard: ReviewLockGuard,
+    generation: u64,
+) {
+    let turn_extension_data = Arc::clone(&prepared.turn_context.extension_data);
+    let session_ctx = Arc::new(SessionTaskContext::new(
+        Arc::clone(&sess),
+        turn_extension_data,
+    ));
+    let task = Arc::new(prepared.task);
+    let turn_context = prepared.turn_context;
+    let input = prepared.input;
+    let cancellation_token = running_review.cancellation_token;
+    let completion = running_review.completion;
+    tokio::spawn(async move {
+        let _review_lock_guard = review_lock_guard;
+        let _ = task
+            .run(session_ctx, turn_context, input, cancellation_token)
+            .await;
+        sess.clear_background_auto_review(generation).await;
+        completion.mark_done();
+    });
+}
+
+pub(super) async fn record_background_review_status(
+    sess: Arc<Session>,
+    persistence: &ReviewPersistenceContext,
+    status: BackgroundAutoReviewStatus,
+    error_summary: Option<String>,
+) {
+    let event = Event {
+        id: persistence.run_id().to_string(),
+        msg: EventMsg::BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent {
+            run_id: persistence.run_id().to_string(),
+            status,
+            review_target: persistence.review_target().clone(),
+            error_summary,
+        }),
+    };
+    if let Err(err) = tokio::spawn(async move {
+        sess.send_event_raw(event).await;
+    })
+    .await
+    {
+        tracing::warn!(error = %err, "background auto review status task failed");
+    }
 }

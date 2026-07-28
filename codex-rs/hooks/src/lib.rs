@@ -102,12 +102,22 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
 }
 
 /// Builds the persisted config-state key for one discovered hook handler.
+///
+/// Handlers that declare an `id` get a stable `…:#<id>` key that survives
+/// reordering. Handlers without one keep the historical
+/// `…:<group_index>:<handler_index>` key so already-persisted `enabled` and
+/// `trusted_hash` entries stay addressable.
 pub fn hook_key(
     key_source: &str,
     event_name: HookEventName,
     group_index: usize,
     handler_index: usize,
+    id: Option<&str>,
 ) -> String {
+    if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
+        return format!("{key_source}:{}:#{id}", hook_event_key_label(event_name));
+    }
+
     format!(
         "{key_source}:{}:{group_index}:{handler_index}",
         hook_event_key_label(event_name)

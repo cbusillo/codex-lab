@@ -40,6 +40,23 @@ app-server-test-client *args:
     cargo build -p codex-cli
     cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
 
+# Build the local Codex CLI and run every exec harness scenario.
+[no-cd]
+[unix]
+exec-harness-test:
+    eval "$({{ justfile_directory() }}/scripts/local/exec-harness-env.sh)" && \
+      cargo_manifest="{{ justfile_directory() }}/codex-rs/Cargo.toml" && \
+      target_dir="${CARGO_TARGET_DIR:-{{ justfile_directory() }}/codex-rs/target}" && \
+      cargo build --manifest-path "$cargo_manifest" -p codex-cli --bin codex && \
+      codex_bin="$target_dir/debug/codex" && \
+      if [ "$(uname -s)" = Linux ]; then \
+        cargo build --manifest-path "$cargo_manifest" -p codex-bwrap --bin bwrap && \
+        mkdir -p "$target_dir/debug/codex-resources" && \
+        cp "$target_dir/debug/bwrap" "$target_dir/debug/codex-resources/bwrap" && \
+        chmod 0755 "$target_dir/debug/codex-resources/bwrap"; \
+      fi && \
+      {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin "$codex_bin" --output-root "$CODEX_EXEC_HARNESS_OUTPUT_ROOT" --report-json "$CODEX_EXEC_HARNESS_REPORT_JSON"
+
 # Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
 fmt:
     @{{ python }} ../scripts/format.py

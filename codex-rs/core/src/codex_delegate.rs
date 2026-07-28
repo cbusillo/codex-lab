@@ -107,6 +107,9 @@ pub(crate) async fn run_codex_thread_interactive(
             .services
             .turn_environments
             .environment_manager(),
+        project_validation_coordinator: Arc::clone(
+            &parent_session.services.project_validation_coordinator,
+        ),
         skills_service: Arc::clone(&parent_session.services.skills_service),
         plugins_manager: Arc::clone(&parent_session.services.plugins_manager),
         mcp_manager: Arc::clone(&parent_session.services.mcp_manager),
@@ -116,6 +119,7 @@ pub(crate) async fn run_codex_thread_interactive(
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source: SessionSource::SubAgent(subagent_source.clone()),
+        session_provenance: None,
         forked_from_thread_id,
         parent_thread_id: Some(parent_session.thread_id),
         thread_source: Some(ThreadSource::Subagent),

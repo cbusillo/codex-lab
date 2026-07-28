@@ -13,6 +13,10 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   skip:
     if: ${{ !inputs.publish }}
     runs-on: ubuntu-latest
@@ -21,6 +25,7 @@ jobs:
 
   build:
     if: ${{ inputs.publish }}
+    needs: authorize_self_hosted
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60

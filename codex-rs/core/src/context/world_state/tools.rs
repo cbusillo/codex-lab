@@ -8,6 +8,11 @@ use codex_protocol::protocol::TOOLS_CLOSE_TAG;
 use codex_protocol::protocol::TOOLS_OPEN_TAG;
 use std::collections::BTreeMap;
 
+/// MANUAL REVIEW (model-visible context rule 5): at the repo's ~4-bytes-per-token approximation
+/// this fragment can reach roughly 1K tokens, which is the threshold above which a single
+/// injected item needs explicit sign-off. Raising this constant requires re-reviewing the
+/// `<tools>` fragment against that rule; `tools_fragment_stays_within_the_manual_review_budget`
+/// pins the current ceiling.
 const MAX_RENDERED_FRAGMENT_BYTES: usize = 4 * 1024;
 const MAX_NAMESPACE_DESCRIPTION_CHARS: usize = 250;
 const OMITTED_LINE_RESERVE_BYTES: usize = 64;

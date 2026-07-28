@@ -6,6 +6,7 @@ use crate::Features;
 use crate::FeaturesToml;
 use crate::Stage;
 use crate::feature_for_key;
+use crate::is_known_feature_key;
 use crate::unstable_features_warning_event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
@@ -73,6 +74,17 @@ path = "/custom/mcp"
         features.map(|features| features.entries()),
         [BTreeMap::new(), BTreeMap::new()]
     );
+}
+
+#[test]
+fn removed_child_agents_md_is_accepted_without_enabling_anything() {
+    assert!(is_known_feature_key("child_agents_md"));
+
+    let mut features = Features::with_defaults();
+    let before = features.enabled_features();
+    features.apply_map(&BTreeMap::from([("child_agents_md".to_string(), true)]));
+
+    assert_eq!(features.enabled_features(), before);
 }
 
 #[test]

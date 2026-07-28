@@ -510,6 +510,7 @@ fn map_hook_matcher_group_to_api(group: CoreMatcherGroup) -> ConfiguredHookMatch
 fn map_hook_handler_to_api(handler: CoreHookHandlerConfig) -> ConfiguredHookHandler {
     match handler {
         CoreHookHandlerConfig::Command {
+            id,
             command,
             command_windows,
             timeout_sec,
@@ -517,6 +518,7 @@ fn map_hook_handler_to_api(handler: CoreHookHandlerConfig) -> ConfiguredHookHand
             status_message,
             additional_context_limit,
         } => ConfiguredHookHandler::Command {
+            id,
             command,
             command_windows,
             timeout_sec,

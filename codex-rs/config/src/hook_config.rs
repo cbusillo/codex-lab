@@ -5,15 +5,73 @@ use std::path::PathBuf;
 use codex_protocol::protocol::HookEventName;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct HooksFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
     pub hooks: HookEventsToml,
+}
+
+/// `hooks.json` files in the wild carry extension keys (`$schema`, editor
+/// metadata, plugin-specific annotations). Rejecting every unknown key breaks
+/// those files, but silently accepting unknown keys hides the common mistake of
+/// writing event tables at the top level (or misspelling their casing) instead
+/// of nesting them under `hooks`. Only the latter is rejected.
+impl<'de> Deserialize<'de> for HooksFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct HooksFileWire {
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default)]
+            hooks: HookEventsToml,
+            #[serde(flatten)]
+            extra: BTreeMap<String, serde_json::Value>,
+        }
+
+        let wire = HooksFileWire::deserialize(deserializer)?;
+        for key in wire.extra.keys() {
+            if is_hook_event_key_regardless_of_casing(key) {
+                return Err(serde::de::Error::unknown_field(key, HOOKS_FILE_FIELDS));
+            }
+        }
+
+        Ok(Self {
+            description: wire.description,
+            hooks: wire.hooks,
+        })
+    }
+}
+
+const HOOKS_FILE_FIELDS: &[&str] = &["description", "hooks"];
+
+const HOOK_EVENT_KEYS: &[&str] = &[
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+];
+
+/// Matches event names case-insensitively so `pretooluse` is reported as a
+/// misplaced event table rather than accepted as an unrelated extension key.
+fn is_hook_event_key_regardless_of_casing(key: &str) -> bool {
+    HOOK_EVENT_KEYS
+        .iter()
+        .any(|event_key| event_key.eq_ignore_ascii_case(key))
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -149,6 +207,11 @@ pub struct MatcherGroup {
 pub enum HookHandlerConfig {
     #[serde(rename = "command")]
     Command {
+        /// Stable identifier for this handler. When present it anchors the
+        /// persisted hook-state key (enable/disable and `trusted_hash`) so
+        /// reordering handlers does not silently drop the user's decisions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         command: String,
         #[serde(default, rename = "commandWindows", alias = "command_windows")]
         command_windows: Option<String>,

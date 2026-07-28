@@ -2,7 +2,10 @@ use super::*;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
-use crate::agent::role::DEFAULT_ROLE_NAME;
+use crate::agent::provider_routing::AgentTaskKind;
+use crate::agent::provider_routing::AgentTaskSize;
+use crate::agent::provider_routing::ProviderRoutingSummary;
+use crate::agent::provider_routing::select_provider_route;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
@@ -48,18 +51,30 @@ async fn handle_spawn_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let fork_mode = args.fork_mode()?;
-    let role_name = args
+    let explicit_role_name = args
         .agent_type
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
 
-    let message = message_content(args.message)?;
+    let message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    let routing =
+        select_provider_route(&config, explicit_role_name, args.task_kind, args.task_size)
+            .await
+            .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
+    let role_name = routing.role_name();
+    let fork_mode = args.fork_mode(routing.is_external())?;
+    if routing.is_external() && fork_mode.is_some() {
+        return Err(FunctionCallError::RespondToModel(
+            "External agents do not support fork_turns; use `fork_turns = \"none\"` or omit it when an external agent is selected."
+                .to_string(),
+        ));
+    }
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }
@@ -119,6 +134,7 @@ async fn handle_spawn_agent(
                     fork_mode,
                     parent_thread_id: Some(session.thread_id),
                     environments: Some(turn.environments.to_selections()),
+                    external_agent_provider: routing.provider().cloned(),
                 },
             ),
     )
@@ -145,21 +161,31 @@ async fn handle_spawn_agent(
         },
     )
     .await;
-    let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",
         /*inc*/ 1,
-        &[("role", role_tag), ("version", "v2")],
+        &[
+            ("role", routing.agent_type()),
+            ("routing", routing.kind().as_str()),
+            ("task_kind", args.task_kind.as_str()),
+            ("task_size", args.task_size.as_str()),
+            ("version", "v2"),
+        ],
     );
     let task_name = String::from(new_agent_path);
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     if hide_agent_metadata {
-        Ok(SpawnAgentResult::HiddenMetadata { task_name })
+        Ok(SpawnAgentResult::HiddenMetadata {
+            task_name,
+            routing: routing.redacted_summary(),
+        })
     } else {
         Ok(SpawnAgentResult::WithNickname {
             task_name,
             nickname,
+            agent_type: routing.agent_type().to_string(),
+            routing: routing.summary(),
         })
     }
 }
@@ -179,12 +205,19 @@ struct SpawnAgentArgs {
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     service_tier: Option<String>,
+    #[serde(default)]
+    task_kind: AgentTaskKind,
+    #[serde(default)]
+    task_size: AgentTaskSize,
     fork_turns: Option<String>,
     fork_context: Option<bool>,
 }
 
 impl SpawnAgentArgs {
-    fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
+    fn fork_mode(
+        &self,
+        default_to_no_fork: bool,
+    ) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
         if self.fork_context.is_some() {
             return Err(FunctionCallError::RespondToModel(
                 "fork_context is not supported in MultiAgentV2; use fork_turns instead".to_string(),
@@ -196,7 +229,7 @@ impl SpawnAgentArgs {
             .as_deref()
             .map(str::trim)
             .filter(|fork_turns| !fork_turns.is_empty())
-            .unwrap_or("all");
+            .unwrap_or(if default_to_no_fork { "none" } else { "all" });
 
         if fork_turns.eq_ignore_ascii_case("none") {
             return Ok(None);
@@ -226,9 +259,12 @@ pub(crate) enum SpawnAgentResult {
     WithNickname {
         task_name: String,
         nickname: Option<String>,
+        agent_type: String,
+        routing: ProviderRoutingSummary,
     },
     HiddenMetadata {
         task_name: String,
+        routing: ProviderRoutingSummary,
     },
 }
 

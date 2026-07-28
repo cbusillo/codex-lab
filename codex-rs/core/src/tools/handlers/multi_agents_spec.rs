@@ -1,5 +1,11 @@
 use super::multi_agents_common::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
 use super::multi_agents_common::model_supports_multi_agent_backend;
+use super::multi_agents_routing_spec::create_agent_task_kind_schema;
+use super::multi_agents_routing_spec::create_agent_task_size_schema;
+use super::multi_agents_routing_spec::external_agent_failure_output_schema;
+use super::multi_agents_routing_spec::external_agent_provider_output_schema;
+use super::multi_agents_routing_spec::provider_routing_guidance;
+use super::multi_agents_routing_spec::provider_routing_output_schema;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::JsonSchema;
@@ -136,7 +142,12 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            Some(vec!["task_name".to_string(), "message".to_string()]),
+            Some(vec![
+                "task_name".to_string(),
+                "message".to_string(),
+                "task_kind".to_string(),
+                "task_size".to_string(),
+            ]),
             Some(false.into()),
         ),
         output_schema: Some(spawn_agent_output_schema_v2(
@@ -408,19 +419,22 @@ fn spawn_agent_output_schema_v1() -> Value {
 
 fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
     if hide_agent_metadata {
+        let routing = provider_routing_output_schema();
         return json!({
             "type": "object",
             "properties": {
                 "task_name": {
                     "type": "string",
                     "description": "Canonical task name for the spawned agent."
-                }
+                },
+                "routing": routing
             },
-            "required": ["task_name"],
+            "required": ["task_name", "routing"],
             "additionalProperties": false
         });
     }
 
+    let routing = provider_routing_output_schema();
     json!({
         "type": "object",
         "properties": {
@@ -431,9 +445,14 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
-            }
+            },
+            "agent_type": {
+                "type": "string",
+                "description": "Effective agent role selected for the spawned agent."
+            },
+            "routing": routing
         },
-        "required": ["task_name", "nickname"],
+        "required": ["task_name", "nickname", "agent_type", "routing"],
         "additionalProperties": false
     })
 }
@@ -453,6 +472,8 @@ fn send_input_output_schema() -> Value {
 }
 
 fn list_agents_output_schema() -> Value {
+    let provider = external_agent_provider_output_schema();
+    let failure = external_agent_failure_output_schema();
     json!({
         "type": "object",
         "properties": {
@@ -468,6 +489,13 @@ fn list_agents_output_schema() -> Value {
                         "agent_status": {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
+                        },
+                        "provider": provider,
+                        "failure": failure,
+                        "duration_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Elapsed external-agent runtime in milliseconds."
                         }
                     },
                     "required": ["agent_name", "agent_status"],
@@ -637,6 +665,8 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             ))
             .with_encrypted(),
         ),
+        ("task_kind".to_string(), create_agent_task_kind_schema()),
+        ("task_size".to_string(), create_agent_task_size_schema()),
         (
             "agent_type".to_string(),
             JsonSchema::string(Some(format!(
@@ -646,7 +676,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "fork_turns".to_string(),
             JsonSchema::string(Some(
-                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+                "Optional number of turns to fork. Defaults to `none` when an external agent is selected and `all` otherwise. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
                     .to_string(),
             )),
         ),
@@ -753,14 +783,17 @@ fn spawn_agent_tool_description_v2(
 ) -> String {
     let agent_role_guidance = available_models_description.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
+    let provider_routing_guidance =
+        provider_routing_guidance(available_models_description.is_some());
 
     let tool_description = format!(
         r#"
         {agent_role_guidance}
         Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
-The spawned agent will have the same tools as you and the ability to spawn its own subagents.
+Native child agents receive the same tools as you and can spawn subagents. Configured agent types may instead route to external CLIs with their own capabilities.
 {inherited_model_guidance}
+{provider_routing_guidance}
 Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.

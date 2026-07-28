@@ -5,6 +5,9 @@ inputs:
     description: Target triple used for cache namespacing.
     required: true
 outputs:
+  cache-scope:
+    description: Stable cache namespace for this runner instance.
+    value: ${{ steps.setup_ci.outputs.cache-scope }}
   repository-cache-path:
     description: Filesystem path used for the Bazel repository cache.
     value: ${{ steps.configure_bazel_repository_cache_unix.outputs.repository-cache-path || steps.configure_bazel_repository_cache_windows.outputs.repository-cache-path }}

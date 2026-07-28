@@ -725,7 +725,8 @@ impl App {
             } else {
                 "Auto-switch accounts disabled"
             };
-            self.chat_widget.add_info_message(message.to_string(), None);
+            self.chat_widget
+                .add_info_message(message.to_string(), /*hint*/ None);
         }
     }
 
@@ -760,7 +761,8 @@ impl App {
             } else {
                 "API key fallback disabled"
             };
-            self.chat_widget.add_info_message(message.to_string(), None);
+            self.chat_widget
+                .add_info_message(message.to_string(), /*hint*/ None);
         }
     }
 

@@ -6,9 +6,85 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentRoleBackendToml": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "args": {
+              "description": "Arguments passed to the command after the executable path.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "args_read_only": {
+              "description": "Arguments appended when the agent is running in read-only mode.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "args_write": {
+              "description": "Arguments appended when the agent is running in workspace-write mode.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "command": {
+              "description": "Command to execute for each spawned external agent.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Environment variables to set for the spawned agent.",
+              "type": "object"
+            },
+            "protocol": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ExternalCommandProtocolToml"
+                }
+              ],
+              "default": "json",
+              "description": "Protocol to communicate with the external agent."
+            },
+            "timeout_ms": {
+              "description": "Maximum process runtime in milliseconds.",
+              "format": "uint64",
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "external_command"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
+        "backend": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentRoleBackendToml"
+            }
+          ],
+          "description": "Optional non-Codex backend used to run agents spawned with this role."
+        },
         "config_file": {
           "allOf": [
             {
@@ -295,7 +371,7 @@
       "description": "Determine where Codex should store CLI auth credentials.",
       "oneOf": [
         {
-          "description": "Persist credentials in CODEX_HOME/auth.json.",
+          "description": "Persist credentials in CODEX_LAB_HOME/auth.json.",
           "enum": [
             "file"
           ],
@@ -309,7 +385,7 @@
           "type": "string"
         },
         {
-          "description": "Use keyring when available; otherwise, fall back to a file in CODEX_HOME.",
+          "description": "Use keyring when available; otherwise, fall back to a file in CODEX_LAB_HOME.",
           "enum": [
             "auto"
           ],
@@ -345,6 +421,36 @@
     },
     "AutoReviewToml": {
       "properties": {
+        "background_max_diff_bytes": {
+          "description": "Maximum diff size in bytes for automatic background reviews. Defaults to 120000. Reviews whose diff exceeds this limit are recorded as skipped rather than launched.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "background_max_elapsed_seconds": {
+          "description": "Maximum wall-clock runtime in seconds for automatic background reviews.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "background_max_findings": {
+          "description": "Maximum number of findings accepted from one background review.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "background_max_output_bytes": {
+          "description": "Maximum serialized reviewer output size in bytes.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "background_max_total_tokens": {
+          "description": "Maximum cumulative token usage for automatic background reviews.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
@@ -358,6 +464,36 @@
         "enabled": {
           "default": true,
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "CargoValidationProviderConfig": {
+      "additionalProperties": false,
+      "description": "Trusted configuration for the built-in Cargo provider. Changed repository Cargo config is parsed for errors, but Cargo runs from an isolated directory so repository config cannot redirect validation through local executables.",
+      "properties": {
+        "command": {
+          "default": [
+            "cargo"
+          ],
+          "description": "Trusted Cargo executable. The provider requires exactly one executable and appends the built-in `check` subcommand and fixed bounded arguments. Repository-local values are ignored with a warning.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Whether changed Rust and Cargo workspace files select this provider.",
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "default": 30000,
+          "description": "Maximum execution time in milliseconds.",
+          "format": "uint64",
+          "maximum": 30000.0,
+          "minimum": 1.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -463,6 +599,9 @@
               "type": "boolean"
             },
             "browser_use_full_cdp_access": {
+              "type": "boolean"
+            },
+            "child_agents_md": {
               "type": "boolean"
             },
             "chronicle": {
@@ -953,6 +1092,13 @@
       },
       "type": "object"
     },
+    "ExternalCommandProtocolToml": {
+      "enum": [
+        "json",
+        "raw_cli"
+      ],
+      "type": "string"
+    },
     "ExternalConfigMigrationPrompts": {
       "additionalProperties": false,
       "description": "Settings for notices we display to users via the tui and app-server clients (primarily the Codex IDE extension). NOTE: these are different from notifications - notices are warnings, NUX screens, acknowledgements, etc.",
@@ -1252,6 +1398,10 @@
             },
             "commandWindows": {
               "default": null,
+              "type": "string"
+            },
+            "id": {
+              "description": "Stable identifier for this handler. When present it anchors the persisted hook-state key (enable/disable and `trusted_hash`) so reordering handlers does not silently drop the user's decisions.",
               "type": "string"
             },
             "statusMessage": {
@@ -2242,7 +2392,7 @@
           "type": "string"
         },
         {
-          "description": "CODEX_HOME/.credentials.json This file will be readable to Codex and other applications running as the same user.",
+          "description": "CODEX_LAB_HOME/.credentials.json This file will be readable to Codex and other applications running as the same user.",
           "enum": [
             "file"
           ],
@@ -2568,6 +2718,28 @@
       "properties": {
         "trust_level": {
           "$ref": "#/definitions/TrustLevel"
+        }
+      },
+      "type": "object"
+    },
+    "ProjectValidationCommand": {
+      "additionalProperties": false,
+      "description": "One project-defined command that runs automatically after agent work.",
+      "properties": {
+        "command": {
+          "default": [],
+          "description": "Executable and arguments. Shell syntax is not interpreted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout_ms": {
+          "default": 60000,
+          "description": "Maximum execution time in milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -3010,6 +3182,35 @@
       },
       "type": "object"
     },
+    "ShellcheckValidationProviderConfig": {
+      "additionalProperties": false,
+      "description": "Trusted configuration for the built-in ShellCheck provider.",
+      "properties": {
+        "command": {
+          "default": [
+            "shellcheck"
+          ],
+          "description": "Executable and optional trusted prefix arguments. Only user, system, managed, or runtime config may set this field; repository-local values are ignored with a warning. The runtime appends `-f gcc` and the selected changed-file paths without shell parsing.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Whether changed shell files select this provider.",
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "default": 6000,
+          "description": "Maximum execution time in milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "SkillConfig": {
       "additionalProperties": false,
       "properties": {
@@ -3394,7 +3595,7 @@
         },
         "pet": {
           "default": null,
-          "description": "Pet id to preselect in the terminal pet picker.\n\nCustom pet ids resolve against CODEX_HOME/pets/<pet-id>/pet.json.",
+          "description": "Pet id to preselect in the terminal pet picker.\n\nCustom pet ids resolve against CODEX_LAB_HOME/pets/<pet-id>/pet.json.",
           "type": "string"
         },
         "pet_anchor": {
@@ -3464,7 +3665,7 @@
         },
         "theme": {
           "default": null,
-          "description": "Syntax highlighting theme name (kebab-case).\n\nWhen set, overrides automatic light/dark theme detection. Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.",
+          "description": "Syntax highlighting theme name (kebab-case).\n\nWhen set, overrides automatic light/dark theme detection. Use `/theme` in the TUI or see `$CODEX_LAB_HOME/themes` for custom themes.",
           "type": "string"
         },
         "vim_mode_default": {
@@ -4707,6 +4908,112 @@
         }
       ]
     },
+    "ValidationConfig": {
+      "additionalProperties": false,
+      "description": "Patch-local validation settings.",
+      "properties": {
+        "groups": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ValidationGroups"
+            }
+          ],
+          "default": {
+            "functional": false,
+            "stylistic": false
+          },
+          "description": "Validation categories enabled for patch-local checks."
+        },
+        "project_command": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProjectValidationCommand"
+            }
+          ],
+          "default": null,
+          "description": "Optional project command to run after a root turn changes a Git worktree. Model tool activity, non-Git workspaces, and unreadable worktree state preserve the existing fail-open behavior and run the command. An actionable failure sends a bounded command/output fragment to the model, permits one correction cycle, and reruns the command once. The command should therefore tolerate up to two executions per root turn. Commands targeting the same Git repository are serialized across root sessions in one runtime; non-Git workspaces remain uncoordinated. A waiting turn can be cancelled and correction reruns reacquire the repository lease. Repository-local config cannot set this executable field."
+        },
+        "providers": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ValidationProviders"
+            }
+          ],
+          "default": {
+            "cargo": {
+              "command": [
+                "cargo"
+              ],
+              "enabled": true,
+              "timeout_ms": 30000
+            },
+            "shellcheck": {
+              "command": [
+                "shellcheck"
+              ],
+              "enabled": true,
+              "timeout_ms": 6000
+            }
+          },
+          "description": "Automatically selected executable providers. Provider argv is trusted executable configuration and cannot be supplied by repository-local config."
+        }
+      },
+      "type": "object"
+    },
+    "ValidationGroups": {
+      "additionalProperties": false,
+      "description": "Category toggles for patch-local validation.",
+      "properties": {
+        "functional": {
+          "default": true,
+          "description": "Structural and correctness checks.",
+          "type": "boolean"
+        },
+        "stylistic": {
+          "default": false,
+          "description": "Formatting and style checks. Reserved for a later runtime slice.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ValidationProviders": {
+      "additionalProperties": false,
+      "description": "Automatically selected executable validation providers.",
+      "properties": {
+        "cargo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CargoValidationProviderConfig"
+            }
+          ],
+          "default": {
+            "command": [
+              "cargo"
+            ],
+            "enabled": true,
+            "timeout_ms": 30000
+          },
+          "description": "Cargo validation selected from changed Rust and Cargo workspace files."
+        },
+        "shellcheck": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ShellcheckValidationProviderConfig"
+            }
+          ],
+          "default": {
+            "command": [
+              "shellcheck"
+            ],
+            "enabled": true,
+            "timeout_ms": 6000
+          },
+          "description": "Shell script validation selected from changed `.sh` and shebang files."
+        }
+      },
+      "type": "object"
+    },
     "Verbosity": {
       "description": "Controls output length/detail on GPT-5 models via the Responses API. Serialized with lowercase values to match the OpenAI API.",
       "enum": [
@@ -4805,7 +5112,7 @@
       "type": "object"
     }
   },
-  "description": "Base config deserialized from ~/.codex/config.toml.",
+  "description": "Base config deserialized from ~/.codex-lab/config.toml.",
   "properties": {
     "agents": {
       "allOf": [
@@ -5021,6 +5328,9 @@
           "type": "boolean"
         },
         "browser_use_full_cdp_access": {
+          "type": "boolean"
+        },
+        "child_agents_md": {
           "type": "boolean"
         },
         "chronicle": {
@@ -5420,7 +5730,7 @@
           "$ref": "#/definitions/AbsolutePathBuf"
         }
       ],
-      "description": "Directory where Codex writes log files. Setting this value explicitly also enables the TUI text log in this directory. Defaults to `$CODEX_HOME/log`."
+      "description": "Directory where Codex writes log files. Setting this value explicitly also enables the TUI text log in this directory. Defaults to `$CODEX_LAB_HOME/log`."
     },
     "marketplaces": {
       "additionalProperties": {
@@ -5705,7 +6015,7 @@
           "$ref": "#/definitions/AbsolutePathBuf"
         }
       ],
-      "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
+      "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_LAB_HOME`."
     },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
@@ -5740,6 +6050,15 @@
         }
       ],
       "description": "Collection of settings that are specific to the TUI."
+    },
+    "validation": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ValidationConfig"
+        }
+      ],
+      "default": null,
+      "description": "Patch-local validation policy."
     },
     "web_search": {
       "allOf": [

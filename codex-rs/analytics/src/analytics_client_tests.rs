@@ -215,6 +215,7 @@ fn sample_thread_with_metadata(
         cwd: test_path_buf("/tmp").abs(),
         cli_version: "0.0.0".to_string(),
         source,
+        session_provenance: None,
         can_accept_direct_input: None,
         thread_source,
         agent_nickname: None,
@@ -4555,6 +4556,7 @@ async fn turn_event_counts_completed_tool_items() {
             status: DynamicToolCallStatus::Completed,
             content_items: None,
             success: Some(true),
+            error: None,
             duration_ms: Some(3),
         },
         ThreadItem::CollabAgentToolCall {

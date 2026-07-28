@@ -355,6 +355,10 @@ async fn stored_thread_from_sqlite_metadata(
     let rollout_path = codex_rollout::plain_rollout_path(metadata.rollout_path.as_path());
     let forked_from_id = session_meta.as_ref().and_then(|meta| meta.forked_from_id);
     let parent_thread_id = session_meta.as_ref().and_then(|meta| meta.parent_thread_id);
+    let session_provenance = session_meta
+        .as_ref()
+        .and_then(|meta| meta.session_provenance.clone())
+        .or_else(|| metadata.session_provenance.clone());
     let history_mode = session_meta
         .as_ref()
         .map(|meta| meta.history_mode)
@@ -390,6 +394,7 @@ async fn stored_thread_from_sqlite_metadata(
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
         source: parse_session_source(&metadata.source),
+        session_provenance,
         history_mode,
         thread_source: metadata.thread_source,
         agent_nickname: metadata.agent_nickname,
@@ -486,6 +491,7 @@ fn stored_thread_from_meta_line(
         cwd: meta_line.meta.cwd,
         cli_version: meta_line.meta.cli_version,
         source: meta_line.meta.source,
+        session_provenance: meta_line.meta.session_provenance,
         history_mode: meta_line.meta.history_mode,
         thread_source: meta_line.meta.thread_source,
         agent_nickname: meta_line.meta.agent_nickname,

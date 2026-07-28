@@ -463,14 +463,15 @@ fn upsert_chatgpt_dedupes_by_id_token_account_id_without_email() {
     let temp = TempDir::new().expect("tempdir");
     let first = upsert_chatgpt_account(
         temp.path(),
-        make_chatgpt_tokens_with_claim_only_account_id(Some("acct-1"), None),
+        make_chatgpt_tokens_with_claim_only_account_id(Some("acct-1"), /*email*/ None),
         Utc::now(),
         /*label*/ None,
         /*make_active*/ true,
     )
     .expect("insert chatgpt");
 
-    let second_tokens = make_chatgpt_tokens_with_claim_only_account_id(Some("acct-1"), None);
+    let second_tokens =
+        make_chatgpt_tokens_with_claim_only_account_id(Some("acct-1"), /*email*/ None);
     let second = upsert_chatgpt_account(
         temp.path(),
         second_tokens.clone(),
@@ -1507,7 +1508,7 @@ fn inactive_chatgpt_sync_updates_a_matching_inactive_account() {
 #[test]
 fn same_workspace_different_users_remain_separate_accounts() {
     let temp = TempDir::new().expect("tempdir");
-    let first_tokens = make_chatgpt_tokens(Some("shared-workspace"), None);
+    let first_tokens = make_chatgpt_tokens(Some("shared-workspace"), /*email*/ None);
     upsert_chatgpt_account(
         temp.path(),
         first_tokens,
@@ -1516,7 +1517,7 @@ fn same_workspace_different_users_remain_separate_accounts() {
         /*make_active*/ false,
     )
     .expect("store first user");
-    let mut second_tokens = make_chatgpt_tokens(Some("shared-workspace"), None);
+    let mut second_tokens = make_chatgpt_tokens(Some("shared-workspace"), /*email*/ None);
     second_tokens.id_token.chatgpt_user_id = Some("user-67890".to_string());
 
     upsert_chatgpt_account(

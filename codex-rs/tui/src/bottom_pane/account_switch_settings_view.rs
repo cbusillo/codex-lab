@@ -182,9 +182,9 @@ impl BottomPaneView for AccountSwitchSettingsView {
         if self.keymap.cancel.is_pressed(key_event) {
             self.complete = true;
         } else if self.keymap.move_up.is_pressed(key_event) {
-            self.move_selection(-1);
+            self.move_selection(/*delta*/ -1);
         } else if self.keymap.move_down.is_pressed(key_event) {
-            self.move_selection(1);
+            self.move_selection(/*delta*/ 1);
         } else if self.keymap.accept.is_pressed(key_event) {
             self.toggle_selected();
         }
@@ -223,7 +223,9 @@ impl Renderable for AccountSwitchSettingsView {
         };
 
         let block = Block::bordered();
-        let inner = block.inner(area).inset(Insets::tlbr(1, 1, 0, 1));
+        let inner = block.inner(area).inset(Insets::tlbr(
+            /*top*/ 1, /*left*/ 1, /*bottom*/ 0, /*right*/ 1,
+        ));
         block.render(area, buf);
 
         let chunks = Layout::vertical([

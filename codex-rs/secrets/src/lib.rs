@@ -193,9 +193,12 @@ impl SecretsManager {
 }
 
 pub fn environment_id_from_cwd(cwd: &Path) -> String {
-    if let Some(repo_root) = get_git_repo_root(cwd)
-        && let Some(name) = repo_root.file_name()
-    {
+    let repo_root = get_git_repo_root(cwd);
+    environment_id_from_cwd_with_repo_root(cwd, repo_root.as_deref())
+}
+
+fn environment_id_from_cwd_with_repo_root(cwd: &Path, repo_root: Option<&Path>) -> String {
+    if let Some(name) = repo_root.and_then(Path::file_name) {
         let name = name.to_string_lossy().trim().to_string();
         if !name.is_empty() {
             return name;
@@ -215,12 +218,8 @@ pub fn environment_id_from_cwd(cwd: &Path) -> String {
     format!("cwd-{short}")
 }
 
-/// Computes the OS keyring account name used for the managed secrets namespace.
-pub fn compute_keyring_account(codex_home: &Path) -> String {
-    compute_keyring_account_for_namespace(codex_home, LocalSecretsNamespace::ManagedSecrets)
-}
-
-pub(crate) fn compute_keyring_account_for_namespace(
+/// Computes the OS keyring account name that stores one local namespace's encryption key.
+pub fn compute_keyring_account_for_namespace(
     codex_home: &Path,
     namespace: LocalSecretsNamespace,
 ) -> String {
@@ -257,7 +256,7 @@ mod tests {
     #[test]
     fn environment_id_fallback_has_cwd_prefix() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let env_id = environment_id_from_cwd(dir.path());
+        let env_id = environment_id_from_cwd_with_repo_root(dir.path(), /*repo_root*/ None);
         let canonical = dir
             .path()
             .canonicalize()
@@ -270,6 +269,18 @@ mod tests {
         let hex = format!("{digest:x}");
         let short = hex.get(..12).expect("digest has at least 12 chars");
         assert_eq!(env_id, format!("cwd-{short}"));
+    }
+
+    #[test]
+    fn environment_id_uses_repo_root_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_root = dir.path().join("my-repo");
+        let cwd = repo_root.join("crates/inner");
+
+        assert_eq!(
+            environment_id_from_cwd_with_repo_root(&cwd, Some(&repo_root)),
+            "my-repo"
+        );
     }
 
     #[test]

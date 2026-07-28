@@ -1266,12 +1266,730 @@
         }
       ]
     },
+    "AutoReviewBudget": {
+      "properties": {
+        "maxElapsedMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxFindings": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxOutputBytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxScopeBytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxTotalTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxElapsedMs",
+        "maxFindings",
+        "maxOutputBytes",
+        "maxScopeBytes",
+        "maxTotalTokens"
+      ],
+      "type": "object"
+    },
     "AutoReviewDecisionSource": {
       "description": "[UNSTABLE] Source that produced a terminal approval auto-review decision.",
       "enum": [
         "agent"
       ],
       "type": "string"
+    },
+    "AutoReviewDetailKind": {
+      "enum": [
+        "run",
+        "finding"
+      ],
+      "type": "string"
+    },
+    "AutoReviewDiagnosticsSummary": {
+      "properties": {
+        "cancelledRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "compact": {
+          "type": "string"
+        },
+        "duplicateSkippedRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "failedRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "inFlightRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lostRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "recentRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "skippedRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "supersededRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "suppressedStaleRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "terminalRuns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cancelledRuns",
+        "compact",
+        "duplicateSkippedRuns",
+        "failedRuns",
+        "inFlightRuns",
+        "lostRuns",
+        "recentRuns",
+        "skippedRuns",
+        "supersededRuns",
+        "suppressedStaleRuns",
+        "terminalRuns"
+      ],
+      "type": "object"
+    },
+    "AutoReviewDispositionAction": {
+      "enum": [
+        "repair",
+        "defer",
+        "obsolete"
+      ],
+      "type": "string"
+    },
+    "AutoReviewDispositionActor": {
+      "enum": [
+        "user",
+        "agent",
+        "system"
+      ],
+      "type": "string"
+    },
+    "AutoReviewDispositionWriteParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/AutoReviewDispositionAction"
+        },
+        "reason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "runId",
+        "threadId"
+      ],
+      "title": "AutoReviewDispositionWriteParams",
+      "type": "object"
+    },
+    "AutoReviewDispositionWriteResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "findingDisposition": {
+          "$ref": "#/definitions/AutoReviewFindingDispositionRecord"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findingDisposition",
+        "runId"
+      ],
+      "title": "AutoReviewDispositionWriteResponse",
+      "type": "object"
+    },
+    "AutoReviewFindingDetailReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "findingId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxBytes": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "threadId"
+      ],
+      "title": "AutoReviewFindingDetailReadParams",
+      "type": "object"
+    },
+    "AutoReviewFindingDetailReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "bytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "content": {
+          "type": "string"
+        },
+        "detailKind": {
+          "$ref": "#/definitions/AutoReviewDetailKind"
+        },
+        "findingCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "findingId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxBytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "omittedFindings": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "originalBytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bytes",
+        "content",
+        "detailKind",
+        "findingCount",
+        "maxBytes",
+        "omittedFindings",
+        "originalBytes",
+        "runId",
+        "truncated"
+      ],
+      "title": "AutoReviewFindingDetailReadResponse",
+      "type": "object"
+    },
+    "AutoReviewFindingDisposition": {
+      "enum": [
+        "needsAttention",
+        "repairing",
+        "deferred",
+        "obsolete"
+      ],
+      "type": "string"
+    },
+    "AutoReviewFindingDispositionRecord": {
+      "properties": {
+        "actor": {
+          "$ref": "#/definitions/AutoReviewDispositionActor"
+        },
+        "disposition": {
+          "$ref": "#/definitions/AutoReviewFindingDisposition"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actor",
+        "disposition",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "AutoReviewFreshness": {
+      "enum": [
+        "current",
+        "stale",
+        "detached"
+      ],
+      "type": "string"
+    },
+    "AutoReviewRunSource": {
+      "enum": [
+        "manual",
+        "background"
+      ],
+      "type": "string"
+    },
+    "AutoReviewRunSummary": {
+      "properties": {
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutoReviewBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "errorSummary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "findingDisposition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutoReviewFindingDispositionRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "freshness": {
+          "$ref": "#/definitions/AutoReviewFreshness"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "omittedFindings": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "renderedFindings": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/AutoReviewRunSource"
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatus"
+        },
+        "terminalReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutoReviewTerminalReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "usage": {
+          "$ref": "#/definitions/AutoReviewUsage"
+        }
+      },
+      "required": [
+        "content",
+        "freshness",
+        "omittedFindings",
+        "renderedFindings",
+        "runId",
+        "source",
+        "startedAt",
+        "status",
+        "truncated",
+        "usage"
+      ],
+      "type": "object"
+    },
+    "AutoReviewStatusCount": {
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "freshness": {
+          "$ref": "#/definitions/AutoReviewFreshness"
+        },
+        "source": {
+          "$ref": "#/definitions/AutoReviewRunSource"
+        },
+        "status": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatus"
+        },
+        "targetMatches": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "count",
+        "freshness",
+        "source",
+        "status",
+        "targetMatches"
+      ],
+      "type": "object"
+    },
+    "AutoReviewSummaryReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "AutoReviewSummaryReadParams",
+      "type": "object"
+    },
+    "AutoReviewSummaryReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutoReviewRunSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutoReviewDiagnosticsSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutoReviewRunSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "statusCounts": {
+          "items": {
+            "$ref": "#/definitions/AutoReviewStatusCount"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "statusCounts"
+      ],
+      "title": "AutoReviewSummaryReadResponse",
+      "type": "object"
+    },
+    "AutoReviewTerminalReason": {
+      "enum": [
+        "budgetScope",
+        "budgetElapsed",
+        "budgetTotalTokens",
+        "budgetOutput",
+        "budgetFindingCount",
+        "emptyOutput",
+        "staleTarget"
+      ],
+      "type": "string"
+    },
+    "AutoReviewUsage": {
+      "properties": {
+        "elapsedMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "findingCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outputBytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scopeBytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "totalTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "BackgroundAutoReviewControlAction": {
+      "enum": [
+        "cancel",
+        "supersede"
+      ],
+      "type": "string"
+    },
+    "BackgroundAutoReviewControlParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/BackgroundAutoReviewControlAction"
+        },
+        "reason": {
+          "$ref": "#/definitions/BackgroundAutoReviewControlReason"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "reason",
+        "runId",
+        "threadId"
+      ],
+      "title": "BackgroundAutoReviewControlParams",
+      "type": "object"
+    },
+    "BackgroundAutoReviewControlReason": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "userRequested"
+              ],
+              "title": "UserRequestedBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UserRequestedBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "runId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "supersededByRun"
+              ],
+              "title": "SupersededByRunBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "runId",
+            "type"
+          ],
+          "title": "SupersededByRunBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "foregroundWorkStarted"
+              ],
+              "title": "ForegroundWorkStartedBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ForegroundWorkStartedBackgroundAutoReviewControlReason",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "threadClosing"
+              ],
+              "title": "ThreadClosingBackgroundAutoReviewControlReasonType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ThreadClosingBackgroundAutoReviewControlReason",
+          "type": "object"
+        }
+      ]
+    },
+    "BackgroundAutoReviewControlResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "BackgroundAutoReviewControlResponse",
+      "type": "object"
+    },
+    "BackgroundAutoReviewStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "superseded",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "BackgroundAutoReviewStatusChangedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "errorSummary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewTarget": {
+          "$ref": "#/definitions/ReviewTarget"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatus"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewTarget",
+        "runId",
+        "status",
+        "threadId"
+      ],
+      "title": "BackgroundAutoReviewStatusChangedNotification",
+      "type": "object"
     },
     "BrowserUseRequirements": {
       "properties": {
@@ -2712,6 +3430,102 @@
             "params"
           ],
           "title": "Review/startRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "review/background/control"
+              ],
+              "title": "Review/background/controlRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/BackgroundAutoReviewControlParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/background/controlRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "review/summary/read"
+              ],
+              "title": "Review/summary/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutoReviewSummaryReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/summary/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "review/findingDetail/read"
+              ],
+              "title": "Review/findingDetail/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutoReviewFindingDetailReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/findingDetail/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "review/disposition/write"
+              ],
+              "title": "Review/disposition/writeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutoReviewDispositionWriteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Review/disposition/writeRequest",
           "type": "object"
         },
         {
@@ -4887,7 +5701,7 @@
           "type": "object"
         },
         {
-          "description": "User config layer from $CODEX_HOME/config.toml. This layer is special in that it is expected to be: - writable by the user - generally outside the workspace directory",
+          "description": "User config layer from $CODEX_LAB_HOME/config.toml. This layer is special in that it is expected to be: - writable by the user - generally outside the workspace directory",
           "properties": {
             "file": {
               "allOf": [
@@ -5356,6 +6170,14 @@
               "type": "string"
             },
             "commandWindows": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "default": null,
+              "description": "Stable identifier for this handler, when the user configured one. It anchors persisted hook-state keys so reordering handlers does not drop enable/disable decisions.",
               "type": [
                 "string",
                 "null"
@@ -11973,6 +12795,117 @@
       ],
       "type": "object"
     },
+    "ProjectValidationCompletedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "One completed project-validation command execution. An actionable first execution may be followed by one bounded correction cycle and a second completion notification.",
+      "properties": {
+        "changedFileCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commandTruncated": {
+          "type": "boolean"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "exitCode": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "itemId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "type": "string"
+        },
+        "outputTruncated": {
+          "type": "boolean"
+        },
+        "skipReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectValidationSkipReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ProjectValidationStatus"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "commandTruncated",
+        "durationMs",
+        "output",
+        "outputTruncated",
+        "status",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ProjectValidationCompletedNotification",
+      "type": "object"
+    },
+    "ProjectValidationSkipReason": {
+      "enum": [
+        "validationDisabled",
+        "noChangedFiles",
+        "noApplicableProvider",
+        "nonRootAgent",
+        "unchangedFingerprint",
+        "unsupportedEnvironment"
+      ],
+      "type": "string"
+    },
+    "ProjectValidationStatus": {
+      "enum": [
+        "passed",
+        "actionableFailure",
+        "configurationError",
+        "timedOut",
+        "infrastructureFailure",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    },
     "RateLimitReachedType": {
       "enum": [
         "rate_limit_reached",
@@ -13640,6 +14573,27 @@
           "type": "object"
         },
         {
+          "description": "Review the changes made by a completed turn.",
+          "properties": {
+            "fingerprint": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "currentTurnDiff"
+              ],
+              "title": "CurrentTurnDiffReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "fingerprint",
+            "type"
+          ],
+          "title": "CurrentTurnDiffReviewTarget",
+          "type": "object"
+        },
+        {
           "description": "Review changes between the current branch and the given base branch.",
           "properties": {
             "branch": {
@@ -14350,6 +15304,46 @@
             "params"
           ],
           "title": "Turn/startedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "validation/completed"
+              ],
+              "title": "Validation/completedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ProjectValidationCompletedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Validation/completedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "review/backgroundStatus/changed"
+              ],
+              "title": "Review/backgroundStatus/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/BackgroundAutoReviewStatusChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Review/backgroundStatus/changedNotification",
           "type": "object"
         },
         {
@@ -15487,6 +16481,100 @@
       ],
       "type": "object"
     },
+    "SessionProvenance": {
+      "description": "Structured provenance for a thread started by an external orchestrator.\n\nThese fields are descriptive metadata only. Runtime authorization and product filtering must continue to use server-side policy and `source`.",
+      "properties": {
+        "issueNumber": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "issueUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SessionProvenanceParams": {
+      "description": "Client-supplied provenance for a thread started by an external orchestrator.\n\nThis request shape intentionally keeps nested fields optional so clients can submit partial descriptive metadata without sending explicit nulls.",
+      "properties": {
+        "issueNumber": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "issueUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "SessionSource": {
       "oneOf": [
         {
@@ -16231,6 +17319,15 @@
           ],
           "description": "Optional Git metadata captured when the thread was created."
         },
+        "historyMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadHistoryMode"
+            }
+          ],
+          "default": "legacy",
+          "description": "Persisted thread history contract selected when this thread was created.\n\nThis field is part of the published stable `Thread` surface; keep it non-experimental so existing clients continue to receive it."
+        },
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
@@ -16280,6 +17377,18 @@
         "sessionId": {
           "description": "Session id shared by threads that belong to the same session tree.",
           "type": "string"
+        },
+        "sessionProvenance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional structured launch provenance supplied by an external agent orchestrator."
         },
         "source": {
           "allOf": [
@@ -17279,6 +18388,14 @@
                 "null"
               ]
             },
+            "error": {
+              "default": null,
+              "description": "Failure detail persisted with the call, when the tool reported one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },
@@ -17640,6 +18757,90 @@
           ],
           "title": "ContextCompactionThreadItem",
           "type": "object"
+        },
+        {
+          "properties": {
+            "changedFileCount": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "commandTruncated": {
+              "type": "boolean"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "durationMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            },
+            "outputTruncated": {
+              "type": "boolean"
+            },
+            "skipReason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProjectValidationSkipReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/definitions/ProjectValidationStatus"
+            },
+            "type": {
+              "enum": [
+                "projectValidation"
+              ],
+              "title": "ProjectValidationThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "commandTruncated",
+            "durationMs",
+            "id",
+            "output",
+            "outputTruncated",
+            "status",
+            "type"
+          ],
+          "title": "ProjectValidationThreadItem",
+          "type": "object"
         }
       ]
     },
@@ -17699,6 +18900,13 @@
             }
           ],
           "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
+        },
+        "descendantOfThreadId": {
+          "description": "Optional root thread id; when set, only persisted spawned descendants of this thread are returned.\n\nStable alias for `ancestorThreadId`, retained for clients that shipped against it. Mutually exclusive with `parentThreadId` and `ancestorThreadId`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "isPinned": {
           "description": "Optional pinned filter; when set, only threads matching this value are returned.",
@@ -18759,6 +19967,17 @@
             "string",
             "null"
           ]
+        },
+        "sessionProvenance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionProvenanceParams"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional client-supplied launch provenance for externally orchestrated sessions. This is descriptive metadata only."
         },
         "sessionStartSource": {
           "anyOf": [

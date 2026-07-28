@@ -5,6 +5,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
@@ -88,6 +89,8 @@ pub struct ThreadMetadata {
     pub recency_at: DateTime<Utc>,
     /// The session source (stringified enum).
     pub source: String,
+    /// Optional structured launch provenance supplied by an external orchestrator.
+    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.
@@ -149,6 +152,8 @@ pub struct ThreadMetadataBuilder {
     pub recency_at: Option<DateTime<Utc>>,
     /// The session source.
     pub source: SessionSource,
+    /// Optional structured launch provenance supplied by an external orchestrator.
+    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.
@@ -194,6 +199,7 @@ impl ThreadMetadataBuilder {
             updated_at: None,
             recency_at: None,
             source,
+            session_provenance: None,
             history_mode: ThreadHistoryMode::Legacy,
             thread_source: None,
             agent_nickname: None,
@@ -232,6 +238,7 @@ impl ThreadMetadataBuilder {
             updated_at,
             recency_at,
             source,
+            session_provenance: self.session_provenance.clone(),
             history_mode: self.history_mode,
             thread_source: self.thread_source.clone(),
             agent_nickname: self.agent_nickname.clone(),
@@ -323,6 +330,9 @@ impl ThreadMetadata {
         if self.source != other.source {
             diffs.push("source");
         }
+        if self.session_provenance != other.session_provenance {
+            diffs.push("session_provenance");
+        }
         if self.agent_nickname != other.agent_nickname {
             diffs.push("agent_nickname");
         }
@@ -399,6 +409,7 @@ pub(crate) struct ThreadRow {
     updated_at: i64,
     recency_at: i64,
     source: String,
+    session_provenance: Option<String>,
     history_mode: String,
     thread_source: Option<String>,
     agent_nickname: Option<String>,
@@ -432,6 +443,7 @@ impl ThreadRow {
             updated_at: row.try_get("updated_at")?,
             recency_at: row.try_get("recency_at")?,
             source: row.try_get("source")?,
+            session_provenance: row.try_get("session_provenance")?,
             history_mode: row.try_get("history_mode")?,
             thread_source: row.try_get("thread_source")?,
             agent_nickname: row.try_get("agent_nickname")?,
@@ -469,6 +481,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             updated_at,
             recency_at,
             source,
+            session_provenance,
             history_mode,
             thread_source,
             agent_nickname,
@@ -497,6 +510,10 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             .transpose()
             .map_err(anyhow::Error::msg)?;
         let history_mode = history_mode.parse().map_err(anyhow::Error::msg)?;
+        let session_provenance = session_provenance
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
         Ok(Self {
             id: ThreadId::try_from(id)?,
             rollout_path: PathBuf::from(rollout_path),
@@ -504,6 +521,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             updated_at: epoch_millis_to_datetime(updated_at)?,
             recency_at: epoch_millis_to_datetime(recency_at)?,
             source,
+            session_provenance,
             history_mode,
             thread_source,
             agent_nickname,
@@ -604,6 +622,7 @@ mod tests {
             updated_at: 1_700_000_100,
             recency_at: 1_700_000_100,
             source: "cli".to_string(),
+            session_provenance: None,
             history_mode: "legacy".to_string(),
             thread_source: None,
             agent_nickname: None,
@@ -638,6 +657,7 @@ mod tests {
             updated_at: DateTime::<Utc>::from_timestamp(1_700_000_100, 0).expect("timestamp"),
             recency_at: DateTime::<Utc>::from_timestamp(1_700_000_100, 0).expect("timestamp"),
             source: "cli".to_string(),
+            session_provenance: None,
             history_mode: ThreadHistoryMode::Legacy,
             thread_source: None,
             agent_nickname: None,

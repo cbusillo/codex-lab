@@ -212,6 +212,52 @@ fn normalize_thread_list_cwd_filters(
     Ok(Some(normalized_cwds))
 }
 
+/// Resolve the `thread/list` relationship filter from the mutually exclusive
+/// relationship parameters.
+///
+/// `descendantOfThreadId` is the stable spelling of `ancestorThreadId`: both
+/// return spawned descendants at any depth, excluding the root thread itself.
+/// It is kept as a separate parameter so clients that shipped against the
+/// stable name keep working without opting into the experimental API.
+fn thread_list_relation_filter(
+    descendant_of_thread_id: Option<String>,
+    parent_thread_id: Option<String>,
+    ancestor_thread_id: Option<String>,
+) -> Result<Option<StoreThreadRelationFilter>, JSONRPCErrorError> {
+    if descendant_of_thread_id.is_some() && parent_thread_id.is_some() {
+        return Err(invalid_request(
+            "descendantOfThreadId and parentThreadId are mutually exclusive",
+        ));
+    }
+    if descendant_of_thread_id.is_some() && ancestor_thread_id.is_some() {
+        return Err(invalid_request(
+            "descendantOfThreadId and ancestorThreadId are mutually exclusive",
+        ));
+    }
+    if parent_thread_id.is_some() && ancestor_thread_id.is_some() {
+        return Err(invalid_request(
+            "parentThreadId and ancestorThreadId are mutually exclusive",
+        ));
+    }
+
+    if let Some(descendant_of_thread_id) = descendant_of_thread_id {
+        let thread_id = ThreadId::from_string(&descendant_of_thread_id)
+            .map_err(|err| invalid_request(format!("invalid descendantOfThreadId: {err}")))?;
+        return Ok(Some(StoreThreadRelationFilter::DescendantsOf(thread_id)));
+    }
+    if let Some(parent_thread_id) = parent_thread_id {
+        let thread_id = ThreadId::from_string(&parent_thread_id)
+            .map_err(|err| invalid_request(format!("invalid parent thread id: {err}")))?;
+        return Ok(Some(StoreThreadRelationFilter::DirectChildrenOf(thread_id)));
+    }
+    if let Some(ancestor_thread_id) = ancestor_thread_id {
+        let thread_id = ThreadId::from_string(&ancestor_thread_id)
+            .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?;
+        return Ok(Some(StoreThreadRelationFilter::DescendantsOf(thread_id)));
+    }
+    Ok(None)
+}
+
 fn has_model_resume_override(
     request_overrides: Option<&HashMap<String, serde_json::Value>>,
     typesafe_overrides: &ConfigOverrides,
@@ -749,6 +795,18 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    /// Compatibility route for older clients that pin a `turnId` in the method
+    /// name. It reuses `thread/items/list` and flattens the per-item turn ids
+    /// back out, since the turn is already fixed by the request.
+    pub(crate) async fn thread_turns_items_list(
+        &self,
+        params: ThreadTurnsItemsListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_items_list_response_inner(params.into())
+            .await
+            .map(|response| Some(ThreadTurnsItemsListResponse::from(response).into()))
+    }
+
     pub(crate) async fn thread_shell_command(
         &self,
         request_id: &ConnectionRequestId,
@@ -966,6 +1024,7 @@ impl ThreadRequestProcessor {
             history_mode,
             session_start_source,
             thread_source,
+            session_provenance,
             environments,
         } = params;
         if matches!(
@@ -1031,6 +1090,7 @@ impl ThreadRequestProcessor {
                 history_mode.map(Into::into),
                 session_start_source,
                 thread_source.map(Into::into),
+                session_provenance.map(Into::into),
                 environments,
                 service_name,
                 allow_provider_model_fallback,
@@ -1108,6 +1168,7 @@ impl ThreadRequestProcessor {
         history_mode: Option<ThreadHistoryMode>,
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
         thread_source: Option<codex_protocol::protocol::ThreadSource>,
+        session_provenance: Option<codex_protocol::protocol::SessionProvenance>,
         environment_selections: Option<Vec<TurnEnvironmentSelection>>,
         service_name: Option<String>,
         allow_provider_model_fallback: bool,
@@ -1240,6 +1301,7 @@ impl ThreadRequestProcessor {
                 },
                 history_mode,
                 thread_source,
+                session_provenance,
                 dynamic_tools,
                 metrics_service_name: service_name,
                 parent_trace: request_trace,
@@ -1981,26 +2043,16 @@ impl ThreadRequestProcessor {
             cwd,
             use_state_db_only,
             search_term,
+            descendant_of_thread_id,
             parent_thread_id,
             ancestor_thread_id,
         } = params;
         let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
-        let relation_filter = match (parent_thread_id, ancestor_thread_id) {
-            (Some(_), Some(_)) => {
-                return Err(invalid_request(
-                    "parentThreadId and ancestorThreadId are mutually exclusive",
-                ));
-            }
-            (Some(parent_thread_id), None) => Some(StoreThreadRelationFilter::DirectChildrenOf(
-                ThreadId::from_string(&parent_thread_id)
-                    .map_err(|err| invalid_request(format!("invalid parent thread id: {err}")))?,
-            )),
-            (None, Some(ancestor_thread_id)) => Some(StoreThreadRelationFilter::DescendantsOf(
-                ThreadId::from_string(&ancestor_thread_id)
-                    .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?,
-            )),
-            (None, None) => None,
-        };
+        let relation_filter = thread_list_relation_filter(
+            descendant_of_thread_id,
+            parent_thread_id,
+            ancestor_thread_id,
+        )?;
 
         let requested_page_size = limit
             .map(|value| value as usize)
@@ -5100,6 +5152,7 @@ pub(crate) fn thread_from_stored_thread(
         source: source.into(),
         can_accept_direct_input: None,
         thread_source: thread.thread_source.map(Into::into),
+        session_provenance: thread.session_provenance.map(Into::into),
         git_info,
         name: thread.name,
         turns: Vec::new(),
@@ -5311,6 +5364,7 @@ fn build_thread_from_snapshot(
             &config_snapshot.session_source,
         )),
         thread_source: config_snapshot.thread_source.clone().map(Into::into),
+        session_provenance: config_snapshot.session_provenance.clone().map(Into::into),
         git_info: None,
         name: None,
         turns: Vec::new(),

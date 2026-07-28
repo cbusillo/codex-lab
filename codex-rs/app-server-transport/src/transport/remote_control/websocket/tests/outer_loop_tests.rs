@@ -130,8 +130,13 @@ async fn worker_outer_loop_reconnects_under_new_account() {
     let codex_home = TempDir::new().expect("temp dir should create");
     let auth_manager = auth_manager_for_account(&codex_home, "account-a", "access-a").await;
 
-    let (websocket, handles) =
-        worker_with_listener(&listener, &codex_home, auth_manager.clone(), None).await;
+    let (websocket, handles) = worker_with_listener(
+        &listener,
+        &codex_home,
+        auth_manager.clone(),
+        /*pre_seeded_account*/ None,
+    )
+    .await;
 
     let run_task = tokio::spawn(websocket.run(/*app_server_client_name_rx*/ None));
 
@@ -181,8 +186,13 @@ async fn worker_outer_loop_closes_virtual_clients_on_account_change() {
     let codex_home = TempDir::new().expect("temp dir should create");
     let auth_manager = auth_manager_for_account(&codex_home, "account-a", "access-a").await;
 
-    let (websocket, mut handles) =
-        worker_with_listener(&listener, &codex_home, auth_manager.clone(), None).await;
+    let (websocket, mut handles) = worker_with_listener(
+        &listener,
+        &codex_home,
+        auth_manager.clone(),
+        /*pre_seeded_account*/ None,
+    )
+    .await;
 
     let run_task = tokio::spawn(websocket.run(/*app_server_client_name_rx*/ None));
 
@@ -280,8 +290,13 @@ async fn worker_outer_loop_clears_subscribe_cursor_on_account_change() {
     let codex_home = TempDir::new().expect("temp dir should create");
     let auth_manager = auth_manager_for_account(&codex_home, "account-a", "access-a").await;
 
-    let (websocket, handles) =
-        worker_with_listener(&listener, &codex_home, auth_manager.clone(), None).await;
+    let (websocket, handles) = worker_with_listener(
+        &listener,
+        &codex_home,
+        auth_manager.clone(),
+        /*pre_seeded_account*/ None,
+    )
+    .await;
 
     let run_task = tokio::spawn(websocket.run(/*app_server_client_name_rx*/ None));
 

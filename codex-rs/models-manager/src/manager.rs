@@ -32,8 +32,8 @@ const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 /// manager owns refresh policy, cache behavior, and catalog merging; it calls
 /// this endpoint only when it decides a remote refresh should happen.
 pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
-    /// Returns whether this provider can authenticate command-scoped requests.
-    fn has_command_auth(&self) -> bool;
+    /// Returns whether this provider has credentials for model discovery.
+    fn has_configured_credentials(&self) -> bool;
 
     /// Returns whether the currently resolved auth can use Codex backend-only models.
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool>;
@@ -411,7 +411,8 @@ impl OpenAiModelsManager {
     }
 
     async fn should_refresh_models(&self) -> bool {
-        self.endpoint_client.uses_codex_backend().await || self.endpoint_client.has_command_auth()
+        self.endpoint_client.uses_codex_backend().await
+            || self.endpoint_client.has_configured_credentials()
     }
 
     async fn get_etag(&self) -> Option<String> {

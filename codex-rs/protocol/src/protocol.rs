@@ -133,6 +133,14 @@ pub fn strip_user_message_prefix(text: &str) -> &str {
     }
 }
 
+/// Authoritative maximum number of environments a single thread/turn may select.
+///
+/// Every selected environment renders its own entry inside the model-visible
+/// `<environment_context>` fragment, so an unbounded selection list is an unbounded
+/// model-context item. This cap is enforced at the client validation boundary, at the
+/// live selection store, and again when the fragment is rendered.
+pub const MAX_TURN_ENVIRONMENT_SELECTIONS: usize = 8;
+
 // TODO(anp): Replace `TurnEnvironmentSelection` with `PathUri` once path URIs carry environment
 // identifiers.
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +166,19 @@ impl TurnEnvironmentSelections {
             environments,
         }
     }
+}
+
+/// One environment selection as persisted in a `TurnContextItem`.
+///
+/// Rollouts are read by older and newer Codex builds alike, so this stays a
+/// self-contained record of the resolved selection rather than a projection of
+/// the live environment types.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnContextEnvironmentItem {
+    pub environment_id: String,
+    pub cwd: AbsolutePathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
@@ -659,7 +680,17 @@ pub enum Op {
     ThreadRollback { num_turns: u32 },
 
     /// Request a code review from the agent.
-    Review { review_request: ReviewRequest },
+    Review {
+        review_request: ReviewRequest,
+        persistence: Option<ReviewPersistence>,
+    },
+
+    /// Control a scheduler-owned background auto-review run.
+    BackgroundAutoReviewControl {
+        run_id: String,
+        action: BackgroundAutoReviewControlAction,
+        reason: BackgroundAutoReviewControlReason,
+    },
 
     /// Record that the user approved one retry of a concrete Guardian-denied action.
     ApproveGuardianDeniedAction { event: GuardianAssessmentEvent },
@@ -713,6 +744,24 @@ impl FromStr for ThreadHistoryMode {
             _ => Err(format!("unknown thread history mode `{value}`")),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BackgroundAutoReviewControlAction {
+    Cancel,
+    Supersede,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+#[ts(tag = "reason", rename_all = "snake_case")]
+pub enum BackgroundAutoReviewControlReason {
+    UserRequested,
+    SupersededByRun { run_id: String },
+    ForegroundWorkStarted,
+    ThreadClosing,
 }
 
 impl From<Vec<UserInput>> for Op {
@@ -880,6 +929,7 @@ impl Op {
             Self::SetThreadMemoryMode { .. } => "set_thread_memory_mode",
             Self::ThreadRollback { .. } => "thread_rollback",
             Self::Review { .. } => "review",
+            Self::BackgroundAutoReviewControl { .. } => "background_auto_review_control",
             Self::ApproveGuardianDeniedAction { .. } => "approve_guardian_denied_action",
             Self::Shutdown => "shutdown",
             Self::RunUserShellCommand { .. } => "run_user_shell_command",
@@ -1444,8 +1494,15 @@ pub enum EventMsg {
     /// Entered review mode.
     EnteredReviewMode(EnteredReviewModeEvent),
 
+    /// Automatic background review lifecycle status changed.
+    BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent),
+
     /// Exited review mode with an optional final result to apply.
     ExitedReviewMode(ExitedReviewModeEvent),
+
+    /// A configured project validation command execution completed. An actionable first attempt
+    /// may be followed by one bounded correction cycle and one final completion event.
+    ProjectValidationCompleted(ProjectValidationCompletedEvent),
 
     RawResponseItem(RawResponseItemEvent),
     RawResponseCompleted(RawResponseCompletedEvent),
@@ -1914,6 +1971,56 @@ pub struct ExitedReviewModeEvent {
     #[ts(optional)]
     pub item_id: Option<String>,
     pub review_output: Option<ReviewOutputEvent>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectValidationStatus {
+    Passed,
+    ActionableFailure,
+    ConfigurationError,
+    TimedOut,
+    InfrastructureFailure,
+    Cancelled,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectValidationSkipReason {
+    ValidationDisabled,
+    NoChangedFiles,
+    NoApplicableProvider,
+    NonRootAgent,
+    UnchangedFingerprint,
+    UnsupportedEnvironment,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ProjectValidationCompletedEvent {
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item_id: Option<String>,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub command_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<AbsolutePathBuf>,
+    pub status: ProjectValidationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub skip_reason: Option<ProjectValidationSkipReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub changed_file_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_code: Option<i32>,
+    pub output: String,
+    pub output_truncated: bool,
+    pub duration_ms: u64,
 }
 
 // Individual event payload types matching each `EventMsg` variant.
@@ -2691,6 +2798,16 @@ impl InitialHistory {
             .and_then(|meta| meta.thread_source.clone())
     }
 
+    pub fn get_resumed_session_provenance(&self) -> Option<SessionProvenance> {
+        self.get_resumed_session_meta()
+            .and_then(|meta| meta.session_provenance.clone())
+    }
+
+    pub fn get_initial_session_provenance(&self) -> Option<SessionProvenance> {
+        self.get_session_meta()
+            .and_then(|meta| meta.session_provenance.clone())
+    }
+
     pub fn get_session_originator(&self) -> Option<String> {
         self.get_session_meta()
             .map(|meta| meta.originator.clone())
@@ -2752,6 +2869,39 @@ pub enum SessionSource {
     SubAgent(SubAgentSource),
     #[serde(other)]
     Unknown,
+}
+
+/// Structured provenance for sessions launched by an external orchestrator.
+///
+/// These fields are untrusted descriptive metadata. Authorization, product
+/// filtering, and runtime behavior must continue to use `SessionSource` and
+/// other server-side policy inputs.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+impl SessionProvenance {
+    pub fn is_empty(&self) -> bool {
+        self.request_id.is_none()
+            && self.repository.is_none()
+            && self.issue_number.is_none()
+            && self.issue_url.is_none()
+            && self.source.is_none()
+            && self.origin.is_none()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
@@ -3070,6 +3220,11 @@ pub struct SessionMeta {
     /// Optional analytics source classification for this thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_source: Option<ThreadSource>,
+    /// Optional structured launch provenance supplied by an external agent
+    /// orchestrator. This is intentionally separate from `source`, which is a
+    /// coarse runtime/product classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_provenance: Option<SessionProvenance>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_nickname: Option<String>,
@@ -3127,6 +3282,7 @@ impl Default for SessionMeta {
             cli_version: String::new(),
             source: SessionSource::default(),
             thread_source: None,
+            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             agent_path: None,
@@ -3264,6 +3420,11 @@ pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub cwd: AbsolutePathBuf,
+    /// Resolved environment selections for this turn. This is persisted as
+    /// turn-context metadata so resume/fork replay can recover the durable
+    /// world-state baseline without re-resolving historical selections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<TurnContextEnvironmentItem>>,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3403,6 +3564,36 @@ pub struct GitInfo {
 pub enum ReviewDelivery {
     Inline,
     Detached,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPersistence {
+    ManualAutoReview,
+    BackgroundAutoReview,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BackgroundAutoReviewStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Superseded,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+pub struct BackgroundAutoReviewStatusEvent {
+    pub run_id: String,
+    pub status: BackgroundAutoReviewStatus,
+    pub review_target: ReviewTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_summary: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
@@ -3923,6 +4114,13 @@ pub struct SessionConfiguredEvent {
     #[ts(optional)]
     pub thread_name: Option<String>,
 
+    /// Persisted thread history contract selected when this thread was created.
+    ///
+    /// Defaulted on the wire so rollouts and clients written before this field
+    /// existed keep deserializing.
+    #[serde(default)]
+    pub history_mode: ThreadHistoryMode,
+
     /// Tell the client what model is being queried.
     pub model: String,
 
@@ -3988,6 +4186,8 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             thread_source: Option<ThreadSource>,
             #[serde(default)]
             thread_name: Option<String>,
+            #[serde(default)]
+            history_mode: ThreadHistoryMode,
             model: String,
             model_provider_id: String,
             service_tier: Option<String>,
@@ -4027,6 +4227,7 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             parent_thread_id: wire.parent_thread_id,
             thread_source: wire.thread_source,
             thread_name: wire.thread_name,
+            history_mode: wire.history_mode,
             model: wire.model,
             model_provider_id: wire.model_provider_id,
             service_tier: wire.service_tier,
@@ -4097,7 +4298,11 @@ pub struct ThreadGoalUpdatedEvent {
 }
 
 /// User's decision in response to an ExecApprovalRequest.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Display, JsonSchema, TS)]
+// `Deserialize` is hand-written in `review_decision_compat` so the legacy
+// unit-form `"denied"` payload keeps working alongside the current
+// `{"denied": {"rejection": "..."}}` form. Keep it out of the doc comment so it
+// does not leak into the published schema.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Display, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
     /// User has approved this command and the agent should execute it.
@@ -5950,6 +6155,50 @@ mod tests {
     }
 
     #[test]
+    fn session_meta_round_trips_session_provenance_and_omits_it_for_legacy_rollouts() -> Result<()>
+    {
+        let legacy: SessionMeta = serde_json::from_value(json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "id": "00000000-0000-0000-0000-000000000001",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "cwd": "/tmp",
+            "originator": "codex",
+            "cli_version": "0.0.0",
+            "model_provider": null,
+            "base_instructions": null
+        }))?;
+        assert_eq!(legacy.session_provenance, None);
+        let legacy_serialized = serde_json::to_value(&legacy)?;
+        assert_eq!(legacy_serialized.get("session_provenance"), None);
+
+        let provenance = SessionProvenance {
+            request_id: Some("agent-session-123".to_string()),
+            repository: Some("cbusillo/codex-lab".to_string()),
+            issue_number: Some(48),
+            issue_url: Some("https://github.com/cbusillo/codex-lab/issues/48".to_string()),
+            source: Some("agent-session".to_string()),
+            origin: Some("launchplane".to_string()),
+        };
+        let mut with_provenance = legacy;
+        with_provenance.session_provenance = Some(provenance.clone());
+        let serialized = serde_json::to_value(&with_provenance)?;
+        assert_eq!(
+            serialized["session_provenance"],
+            json!({
+                "requestId": "agent-session-123",
+                "repository": "cbusillo/codex-lab",
+                "issueNumber": 48,
+                "issueUrl": "https://github.com/cbusillo/codex-lab/issues/48",
+                "source": "agent-session",
+                "origin": "launchplane"
+            })
+        );
+        let reparsed: SessionMeta = serde_json::from_value(serialized)?;
+        assert_eq!(reparsed.session_provenance, Some(provenance));
+        Ok(())
+    }
+
+    #[test]
     fn session_meta_defaults_legacy_history_mode() -> Result<()> {
         let session_meta: SessionMeta = serde_json::from_value(json!({
             "session_id": "00000000-0000-0000-0000-000000000001",
@@ -5970,6 +6219,38 @@ mod tests {
         unknown["history_mode"] = json!("future");
         assert!(serde_json::from_value::<SessionMeta>(unknown).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn legacy_project_validation_event_defaults_new_disposition_fields() {
+        let event: ProjectValidationCompletedEvent = serde_json::from_value(json!({
+            "turn_id": "turn-1",
+            "command": ["just", "test"],
+            "status": "passed",
+            "exit_code": 0,
+            "output": "ok",
+            "output_truncated": false,
+            "duration_ms": 12
+        }))
+        .expect("deserialize legacy project validation event");
+
+        assert_eq!(
+            event,
+            ProjectValidationCompletedEvent {
+                turn_id: "turn-1".to_string(),
+                item_id: None,
+                command: vec!["just".to_string(), "test".to_string()],
+                command_truncated: false,
+                cwd: None,
+                status: ProjectValidationStatus::Passed,
+                skip_reason: None,
+                changed_file_count: None,
+                exit_code: Some(0),
+                output: "ok".to_string(),
+                output_truncated: false,
+                duration_ms: 12,
+            }
+        );
     }
 
     #[test]
@@ -6081,10 +6362,86 @@ mod tests {
     }
 
     #[test]
+    fn turn_context_item_round_trips_legacy_environments() -> Result<()> {
+        let cwd = test_path_buf("/tmp/workspace").abs();
+        let legacy_line = json!({
+            "cwd": cwd,
+            "environments": [
+                { "environment_id": "local", "cwd": cwd, "shell": "bash" },
+                { "environment_id": "remote", "cwd": cwd },
+            ],
+            "approval_policy": "never",
+            "sandbox_policy": serde_json::to_value(SandboxPolicy::DangerFullAccess)?,
+            "model": "gpt-5",
+            "summary": "auto",
+        });
+
+        let item: TurnContextItem = serde_json::from_value(legacy_line)?;
+
+        assert_eq!(
+            item.environments,
+            Some(vec![
+                TurnContextEnvironmentItem {
+                    environment_id: "local".to_string(),
+                    cwd: cwd.clone(),
+                    shell: Some("bash".to_string()),
+                },
+                TurnContextEnvironmentItem {
+                    environment_id: "remote".to_string(),
+                    cwd: cwd.clone(),
+                    shell: None,
+                },
+            ])
+        );
+        let reserialized = serde_json::to_value(&item)?;
+        assert_eq!(
+            reserialized["environments"],
+            json!([
+                { "environment_id": "local", "cwd": cwd, "shell": "bash" },
+                { "environment_id": "remote", "cwd": cwd },
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn turn_context_item_omits_environments_when_absent() -> Result<()> {
+        let item = TurnContextItem {
+            turn_id: None,
+            cwd: test_path_buf("/tmp").abs(),
+            environments: None,
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "gpt-5".to_string(),
+            comp_hash: None,
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            multi_agent_mode: None,
+            realtime_active: None,
+            effort: None,
+            summary: ReasoningSummaryConfig::Auto,
+        };
+
+        let value = serde_json::to_value(item)?;
+
+        assert_eq!(value.get("environments"), None);
+        Ok(())
+    }
+
+    #[test]
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
             cwd: test_path_buf("/tmp").abs(),
+            environments: None,
             workspace_roots: None,
             current_date: None,
             timezone: None,
@@ -6158,6 +6515,7 @@ mod tests {
                 parent_thread_id: None,
                 thread_source: None,
                 thread_name: None,
+                history_mode: ThreadHistoryMode::Paginated,
                 model: "codex-mini-latest".to_string(),
                 model_provider_id: "openai".to_string(),
                 service_tier: None,
@@ -6179,6 +6537,7 @@ mod tests {
                 "type": "session_configured",
                 "session_id": "67e55044-10b1-426f-9247-bb680e5fe0c7",
                 "thread_id": "67e55044-10b1-426f-9247-bb680e5fe0c8",
+                "history_mode": "paginated",
                 "model": "codex-mini-latest",
                 "model_provider_id": "openai",
                 "approval_policy": "never",
@@ -6210,6 +6569,7 @@ mod tests {
 
         let event: SessionConfiguredEvent = serde_json::from_value(value)?;
         assert_eq!(event.permission_profile, PermissionProfile::read_only());
+        assert_eq!(event.history_mode, ThreadHistoryMode::Legacy);
         Ok(())
     }
 
