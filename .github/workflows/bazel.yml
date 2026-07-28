@@ -20,12 +20,12 @@ jobs:
 
   build:
     needs: authorize_self_hosted
-    # Bazel compilation runs only in trusted postmerge/manual contexts. Runtime
+    # Bazel compilation runs only in trusted full-suite/manual contexts. Runtime
     # tests are owned by rust-ci-full, where each platform has the dependencies
     # and isolation its test suite expects.
     timeout-minutes: 60
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - runner: codex-lab-linux
@@ -83,7 +83,6 @@ jobs:
           )
           bazel_build_args=(
             build
-            --keep_going
             "--build_metadata=COMMIT_SHA=${GITHUB_SHA}"
           )
           ./.github/scripts/run-bazel-ci.sh \
@@ -120,7 +119,7 @@ jobs:
     needs: authorize_self_hosted
     timeout-minutes: 60
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - runner: codex-lab-linux
@@ -197,7 +196,7 @@ jobs:
     needs: authorize_self_hosted
     timeout-minutes: 60
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - runner: codex-lab-linux

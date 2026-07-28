@@ -1,10 +1,16 @@
-name: postmerge-ci
+name: full-ci
 
-# This is the single entrypoint for main-only CI that is intentionally outside
-# the merge-blocking suite. It keeps the broader postmerge signal in one run.
+# This is the single entrypoint for comprehensive verification that is
+# intentionally outside the merge-blocking suite. Keep it scheduled or manual
+# so ordinary main pushes do not queue the full cross-platform fan-out.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"
+
+concurrency:
+  group: full-ci::${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Keep reusable workflow calls alphabetized. Each child retains its own
@@ -30,7 +36,7 @@ jobs:
     secrets: inherit
 
   results:
-    name: Postmerge CI results
+    name: Full CI results
     needs:
       - bazel
       - rust-ci-full
@@ -39,8 +45,8 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
-      # Postmerge runs use the pushed main commit, so this helper always comes
-      # from the same revision that defined the parent workflow.
+      # Scheduled runs use the default branch and manual runs use the selected
+      # ref, so this helper comes from the revision that defined the workflow.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
