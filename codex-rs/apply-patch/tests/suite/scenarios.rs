@@ -9,8 +9,12 @@ use tempfile::tempdir;
 
 #[test]
 fn test_apply_patch_scenarios() -> anyhow::Result<()> {
-    let scenarios_dir = repo_root()?
-        .join("codex-rs")
+    let codex_rs_root = if let Some(workspace_root) = std::env::var_os("INSTA_WORKSPACE_ROOT") {
+        PathBuf::from(workspace_root)
+    } else {
+        repo_root()?.join("codex-rs")
+    };
+    let scenarios_dir = codex_rs_root
         .join("apply-patch")
         .join("tests")
         .join("fixtures")
