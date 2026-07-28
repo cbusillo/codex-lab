@@ -50,9 +50,55 @@ jobs:
           }
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
 
+  full-bazel:
+    name: Full verification / Bazel
+    needs: release-metadata
+    uses: ./.github/workflows/bazel.yml
+    secrets: inherit
+
+  full-rust:
+    name: Full verification / Rust
+    needs: release-metadata
+    uses: ./.github/workflows/rust-ci-full.yml
+    secrets: inherit
+
+  full-sdk-integration:
+    name: Full verification / SDK integration
+    needs: release-metadata
+    uses: ./.github/workflows/sdk-integration.yml
+    secrets: inherit
+
+  full-v8-canary:
+    name: Full verification / V8 canary
+    needs: release-metadata
+    uses: ./.github/workflows/v8-canary.yml
+    secrets: inherit
+
+  full-verification:
+    name: Full verification results
+    needs:
+      - full-bazel
+      - full-rust
+      - full-sdk-integration
+      - full-v8-canary
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require successful dependencies
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/check_ci_results.py
+
   build-macos-aarch64:
     name: Build macOS ARM64 Codex Lab release artifacts
-    needs: release-metadata
+    needs:
+      - release-metadata
+      - full-verification
     runs-on:
       - self-hosted
       - macOS

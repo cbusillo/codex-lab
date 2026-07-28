@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: rust-ci-full::${{ github.ref }}
+  group: rust-ci-full::${{ github.workflow }}::${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

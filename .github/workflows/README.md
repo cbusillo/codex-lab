@@ -53,6 +53,15 @@ verification runs on a nightly or explicitly requested cadence.
   fail-fast cancellation, so each suite fails fast internally without
   serializing the successful path.
 
+## Release Gate
+
+- `codex-lab-release.yml` runs the same Bazel, Rust, SDK integration, and V8
+  reusable workflows on the exact selected release ref after validating release
+  metadata and before building release artifacts.
+- A recent nightly is useful evidence but never substitutes for this exact-ref
+  release gate. Publishing remains downstream of both full verification and
+  artifact validation.
+
 ## Runner Ownership
 
 - Merge-blocking workflows use standard GitHub-hosted runners so public fork
