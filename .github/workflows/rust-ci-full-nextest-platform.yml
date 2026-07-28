@@ -396,6 +396,7 @@ jobs:
           set -euo pipefail
           archive_file="${RUNNER_TEMP}/nextest-archive/${NEXTEST_ARCHIVE_FILE}"
           workspace_root="$(pwd)"
+          export INSTA_WORKSPACE_ROOT="${workspace_root}"
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             original_home="${HOME}"

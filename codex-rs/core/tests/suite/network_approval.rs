@@ -53,6 +53,7 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -157,6 +158,19 @@ async fn guardian_network_approval_preserves_action_and_outcome_routing() -> Res
 
     let actions = guardian_network_actions(&responses)?;
     assert_eq!(actions.len(), 2);
+    let first_shell = actions[0]
+        .pointer("/trigger/command/0")
+        .and_then(Value::as_str)
+        .context("expected network command shell")?;
+    anyhow::ensure!(
+        matches!(
+            Path::new(first_shell)
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("sh" | "bash")
+        ),
+        "unexpected POSIX shell path: {first_shell}"
+    );
     assert_eq!(
         actions[0],
         json!({
@@ -167,7 +181,7 @@ async fn guardian_network_approval_preserves_action_and_outcome_routing() -> Res
             "tool": "network_access",
             "trigger": {
                 "callId": first_call_id,
-                "command": ["/bin/sh", "-c", first_command],
+                "command": [first_shell, "-c", first_command],
                 "cwd": test.config.cwd,
                 "sandboxPermissions": "use_default",
                 "toolName": "exec_command",

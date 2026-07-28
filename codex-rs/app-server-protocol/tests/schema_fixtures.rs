@@ -113,6 +113,16 @@ Run `just write-app-server-schema` to overwrite with your changes.\n\n{diff}",
 }
 
 fn schema_root() -> Result<PathBuf> {
+    if let Some(workspace_root) = std::env::var_os("INSTA_WORKSPACE_ROOT") {
+        let schema_root = PathBuf::from(workspace_root).join("app-server-protocol/schema");
+        anyhow::ensure!(
+            schema_root.is_dir(),
+            "runtime schema root does not exist: {}",
+            schema_root.display()
+        );
+        return Ok(schema_root);
+    }
+
     // In Bazel runfiles (especially manifest-only mode), resolving directories is not
     // reliable. Resolve a known file, then walk up to the schema root.
     let typescript_index = codex_utils_cargo_bin::find_resource!("schema/typescript/index.ts")
