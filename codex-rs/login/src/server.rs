@@ -1468,6 +1468,7 @@ mod tests {
         .await
     }
 
+    #[serial_test::serial(logout_revoke)]
     #[tokio::test]
     async fn isolated_chatgpt_relogin_and_logout_leave_no_account_catalog_credentials()
     -> anyhow::Result<()> {
