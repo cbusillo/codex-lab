@@ -80,8 +80,8 @@ mod tests {
             .to_str()
             .expect("missing codex lab home path should be valid utf-8");
 
-        let err =
-            find_codex_home_from_env(Some(missing_str), None).expect_err("missing CODEX_LAB_HOME");
+        let err = find_codex_home_from_env(Some(missing_str), /*default_home*/ None)
+            .expect_err("missing CODEX_LAB_HOME");
         assert_eq!(err.kind(), ErrorKind::NotFound);
         assert!(
             err.to_string().contains("CODEX_LAB_HOME"),
@@ -98,7 +98,8 @@ mod tests {
             .to_str()
             .expect("file codex lab home path should be valid utf-8");
 
-        let err = find_codex_home_from_env(Some(file_str), None).expect_err("file CODEX_LAB_HOME");
+        let err = find_codex_home_from_env(Some(file_str), /*default_home*/ None)
+            .expect_err("file CODEX_LAB_HOME");
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(
             err.to_string().contains("not a directory"),
@@ -114,8 +115,8 @@ mod tests {
             .to_str()
             .expect("temp codex lab home path should be valid utf-8");
 
-        let resolved =
-            find_codex_home_from_env(Some(temp_str), None).expect("valid CODEX_LAB_HOME");
+        let resolved = find_codex_home_from_env(Some(temp_str), /*default_home*/ None)
+            .expect("valid CODEX_LAB_HOME");
         let expected = temp_home
             .path()
             .canonicalize()

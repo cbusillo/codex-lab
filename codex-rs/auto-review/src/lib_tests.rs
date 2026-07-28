@@ -503,7 +503,7 @@ fn corrupt_index_recovers_detail_from_metadata_and_output() -> anyhow::Result<()
     corrupt_runs_index(&store)?;
 
     let detail = store.finding_detail("run_1", "f1", DETAIL_MAX_BYTES)?;
-    let run_detail = store.detail("run_1", None, DETAIL_MAX_BYTES)?;
+    let run_detail = store.detail("run_1", /*finding_id*/ None, DETAIL_MAX_BYTES)?;
 
     assert_eq!(detail.kind, AutoReviewDetailKind::Finding);
     assert_eq!(detail.finding_id.as_deref(), Some("f1"));
@@ -606,7 +606,7 @@ fn corrupt_index_still_blocks_orphan_reconciliation_writes() -> anyhow::Result<(
     corrupt_runs_index(&store)?;
 
     let error = store
-        .reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 3)
+        .reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 3)
         .expect_err("corrupt canonical index should block reconciliation writes");
 
     assert!(
@@ -648,7 +648,7 @@ fn orphan_reconciliation_recovers_when_index_is_missing() -> anyhow::Result<()> 
     std::fs::remove_file(store.runs_path())?;
 
     assert_eq!(
-        store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 3)?,
+        store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 3)?,
         1
     );
 
@@ -700,6 +700,113 @@ fn save_run_prunes_metadata_for_runs_evicted_from_index() -> anyhow::Result<()> 
 
     assert!(!evicted_metadata_path.exists());
     assert!(!run_ids(store.list_runs()?).contains(&"run_000".to_string()));
+    Ok(())
+}
+
+#[test]
+fn save_run_backfills_only_missing_metadata_sidecars() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+    store.save_run(&sample_run("run_2", &sample_output(Vec::new())))?;
+
+    // Tag an existing sidecar so a rewrite would be observable, and drop another so the
+    // backfill has something to restore.
+    let retained_path = store.run_metadata_path("run_1")?;
+    let mut tagged: AutoReviewRun =
+        serde_json::from_str(&std::fs::read_to_string(&retained_path)?)?;
+    tagged.started_at_unix_secs = 4242;
+    std::fs::write(
+        &retained_path,
+        format!("{}\n", serde_json::to_string_pretty(&tagged)?),
+    )?;
+    let backfilled_path = store.run_metadata_path("run_2")?;
+    std::fs::remove_file(&backfilled_path)?;
+
+    store.save_run(&sample_run("run_3", &sample_output(Vec::new())))?;
+
+    assert!(
+        backfilled_path.exists(),
+        "missing sidecar should be backfilled"
+    );
+    let retained: AutoReviewRun = serde_json::from_str(&std::fs::read_to_string(&retained_path)?)?;
+    assert_eq!(
+        retained.started_at_unix_secs, 4242,
+        "sidecars that already exist should not be rewritten on unrelated saves"
+    );
+
+    corrupt_runs_index(&store)?;
+    assert_eq!(
+        run_ids(store.list_runs()?),
+        vec![
+            "run_1".to_string(),
+            "run_2".to_string(),
+            "run_3".to_string()
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn save_run_rewrites_metadata_for_the_changed_run() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    store.save_run(&sample_run("run_1", &sample_output(Vec::new())))?;
+
+    let updated = AutoReviewRun {
+        started_at_unix_secs: 99,
+        ..sample_run("run_1", &sample_output(Vec::new()))
+    };
+    store.save_run(&updated)?;
+
+    corrupt_runs_index(&store)?;
+    assert_eq!(store.load_run("run_1")?, updated);
+    Ok(())
+}
+
+#[test]
+fn save_run_removes_state_sidecars_for_runs_evicted_from_index() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    for index in 0..DEFAULT_MAX_RUNS {
+        let output = sample_output(Vec::new());
+        store.save_run(&AutoReviewRun {
+            run_id: format!("run_{index:03}"),
+            started_at_unix_secs: index as i64,
+            completed_at_unix_secs: Some(index as i64),
+            ..sample_run("unused", &output)
+        })?;
+    }
+    store.save_run_state(&AutoReviewRunState::new("run_000"))?;
+    store.save_run_state(&AutoReviewRunState::new("run_001"))?;
+    let evicted_state_path = store.run_state_path("run_000")?;
+    let retained_state_path = store.run_state_path("run_001")?;
+    assert!(evicted_state_path.exists());
+
+    // The next save pushes the index past its cap and evicts the oldest run.
+    let output = sample_output(Vec::new());
+    store.save_run(&AutoReviewRun {
+        run_id: format!("run_{DEFAULT_MAX_RUNS:03}"),
+        started_at_unix_secs: DEFAULT_MAX_RUNS as i64,
+        completed_at_unix_secs: Some(DEFAULT_MAX_RUNS as i64),
+        ..sample_run("unused", &output)
+    })?;
+
+    assert!(
+        !evicted_state_path.exists(),
+        "evicted run state should be removed"
+    );
+    assert!(
+        !store.run_metadata_path("run_000")?.exists(),
+        "evicted run metadata should be removed"
+    );
+    assert!(
+        retained_state_path.exists(),
+        "retained run state should be kept"
+    );
     Ok(())
 }
 
@@ -770,7 +877,7 @@ fn finding_detail_reads_completed_output_sidecar() -> anyhow::Result<()> {
     store.save_run(&run)?;
     store.save_output("run_1", &output)?;
 
-    let detail = store.finding_detail("run_1", "f1", 120)?;
+    let detail = store.finding_detail("run_1", "f1", /*max_bytes*/ 120)?;
 
     assert_eq!(detail.kind, AutoReviewDetailKind::Finding);
     assert_eq!(detail.finding_id.as_deref(), Some("f1"));
@@ -839,7 +946,7 @@ fn detail_formats_bounded_run_overview() -> anyhow::Result<()> {
     store.save_run(&run)?;
     store.save_output("run_1", &output)?;
 
-    let detail = store.detail("run_1", None, DETAIL_MAX_BYTES)?;
+    let detail = store.detail("run_1", /*finding_id*/ None, DETAIL_MAX_BYTES)?;
 
     assert_eq!(detail.kind, AutoReviewDetailKind::Run);
     assert_eq!(detail.finding_id, None);
@@ -1050,7 +1157,14 @@ fn diagnostics_count_stale_current_turn_diff_as_stale_suppression_for_uncommitte
 
 #[test]
 fn diagnostics_are_absent_for_empty_runs() {
-    assert_eq!(AutoReviewDiagnostics::from_runs([], None, None), None);
+    assert_eq!(
+        AutoReviewDiagnostics::from_runs(
+            [],
+            /*active_target*/ None,
+            /*active_review_target*/ None
+        ),
+        None
+    );
 }
 
 #[test]
@@ -1082,7 +1196,7 @@ fn detail_lookup_rejects_unknown_ids_and_empty_budget() -> anyhow::Result<()> {
     store.save_output("run_1", &output)?;
 
     let missing = store
-        .finding_detail("run_1", "missing", 120)
+        .finding_detail("run_1", "missing", /*max_bytes*/ 120)
         .expect_err("missing finding should fail");
     let empty_budget = store
         .finding_detail("run_1", "f1", /*max_bytes*/ 0)
@@ -1562,7 +1676,8 @@ fn reconcile_orphaned_in_flight_marks_lost() -> anyhow::Result<()> {
     store.save_run(&running)?;
     store.save_run(&completed)?;
 
-    let changed = store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), 99)?;
+    let changed = store
+        .reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 99)?;
 
     let running = store.load_run("running")?;
     let completed = store.load_run("completed")?;
@@ -1599,7 +1714,7 @@ fn reconcile_orphaned_in_flight_marks_manual_and_background_lost() -> anyhow::Re
     store.save_run(&background)?;
     store.save_run(&live_manual)?;
 
-    let changed = store.reconcile_orphaned_in_flight(["live_manual"], 99)?;
+    let changed = store.reconcile_orphaned_in_flight(["live_manual"], /*now_unix_secs*/ 99)?;
 
     let manual = store.load_run("manual")?;
     let background = store.load_run("background")?;

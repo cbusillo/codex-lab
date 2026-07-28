@@ -5,6 +5,13 @@ impl AgentControl {
     /// Submit a shutdown request for a live agent without marking it explicitly closed in
     /// persisted spawn-edge state.
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+        if self.state.cancel_external_agent(agent_id) {
+            return Ok(String::new());
+        }
+        if self.state.external_agent_status(agent_id).is_some() {
+            self.release_external_agent(agent_id);
+            return Ok(String::new());
+        }
         let state = self.upgrade()?;
         let result = if let Ok(thread) = state.get_thread(agent_id).await {
             thread.session.ensure_rollout_materialized().await;
@@ -28,6 +35,14 @@ impl AgentControl {
     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the
     /// agent and any live descendants reached from the in-memory tree.
     pub(crate) async fn close_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+        if self.state.cancel_external_agent(agent_id) {
+            self.close_thread_spawn_edge(agent_id).await;
+            return Ok(String::new());
+        }
+        if self.state.external_agent_status(agent_id).is_some() {
+            self.close_external_agent(agent_id).await;
+            return Ok(String::new());
+        }
         let state = self.upgrade()?;
         let known_agent = self.state.agent_metadata_for_thread(agent_id).is_some();
         match state.get_thread(agent_id).await {
@@ -65,7 +80,12 @@ impl AgentControl {
                 warn!("failed to inspect agent before close {agent_id}: {err}");
             }
         }
-        match Box::pin(self.shutdown_agent_tree(agent_id)).await {
+        let external_descendant_ids = if self.state.has_registered_external_agents() {
+            Box::pin(self.registered_external_thread_spawn_descendants(agent_id)).await?
+        } else {
+            Vec::new()
+        };
+        let result = match Box::pin(self.shutdown_agent_tree(agent_id)).await {
             Err(err)
                 if known_agent
                     && matches!(
@@ -76,7 +96,19 @@ impl AgentControl {
                 Ok(String::new())
             }
             result => result,
+        };
+        for external_descendant_id in external_descendant_ids {
+            if self
+                .state
+                .external_agent_status(external_descendant_id)
+                .is_some_and(|status| is_final(&status))
+            {
+                self.close_external_agent(external_descendant_id).await;
+            } else {
+                self.close_thread_spawn_edge(external_descendant_id).await;
+            }
         }
+        result
     }
 
     /// Shut down `agent_id` and any live descendants reachable from the in-memory spawn tree.

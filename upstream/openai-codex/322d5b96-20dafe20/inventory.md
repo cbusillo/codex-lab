@@ -14,9 +14,9 @@ local content there instead of upstream content; it does not reject it.
 
 | Dimension | Value |
 | --- | ---: |
-| Residual lane `amber_contract_adapt` | 130 |
-| Residual lane `green_bulk_adopt` | 175 |
-| Residual lane `intentionally_owned` | 73 |
+| Residual lane `amber_contract_adapt` | 124 |
+| Residual lane `green_bulk_adopt` | 170 |
+| Residual lane `intentionally_owned` | 84 |
 | Residual lane `red_manual_review` | 10 |
 
 ## Contract-reviewed conflicts

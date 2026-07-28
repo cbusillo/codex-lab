@@ -8,6 +8,7 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeInput;
+use codex_mcp::McpStartupReconnectPolicy;
 use codex_mcp::ToolInfo;
 use codex_mcp::effective_mcp_servers;
 use codex_mcp::host_owned_codex_apps_enabled;
@@ -99,6 +100,10 @@ impl AppsRequestProcessor {
                             .flatten();
                     let runtime = McpRuntime::new(McpRuntimeInput {
                         config: Arc::clone(&mcp_config),
+                        // This refresh reports its own failure and shuts the
+                        // runtime down. A background reconnect would escape
+                        // that shutdown and overwrite the retained snapshot.
+                        startup_reconnect_policy: McpStartupReconnectPolicy::FailureIsFinal,
                         plugins_available: false,
                         ready_selected_capability_roots: Vec::new(),
                         mcp_servers,

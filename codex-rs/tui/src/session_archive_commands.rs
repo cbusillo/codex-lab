@@ -181,6 +181,7 @@ async fn lookup_session_by_exact_name(
                     )),
                     archived: Some(archived),
                     is_pinned: None,
+                    descendant_of_thread_id: None,
                     parent_thread_id: None,
                     ancestor_thread_id: None,
                     cwd: None,
@@ -347,6 +348,7 @@ async fn start_app_server_for_archive_command(
     );
     let auth_route_config = AuthRouteConfig::from_http_client_factory(http_client_factory);
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+        codex_home.to_path_buf(),
         codex_home.to_path_buf(),
         /*enable_codex_api_key_env*/ false,
         config_toml.cli_auth_credentials_store.unwrap_or_default(),

@@ -19,6 +19,7 @@ impl fmt::Display for ConnectionId {
 }
 
 /// Outgoing message from the server to the client.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum OutgoingMessage {

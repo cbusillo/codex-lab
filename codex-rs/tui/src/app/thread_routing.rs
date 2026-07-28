@@ -1274,6 +1274,10 @@ impl App {
                     self.enqueue_thread_history_entry_response(thread_id, event)
                         .await?;
                 }
+                ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => {
+                    self.enqueue_thread_auto_review_summary(thread_id, run_id, *result)
+                        .await?;
+                }
                 ThreadBufferedEvent::FeedbackSubmission(event) => {
                     self.enqueue_thread_feedback_event(thread_id, event).await;
                 }
@@ -1282,6 +1286,67 @@ impl App {
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ false);
         self.chat_widget.submit_initial_user_message_if_pending();
+        Ok(())
+    }
+
+    pub(super) async fn enqueue_thread_auto_review_summary(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: String,
+        result: Result<AutoReviewSummaryReadResponse, String>,
+    ) -> Result<()> {
+        let (sender, store) = {
+            let channel = self.ensure_thread_channel(thread_id);
+            (channel.sender.clone(), Arc::clone(&channel.store))
+        };
+
+        let should_send = {
+            let mut guard = store.lock().await;
+            guard.push_auto_review_summary(run_id.clone(), result.clone());
+            guard.active
+        };
+
+        if should_send {
+            let event = ThreadBufferedEvent::AutoReviewSummaryLoaded {
+                run_id,
+                result: Box::new(result),
+            };
+            match sender.try_send(event) {
+                Ok(()) => {}
+                Err(TrySendError::Full(event)) => {
+                    tokio::spawn(async move {
+                        if let Err(err) = sender.send(event).await {
+                            tracing::warn!("thread {thread_id} event channel closed: {err}");
+                        }
+                    });
+                }
+                Err(TrySendError::Closed(_)) => {
+                    tracing::warn!("thread {thread_id} event channel closed");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn enqueue_primary_thread_auto_review_summary(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: String,
+        result: Result<AutoReviewSummaryReadResponse, String>,
+    ) -> Result<()> {
+        if self.primary_thread_id == Some(thread_id) {
+            return self
+                .enqueue_thread_auto_review_summary(thread_id, run_id, result)
+                .await;
+        }
+        if self.primary_thread_id.is_none() {
+            self.pending_primary_events
+                .push_back(ThreadBufferedEvent::AutoReviewSummaryLoaded {
+                    run_id,
+                    result: Box::new(result),
+                });
+        }
         Ok(())
     }
 
@@ -1474,11 +1539,23 @@ impl App {
             self.chat_widget
                 .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshot);
         }
+        let replayed_auto_review_summaries = snapshot
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, .. } => Some(run_id.clone()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         for event in snapshot.events {
             if suppress_replay_notices && replay_filter::event_is_notice(&event) {
                 continue;
             }
-            self.handle_thread_event_replay(event);
+            self.handle_thread_event_replay(
+                event,
+                &replayed_auto_review_summaries,
+                /*fetch_missing_auto_review_summaries*/ resume_restored_queue,
+            );
         }
         if should_buffer_replay {
             self.app_event_tx
@@ -1559,6 +1636,10 @@ impl App {
             ThreadBufferedEvent::HistoryEntryResponse(event) => {
                 self.chat_widget.handle_history_entry_response(event);
             }
+            ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => {
+                self.chat_widget
+                    .handle_auto_review_summary_loaded(run_id, *result);
+            }
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }
@@ -1568,21 +1649,62 @@ impl App {
         }
     }
 
-    pub(super) fn handle_thread_event_replay(&mut self, event: ThreadBufferedEvent) {
+    pub(super) fn handle_thread_event_replay(
+        &mut self,
+        event: ThreadBufferedEvent,
+        replayed_auto_review_summaries: &HashSet<String>,
+        fetch_missing_auto_review_summaries: bool,
+    ) {
         match event {
-            ThreadBufferedEvent::Notification(notification) => self
-                .chat_widget
-                .handle_server_notification(notification, Some(ReplayKind::ThreadSnapshot)),
+            ThreadBufferedEvent::Notification(notification) => {
+                if fetch_missing_auto_review_summaries {
+                    self.maybe_fetch_replayed_auto_review_summary(
+                        &notification,
+                        replayed_auto_review_summaries,
+                    );
+                }
+                self.chat_widget
+                    .handle_server_notification(notification, Some(ReplayKind::ThreadSnapshot));
+            }
             ThreadBufferedEvent::Request(request) => self
                 .chat_widget
                 .handle_server_request(request, Some(ReplayKind::ThreadSnapshot)),
             ThreadBufferedEvent::HistoryEntryResponse(event) => {
                 self.chat_widget.handle_history_entry_response(event)
             }
+            ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => self
+                .chat_widget
+                .handle_auto_review_summary_loaded(run_id, *result),
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }
         }
+    }
+
+    fn maybe_fetch_replayed_auto_review_summary(
+        &mut self,
+        notification: &ServerNotification,
+        replayed_auto_review_summaries: &HashSet<String>,
+    ) {
+        let ServerNotification::BackgroundAutoReviewStatusChanged(notification) = notification
+        else {
+            return;
+        };
+        if !background_auto_review_status_has_summary(notification.status)
+            || replayed_auto_review_summaries.contains(&notification.run_id)
+        {
+            return;
+        }
+        let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
+            return;
+        };
+        if !self.try_claim_auto_review_summary_fetch(thread_id, &notification.run_id) {
+            return;
+        }
+        self.app_event_tx.send(AppEvent::FetchAutoReviewSummary {
+            thread_id,
+            run_id: notification.run_id.clone(),
+        });
     }
 
     /// Handles an event emitted by the currently active thread.
@@ -1657,8 +1779,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::make_test_app_with_event_rx;
+    use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
+    use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
     use codex_protocol::models::ActivePermissionProfile;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+    use pretty_assertions::assert_eq;
 
     async fn config_with_workspace_profile() -> Config {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -1725,5 +1851,120 @@ mod tests {
             ),
             TurnPermissionsOverride::LegacySandbox(effective_permission_profile)
         );
+    }
+    fn status_notification(
+        thread_id: ThreadId,
+        run_id: &str,
+        status: BackgroundAutoReviewStatus,
+    ) -> ServerNotification {
+        ServerNotification::BackgroundAutoReviewStatusChanged(
+            BackgroundAutoReviewStatusChangedNotification {
+                thread_id: thread_id.to_string(),
+                run_id: run_id.to_string(),
+                status,
+                review_target: ApiReviewTarget::UncommittedChanges,
+                error_summary: None,
+            },
+        )
+    }
+
+    fn drain_summary_fetches(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    ) -> Vec<(ThreadId, String)> {
+        let mut fetches = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::FetchAutoReviewSummary { thread_id, run_id } = event {
+                fetches.push((thread_id, run_id));
+            }
+        }
+        fetches
+    }
+
+    /// Resuming a thread replays every buffered background-review status, so a
+    /// run that walked Pending -> Running -> Completed would ask the app server
+    /// for the same summary several times if the replay path did not claim the
+    /// fetch. Only the terminal status carries a summary, and only once.
+    #[tokio::test]
+    async fn replayed_statuses_fetch_each_run_summary_once() {
+        let (mut app, mut rx) = make_test_app_with_event_rx().await;
+        let thread_id = ThreadId::new();
+
+        for status in [
+            BackgroundAutoReviewStatus::Pending,
+            BackgroundAutoReviewStatus::Running,
+            BackgroundAutoReviewStatus::Completed,
+            // A duplicate terminal status can arrive from a second replay pass.
+            BackgroundAutoReviewStatus::Completed,
+        ] {
+            app.maybe_fetch_replayed_auto_review_summary(
+                &status_notification(thread_id, "run-1", status),
+                &HashSet::new(),
+            );
+        }
+
+        assert_eq!(
+            drain_summary_fetches(&mut rx),
+            vec![(thread_id, "run-1".to_string())]
+        );
+    }
+
+    /// Every terminal status persists a summary, and each distinct run needs its
+    /// own fetch: the claim is per `(thread, run)`, not per thread.
+    #[tokio::test]
+    async fn each_terminal_run_gets_its_own_summary_fetch() {
+        let (mut app, mut rx) = make_test_app_with_event_rx().await;
+        let thread_id = ThreadId::new();
+
+        for (run_id, status) in [
+            ("run-completed", BackgroundAutoReviewStatus::Completed),
+            ("run-failed", BackgroundAutoReviewStatus::Failed),
+            ("run-cancelled", BackgroundAutoReviewStatus::Cancelled),
+            ("run-superseded", BackgroundAutoReviewStatus::Superseded),
+            ("run-skipped", BackgroundAutoReviewStatus::Skipped),
+        ] {
+            app.maybe_fetch_replayed_auto_review_summary(
+                &status_notification(thread_id, run_id, status),
+                &HashSet::new(),
+            );
+        }
+
+        assert_eq!(
+            drain_summary_fetches(&mut rx),
+            vec![
+                (thread_id, "run-completed".to_string()),
+                (thread_id, "run-failed".to_string()),
+                (thread_id, "run-cancelled".to_string()),
+                (thread_id, "run-superseded".to_string()),
+                (thread_id, "run-skipped".to_string()),
+            ]
+        );
+    }
+
+    /// A summary that the replay already delivered must not be re-fetched, and a
+    /// run that has not reached a terminal status has no summary to fetch yet.
+    #[tokio::test]
+    async fn replayed_summaries_and_non_terminal_statuses_skip_the_fetch() {
+        let (mut app, mut rx) = make_test_app_with_event_rx().await;
+        let thread_id = ThreadId::new();
+        let already_replayed = HashSet::from(["run-replayed".to_string()]);
+
+        app.maybe_fetch_replayed_auto_review_summary(
+            &status_notification(
+                thread_id,
+                "run-replayed",
+                BackgroundAutoReviewStatus::Completed,
+            ),
+            &already_replayed,
+        );
+        app.maybe_fetch_replayed_auto_review_summary(
+            &status_notification(
+                thread_id,
+                "run-running",
+                BackgroundAutoReviewStatus::Running,
+            ),
+            &already_replayed,
+        );
+
+        assert_eq!(drain_summary_fetches(&mut rx), Vec::new());
     }
 }

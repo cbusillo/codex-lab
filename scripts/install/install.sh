@@ -884,8 +884,12 @@ install_package_release() {
   tar -xzf "$archive_path" -C "$stage_release"
   chmod 0755 \
     "$stage_release/bin/codex" \
-    "$stage_release/bin/codex-code-mode-host" \
     "$stage_release/codex-path/rg"
+  # Packages published before the code mode host was bundled do not ship the
+  # helper; they must stay installable.
+  if [ -f "$stage_release/bin/codex-code-mode-host" ]; then
+    chmod 0755 "$stage_release/bin/codex-code-mode-host"
+  fi
   if [ -f "$stage_release/codex-resources/bwrap" ]; then
     chmod 0755 "$stage_release/codex-resources/bwrap"
   fi
@@ -938,7 +942,6 @@ release_dir_is_complete() {
     package)
       [ -f "$release_dir/codex-package.json" ] &&
         [ -x "$release_dir/bin/codex" ] &&
-        [ -x "$release_dir/bin/codex-code-mode-host" ] &&
         [ -x "$release_dir/codex" ] &&
         [ -x "$release_dir/codex-path/rg" ] ||
         return 1
@@ -1001,7 +1004,9 @@ update_visible_command() {
 
 verify_visible_command() {
   "$BIN_PATH" --version >/dev/null
-  if [ "$os" = "darwin" ] && [ "$install_layout" = "package" ]; then
+  if [ "$os" = "darwin" ] &&
+    [ "$install_layout" = "package" ] &&
+    [ -x "$CURRENT_LINK/bin/codex-code-mode-host" ]; then
     [ -x "$CODE_MODE_HOST_BIN_PATH" ]
   fi
 }

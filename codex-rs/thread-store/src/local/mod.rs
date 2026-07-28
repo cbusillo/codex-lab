@@ -693,6 +693,7 @@ mod tests {
             RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
+                environments: None,
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
@@ -1624,6 +1625,7 @@ mod tests {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),

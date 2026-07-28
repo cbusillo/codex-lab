@@ -181,6 +181,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
+                descendant_of_thread_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
             },
@@ -203,6 +204,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Cli,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -363,6 +365,7 @@ async fn start_in_process_client(
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {

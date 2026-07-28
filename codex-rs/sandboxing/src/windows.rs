@@ -112,10 +112,11 @@ pub fn resolve_windows_restricted_token_filesystem_overrides(
     // deny-write sentinels.
     file_system_sandbox_policy.remove_skip_missing_path_entries();
 
-    // The restricted-token backend can still enforce split write restrictions,
-    // but its WRITE_RESTRICTED token does not make capability SID deny-read ACEs
-    // participate in read access checks. Read restrictions therefore require the
-    // elevated backend, even when the filesystem root remains readable.
+    // The restricted-token backend can enforce some split GenericWrite
+    // restrictions, but WRITE_RESTRICTED does not make capability SID deny-read
+    // ACEs participate in read checks or remove ambient delete/DACL/owner rights.
+    // Read restrictions therefore require the elevated backend, even when the
+    // filesystem root remains readable.
     if !windows_policy_has_root_read_access(&file_system_sandbox_policy, sandbox_policy_cwd) {
         return Err(
             "windows unelevated restricted-token sandbox cannot enforce split filesystem read restrictions directly; refusing to run unsandboxed"

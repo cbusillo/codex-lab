@@ -41,6 +41,7 @@ async fn codex_delegate_ignores_legacy_deltas() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .expect("submit review");

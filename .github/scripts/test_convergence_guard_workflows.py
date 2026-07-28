@@ -5,11 +5,15 @@ tests bound themselves to the convergence-guard and exec-harness surfaces
 instead of pretending the whole tree is clean.
 """
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import unittest
 from pathlib import Path
+
+from verify_repo_checks_test_registration import is_registered
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,10 +73,76 @@ class RepoCheckWiringTest(unittest.TestCase):
             "python3 .github/scripts/upstream_convergence_guard.py", contents
         )
 
-    def test_repo_checks_runs_the_guard_and_inventory_tests(self) -> None:
+    def test_repo_checks_runs_the_governance_bootstrap(self) -> None:
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
 
-        self.assertIn("test_upstream_convergence_*.py", contents)
+        self.assertIn(
+            "python3 .github/scripts/verify_upstream_convergence_governance.py",
+            contents,
+        )
+
+    def test_repo_checks_runs_the_convergence_validator(self) -> None:
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 .github/scripts/upstream_convergence.py validate", contents
+        )
+        self.assertIn("fetch-depth: 0", contents)
+        self.assertIn("git remote add openai https://github.com/openai/codex.git", contents)
+        self.assertIn('--against "$CONVERGENCE_BASE_SHA"', contents)
+        self.assertIn('--json | tee "$report"', contents)
+        self.assertIn("Convergence comparison base:", contents)
+        self.assertIn("$GITHUB_STEP_SUMMARY", contents)
+
+    def test_bazel_does_not_run_history_dependent_github_script_suite(self) -> None:
+        contents = (WORKFLOWS / "bazel.yml").read_text(encoding="utf-8")
+
+        self.assertNotIn("just test-github-scripts", contents)
+
+    def test_convergence_summary_jq_program_executes(self) -> None:
+        require("jq", self)
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+        match = re.search(
+            r"jq -r '\n(?P<program>.*?)\n\s*' \"\$report\"",
+            contents,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        program = match.group("program")
+        result = subprocess.run(
+            ["jq", "-r", program],
+            cwd=ROOT,
+            input=json.dumps(
+                {
+                    "comparisonMode": "bootstrap",
+                    "policyStateAtBase": "absent",
+                    "appendOnlyChecked": False,
+                    "provenanceChecked": False,
+                    "bootstrapReason": None,
+                    "newSnapshots": ["one", "two"],
+                }
+            ),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Comparison mode: `bootstrap`", result.stdout)
+        self.assertIn("Bootstrap reason: none", result.stdout)
+        self.assertIn("New snapshots: `one, two`", result.stdout)
+
+    def test_repo_checks_runs_the_guard_and_inventory_tests(self) -> None:
+        # Asserted through the registration verifier rather than a literal
+        # pattern string: `repo-checks.yml` discovers the whole directory, so
+        # pinning one spelling of the pattern would break on every valid change
+        # to how discovery is expressed.
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+
+        for name in (
+            "test_upstream_convergence_guard.py",
+            "test_upstream_convergence_inventory.py",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(is_registered(name, ".github/scripts", contents))
 
     def test_repo_checks_is_reachable_from_blocking_ci(self) -> None:
         contents = (WORKFLOWS / "blocking-ci.yml").read_text(encoding="utf-8")

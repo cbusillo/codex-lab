@@ -163,7 +163,9 @@ codex-app-server-test-client = { path = "app-server-test-client" }
 codex-apply-patch = { path = "apply-patch" }
 codex-arg0 = { path = "arg0" }
 codex-async-utils = { path = "async-utils" }
+codex-auto-review = { path = "auto-review" }
 codex-backend-client = { path = "backend-client" }
+codex-browser = { path = "browser" }
 codex-chatgpt = { path = "chatgpt" }
 codex-cli = { path = "cli" }
 codex-code-bridge-client = { path = "code-bridge-client" }
@@ -201,6 +203,7 @@ codex-git-attribution = { path = "ext/git-attribution" }
 codex-guardian = { path = "ext/guardian" }
 codex-image-generation-extension = { path = "ext/image-generation" }
 codex-external-agent-migration = { path = "external-agent-migration" }
+codex-external-agent-sessions = { path = "external-agent-sessions" }
 codex-experimental-api-macros = { path = "codex-experimental-api-macros" }
 codex-features = { path = "features" }
 codex-feedback = { path = "feedback" }
@@ -578,6 +581,34 @@ strip = false
 debug = "limited"
 inherits = "test"
 opt-level = 0
+
+# Image resize and codec work is unusably slow unoptimized: at opt-level 0 the
+# image preparation tests exceed the 60s nextest limit on Windows CI. Optimize
+# the enabled image and compression crates; unspecified packages keep the
+# fast-compiling default.
+[profile.ci-test.package.image]
+opt-level = 2
+
+[profile.ci-test.package.png]
+opt-level = 2
+
+[profile.ci-test.package.fdeflate]
+opt-level = 2
+
+[profile.ci-test.package.flate2]
+opt-level = 2
+
+[profile.ci-test.package.miniz_oxide]
+opt-level = 2
+
+[profile.ci-test.package.zune-jpeg]
+opt-level = 2
+
+[profile.ci-test.package.image-webp]
+opt-level = 2
+
+[profile.ci-test.package.gif]
+opt-level = 2
 
 [patch.crates-io]
 # Uncomment to debug local changes.

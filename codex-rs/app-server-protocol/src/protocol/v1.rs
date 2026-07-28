@@ -66,7 +66,7 @@ pub struct InitializeResponse {
     pub user_agent: String,
     /// Actual compiled identity for the running app-server binary.
     pub server_build: Option<ServerBuildInfo>,
-    /// Absolute path to the server's $CODEX_HOME directory.
+    /// Absolute path to the server's $CODEX_LAB_HOME directory.
     pub codex_home: AbsolutePathBuf,
     /// Platform family for the running app-server target, for example
     /// `"unix"` or `"windows"`.

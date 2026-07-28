@@ -22,6 +22,7 @@ external integration were restored:
 | Background Review    | `background-review-same-turn-commit.json`                                             |
 | Provider routing     | `provider-routing-high-risk-external.json`                                            |
 | External integration | `third-party-agent-current-binary-lifecycle.json`                                     |
+| Model-facing tools   | `external-tools-model-facing-contract.json`                                           |
 
 Every scenario still recorded in `upstream/convergence-guard.json` but not
 restored here carries a `pending_restore` waiver in
@@ -145,11 +146,15 @@ passing rerun.
 `third-party-agent-current-binary-lifecycle.json` provides the deterministic
 current-binary gate for issue #312. It configures a fixture external-command
 agent, then proves native spawn, parent-visible completion output, terminal
-status listing, and close cleanup without using a paid provider or inherited
-credentials.
+status listing, and V2 interrupt cleanup without using a paid provider or
+inherited credentials.
 
 `provider-routing-high-risk-external.json` proves issue #370's significance-aware
 automatic routing with a deterministic external-command fixture.
+
+`external-tools-model-facing-contract.json` proves that the in-process browser
+and Code Bridge handlers are present in the model request and return bounded,
+deterministic status responses without requiring Chrome or a live bridge.
 
 `background-review-same-turn-commit.json` proves durable Background Review
 target and currentness metadata for a commit made inside the same turn.

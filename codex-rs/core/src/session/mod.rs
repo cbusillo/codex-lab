@@ -131,6 +131,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RateLimitReachedType;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -197,6 +198,7 @@ use crate::config::ConstraintResult;
 use crate::config::PermissionProfileSnapshot;
 use crate::config::PermissionProfileState;
 use crate::config::StartedNetworkProxy;
+use crate::config::ThreadStoreConfig;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
@@ -212,6 +214,8 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 
 mod apps_context;
+mod background_auto_review;
+pub(crate) mod cargo_validation_provider;
 mod code_mode_warning;
 mod config_lock;
 pub(crate) mod context_window;
@@ -223,6 +227,8 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+pub(crate) mod project_validation;
+pub(crate) mod project_validation_coordinator;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
@@ -233,6 +239,7 @@ pub(crate) mod time_reminder;
 mod token_budget;
 pub(crate) mod turn;
 pub(crate) mod turn_context;
+pub(crate) mod validation_provider;
 mod world_state;
 use self::apps_context::AppsContext;
 use self::code_mode_warning::unsupported_code_mode_warning;
@@ -244,6 +251,7 @@ use self::handlers::submission_loop;
 pub(crate) use self::input_queue::InputQueueActivity;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
+use self::project_validation_coordinator::ProjectValidationCoordinator;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -442,6 +450,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) control_models_manager: SharedModelsManager,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
+    pub(crate) project_validation_coordinator: Arc<ProjectValidationCoordinator>,
     pub(crate) skills_service: Arc<SkillsService>,
     pub(crate) plugins_manager: Arc<PluginsManager>,
     pub(crate) mcp_manager: Arc<McpManager>,
@@ -451,6 +460,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
     pub(crate) fork_persistence: ForkPersistence,
     pub(crate) session_source: SessionSource,
+    pub(crate) session_provenance: Option<SessionProvenance>,
     pub(crate) forked_from_thread_id: Option<ThreadId>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) thread_source: Option<ThreadSource>,
@@ -532,7 +542,12 @@ async fn resolve_execution_account_for_session(
     };
     // Ephemeral threads (sub-agents and forks of them) may reuse a durable
     // source lease but must never write a destination lease of their own.
-    let persistence = if config.ephemeral {
+    // In-memory thread stores are intentionally non-durable, so persisting a
+    // lease keyed by one of their non-resumable thread ids would leave orphaned
+    // local state under `codex_home`.
+    let persistence = if config.ephemeral
+        || !matches!(config.experimental_thread_store, ThreadStoreConfig::Local)
+    {
         ExecutionAccountLeasePersistence::Ephemeral
     } else {
         ExecutionAccountLeasePersistence::Durable
@@ -597,6 +612,7 @@ impl Session {
             auth_manager,
             control_models_manager,
             environment_manager,
+            project_validation_coordinator,
             skills_service,
             plugins_manager,
             mcp_manager,
@@ -606,6 +622,7 @@ impl Session {
             requested_history_mode,
             fork_persistence,
             session_source,
+            session_provenance,
             forked_from_thread_id,
             parent_thread_id,
             thread_source,
@@ -794,6 +811,7 @@ impl Session {
             app_server_client_name: None,
             app_server_client_version: None,
             session_source,
+            session_provenance,
             history_mode,
             forked_from_thread_id,
             parent_thread_id,
@@ -830,6 +848,7 @@ impl Session {
             supports_openai_form_elicitation,
             agent_control,
             environment_manager,
+            project_validation_coordinator,
             inherited_environments,
             analytics_events_client,
             thread_store,
@@ -3612,7 +3631,7 @@ impl Session {
         if turn_context.config.features.enabled(Feature::TokenBudget)
             && turn_context.model_context_window().is_some()
         {
-            let mcp_result = self
+            let thread_hint = self
                 .services
                 .mcp_runtime
                 .latest_call_tool(
@@ -3625,25 +3644,14 @@ impl Session {
                 )
                 .await
                 .ok()
-                .and_then(|result| {
-                    let text = result
-                        .content
-                        .iter()
-                        .filter_map(|content| {
-                            content.get("text").and_then(serde_json::Value::as_str)
-                        })
-                        .filter(|text| !text.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    (!text.is_empty()).then_some(text)
-                });
+                .and_then(|result| crate::context::join_thread_hint_content(&result.content));
             developer_sections.push(
                 crate::context::TokenBudgetContext::new(
                     self.thread_id(),
                     auto_compact_window_ids.first_window_id,
                     auto_compact_window_ids.previous_window_id,
                     auto_compact_window_ids.window_id,
-                    mcp_result,
+                    thread_hint,
                 )
                 .render(),
             );

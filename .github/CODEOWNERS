@@ -13,5 +13,15 @@
 /.github/scripts/macos-signing/ @openai/codex-core-agent-team
 /.github/workflows/rust-release.yml @openai/codex-core-agent-team
 
-# Keep ownership changes reviewed by the same team.
-/.github/CODEOWNERS @openai/codex-core-agent-team
+# Keep convergence policy and evidence reviewed by the fork owner.
+/AGENTS.md @cbusillo
+/upstream/ @cbusillo
+/.github/scripts/upstream_convergence*.py @cbusillo
+/.github/scripts/test_upstream_convergence*.py @cbusillo
+/.github/scripts/verify_upstream_convergence_governance.py @cbusillo
+/.github/scripts/test_convergence_guard_workflows.py @cbusillo
+/.github/workflows/blocking-ci.yml @cbusillo
+/.github/workflows/repo-checks.yml @cbusillo
+
+# Keep ownership changes reviewed by the fork owner.
+/.github/CODEOWNERS @cbusillo

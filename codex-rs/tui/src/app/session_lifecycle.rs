@@ -1231,6 +1231,7 @@ impl App {
             }
         };
         let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            self.config.codex_home.to_path_buf(),
             auth_home.to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             self.config.cli_auth_credentials_store_mode,
@@ -1499,6 +1500,7 @@ impl App {
     ) -> Result<(), String> {
         let default_auth_home = self.config.codex_home.clone();
         let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            self.config.codex_home.to_path_buf(),
             default_auth_home.to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             self.config.cli_auth_credentials_store_mode,
@@ -1727,6 +1729,7 @@ impl App {
     ) -> Result<(), String> {
         let default_auth_home = self.config.codex_home.clone();
         let replacement_cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+            self.config.codex_home.to_path_buf(),
             default_auth_home.to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             self.config.cli_auth_credentials_store_mode,

@@ -8,15 +8,15 @@ use codex_core::ThreadManager;
 use codex_core::config::ConfigOverrides;
 use codex_external_agent_migration::ExternalAgentConfigImportItemResult;
 use codex_external_agent_migration::record_import_error;
-use codex_external_agent_migration::sessions::CompletedExternalAgentSessionImport;
-use codex_external_agent_migration::sessions::ExternalAgentSessionMigration;
-use codex_external_agent_migration::sessions::ImportedExternalAgentSession;
-use codex_external_agent_migration::sessions::ImportedSessionConnectorAttribution;
-use codex_external_agent_migration::sessions::PendingSessionImport;
-use codex_external_agent_migration::sessions::SessionMetadataMode;
-use codex_external_agent_migration::sessions::detect_imported_cla_session_connectors;
-use codex_external_agent_migration::sessions::prepare_validated_session_import_with_metadata_mode;
-use codex_external_agent_migration::sessions::record_completed_session_imports;
+use codex_external_agent_sessions::CompletedExternalAgentSessionImport;
+use codex_external_agent_sessions::ExternalAgentSessionMigration;
+use codex_external_agent_sessions::ImportedExternalAgentSession;
+use codex_external_agent_sessions::ImportedSessionConnectorAttribution;
+use codex_external_agent_sessions::PendingSessionImport;
+use codex_external_agent_sessions::SessionMetadataMode;
+use codex_external_agent_sessions::detect_imported_cla_session_connectors;
+use codex_external_agent_sessions::prepare_validated_session_import_with_metadata_mode;
+use codex_external_agent_sessions::record_completed_session_imports;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
@@ -312,6 +312,7 @@ impl ExternalAgentSessionImporter {
             forked_from_id: None,
             parent_thread_id: None,
             source: source.clone(),
+            session_provenance: None,
             thread_source: None,
             originator: codex_login::default_client::originator().value,
             base_instructions: BaseInstructions {

@@ -92,7 +92,10 @@ async fn live_browser_witness_round_trips_events_screenshot_and_control() {
         )
         .await
         .expect("subscribe");
-    let mut events = client.events(&subscriber, 0).await.expect("events");
+    let mut events = client
+        .events(&subscriber, /*last_event_id*/ 0)
+        .await
+        .expect("events");
 
     let pageview = next_message(&mut events, "pageview").await;
     assert!(matches!(

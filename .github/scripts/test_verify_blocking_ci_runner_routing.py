@@ -88,7 +88,7 @@ class VerifyBlockingCiRunnerRoutingTest(unittest.TestCase):
             "jobs:\n  hosted:\n    runs-on: ubuntu-24.04\n",
         )
         self.write_workflow(
-            "postmerge-ci.yml",
+            "full-ci.yml",
             "jobs:\n"
             "  trusted:\n"
             "    runs-on: [self-hosted, codex-lab-linux]\n",

@@ -156,14 +156,14 @@ fn prefer_execution_account(
     crate::account_usage::record_rate_limit_snapshot(
         codex_home,
         &control.id,
-        rate_limit_snapshot(now + Duration::hours(4), 40.0),
+        rate_limit_snapshot(now + Duration::hours(4), /*used_percent*/ 40.0),
         now,
     )
     .expect("record control usage");
     crate::account_usage::record_rate_limit_snapshot(
         codex_home,
         &execution.id,
-        rate_limit_snapshot(now + Duration::hours(1), 40.0),
+        rate_limit_snapshot(now + Duration::hours(1), /*used_percent*/ 40.0),
         now,
     )
     .expect("record execution usage");
@@ -213,7 +213,7 @@ async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control()
     crate::account_usage::record_rate_limit_snapshot(
         codex_home.path(),
         &control.id,
-        rate_limit_snapshot(now + Duration::minutes(10), 1.0),
+        rate_limit_snapshot(now + Duration::minutes(10), /*used_percent*/ 1.0),
         now,
     )
     .expect("update control usage");

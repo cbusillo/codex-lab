@@ -15,13 +15,18 @@ on:
       - "codex-rs/**"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   build-macos-aarch64:
     name: Build macOS ARM64 Codex Lab app
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: authorize_self_hosted
     runs-on:
       - self-hosted
       - macOS

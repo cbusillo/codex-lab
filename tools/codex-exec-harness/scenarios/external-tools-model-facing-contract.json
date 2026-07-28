@@ -1,0 +1,85 @@
+{
+  "name": "external-tools-model-facing-contract",
+  "characterization": {
+    "issue": 126,
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.6-sol",
+  "prompt": "Check the browser and Code Bridge status, then finish.",
+  "config_toml": "model_provider = \"harness\"\n\n[features]\nin_app_browser = true\nbrowser_use = true\nbrowser_use_full_cdp_access = false\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-external-tools-browser",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "browser",
+              "arguments": "{\"action\":\"status\"}",
+              "call_id": "call-external-tools-browser"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-external-tools-code-bridge",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "code_bridge",
+              "arguments": "{\"action\":\"status\"}",
+              "call_id": "call-external-tools-code-bridge"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-external-tools-complete",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-external-tools-complete",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "External tools are model-visible."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 3,
+    "turn_count": 1,
+    "thread_id": "required",
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "contains_all": ["browser", "code_bridge"]
+      }
+    ],
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-external-tools-browser",
+        "contains_all": ["\"status\":\"available\"", "\"enabled\":false"]
+      },
+      {
+        "request": 2,
+        "call_id": "call-external-tools-code-bridge",
+        "contains": "\"status\":\"unavailable\""
+      }
+    ]
+  },
+  "timeout_seconds": 60
+}

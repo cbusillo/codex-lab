@@ -17,8 +17,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   codex-exec-harness:
     name: Codex exec harness
+    needs: authorize_self_hosted
     runs-on:
       - self-hosted
       - Linux
@@ -44,10 +49,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${RUNNER_ENVIRONMENT:-}" = "self-hosted" ]; then
+            runner_slug="$(printf '%s' "${RUNNER_NAME:-unnamed}" | tr -cs 'A-Za-z0-9._-' '-')"
+            runner_slug="${runner_slug#-}"
+            runner_slug="${runner_slug%-}"
+            [ -n "$runner_slug" ] || runner_slug="unnamed"
             if [ -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ] && [ -d "$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT" ]; then
-              target_dir="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT%/}/github-actions/cache/${GITHUB_REPOSITORY}/exec-harness/cargo-target"
+              target_dir="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT%/}/github-actions/cache/${GITHUB_REPOSITORY}/exec-harness/${runner_slug}/cargo-target"
             else
-              target_dir="$HOME/.cache/codex/exec-harness-target"
+              target_dir="$HOME/.cache/codex/${runner_slug}/exec-harness-target"
             fi
             mkdir -p "$target_dir"
             echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"

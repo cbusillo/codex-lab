@@ -17,6 +17,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context_manager::ImageSanitizationSource;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::inspect_pending_input;
@@ -104,15 +105,18 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
 use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
+use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::user_input::UserInput;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
@@ -137,6 +141,17 @@ use tracing::warn;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
+/// Fixed-size text left in place of an image the Responses API refused to read.
+const INVALID_IMAGE_PLACEHOLDER: &str = "Image omitted: the model could not read this image.";
+const INVALID_IMAGE_HISTORY_CHECKPOINT_MESSAGE: &str =
+    "Sanitized an unreadable image from conversation history.";
+const INVALID_IMAGE_MESSAGE: &str =
+    "Invalid image in your last message. Please remove it and try again.";
+const INVALID_IMAGE_SANITIZED_MESSAGE: &str = concat!(
+    "The model could not read one of the images in this conversation, so it was removed from ",
+    "history. Later turns will work; retry with a different image if you still need it."
+);
+
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
 ///
@@ -151,14 +166,54 @@ const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_tok
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the turn complete.
 ///
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunTurnMode {
+    Initial,
+    Continuation,
+}
+
+pub(crate) struct RunTurnState {
+    turn_diff_tracker: tokio::sync::OnceCell<SharedTurnDiffTracker>,
+    mode: RunTurnMode,
+}
+
+impl RunTurnState {
+    pub(crate) fn new() -> Self {
+        Self {
+            turn_diff_tracker: tokio::sync::OnceCell::new(),
+            mode: RunTurnMode::Initial,
+        }
+    }
+
+    fn begin_run(&mut self) -> RunTurnMode {
+        std::mem::replace(&mut self.mode, RunTurnMode::Continuation)
+    }
+
+    async fn turn_diff_tracker(&self, step_context: &StepContext) -> SharedTurnDiffTracker {
+        Arc::clone(
+            self.turn_diff_tracker
+                .get_or_init(|| async {
+                    Arc::new(tokio::sync::Mutex::new(
+                        TurnDiffTracker::with_environment_display_roots(
+                            turn_diff_display_roots(step_context).await,
+                        ),
+                    ))
+                })
+                .await,
+        )
+    }
+}
+
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     mut turn_context: Arc<TurnContext>,
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
     input: Vec<TurnInput>,
+    run_state: &mut RunTurnState,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
-) -> CodexResult<Option<String>> {
+) -> CodexResult<TurnRunResult> {
+    let run_mode = run_state.begin_run();
     turn_context = sess
         .ensure_mcp_manager_for_execution_account(&turn_context)
         .await;
@@ -184,7 +239,7 @@ pub(crate) async fn run_turn(
         sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
             .await;
         error!("Failed to run pre-sampling compact");
-        return Ok(None);
+        return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
     }
 
     // run_turn owns the step used to seed context and make the first sampling request.
@@ -200,53 +255,54 @@ pub(crate) async fn run_turn(
         Err(err) => return Err(err),
     };
     // Keep the exact model-visible state used by this turn and its inline compactions.
-    let (mut world_state, display_roots) = tokio::join!(
-        sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref()),
-        turn_diff_display_roots(first_step_context.as_ref()),
-    );
-
-    let Some((injection_items, explicitly_enabled_connectors)) = build_skills_and_plugins(
-        &sess,
-        first_step_context.as_ref(),
-        &input,
-        &cancellation_token,
-    )
-    .await
-    else {
-        return Ok(None);
-    };
-
-    if run_pending_session_start_hooks(&sess, &turn_context).await {
-        return Ok(None);
-    }
-    let mut can_drain_pending_input = input.is_empty();
-    if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
-        return Ok(None);
-    }
-
-    sess.merge_connector_selection(explicitly_enabled_connectors.clone())
+    let mut world_state = sess
+        .record_context_updates_and_set_reference_context_item(first_step_context.as_ref())
         .await;
-    sess.set_previous_turn_settings(Some(PreviousTurnSettings {
-        model: turn_context.model_info.slug.clone(),
-        comp_hash: turn_context.model_info.comp_hash.clone(),
-        realtime_active: Some(turn_context.realtime_active),
-    }))
-    .await;
-    for response_item in injection_items {
-        sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-            .await;
-    }
+    let turn_diff_tracker = run_state
+        .turn_diff_tracker(first_step_context.as_ref())
+        .await;
+    let mut can_drain_pending_input = input.is_empty();
+    if run_mode == RunTurnMode::Initial {
+        let Some((injection_items, explicitly_enabled_connectors)) = build_skills_and_plugins(
+            &sess,
+            first_step_context.as_ref(),
+            &input,
+            &cancellation_token,
+        )
+        .await
+        else {
+            return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
+        };
 
-    track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
+        if run_pending_session_start_hooks(&sess, &turn_context).await {
+            return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
+        }
+        if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+            return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
+        }
+
+        sess.merge_connector_selection(explicitly_enabled_connectors.clone())
+            .await;
+        sess.set_previous_turn_settings(Some(PreviousTurnSettings {
+            model: turn_context.model_info.slug.clone(),
+            comp_hash: turn_context.model_info.comp_hash.clone(),
+            realtime_active: Some(turn_context.realtime_active),
+        }))
+        .await;
+        for response_item in injection_items {
+            sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
+                .await;
+        }
+
+        track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
+    } else if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+        return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
+    }
 
     let mut last_agent_message: Option<String> = None;
+    let mut model_used_tools = false;
+    let mut project_validation_eligibility = ProjectValidationEligibility::Ineligible;
     let mut stop_hook_active = false;
-    // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
-    // many turns, from the perspective of the user, it is a single turn.
-    let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
-        TurnDiffTracker::with_environment_display_roots(display_roots),
-    ));
-
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
     // Pending input is drained into history before building the next model request.
@@ -306,6 +362,8 @@ pub(crate) async fn run_turn(
             }
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
+            let auto_review_awareness_input_item =
+                build_auto_review_awareness_input_item(sess.as_ref(), turn_context.as_ref()).await;
 
             let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
                 sess.installation_id.clone(),
@@ -320,6 +378,7 @@ pub(crate) async fn run_turn(
                 &mut client_session,
                 &responses_metadata,
                 sampling_request_input,
+                auto_review_awareness_input_item,
                 cancellation_token.child_token(),
             )
             .await
@@ -330,7 +389,9 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    model_used_tools: sampling_request_model_used_tools,
                 } = sampling_request_output;
+                model_used_tools |= sampling_request_model_used_tools;
                 if model_needs_follow_up {
                     sess.input_queue
                         .accept_mailbox_delivery_for_current_turn(
@@ -420,10 +481,10 @@ pub(crate) async fn run_turn(
                         let error = err.to_codex_protocol_error();
                         sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
                             .await;
-                        return Ok(None);
+                        return Ok(TurnRunResult::ineligible(model_used_tools));
                     }
                     if run_pending_session_start_hooks(&sess, &turn_context).await {
-                        return Ok(None);
+                        return Ok(TurnRunResult::ineligible(model_used_tools));
                     }
                     can_drain_pending_input = !model_needs_follow_up;
                     continue;
@@ -476,8 +537,14 @@ pub(crate) async fn run_turn(
                     )
                     .await
                     {
-                        return Ok(None);
+                        return Ok(TurnRunResult {
+                            last_agent_message: None,
+                            project_validation_eligibility:
+                                ProjectValidationEligibility::Ineligible,
+                            model_used_tools,
+                        });
                     }
+                    project_validation_eligibility = ProjectValidationEligibility::Eligible;
                     break;
                 }
                 continue;
@@ -491,13 +558,23 @@ pub(crate) async fn run_turn(
                     CodexErrorDetails::InvalidImageRequest()
                 ) =>
             {
+                warn!("Responses rejected an image; sanitizing history to prevent replay");
+                let sanitized = sanitize_invalid_image_history(&sess).await;
+                if sanitized == Some(ImageSanitizationSource::Tool) {
+                    // The offending image came from a tool, so the user has nothing to fix.
+                    // Retry the turn now that the transcript no longer carries it.
+                    continue;
+                }
                 sess.track_turn_codex_error(turn_context.as_ref(), &codex_error);
                 let error = CodexErrorInfo::BadRequest;
                 sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
                     .await;
+                let message = match sanitized {
+                    Some(ImageSanitizationSource::User) => INVALID_IMAGE_SANITIZED_MESSAGE,
+                    Some(ImageSanitizationSource::Tool) | None => INVALID_IMAGE_MESSAGE,
+                };
                 let event = EventMsg::Error(ErrorEvent {
-                    message: "Invalid image in your last message. Please remove it and try again."
-                        .to_string(),
+                    message: message.to_string(),
                     codex_error_info: Some(error),
                 });
                 sess.send_event(&turn_context, event).await;
@@ -540,7 +617,63 @@ pub(crate) async fn run_turn(
         }
     }
 
-    Ok(last_agent_message)
+    Ok(TurnRunResult {
+        last_agent_message,
+        project_validation_eligibility,
+        model_used_tools,
+    })
+}
+
+/// Remove the newest images from history after the Responses API rejected the request because it
+/// could not read one of them.
+///
+/// The API rejects the whole request, so leaving the offending image in place makes every later
+/// turn of this thread fail. See [`ContextManager::replace_all_images`] for why this narrow
+/// history rewrite is the accepted exception to the incremental-context rule. The sanitized
+/// history is checkpointed into the rollout so a resumed thread does not replay the poisoned
+/// image.
+async fn sanitize_invalid_image_history(sess: &Session) -> Option<ImageSanitizationSource> {
+    let (source, replacement_history, window_number, window_ids, world_state_baseline) = {
+        let mut state = sess.state.lock().await;
+        let source = state
+            .history
+            .replace_all_images(INVALID_IMAGE_PLACEHOLDER)?;
+        (
+            source,
+            state.history.raw_items().to_vec(),
+            state.auto_compact_window_number(),
+            state.auto_compact_window_ids(),
+            state.history.world_state_baseline().cloned(),
+        )
+    };
+
+    // Sanitization replaces history in place; it does not open a new context window. Persisting
+    // the *current* window identity keeps resume from treating this checkpoint as a legacy
+    // window-less compaction, which would discard the thread's window ids and inflate its window
+    // number.
+    let checkpoint = RolloutItem::Compacted(CompactedItem {
+        message: INVALID_IMAGE_HISTORY_CHECKPOINT_MESSAGE.to_string(),
+        replacement_history: Some(replacement_history),
+        window_number: Some(window_number),
+        first_window_id: Some(window_ids.first_window_id.to_string()),
+        previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
+        window_id: Some(window_ids.window_id.to_string()),
+    });
+    sess.persist_rollout_items(&[checkpoint]).await;
+    // Replay clears the world-state baseline at every checkpoint, but sanitization only rewrote
+    // image content: the live baseline is still correct. Re-persist it as a full snapshot so a
+    // resumed thread diffs against the same baseline instead of re-rendering all of world state.
+    if let Some(world_state_baseline) = world_state_baseline {
+        sess.persist_rollout_items(&[RolloutItem::WorldState(WorldStateItem::full(
+            world_state_baseline.into_value(),
+        ))])
+        .await;
+    }
+    if let Err(err) = sess.flush_rollout().await {
+        warn!("failed to persist invalid-image history sanitization: {err}");
+    }
+
+    Some(source)
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -815,6 +948,28 @@ async fn build_extension_turn_input_items(
     }
 
     Some(items)
+}
+
+async fn build_auto_review_awareness_input_item(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> Option<ResponseItem> {
+    let cwd = turn_context
+        .environments
+        .single_local_environment_cwd()?
+        .clone();
+    let codex_home = sess.codex_home().await;
+    let active_snapshot = {
+        let state = sess.state.lock().await;
+        state.background_auto_review.active_snapshot()
+    };
+    crate::context::build_auto_review_awareness(
+        codex_home.as_path(),
+        cwd.as_path(),
+        active_snapshot,
+    )
+    .await
+    .map(ContextualUserFragment::into)
 }
 
 #[tracing::instrument(
@@ -1210,6 +1365,7 @@ async fn run_sampling_request(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
+    request_only_input_item: Option<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1241,6 +1397,11 @@ async fn run_sampling_request(
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        let original_prompt_input = prompt_input.clone();
+        let mut prompt_input = prompt_input;
+        if let Some(request_only_input_item) = &request_only_input_item {
+            prompt_input.push(request_only_input_item.clone());
+        }
         let prompt = build_prompt(
             prompt_input,
             router.as_ref(),
@@ -1261,7 +1422,7 @@ async fn run_sampling_request(
         .await
         {
             Ok(output) => {
-                return Ok((output, original_input.unwrap_or(prompt.input)));
+                return Ok((output, original_input.unwrap_or(original_prompt_input)));
             }
             Err(err) => match err.details() {
                 CodexErrorDetails::ContextWindowExceeded => {
@@ -1286,7 +1447,7 @@ async fn run_sampling_request(
         };
 
         if original_input.is_none() {
-            original_input = Some(prompt.input);
+            original_input = Some(original_prompt_input);
         }
 
         if !err.is_retryable() {
@@ -1527,6 +1688,46 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    model_used_tools: bool,
+}
+
+fn response_item_is_model_tool_activity(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::LocalShellCall { .. }
+            | ResponseItem::FunctionCall { .. }
+            | ResponseItem::ToolSearchCall { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::WebSearchCall { .. }
+            | ResponseItem::ImageGenerationCall { .. }
+    )
+}
+
+/// Whether a completed turn may trigger project validation. Turns that exit
+/// through an error or abort path stay ineligible so validation only follows a
+/// normally completed root turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectValidationEligibility {
+    Eligible,
+    Ineligible,
+}
+
+pub(crate) struct TurnRunResult {
+    pub(crate) last_agent_message: Option<String>,
+    pub(crate) project_validation_eligibility: ProjectValidationEligibility,
+    pub(crate) model_used_tools: bool,
+}
+
+impl TurnRunResult {
+    /// A turn that exited early without completing normally; project
+    /// validation must not run for it.
+    fn ineligible(model_used_tools: bool) -> Self {
+        Self {
+            last_agent_message: None,
+            project_validation_eligibility: ProjectValidationEligibility::Ineligible,
+            model_used_tools,
+        }
+    }
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -1762,8 +1963,10 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::RealtimeConversationListVoicesResponse(_)
         | EventMsg::PlanUpdate(_)
         | EventMsg::TurnAborted(_)
+        | EventMsg::BackgroundAutoReviewStatus(_)
         | EventMsg::ShutdownComplete
         | EventMsg::EnteredReviewMode(_)
+        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::RawResponseCompleted(_)
@@ -2163,6 +2366,7 @@ async fn try_run_sampling_request(
         FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
+    let mut model_used_tools = false;
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
@@ -2225,6 +2429,7 @@ async fn try_run_sampling_request(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                model_used_tools |= response_item_is_model_tool_activity(&item);
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
@@ -2315,6 +2520,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        model_used_tools,
                     });
                 }
             }
@@ -2485,6 +2691,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    model_used_tools,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
@@ -2672,6 +2879,15 @@ async fn try_run_sampling_request(
             tracker.get_unified_diff()
         };
         if let Some(unified_diff) = unified_diff {
+            let active_turn_state = {
+                let active_turn = sess.active_turn.lock().await;
+                active_turn
+                    .as_ref()
+                    .map(|active_turn| Arc::clone(&active_turn.turn_state))
+            };
+            if let Some(turn_state) = active_turn_state {
+                turn_state.lock().await.completed_turn_diff = Some(unified_diff.clone());
+            }
             let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
             sess.clone().send_event(&turn_context, msg).await;
         }

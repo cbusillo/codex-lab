@@ -321,11 +321,13 @@ mod tests {
 
     #[test]
     fn kitty_local_file_pet_image_uses_file_reference_without_inline_payload() {
+        use base64::Engine as _;
+
         let dir = tempfile::tempdir().unwrap();
         let frame = dir.path().join("frame.png");
         std::fs::write(&frame, b"png").unwrap();
         let request = AmbientPetDraw {
-            frame,
+            frame: frame.clone(),
             protocol: ImageProtocol::KittyLocalFile,
             x: 2,
             y: 3,
@@ -343,8 +345,19 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("a=d,d=I,i=49374,q=2;"));
         assert!(output.contains("\x1b[4;3H"));
-        assert!(output.contains("a=T,t=f,f=100,c=4,r=2,q=2,i=49374;"));
-        assert!(!output.contains("cG5n"));
+        // The file-reference payload is the base64 of the canonicalized path, not
+        // of the image bytes; assert on that exact payload rather than probing for
+        // a short base64 fragment that could collide with the path encoding.
+        let canonical_frame = frame.canonicalize().unwrap();
+        let expected_payload = base64::engine::general_purpose::STANDARD
+            .encode(canonical_frame.to_string_lossy().as_bytes());
+        assert!(output.contains(&format!(
+            "a=T,t=f,f=100,c=4,r=2,q=2,i=49374;{expected_payload}"
+        )));
+        // `t=d` marks inline transmission. Base64 payloads never contain `,` or a
+        // non-trailing `=`, so this substring cannot appear inside the file path
+        // payload.
+        assert!(!output.contains(",t=d,"));
         assert!(output.contains("\x1b8"));
     }
 

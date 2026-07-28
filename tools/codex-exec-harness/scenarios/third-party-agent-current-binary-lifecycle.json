@@ -5,7 +5,7 @@
     "status": "runtime-covered"
   },
   "model": "gpt-5.6-sol",
-  "prompt": "Spawn the fixture_external agent as task fixture_agent, wait for it, list its terminal status, close it, and finish.",
+  "prompt": "Spawn the fixture_external agent as task fixture_agent, wait for it, list its terminal status, interrupt it for cleanup, and finish.",
   "files": {
     "fixture-agent.sh": "sleep 1\nprintf 'FIXTURE_EXTERNAL_AGENT_COMPLETED cwd=%s prompt=%s\\n' \"$PWD\" \"$1\"\n"
   },
@@ -18,6 +18,7 @@
           {
             "item": {
               "type": "function_call",
+              "namespace": "collaboration",
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Return the fixture completion marker and workspace provenance.\",\"task_name\":\"fixture_agent\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external\",\"fork_turns\":\"none\"}",
               "call_id": "call-third-party-agent-spawn"
@@ -31,6 +32,7 @@
           {
             "item": {
               "type": "function_call",
+              "namespace": "collaboration",
               "name": "wait_agent",
               "arguments": "{\"timeout_ms\":10000}",
               "call_id": "call-third-party-agent-wait"
@@ -44,6 +46,7 @@
           {
             "item": {
               "type": "function_call",
+              "namespace": "collaboration",
               "name": "list_agents",
               "arguments": "{}",
               "call_id": "call-third-party-agent-list"
@@ -52,14 +55,15 @@
         ]
       },
       {
-        "response_id": "resp-third-party-agent-close",
+        "response_id": "resp-third-party-agent-interrupt",
         "events": [
           {
             "item": {
               "type": "function_call",
-              "name": "close_agent",
+              "namespace": "collaboration",
+              "name": "interrupt_agent",
               "arguments": "{\"target\":\"fixture_agent\"}",
-              "call_id": "call-third-party-agent-close"
+              "call_id": "call-third-party-agent-interrupt"
             }
           }
         ]
@@ -93,7 +97,7 @@
     "responses": [
       {
         "request": 0,
-        "scope": "tools",
+        "scope": "input",
         "contains_all": ["fixture_external", "spawn_agent"]
       },
       {
@@ -120,7 +124,7 @@
       },
       {
         "request": 4,
-        "call_id": "call-third-party-agent-close",
+        "call_id": "call-third-party-agent-interrupt",
         "contains": "FIXTURE_EXTERNAL_AGENT_COMPLETED"
       }
     ]

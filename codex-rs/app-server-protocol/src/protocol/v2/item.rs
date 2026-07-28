@@ -5,8 +5,11 @@ use super::McpToolCallResult;
 use super::NetworkApprovalContext;
 use super::NetworkApprovalProtocol;
 use super::NetworkPolicyAmendment;
+use super::ProjectValidationSkipReason;
+use super::ProjectValidationStatus;
 use super::RequestPermissionProfile;
 use super::UserInput;
+use super::command_output::command_output_text;
 use super::shared::v2_enum_from_core;
 use crate::protocol::item_builders::command_actions_for_path_uri;
 use crate::protocol::item_builders::convert_patch_changes;
@@ -333,6 +336,9 @@ pub enum ThreadItem {
         status: DynamicToolCallStatus,
         content_items: Option<Vec<DynamicToolCallOutputContentItem>>,
         success: Option<bool>,
+        /// Failure detail persisted with the call, when the tool reported one.
+        #[serde(default)]
+        error: Option<String>,
         /// The duration of the dynamic tool call in milliseconds.
         #[ts(type = "number | null")]
         duration_ms: Option<i64>,
@@ -394,6 +400,21 @@ pub enum ThreadItem {
     ContextCompaction {
         id: String,
     },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    ProjectValidation {
+        id: String,
+        command: Vec<String>,
+        command_truncated: bool,
+        cwd: Option<AbsolutePathBuf>,
+        status: ProjectValidationStatus,
+        skip_reason: Option<ProjectValidationSkipReason>,
+        changed_file_count: Option<u32>,
+        exit_code: Option<i32>,
+        output: String,
+        output_truncated: bool,
+        duration_ms: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -432,7 +453,8 @@ impl ThreadItem {
             | ThreadItem::ImageView { id, .. }
             | ThreadItem::EnteredReviewMode { id, .. }
             | ThreadItem::ExitedReviewMode { id, .. }
-            | ThreadItem::ContextCompaction { id, .. } => id,
+            | ThreadItem::ContextCompaction { id, .. }
+            | ThreadItem::ProjectValidation { id, .. } => id,
             ThreadItem::WebSearch(item) => &item.id,
             ThreadItem::Sleep(item) => &item.id,
             ThreadItem::ImageGeneration(item) => &item.id,
@@ -850,9 +872,12 @@ impl From<CoreTurnItem> for ThreadItem {
                 source: command.source.into(),
                 status: command.status.into(),
                 command_actions: command_actions_for_path_uri(&command.parsed_cmd, &command.cwd),
-                aggregated_output: command
-                    .aggregated_output
-                    .filter(|output| !output.is_empty()),
+                aggregated_output: command_output_text(
+                    command.aggregated_output,
+                    command.stdout,
+                    command.stderr,
+                    command.formatted_output,
+                ),
                 exit_code: command.exit_code,
                 duration_ms: command
                     .duration
@@ -871,6 +896,7 @@ impl From<CoreTurnItem> for ThreadItem {
                         .collect()
                 }),
                 success: call.success,
+                error: call.error,
                 duration_ms: call
                     .duration
                     .and_then(|duration| i64::try_from(duration.as_millis()).ok()),

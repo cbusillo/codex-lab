@@ -220,6 +220,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
             forked_from_id: Some(parent_thread_id),
             parent_thread_id: None,
             source: SessionSource::Cli,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -269,6 +270,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {

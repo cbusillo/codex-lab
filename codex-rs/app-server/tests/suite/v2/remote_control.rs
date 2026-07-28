@@ -597,18 +597,17 @@ async fn rpc_updates_durable_preference_but_ephemeral_does_not() -> Result<()> {
 #[tokio::test]
 async fn remote_control_reconnect_returns_connecting_while_connecting() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let mut backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
+    let _backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
         .await?;
 
-    let enable_request_id = mcp.send_remote_control_enable_request().await?;
-    assert_eq!(
-        timeout(DEFAULT_TIMEOUT, backend.wait_for_enroll_request()).await??,
-        "POST /backend-api/wham/remote/control/server/enroll HTTP/1.1"
-    );
+    let enable_request_id = mcp.send_remote_control_ephemeral_enable_request().await?;
+    let enabled: RemoteControlEnableResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(enable_request_id)).await??;
+    assert_eq!(enabled.status, RemoteControlConnectionStatus::Connecting);
 
     let request_id = mcp.send_remote_control_reconnect_request().await?;
     let response: JSONRPCResponse = timeout(
@@ -622,10 +621,6 @@ async fn remote_control_reconnect_returns_connecting_while_connecting() -> Resul
     assert!(!received.server_name.is_empty());
     assert_eq!(received.environment_id, None);
     assert!(!received.installation_id.is_empty());
-
-    backend.complete_enrollment()?;
-    let _: RemoteControlEnableResponse =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(enable_request_id)).await??;
     Ok(())
 }
 

@@ -22,7 +22,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   tag-check:
+    needs: authorize_self_hosted
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -165,10 +170,12 @@ jobs:
       - name: Install Linux bwrap build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
+        env:
+          APT_INSTALL_ARGS: --no-install-recommends
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils pkg-config libcap-dev
+          bash "${GITHUB_WORKSPACE}/.github/scripts/install-apt-packages.sh" \
+            binutils pkg-config libcap-dev
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ matrix.target }}
@@ -1351,7 +1358,12 @@ jobs:
             --package codex-responses-api-proxy \
             --package codex-sdk
 
+      # scripts/install/install.{sh,ps1} resolve every download from
+      # openai/codex. Publishing them as fork release assets would hand users an
+      # installer that ignores the release they downloaded it from, so they ship
+      # only from the repository they point at.
       - name: Stage installer scripts
+        if: ${{ github.repository == 'openai/codex' }}
         run: |
           cp scripts/install/install.sh dist/install.sh
           cp scripts/install/install.ps1 dist/install.ps1
@@ -1417,8 +1429,11 @@ jobs:
   # npm docs: https://docs.npmjs.com/trusted-publishers
   publish-npm:
     # Publish to npm for stable releases, numbered alphas, and alpha hotfixes.
+    # Every tarball is published under the OpenAI-owned `@openai` npm scope, so
+    # pin this to the repository that owns those packages.
     if: >-
       ${{
+        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         needs.release.outputs.should_publish_npm == 'true'
@@ -1579,9 +1594,11 @@ jobs:
     name: Trigger developers.openai.com deploy
     needs: release
     # Only trigger the deploy for a stable release.
-    # The deploy updates developers.openai.com with the new config schema json file.
+    # The deploy updates developers.openai.com with the new config schema json
+    # file, an OpenAI-owned property, so pin it to the upstream repository.
     if: >-
       ${{
+        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         !contains(needs.release.outputs.version, '-')
@@ -1608,9 +1625,12 @@ jobs:
     name: winget
     needs: release
     # Only publish stable/mainline releases to WinGet; pre-releases include a
-    # '-' in the semver string (e.g., 1.2.3-alpha.1).
+    # '-' in the semver string (e.g., 1.2.3-alpha.1). The manifest identifier
+    # `OpenAI.Codex` and the `openai-oss-forks` winget-pkgs fork are both
+    # OpenAI-owned, so pin this to the upstream repository.
     if: >-
       ${{
+        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         !contains(needs.release.outputs.version, '-')

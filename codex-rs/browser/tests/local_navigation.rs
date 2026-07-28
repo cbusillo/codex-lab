@@ -87,27 +87,21 @@ async fn assert_manager_can_open_local_http_server(headless: bool) -> Result<()>
     Ok(())
 }
 
-fn can_run_headed_browser_test() -> bool {
-    if !cfg!(target_os = "linux") {
-        return true;
-    }
-
-    env::var_os("DISPLAY").is_some() || env::var_os("WAYLAND_DISPLAY").is_some()
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a locally launchable Chrome; run explicitly with --ignored"]
 async fn internal_browser_can_open_local_http_server() -> Result<()> {
-    assert_manager_can_open_local_http_server(true).await
+    assert_manager_can_open_local_http_server(/*headless*/ true).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an interactive desktop; run explicitly with --ignored"]
 async fn headed_internal_browser_can_open_local_http_server() -> Result<()> {
-    if !can_run_headed_browser_test() {
-        eprintln!(
-            "skipping headed browser regression test: no DISPLAY or WAYLAND_DISPLAY available"
-        );
-        return Ok(());
+    if cfg!(target_os = "linux")
+        && env::var_os("DISPLAY").is_none()
+        && env::var_os("WAYLAND_DISPLAY").is_none()
+    {
+        anyhow::bail!("headed browser test requires DISPLAY or WAYLAND_DISPLAY");
     }
 
-    assert_manager_can_open_local_http_server(false).await
+    assert_manager_can_open_local_http_server(/*headless*/ false).await
 }

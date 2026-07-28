@@ -6,6 +6,7 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
+use codex_auto_review::AutoReviewBudget;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -21,6 +22,8 @@ use codex_config::ResidencyRequirement;
 use codex_config::SandboxModeRequirement;
 use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
+use codex_config::ValidationConfig;
+use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
@@ -180,6 +183,47 @@ pub(crate) use resolved_permission_profile::PermissionProfileState;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES: usize = 120_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS: u64 = 5 * 60 * 1_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS: u64 = 250_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS: usize = 20;
+
+fn resolve_background_auto_review_budget(
+    auto_review: Option<&AutoReviewToml>,
+) -> std::io::Result<AutoReviewBudget> {
+    let defaults = Config::default_background_auto_review_budget();
+    let max_elapsed_seconds = auto_review
+        .and_then(|config| config.background_max_elapsed_seconds)
+        .unwrap_or(defaults.max_elapsed_ms / 1_000);
+    let budget = AutoReviewBudget {
+        max_scope_bytes: auto_review
+            .and_then(|config| config.background_max_diff_bytes)
+            .unwrap_or(defaults.max_scope_bytes),
+        max_elapsed_ms: max_elapsed_seconds.checked_mul(1_000).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "[auto_review] background_max_elapsed_seconds is too large",
+            )
+        })?,
+        max_total_tokens: auto_review
+            .and_then(|config| config.background_max_total_tokens)
+            .unwrap_or(defaults.max_total_tokens),
+        max_output_bytes: auto_review
+            .and_then(|config| config.background_max_output_bytes)
+            .unwrap_or(defaults.max_output_bytes),
+        max_findings: auto_review
+            .and_then(|config| config.background_max_findings)
+            .unwrap_or(defaults.max_findings),
+    };
+    budget.validate().map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid [auto_review] background budget: {err}"),
+        )
+    })?;
+    Ok(budget)
+}
 
 /// Compatibility-only config retained so legacy `ghost_snapshot` settings
 /// continue to load even though snapshots are no longer produced.
@@ -628,6 +672,9 @@ pub struct Config {
     /// Model used specifically for review sessions.
     pub review_model: Option<String>,
 
+    /// Effective hard limits for automatic background reviews.
+    pub background_auto_review_budget: AutoReviewBudget,
+
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
 
@@ -661,6 +708,9 @@ pub struct Config {
     /// been escalated. This does not disable separate safety checks such as
     /// ARC.
     pub approvals_reviewer: ApprovalsReviewer,
+
+    /// Patch-local validation policy.
+    pub validation: ValidationConfig,
 
     /// enforce_residency means web traffic cannot be routed outside of a
     /// particular geography. HTTP clients should direct their requests
@@ -719,7 +769,7 @@ pub struct Config {
     /// appends one extra argument containing a JSON payload describing the
     /// event.
     ///
-    /// Example `~/.codex/config.toml` snippet:
+    /// Example `~/.codex-lab/config.toml` snippet:
     ///
     /// ```toml
     /// notify = ["notify-send", "Codex"]
@@ -834,7 +884,7 @@ pub struct Config {
     /// keyring: Use an OS-specific keyring service.
     ///          Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.
     ///          https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/oauth.rs#L2
-    /// file: CODEX_HOME/.credentials.json
+    /// file: CODEX_LAB_HOME/.credentials.json
     ///       This file will be readable to Codex and other applications running as the same user.
     /// auto (default): keyring if available, otherwise file.
     pub mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode,
@@ -888,7 +938,7 @@ pub struct Config {
     pub memories: MemoriesConfig,
 
     /// Directory containing all Codex state (defaults to `~/.codex` but can be
-    /// overridden by the `CODEX_HOME` environment variable).
+    /// overridden by the `CODEX_LAB_HOME` environment variable).
     pub codex_home: AbsolutePathBuf,
 
     /// Directory used for auth credential storage for this invocation. Defaults
@@ -898,7 +948,7 @@ pub struct Config {
     /// Resolved configuration shared by all Codex SQLite databases.
     pub sqlite: codex_state::SqliteConfig,
 
-    /// Directory where Codex writes log files (defaults to `$CODEX_HOME/log`).
+    /// Directory where Codex writes log files (defaults to `$CODEX_LAB_HOME/log`).
     pub log_dir: PathBuf,
 
     /// Directory where Codex writes effective session config lock files.
@@ -1465,6 +1515,17 @@ impl ConfigBuilder {
 }
 
 impl Config {
+    /// Background auto-review limits used when `[auto_review]` supplies no overrides.
+    pub fn default_background_auto_review_budget() -> AutoReviewBudget {
+        AutoReviewBudget {
+            max_scope_bytes: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES,
+            max_elapsed_ms: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS,
+            max_total_tokens: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS,
+            max_output_bytes: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES,
+            max_findings: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS,
+        }
+    }
+
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
         &self.sqlite
     }
@@ -2226,7 +2287,7 @@ pub(crate) fn set_project_trust_level_inner(
     Ok(())
 }
 
-/// Patch `CODEX_HOME/config.toml` project state to set trust level.
+/// Patch `CODEX_LAB_HOME/config.toml` project state to set trust level.
 /// Use with caution.
 pub fn set_project_trust_level(
     codex_home: &Path,
@@ -2265,6 +2326,75 @@ pub struct AgentRoleConfig {
     pub config_file: Option<PathBuf>,
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+    /// Optional backend used instead of spawning an internal Codex thread.
+    pub backend: Option<AgentRoleBackendConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRoleBackendConfig {
+    ExternalCommand(ExternalCommandAgentBackendConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExternalCommandProtocol {
+    #[default]
+    Json,
+    RawCli,
+}
+
+impl From<codex_config::config_toml::ExternalCommandProtocolToml> for ExternalCommandProtocol {
+    fn from(toml: codex_config::config_toml::ExternalCommandProtocolToml) -> Self {
+        match toml {
+            codex_config::config_toml::ExternalCommandProtocolToml::Json => Self::Json,
+            codex_config::config_toml::ExternalCommandProtocolToml::RawCli => Self::RawCli,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalCommandAgentBackendConfig {
+    pub command: String,
+    pub protocol: ExternalCommandProtocol,
+    pub args: Vec<String>,
+    pub args_read_only: Vec<String>,
+    pub args_write: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub timeout_ms: u64,
+    pub launch_family: Option<String>,
+}
+
+impl Default for ExternalCommandAgentBackendConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            protocol: ExternalCommandProtocol::Json,
+            args: Vec::new(),
+            args_read_only: Vec::new(),
+            args_write: Vec::new(),
+            env: std::collections::HashMap::new(),
+            timeout_ms: 30_000,
+            launch_family: None,
+        }
+    }
+}
+
+impl AgentRoleBackendConfig {
+    pub(crate) fn from_toml(backend: codex_config::config_toml::AgentRoleBackendToml) -> Self {
+        match backend {
+            codex_config::config_toml::AgentRoleBackendToml::ExternalCommand(command) => {
+                Self::ExternalCommand(ExternalCommandAgentBackendConfig {
+                    command: command.command,
+                    protocol: command.protocol.into(),
+                    args: command.args.unwrap_or_default(),
+                    args_read_only: command.args_read_only.unwrap_or_default(),
+                    args_write: command.args_write.unwrap_or_default(),
+                    env: command.env.unwrap_or_default(),
+                    timeout_ms: command.timeout_ms.unwrap_or(30_000),
+                    launch_family: None,
+                })
+            }
+        }
+    }
 }
 
 fn resolve_tool_suggest_config(
@@ -4009,6 +4139,9 @@ impl Config {
             model,
             service_tier,
             review_model,
+            background_auto_review_budget: resolve_background_auto_review_budget(
+                cfg.auto_review.as_ref(),
+            )?,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_auto_compact_token_limit_scope: cfg
@@ -4033,6 +4166,7 @@ impl Config {
             explicit_permission_profile_mode,
             custom_permission_profiles,
             approvals_reviewer: constrained_approvals_reviewer.value(),
+            validation: cfg.validation.unwrap_or_default(),
             enforce_residency: enforce_residency.value,
             notify: cfg.notify,
             base_instructions,
@@ -4573,12 +4707,12 @@ fn normalize_guardian_policy_config(value: Option<&str>) -> Option<String> {
 }
 
 /// Returns the path to the Codex configuration directory, which can be
-/// specified by the `CODEX_HOME` environment variable. If not set, defaults to
+/// specified by the `CODEX_LAB_HOME` environment variable. If not set, defaults to
 /// `~/.codex`.
 ///
-/// - If `CODEX_HOME` is set, the value must exist and be a directory. The
+/// - If `CODEX_LAB_HOME` is set, the value must exist and be a directory. The
 ///   value will be canonicalized and this function will Err otherwise.
-/// - If `CODEX_HOME` is not set, this function does not verify that the
+/// - If `CODEX_LAB_HOME` is not set, this function does not verify that the
 ///   directory exists.
 pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
     codex_utils_home_dir::find_codex_home()

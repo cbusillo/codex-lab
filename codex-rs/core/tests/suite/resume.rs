@@ -112,6 +112,7 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
                     EventMsg::UserMessage(_),
                     EventMsg::AgentMessage(_),
                     EventMsg::TokenCount(_),
+                    EventMsg::ProjectValidationCompleted(_),
                     EventMsg::TurnComplete(_),
                 ]
             )
@@ -128,6 +129,7 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
             EventMsg::UserMessage(first_user),
             EventMsg::AgentMessage(assistant_message),
             EventMsg::TokenCount(_),
+            EventMsg::ProjectValidationCompleted(_),
             EventMsg::TurnComplete(completed),
         ] => {
             assert_eq!(first_user.message, "Record some messages");
@@ -200,6 +202,7 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
                     EventMsg::AgentReasoningRawContent(_),
                     EventMsg::AgentMessage(_),
                     EventMsg::TokenCount(_),
+                    EventMsg::ProjectValidationCompleted(_),
                     EventMsg::TurnComplete(_),
                 ]
             )
@@ -218,6 +221,7 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
             EventMsg::AgentReasoningRawContent(raw),
             EventMsg::AgentMessage(assistant_message),
             EventMsg::TokenCount(_),
+            EventMsg::ProjectValidationCompleted(_),
             EventMsg::TurnComplete(completed),
         ] => {
             assert_eq!(first_user.message, "Record reasoning messages");

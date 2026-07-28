@@ -690,10 +690,83 @@
         }
       ]
     },
+    "ProjectValidationSkipReason": {
+      "enum": [
+        "validationDisabled",
+        "noChangedFiles",
+        "noApplicableProvider",
+        "nonRootAgent",
+        "unchangedFingerprint",
+        "unsupportedEnvironment"
+      ],
+      "type": "string"
+    },
+    "ProjectValidationStatus": {
+      "enum": [
+        "passed",
+        "actionableFailure",
+        "configurationError",
+        "timedOut",
+        "infrastructureFailure",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    },
     "ReasoningEffort": {
       "description": "A non-empty reasoning effort value advertised by the model.",
       "minLength": 1,
       "type": "string"
+    },
+    "SessionProvenance": {
+      "description": "Structured provenance for a thread started by an external orchestrator.\n\nThese fields are descriptive metadata only. Runtime authorization and product filtering must continue to use server-side policy and `source`.",
+      "properties": {
+        "issueNumber": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "issueUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "SessionSource": {
       "oneOf": [
@@ -897,6 +970,15 @@
           ],
           "description": "Optional Git metadata captured when the thread was created."
         },
+        "historyMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadHistoryMode"
+            }
+          ],
+          "default": "legacy",
+          "description": "Persisted thread history contract selected when this thread was created.\n\nThis field is part of the published stable `Thread` surface; keep it non-experimental so existing clients continue to receive it."
+        },
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
@@ -946,6 +1028,18 @@
         "sessionId": {
           "description": "Session id shared by threads that belong to the same session tree.",
           "type": "string"
+        },
+        "sessionProvenance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional structured launch provenance supplied by an external agent orchestrator."
         },
         "source": {
           "allOf": [
@@ -1427,6 +1521,14 @@
                 "null"
               ]
             },
+            "error": {
+              "default": null,
+              "description": "Failure detail persisted with the call, when the tool reported one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },
@@ -1787,6 +1889,90 @@
             "type"
           ],
           "title": "ContextCompactionThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "changedFileCount": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "commandTruncated": {
+              "type": "boolean"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "durationMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            },
+            "outputTruncated": {
+              "type": "boolean"
+            },
+            "skipReason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProjectValidationSkipReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/definitions/ProjectValidationStatus"
+            },
+            "type": {
+              "enum": [
+                "projectValidation"
+              ],
+              "title": "ProjectValidationThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "commandTruncated",
+            "durationMs",
+            "id",
+            "output",
+            "outputTruncated",
+            "status",
+            "type"
+          ],
+          "title": "ProjectValidationThreadItem",
           "type": "object"
         }
       ]

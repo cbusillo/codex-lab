@@ -67,6 +67,7 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
@@ -97,6 +98,7 @@ pub enum RolloutRecorderParams {
         forked_from_id: Option<ThreadId>,
         parent_thread_id: Option<ThreadId>,
         source: Box<SessionSource>,
+        session_provenance: Option<SessionProvenance>,
         thread_source: Option<ThreadSource>,
         originator: String,
         base_instructions: BaseInstructions,
@@ -192,6 +194,7 @@ impl RolloutRecorderParams {
             forked_from_id,
             parent_thread_id,
             source: Box::new(source),
+            session_provenance: None,
             thread_source,
             originator,
             base_instructions,
@@ -203,6 +206,20 @@ impl RolloutRecorderParams {
             subagent_history_start_ordinal: None,
             initial_window_id: None,
         }
+    }
+
+    pub fn with_session_provenance(
+        mut self,
+        session_provenance: Option<SessionProvenance>,
+    ) -> Self {
+        if let Self::Create {
+            session_provenance: provenance,
+            ..
+        } = &mut self
+        {
+            *provenance = session_provenance;
+        }
+        self
     }
 
     pub fn with_session_id(mut self, session_id: SessionId) -> Self {
@@ -803,6 +820,7 @@ impl RolloutRecorder {
                 forked_from_id,
                 parent_thread_id,
                 source,
+                session_provenance,
                 thread_source,
                 originator,
                 base_instructions,
@@ -842,6 +860,7 @@ impl RolloutRecorder {
                     agent_role: source.get_agent_role(),
                     agent_path: source.get_agent_path().map(Into::into),
                     source: *source,
+                    session_provenance,
                     thread_source,
                     model_provider: Some(config.model_provider_id().to_string()),
                     base_instructions: Some(base_instructions),
@@ -1208,6 +1227,7 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         git_sha,
         git_origin_url,
         source,
+        session_provenance,
         history_mode: _,
         parent_thread_id,
         agent_nickname,
@@ -1240,6 +1260,9 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
     }
     if item.source.is_none() {
         item.source = source;
+    }
+    if item.session_provenance.is_none() {
+        item.session_provenance = session_provenance;
     }
     if item.parent_thread_id.is_none() {
         item.parent_thread_id = parent_thread_id;
@@ -1971,6 +1994,7 @@ fn thread_item_from_state_metadata(
                 .or_else(|_| serde_json::from_value(Value::String(item.source)))
                 .unwrap_or(SessionSource::Unknown),
         ),
+        session_provenance: item.session_provenance,
         history_mode: item.history_mode,
         parent_thread_id,
         agent_nickname: item.agent_nickname,

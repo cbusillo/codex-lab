@@ -204,8 +204,18 @@ fn loaded_account_list_enter_switches_server_account() {
     let mut view = LoginAccountsView::new_with_loaded_accounts(
         tx,
         vec![
-            account_list_entry("chatgpt", AppServerAuthMode::Chatgpt, "ChatGPT", true),
-            account_list_entry("api", AppServerAuthMode::ApiKey, "API key", false),
+            account_list_entry(
+                "chatgpt",
+                AppServerAuthMode::Chatgpt,
+                "ChatGPT",
+                /*is_active*/ true,
+            ),
+            account_list_entry(
+                "api",
+                AppServerAuthMode::ApiKey,
+                "API key",
+                /*is_active*/ false,
+            ),
         ],
         /*feedback*/ None,
     );
@@ -231,7 +241,7 @@ fn loaded_account_list_refresh_reopens_accounts() {
             "api",
             AppServerAuthMode::ApiKey,
             "API key",
-            true,
+            /*is_active*/ true,
         )],
         /*feedback*/ None,
     );
@@ -252,7 +262,7 @@ fn loaded_account_list_disconnect_emits_remove_event() {
             "api",
             AppServerAuthMode::ApiKey,
             "API key",
-            true,
+            /*is_active*/ true,
         )],
         /*feedback*/ None,
     );
@@ -274,8 +284,18 @@ fn loaded_account_list_renders_disconnect_hint() {
     let view = LoginAccountsView::new_with_loaded_accounts(
         app_event_sender(),
         vec![
-            account_list_entry("chatgpt", AppServerAuthMode::Chatgpt, "ChatGPT", true),
-            account_list_entry("api", AppServerAuthMode::ApiKey, "API key", false),
+            account_list_entry(
+                "chatgpt",
+                AppServerAuthMode::Chatgpt,
+                "ChatGPT",
+                /*is_active*/ true,
+            ),
+            account_list_entry(
+                "api",
+                AppServerAuthMode::ApiKey,
+                "API key",
+                /*is_active*/ false,
+            ),
         ],
         /*feedback*/ None,
     );
@@ -363,7 +383,7 @@ fn add_account_failed_esc_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::Failed("sign-in failed".to_string()),
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -372,7 +392,7 @@ fn add_account_api_key_failed_esc_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::ApiKeyFailed("invalid API key".to_string()),
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -381,7 +401,7 @@ fn add_account_device_code_failed_esc_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::DeviceCodeFailed("device code expired".to_string()),
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -390,7 +410,7 @@ fn add_account_complete_esc_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::Complete,
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -399,7 +419,7 @@ fn add_account_choose_q_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::Choose,
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -411,7 +431,7 @@ fn add_account_waiting_esc_cancels_and_returns_to_accounts() {
             auth_url: "https://auth.example.com/login".to_string(),
         },
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 
@@ -420,7 +440,7 @@ fn add_account_starting_esc_cancels_and_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::Starting,
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 
@@ -433,7 +453,7 @@ fn add_account_device_code_waiting_esc_cancels_and_returns_to_accounts() {
             user_code: "ABCD-EFGH".to_string(),
         },
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 
@@ -442,7 +462,7 @@ fn add_account_device_code_starting_esc_cancels_and_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::DeviceCodeStarting,
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 
@@ -454,7 +474,7 @@ fn add_account_waiting_q_cancels_and_returns_to_accounts() {
             auth_url: "https://auth.example.com/login".to_string(),
         },
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 

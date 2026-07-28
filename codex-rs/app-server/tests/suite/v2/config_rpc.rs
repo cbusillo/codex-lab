@@ -60,6 +60,7 @@ async fn config_requirements_read_includes_remote_control_and_managed_hooks() ->
 
 [[hooks.SessionStart.hooks]]
 type = "command"
+id = "managed-session-start"
 command = "echo managed"
 additionalContextLimit = 4096
 "#,
@@ -84,6 +85,7 @@ additionalContextLimit = 4096
             .session_start[0]
             .hooks,
         vec![ConfiguredHookHandler::Command {
+            id: Some("managed-session-start".to_string()),
             command: "echo managed".to_string(),
             command_windows: None,
             timeout_sec: None,

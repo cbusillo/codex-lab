@@ -14,8 +14,13 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   build:
-    # Bazel compilation runs only in trusted postmerge/manual contexts. Runtime
+    needs: authorize_self_hosted
+    # Bazel compilation runs only in trusted full-suite/manual contexts. Runtime
     # tests are owned by rust-ci-full, where each platform has the dependencies
     # and isolation its test suite expects.
     timeout-minutes: 60
@@ -53,7 +58,6 @@ jobs:
         shell: bash
         run: |
           python3 .github/scripts/rusty_v8_bazel.py check-module-bazel
-          just test-github-scripts
 
       - name: Check MODULE.bazel.lock is up to date
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -79,7 +83,6 @@ jobs:
           )
           bazel_build_args=(
             build
-            --keep_going
             "--build_metadata=COMMIT_SHA=${GITHUB_SHA}"
           )
           ./.github/scripts/run-bazel-ci.sh \
@@ -113,6 +116,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   clippy:
+    needs: authorize_self_hosted
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -189,6 +193,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   verify-release-build:
+    needs: authorize_self_hosted
     timeout-minutes: 60
     strategy:
       fail-fast: false

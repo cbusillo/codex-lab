@@ -106,6 +106,8 @@ pub(crate) struct SessionConfiguration {
     pub(super) app_server_client_version: Option<String>,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     pub(super) session_source: SessionSource,
+    /// Optional external launch provenance supplied by an orchestrator.
+    pub(super) session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub(super) history_mode: ThreadHistoryMode,
     /// Immediate history source copied into this thread, when this thread was forked.
@@ -228,6 +230,7 @@ impl SessionConfiguration {
             personality: self.personality,
             collaboration_mode: self.collaboration_mode.clone(),
             session_source: self.session_source.clone(),
+            session_provenance: self.session_provenance.clone(),
             history_mode: self.history_mode,
             forked_from_thread_id: self.forked_from_thread_id,
             parent_thread_id: self.parent_thread_id,
@@ -518,6 +521,7 @@ impl Session {
         supports_openai_form_elicitation: bool,
         agent_control: AgentControl,
         environment_manager: Arc<EnvironmentManager>,
+        project_validation_coordinator: Arc<ProjectValidationCoordinator>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         analytics_events_client: Option<AnalyticsEventsClient>,
         thread_store: Arc<dyn ThreadStore>,
@@ -624,6 +628,7 @@ impl Session {
                             forked_from_id,
                             parent_thread_id,
                             source: session_source,
+                            session_provenance: session_configuration.session_provenance.clone(),
                             thread_source: session_configuration.thread_source.clone(),
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {
@@ -1176,6 +1181,7 @@ impl Session {
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
+                project_validation_coordinator,
             };
             let apps_context = AppsContext::new(services.execution_account.cache_identity());
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
@@ -1209,6 +1215,7 @@ impl Session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);
             }
+            sess.recover_auto_review_after_restart().await;
             // Dispatch the SessionConfiguredEvent first and then report any errors.
             // If resuming, include converted initial messages in the payload so UIs can render them immediately.
             let initial_messages = initial_history.get_event_msgs();
@@ -1221,6 +1228,7 @@ impl Session {
                     parent_thread_id,
                     thread_source: session_configuration.thread_source.clone(),
                     thread_name: session_configuration.thread_name.clone(),
+                    history_mode: session_configuration.history_mode,
                     model: session_configuration.collaboration_mode.model().to_string(),
                     model_provider_id: config.model_provider_id.clone(),
                     service_tier: session_configuration.service_tier.clone(),

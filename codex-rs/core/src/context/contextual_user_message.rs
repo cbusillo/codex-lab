@@ -3,12 +3,14 @@ use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
 
 use super::AdditionalContextUserFragment;
+use super::AutoReviewAwareness;
 use super::FragmentRegistration;
 use super::FragmentRegistrationProxy;
 use super::InternalModelContextFragment;
 use super::LegacyApplyPatchExecCommandWarning;
 use super::LegacyModelMismatchWarning;
 use super::LegacyUnifiedExecProcessLimitWarning;
+use super::ProjectValidationFailure;
 use super::RecommendedPluginsInstructions;
 use super::SkillInstructions;
 use super::SubagentNotification;
@@ -22,6 +24,8 @@ static USER_INSTRUCTIONS_REGISTRATION: FragmentRegistrationProxy<UserInstruction
 static ENVIRONMENT_CONTEXT_REGISTRATION: FragmentRegistrationProxy<EnvironmentsState> =
     FragmentRegistrationProxy::new();
 static ADDITIONAL_CONTEXT_REGISTRATION: FragmentRegistrationProxy<AdditionalContextUserFragment> =
+    FragmentRegistrationProxy::new();
+static AUTO_REVIEW_AWARENESS_REGISTRATION: FragmentRegistrationProxy<AutoReviewAwareness> =
     FragmentRegistrationProxy::new();
 static SKILL_INSTRUCTIONS_REGISTRATION: FragmentRegistrationProxy<SkillInstructions> =
     FragmentRegistrationProxy::new();
@@ -45,11 +49,15 @@ static LEGACY_APPLY_PATCH_EXEC_COMMAND_WARNING_REGISTRATION: FragmentRegistratio
 static LEGACY_MODEL_MISMATCH_WARNING_REGISTRATION: FragmentRegistrationProxy<
     LegacyModelMismatchWarning,
 > = FragmentRegistrationProxy::new();
+static PROJECT_VALIDATION_FAILURE_REGISTRATION: FragmentRegistrationProxy<
+    ProjectValidationFailure,
+> = FragmentRegistrationProxy::new();
 
 static CONTEXTUAL_USER_FRAGMENTS: &[&dyn FragmentRegistration] = &[
     &USER_INSTRUCTIONS_REGISTRATION,
     &ENVIRONMENT_CONTEXT_REGISTRATION,
     &ADDITIONAL_CONTEXT_REGISTRATION,
+    &AUTO_REVIEW_AWARENESS_REGISTRATION,
     &SKILL_INSTRUCTIONS_REGISTRATION,
     &USER_SHELL_COMMAND_REGISTRATION,
     &TURN_ABORTED_REGISTRATION,
@@ -59,6 +67,7 @@ static CONTEXTUAL_USER_FRAGMENTS: &[&dyn FragmentRegistration] = &[
     &LEGACY_UNIFIED_EXEC_PROCESS_LIMIT_WARNING_REGISTRATION,
     &LEGACY_APPLY_PATCH_EXEC_COMMAND_WARNING_REGISTRATION,
     &LEGACY_MODEL_MISMATCH_WARNING_REGISTRATION,
+    &PROJECT_VALIDATION_FAILURE_REGISTRATION,
 ];
 
 fn is_standard_contextual_user_text(text: &str) -> bool {

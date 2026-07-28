@@ -16,6 +16,7 @@ use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SessionProvenance;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
@@ -39,6 +40,8 @@ use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
+use codex_app_server_protocol::ThreadTurnsItemsListParams;
+use codex_app_server_protocol::ThreadTurnsItemsListResponse;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::Turn;
@@ -152,6 +155,80 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
 }
 
 #[tokio::test]
+async fn thread_read_preserves_session_provenance() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let filename_ts = "2025-01-05T12-00-00";
+    let conversation_id = create_fake_rollout_with_text_elements(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Vec::new(),
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let provenance = SessionProvenance {
+        request_id: Some("req-thread-read".to_string()),
+        repository: Some("cbusillo/codex-lab".to_string()),
+        issue_number: Some(126),
+        issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
+        source: Some("github-plan".to_string()),
+        origin: Some("launchplane".to_string()),
+    };
+    set_session_provenance_on_fake_rollout(
+        rollout_path(codex_home.path(), filename_ts, &conversation_id).as_path(),
+        &provenance,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: conversation_id.clone(),
+            include_turns: false,
+        })
+        .await?;
+    let ThreadReadResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
+
+    assert_eq!(thread.id, conversation_id);
+    assert_eq!(thread.session_provenance, Some(provenance));
+
+    Ok(())
+}
+
+/// Stamp structured launch provenance into a fixture rollout's `session_meta` line.
+fn set_session_provenance_on_fake_rollout(
+    path: &std::path::Path,
+    provenance: &SessionProvenance,
+) -> Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let mut lines = content.lines();
+    let first_line = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("rollout at {} is empty", path.display()))?;
+    let mut session_meta: serde_json::Value = serde_json::from_str(first_line)?;
+    session_meta["payload"]["session_provenance"] = serde_json::to_value(provenance)?;
+    let remaining = lines.collect::<Vec<_>>().join("\n");
+
+    let mut updated = serde_json::to_string(&session_meta)?;
+    updated.push('\n');
+    if !remaining.is_empty() {
+        updated.push_str(&remaining);
+        updated.push('\n');
+    }
+    std::fs::write(path, updated)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_read_can_include_turns() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
@@ -258,6 +335,7 @@ async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_histo
             cwd: None,
             use_state_db_only: false,
             search_term: None,
+            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -488,6 +566,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
             forked_from_id: None,
             parent_thread_id: None,
             source: ProtocolSessionSource::Cli,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -750,6 +829,7 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {
@@ -820,6 +900,7 @@ async fn thread_read_loaded_include_turns_reads_store_history_without_rollout_pa
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {
@@ -928,6 +1009,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
+        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {
@@ -959,6 +1041,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
+                descendant_of_thread_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
             },
@@ -1338,6 +1421,7 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
             cwd: None,
             use_state_db_only: true,
             search_term: None,
+            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -1536,6 +1620,7 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
             forked_from_id: None,
             parent_thread_id: None,
             source: ProtocolSessionSource::Cli,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -1896,6 +1981,45 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
     assert_eq!(third_items_page.data[1].turn_id, "turn-2");
     assert_eq!(third_items_page.data[1].item.id(), "user-2");
 
+    // The legacy `thread/turns/items/list` route serves the same items for a
+    // pinned turn, unwrapped out of their `{ turnId, item }` entries.
+    let legacy_request_id = mcp
+        .send_thread_turns_items_list_request(ThreadTurnsItemsListParams {
+            thread_id: thread_id.to_string(),
+            turn_id: "turn-1".to_string(),
+            cursor: None,
+            limit: None,
+            sort_direction: Some(SortDirection::Asc),
+        })
+        .await?;
+    let legacy_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(legacy_request_id)),
+    )
+    .await??;
+    let legacy_page: ThreadTurnsItemsListResponse = to_response(legacy_response)?;
+    let turn_one_page = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("turn-1"),
+        /*cursor*/ None,
+        /*limit*/ None,
+        SortDirection::Asc,
+    )
+    .await?;
+    assert_eq!(
+        legacy_page,
+        ThreadTurnsItemsListResponse {
+            data: turn_one_page
+                .data
+                .iter()
+                .map(|entry| entry.item.clone())
+                .collect(),
+            next_cursor: turn_one_page.next_cursor.clone(),
+            backwards_cursor: turn_one_page.backwards_cursor.clone(),
+        }
+    );
+
     let turn_start_id = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread_id.to_string(),
@@ -1945,6 +2069,44 @@ async fn thread_items_list_returns_unsupported() -> Result<()> {
     )
     .await??;
 
+    assert_eq!(read_err.error.code, -32601);
+    assert_eq!(
+        read_err.error.message,
+        "thread/items/list is not supported yet"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_turns_items_list_returns_unsupported() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+
+    let read_id = mcp
+        .send_thread_turns_items_list_request(ThreadTurnsItemsListParams {
+            thread_id: "00000000-0000-4000-8000-000000000123".to_string(),
+            turn_id: "turn-1".to_string(),
+            cursor: None,
+            limit: None,
+            sort_direction: None,
+        })
+        .await?;
+    let read_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+
+    // The compatibility route delegates, so unsupported stores surface the
+    // `thread/items/list` error rather than an unknown-method error.
     assert_eq!(read_err.error.code, -32601);
     assert_eq!(
         read_err.error.message,
@@ -2226,6 +2388,7 @@ async fn seed_pathless_store_thread(
             forked_from_id: None,
             parent_thread_id: None,
             source: ProtocolSessionSource::Cli,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),

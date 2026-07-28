@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::status::is_final;
 use crate::session::session::Session;
+use crate::session_prefix::bounded_status;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
 use codex_protocol::error::CodexErrorDetails;
@@ -188,13 +189,16 @@ impl Handler {
         let timed_out = statuses.is_empty();
         let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
         let result = WaitAgentResult {
+            // The completion message and error text are agent-authored and otherwise unbounded.
+            // `wait_agent` output is model-visible, so it carries the same completion-payload
+            // budget as inter-agent notifications.
             status: statuses
                 .into_iter()
                 .filter_map(|(thread_id, status)| {
                     target_by_thread_id
                         .get(&thread_id)
                         .cloned()
-                        .map(|target| (target, status))
+                        .map(|target| (target, bounded_status(&status)))
                 })
                 .collect(),
             timed_out,

@@ -567,6 +567,47 @@
       ],
       "type": "string"
     },
+    "BackgroundAutoReviewStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "superseded",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "BackgroundAutoReviewStatusChangedNotification": {
+      "properties": {
+        "errorSummary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewTarget": {
+          "$ref": "#/definitions/ReviewTarget"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatus"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewTarget",
+        "runId",
+        "status",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -3013,6 +3054,115 @@
         }
       ]
     },
+    "ProjectValidationCompletedNotification": {
+      "description": "One completed project-validation command execution. An actionable first execution may be followed by one bounded correction cycle and a second completion notification.",
+      "properties": {
+        "changedFileCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commandTruncated": {
+          "type": "boolean"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "exitCode": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "itemId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "type": "string"
+        },
+        "outputTruncated": {
+          "type": "boolean"
+        },
+        "skipReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectValidationSkipReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ProjectValidationStatus"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "commandTruncated",
+        "durationMs",
+        "output",
+        "outputTruncated",
+        "status",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "ProjectValidationSkipReason": {
+      "enum": [
+        "validationDisabled",
+        "noChangedFiles",
+        "noApplicableProvider",
+        "nonRootAgent",
+        "unchangedFingerprint",
+        "unsupportedEnvironment"
+      ],
+      "type": "string"
+    },
+    "ProjectValidationStatus": {
+      "enum": [
+        "passed",
+        "actionableFailure",
+        "configurationError",
+        "timedOut",
+        "infrastructureFailure",
+        "cancelled",
+        "skipped"
+      ],
+      "type": "string"
+    },
     "RateLimitReachedType": {
       "enum": [
         "rate_limit_reached",
@@ -3318,6 +3468,118 @@
       },
       "type": "object"
     },
+    "ReviewTarget": {
+      "oneOf": [
+        {
+          "description": "Review the working tree: staged, unstaged, and untracked files.",
+          "properties": {
+            "type": {
+              "enum": [
+                "uncommittedChanges"
+              ],
+              "title": "UncommittedChangesReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UncommittedChangesReviewTarget",
+          "type": "object"
+        },
+        {
+          "description": "Review the changes made by a completed turn.",
+          "properties": {
+            "fingerprint": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "currentTurnDiff"
+              ],
+              "title": "CurrentTurnDiffReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "fingerprint",
+            "type"
+          ],
+          "title": "CurrentTurnDiffReviewTarget",
+          "type": "object"
+        },
+        {
+          "description": "Review changes between the current branch and the given base branch.",
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "baseBranch"
+              ],
+              "title": "BaseBranchReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch",
+            "type"
+          ],
+          "title": "BaseBranchReviewTarget",
+          "type": "object"
+        },
+        {
+          "description": "Review the changes introduced by a specific commit.",
+          "properties": {
+            "sha": {
+              "type": "string"
+            },
+            "title": {
+              "description": "Optional human-readable label (e.g., commit subject) for UIs.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "commit"
+              ],
+              "title": "CommitReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha",
+            "type"
+          ],
+          "title": "CommitReviewTarget",
+          "type": "object"
+        },
+        {
+          "description": "Arbitrary instructions, equivalent to the old free-form prompt.",
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "custom"
+              ],
+              "title": "CustomReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "instructions",
+            "type"
+          ],
+          "title": "CustomReviewTarget",
+          "type": "object"
+        }
+      ]
+    },
     "SandboxPolicy": {
       "oneOf": [
         {
@@ -3430,6 +3692,56 @@
         "requestId",
         "threadId"
       ],
+      "type": "object"
+    },
+    "SessionProvenance": {
+      "description": "Structured provenance for a thread started by an external orchestrator.\n\nThese fields are descriptive metadata only. Runtime authorization and product filtering must continue to use server-side policy and `source`.",
+      "properties": {
+        "issueNumber": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "issueUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "SessionSource": {
@@ -3754,6 +4066,15 @@
           ],
           "description": "Optional Git metadata captured when the thread was created."
         },
+        "historyMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadHistoryMode"
+            }
+          ],
+          "default": "legacy",
+          "description": "Persisted thread history contract selected when this thread was created.\n\nThis field is part of the published stable `Thread` surface; keep it non-experimental so existing clients continue to receive it."
+        },
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
@@ -3803,6 +4124,18 @@
         "sessionId": {
           "description": "Session id shared by threads that belong to the same session tree.",
           "type": "string"
+        },
+        "sessionProvenance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional structured launch provenance supplied by an external agent orchestrator."
         },
         "source": {
           "allOf": [
@@ -4406,6 +4739,14 @@
                 "null"
               ]
             },
+            "error": {
+              "default": null,
+              "description": "Failure detail persisted with the call, when the tool reported one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },
@@ -4766,6 +5107,90 @@
             "type"
           ],
           "title": "ContextCompactionThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "changedFileCount": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "commandTruncated": {
+              "type": "boolean"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "durationMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            },
+            "outputTruncated": {
+              "type": "boolean"
+            },
+            "skipReason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProjectValidationSkipReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/definitions/ProjectValidationStatus"
+            },
+            "type": {
+              "enum": [
+                "projectValidation"
+              ],
+              "title": "ProjectValidationThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "commandTruncated",
+            "durationMs",
+            "id",
+            "output",
+            "outputTruncated",
+            "status",
+            "type"
+          ],
+          "title": "ProjectValidationThreadItem",
           "type": "object"
         }
       ]
@@ -6182,6 +6607,46 @@
         "params"
       ],
       "title": "Turn/startedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "validation/completed"
+          ],
+          "title": "Validation/completedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ProjectValidationCompletedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Validation/completedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "review/backgroundStatus/changed"
+          ],
+          "title": "Review/backgroundStatus/changedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatusChangedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Review/backgroundStatus/changedNotification",
       "type": "object"
     },
     {

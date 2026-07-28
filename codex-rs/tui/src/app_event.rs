@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
+use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
@@ -248,6 +249,19 @@ pub(crate) enum AppEvent {
     ThreadHistoryEntryResponse {
         thread_id: ThreadId,
         event: HistoryLookupResponse,
+    },
+
+    /// Deliver a native Auto Review summary fetched from the app server to a thread transcript.
+    AutoReviewSummaryLoaded {
+        thread_id: ThreadId,
+        run_id: String,
+        result: Result<AutoReviewSummaryReadResponse, String>,
+    },
+
+    /// Fetch an Auto Review summary that was replayed before its buffered summary response.
+    FetchAutoReviewSummary {
+        thread_id: ThreadId,
+        run_id: String,
     },
 
     /// Persist a submitted prompt in the cross-session message history.

@@ -7,6 +7,9 @@ outputs:
   cargo-target-dir:
     description: Filesystem path used for Cargo's target directory.
     value: ${{ steps.configure_ci_build_paths.outputs.cargo-target-dir }}
+  cache-scope:
+    description: Stable cache namespace for this runner instance.
+    value: ${{ steps.configure_ci_build_paths.outputs.cache-scope }}
 
 runs:
   using: composite
@@ -24,10 +27,17 @@ runs:
       shell: bash
       env:
         RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        RUNNER_NAME_VALUE: ${{ runner.name }}
         RUNNER_OS_NAME: ${{ runner.os }}
       run: |
         if [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" && "${RUNNER_OS_NAME}" == "macOS" ]]; then
           ci_build_root="${RUNNER_TEMP}/codex-ci"
+        elif [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" ]]; then
+          runner_slug="$(printf '%s' "${RUNNER_NAME_VALUE:-unnamed}" | tr -cs 'A-Za-z0-9._-' '-')"
+          runner_slug="${runner_slug#-}"
+          runner_slug="${runner_slug%-}"
+          [[ -n "$runner_slug" ]] || runner_slug="unnamed"
+          ci_build_root="$HOME/.cache/codex-ci/$runner_slug"
         else
           ci_build_root="$HOME/.cache/codex-ci"
         fi
@@ -37,8 +47,22 @@ runs:
     - name: Configure CI build paths
       id: configure_ci_build_paths
       shell: bash
+      env:
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        RUNNER_NAME_VALUE: ${{ runner.name }}
+        RUNNER_OS_NAME: ${{ runner.os }}
       run: |
         set -euo pipefail
+        runner_slug="$(printf '%s' "${RUNNER_NAME_VALUE:-unnamed}" | tr -cs 'A-Za-z0-9._-' '-')"
+        runner_slug="${runner_slug#-}"
+        runner_slug="${runner_slug%-}"
+        [[ -n "$runner_slug" ]] || runner_slug="unnamed"
+        if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" ]]; then
+          cache_scope="self-hosted-$runner_slug"
+        else
+          cache_scope="github-hosted"
+        fi
+
         # setup-bazel passes output_base explicitly, so keep both it and the
         # user root under the shared build root. Keep these directory names tiny
         # on every platform so Windows Bazel paths do not overflow argv or
@@ -46,9 +70,21 @@ runs:
         bazel_output_base="$CI_BUILD_ROOT/o"
         bazel_output_user_root="$CI_BUILD_ROOT/b"
         bazel_repository_cache="$CI_BUILD_ROOT/bazel-repository-cache"
-        bazel_repo_contents_cache="$CI_BUILD_ROOT/bazel-repo-contents-cache-$GITHUB_RUN_ID-$GITHUB_JOB"
+        # Repository contents are keyed to this job and are never reused by a
+        # later run. Keep them under the runner-owned temporary directory so
+        # self-hosted Linux jobs cannot accumulate one persistent tree per run.
+        bazel_repo_contents_cache="$RUNNER_TEMP/bazel-repo-contents-cache"
         cargo_target_dir="$CI_BUILD_ROOT/cargo-target"
-        tmp="$CI_BUILD_ROOT/tmp"
+        if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+          # The Dev Drive is recreated for each Windows job and keeps temp paths
+          # short while avoiding antivirus overhead.
+          tmp="$CI_BUILD_ROOT/tmp"
+        else
+          # Test extraction trees and other job-scoped files must not share the
+          # persistent Cargo/Bazel cache root. GitHub Runner clears RUNNER_TEMP
+          # between jobs, including after cancellation.
+          tmp="$RUNNER_TEMP/codex-ci-tmp"
+        fi
 
         build_dirs=(
           "$bazel_output_base"
@@ -60,6 +96,7 @@ runs:
         )
         mkdir -p "${build_dirs[@]}"
         echo "bazel-output-base=$bazel_output_base" >> "$GITHUB_OUTPUT"
+        echo "cache-scope=$cache_scope" >> "$GITHUB_OUTPUT"
         echo "cargo-target-dir=$cargo_target_dir" >> "$GITHUB_OUTPUT"
 
         {
@@ -68,8 +105,14 @@ runs:
           echo "BAZEL_REPOSITORY_CACHE=$bazel_repository_cache"
           echo "BAZEL_REPO_CONTENTS_CACHE=$bazel_repo_contents_cache"
           echo "CARGO_TARGET_DIR=$cargo_target_dir"
+          echo "CI_CACHE_SCOPE=$cache_scope"
           echo "TEMP=$tmp"
           echo "TMP=$tmp"
+          echo "TMPDIR=$tmp"
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && "$RUNNER_OS_NAME" != "Windows" ]]; then
+            runner_checksum="$(printf '%s' "$runner_slug" | cksum | awk '{ print $1 }')"
+            echo "SCCACHE_SERVER_PORT=$((20000 + runner_checksum % 10000))"
+          fi
         } >> "$GITHUB_ENV"
 
     - name: Prefer the Git CLI for Cargo git dependencies

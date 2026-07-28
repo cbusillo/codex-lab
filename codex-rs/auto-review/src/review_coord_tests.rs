@@ -521,12 +521,12 @@ fn valid_lock_with_dead_pid_is_cleared() {
 }
 
 #[test]
-#[cfg(unix)]
 fn valid_lock_with_live_pid_is_not_cleared() {
     let home = TempDir::new().expect("temp home");
     let repo = TempDir::new().expect("temp repo");
     let coordination = ReviewCoordination::for_scope(home.path(), repo.path());
     fs::create_dir_all(coordination.root()).expect("coordination root");
+    assert!(pid_alive(std::process::id()));
     let info = ReviewLockInfo {
         pid: std::process::id(),
         started_at_unix_secs: 1,

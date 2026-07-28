@@ -180,7 +180,7 @@ impl CodeBridgeClient {
         let client_id = client_id.into();
         let payload = self
             .post_payload(
-                None,
+                /*session*/ None,
                 BridgeEnvelope {
                     protocol_version: PROTOCOL_VERSION.to_string(),
                     message_id: format!("hello-{client_id}"),
@@ -359,7 +359,8 @@ impl CodeBridgeClient {
         session: &CodeBridgeSession,
         response: ControlResponse,
     ) -> Result<BridgePayload, CodeBridgeClientError> {
-        self.respond_control_payload(session, response, None).await
+        self.respond_control_payload(session, response, /*result*/ None)
+            .await
     }
 
     pub async fn respond_control_with_result(
@@ -615,7 +616,10 @@ mod tests {
             .publish_console(&producer, "event-1", ConsoleLevel::Info, "hello bridge")
             .await
             .expect("publish event");
-        let mut subscriber_events = client.events(&subscriber, 0).await.expect("events");
+        let mut subscriber_events = client
+            .events(&subscriber, /*last_event_id*/ 0)
+            .await
+            .expect("events");
         let message = next_test_message(&mut subscriber_events, "event message").await;
         let event_sequence = message.sequence;
         assert!(matches!(
@@ -635,7 +639,10 @@ mod tests {
             )
             .await
             .expect("screenshot request");
-        let mut producer_events = client.events(&producer, 0).await.expect("producer events");
+        let mut producer_events = client
+            .events(&producer, /*last_event_id*/ 0)
+            .await
+            .expect("producer events");
         let message = next_test_message(&mut producer_events, "screenshot request message").await;
         assert!(matches!(
             message.envelope.payload,
@@ -791,7 +798,10 @@ mod tests {
             )
             .await
             .expect("subscribe");
-        let mut subscriber_events = client.events(&subscriber, 0).await.expect("events");
+        let mut subscriber_events = client
+            .events(&subscriber, /*last_event_id*/ 0)
+            .await
+            .expect("events");
 
         client
             .publish_error(
@@ -1009,7 +1019,10 @@ mod tests {
             )
             .await
             .expect("subscribe");
-        let mut consumer_events = client.events(&consumer, 0).await.expect("consumer events");
+        let mut consumer_events = client
+            .events(&consumer, /*last_event_id*/ 0)
+            .await
+            .expect("consumer events");
 
         client
             .publish_pageview(
@@ -1054,7 +1067,10 @@ mod tests {
             )
             .await
             .expect("request screenshot");
-        let mut browser_events = client.events(&browser, 0).await.expect("browser events");
+        let mut browser_events = client
+            .events(&browser, /*last_event_id*/ 0)
+            .await
+            .expect("browser events");
         assert!(matches!(
             next_test_message(&mut browser_events, "screenshot request")
                 .await
@@ -1197,7 +1213,10 @@ mod tests {
             .await
             .expect("publish event");
 
-        let mut subscriber_events = client.events(&subscriber, 0).await.expect("events");
+        let mut subscriber_events = client
+            .events(&subscriber, /*last_event_id*/ 0)
+            .await
+            .expect("events");
         let message = next_test_message(&mut subscriber_events, "event message").await;
         assert!(matches!(
             message.envelope.payload,

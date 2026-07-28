@@ -1272,6 +1272,38 @@ async fn request_plugin_install_description_requires_exhausting_tool_search() {
 }
 
 #[tokio::test]
+async fn plain_dynamic_external_tools_keep_ownership() {
+    let plan = probe_with(
+        |turn| {
+            set_features(turn, &[Feature::InAppBrowser, Feature::BrowserUse]);
+        },
+        ToolPlanInputs {
+            dynamic_tools: vec![
+                dynamic_tool(
+                    /*namespace*/ None,
+                    "code_bridge",
+                    /*defer_loading*/ false,
+                ),
+                dynamic_tool(
+                    /*namespace*/ None, "browser", /*defer_loading*/ false,
+                ),
+            ],
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    plan.assert_visible_contains(&["code_bridge", "browser"]);
+    plan.assert_registered_contains(&["code_bridge", "browser"]);
+    for tool_name in ["code_bridge", "browser"] {
+        let ToolSpec::Function(tool) = plan.visible_spec(tool_name) else {
+            panic!("expected {tool_name} function spec");
+        };
+        assert_eq!(tool.description, format!("{tool_name} dynamic tool"));
+    }
+}
+
+#[tokio::test]
 async fn code_mode_only_exposes_code_executor_and_hides_nested_tools() {
     let input = ToolPlanInputs {
         dynamic_tools: vec![dynamic_tool(
