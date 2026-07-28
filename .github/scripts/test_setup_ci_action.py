@@ -53,6 +53,13 @@ class SetupCiActionTests(unittest.TestCase):
         self.assertIn('bazel_repository_cache="$CI_BUILD_ROOT/bazel-repository-cache"', action)
         self.assertIn('cargo_target_dir="$CI_BUILD_ROOT/cargo-target"', action)
 
+    def test_job_temporary_data_uses_ephemeral_os_storage(self) -> None:
+        action = Path(".github/actions/setup-ci/action.yml").read_text(encoding="utf-8")
+
+        self.assertIn('if [[ "${RUNNER_OS:-}" == "Windows" ]]', action)
+        self.assertIn('tmp="$CI_BUILD_ROOT/tmp"', action)
+        self.assertIn('tmp="$RUNNER_TEMP/codex-ci-tmp"', action)
+
 
 if __name__ == "__main__":
     unittest.main()

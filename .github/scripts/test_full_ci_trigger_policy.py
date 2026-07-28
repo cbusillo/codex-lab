@@ -8,16 +8,15 @@ FULL_CI_WORKFLOW = ROOT / ".github/workflows/full-ci.yml"
 LEGACY_POSTMERGE_WORKFLOW = ROOT / ".github/workflows/postmerge-ci.yml"
 BLOCKING_CI_WORKFLOW = ROOT / ".github/workflows/blocking-ci.yml"
 RUST_FULL_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci-full.yml"
+RUST_BLOCKING_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci.yml"
 V8_CANARY_WORKFLOW = ROOT / ".github/workflows/v8-canary.yml"
 CODEX_LAB_RELEASE_WORKFLOW = ROOT / ".github/workflows/codex-lab-release.yml"
-FULL_CI_COMPONENTS = (
-    ROOT / ".bazelrc",
+FULL_CI_MATRIX_WORKFLOWS = (
     ROOT / ".github/workflows/sdk-integration.yml",
     ROOT / ".github/workflows/bazel.yml",
     ROOT / ".github/workflows/rust-ci-full.yml",
     ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml",
     ROOT / ".github/workflows/v8-canary.yml",
-    ROOT / ".github/scripts/run-argument-comment-lint-bazel.sh",
 )
 FULL_VERIFICATION_WORKFLOWS = {
     "bazel.yml",
@@ -80,6 +79,13 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertIn("\n  pull_request:", workflow_header)
         self.assertIn("\n  push:", workflow_header)
         self.assertIn("\n    branches: [main]", workflow_header)
+
+    def test_bounded_ci_compiles_the_rust_workspace(self) -> None:
+        workflow = RUST_BLOCKING_CI_WORKFLOW.read_text()
+
+        self.assertIn("  workspace_check:\n", workflow)
+        self.assertIn("run: cargo check --workspace --tests --locked", workflow)
+        self.assertIn("workspace_check,", workflow)
 
     def test_opt_in_rust_full_ci_cancels_superseded_runs(self) -> None:
         workflow_header = RUST_FULL_CI_WORKFLOW.read_text().split(
@@ -152,13 +158,46 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             with self.subTest(workflow=workflow_path.name):
                 self.assertLessEqual(reusable_workflow_depth(workflow_path), 4)
 
-    def test_full_ci_components_fail_fast(self) -> None:
-        for workflow_path in FULL_CI_COMPONENTS:
+    def test_full_ci_collects_complete_diagnostics(self) -> None:
+        for workflow_path in FULL_CI_MATRIX_WORKFLOWS:
             with self.subTest(workflow=workflow_path.name):
                 component = workflow_path.read_text()
-                self.assertNotIn("fail-fast: false", component)
-                self.assertNotIn("--no-fail-fast", component)
-                self.assertNotIn("--keep_going", component)
+                strategy_count = len(
+                    re.findall(r"^\s+strategy:\s*$", component, flags=re.MULTILINE)
+                )
+                fail_fast_false_count = len(
+                    re.findall(
+                        r"^\s+fail-fast:\s+false\s*$",
+                        component,
+                        flags=re.MULTILINE,
+                    )
+                )
+                self.assertEqual(strategy_count, fail_fast_false_count)
+
+        self.assertIn("common:ci --keep_going", (ROOT / ".bazelrc").read_text())
+        self.assertIn(
+            "post_config_bazel_args=(--keep_going)",
+            (ROOT / ".github/scripts/run-bazel-ci.sh").read_text(),
+        )
+        self.assertIn(
+            "--no-fail-fast",
+            (ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml").read_text(),
+        )
+
+    def test_argument_comment_lint_has_bounded_local_fallback(self) -> None:
+        workflow = RUST_FULL_CI_WORKFLOW.read_text()
+
+        self.assertIn(
+            'if [[ -z "${BUILDBUDDY_API_KEY}" && "${RUNNER_OS}" != "Windows" ]]',
+            workflow,
+        )
+        self.assertIn(
+            "python3 ./tools/argument-comment-lint/run-prebuilt-linter.py",
+            workflow,
+        )
+        self.assertIn("rustup toolchain install nightly-2025-09-18", workflow)
+        self.assertIn("argument-comment-workspace-${{ runner.os }}", workflow)
+        self.assertIn("uses: ./.github/actions/setup-rusty-v8", workflow)
 
 
 if __name__ == "__main__":

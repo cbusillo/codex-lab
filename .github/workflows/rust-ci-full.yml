@@ -101,22 +101,25 @@ jobs:
   argument_comment_lint_prebuilt:
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    # Run 30205457451 cancelled the Linux matrix leg at exactly 60 minutes; the
-    # Bazel build needs headroom above that on a cold cache.
+    # BuildBuddy-backed and Windows-local Bazel runs can exceed 60 minutes on a
+    # cold cache. The Unix no-key fallback remains bounded by the same limit.
     timeout-minutes: 90
     environment:
       name: bazel
       deployment: false
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - name: Linux
             runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
           - name: macOS
             runner: macos-26
+            target: aarch64-apple-darwin
           - name: Windows
             runner: windows-2025
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -130,30 +133,55 @@ jobs:
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-      - name: Run argument comment lint on codex-rs via Bazel
+      - name: Restore Cargo dependency cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: argument-comment-workspace-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
+          restore-keys: |
+            argument-comment-workspace-${{ runner.os }}-
+      - name: Configure rusty_v8 artifact overrides
         if: ${{ runner.os != 'Windows' }}
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+          artifact-repository: openai/codex
+      - name: Run argument comment lint on codex-rs
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         shell: bash
         run: |
-          bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
-          ./.github/scripts/run-bazel-ci.sh \
-            -- \
-            build \
-            --config=argument-comment-lint \
-            --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
-            -- \
-            ${bazel_targets}
-      - name: Run argument comment lint on codex-rs via Bazel
-        if: ${{ runner.os == 'Windows' }}
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        shell: bash
-        run: |
-          ./.github/scripts/run-argument-comment-lint-bazel.sh \
-            --config=argument-comment-lint \
-            --platforms=//:local_windows \
-            --build_metadata=COMMIT_SHA=${GITHUB_SHA}
+          set -euo pipefail
+          if [[ -z "${BUILDBUDDY_API_KEY}" && "${RUNNER_OS}" != "Windows" ]]; then
+            echo "::notice::BuildBuddy is unavailable; using the packaged Cargo/Dylint runner instead of a local full Bazel build"
+            rustup toolchain install nightly-2025-09-18 \
+              --profile minimal \
+              --component llvm-tools-preview \
+              --component rustc-dev \
+              --component rust-src \
+              --no-self-update
+            python3 ./tools/argument-comment-lint/run-prebuilt-linter.py
+            exit 0
+          fi
+
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            ./.github/scripts/run-argument-comment-lint-bazel.sh \
+              --config=argument-comment-lint \
+              --platforms=//:local_windows \
+              --build_metadata=COMMIT_SHA=${GITHUB_SHA}
+          else
+            bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
+            ./.github/scripts/run-bazel-ci.sh \
+              -- \
+              build \
+              --config=argument-comment-lint \
+              --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
+              -- \
+              ${bazel_targets}
+          fi
 
   # --- CI to validate on different os/targets --------------------------------
   lint_build:
@@ -172,7 +200,7 @@ jobs:
       SCCACHE_CACHE_SIZE: 10G
 
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: macos-26
