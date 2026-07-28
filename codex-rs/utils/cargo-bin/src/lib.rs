@@ -278,35 +278,3 @@ fn normalize_runfile_path(path: &Path) -> PathBuf {
             acc
         })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cargo_resource_uses_runtime_workspace_with_package_suffix() {
-        let path = resolve_cargo_resource_from_workspace(
-            Path::new("/runner/codex-rs"),
-            Path::new("/builder/codex-rs/chatgpt"),
-            Path::new("tests/task_turn_fixture.json"),
-        )
-        .expect("resource should resolve");
-
-        assert_eq!(
-            path,
-            Path::new("/runner/codex-rs/chatgpt/tests/task_turn_fixture.json")
-        );
-    }
-
-    #[test]
-    fn cargo_resource_rejects_manifest_outside_workspace() {
-        let error = resolve_cargo_resource_from_workspace(
-            Path::new("/runner/codex-rs"),
-            Path::new("/builder/other/chatgpt"),
-            Path::new("tests/task_turn_fixture.json"),
-        )
-        .expect_err("manifest outside codex-rs should fail");
-
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-    }
-}

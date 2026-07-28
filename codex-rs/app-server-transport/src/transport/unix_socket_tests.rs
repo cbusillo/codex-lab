@@ -55,7 +55,7 @@ fn listen_unix_socket_accepts_relative_custom_path() {
 
 #[tokio::test]
 async fn control_socket_acceptor_upgrades_and_forwards_websocket_text_messages_and_pings() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let temp_dir = test_temp_dir();
     let socket_path = test_socket_path(temp_dir.path());
     let (transport_event_tx, mut transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
@@ -143,7 +143,7 @@ async fn control_socket_acceptor_upgrades_and_forwards_websocket_text_messages_a
 
 #[tokio::test]
 async fn app_server_startup_lock_serializes_waiters() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let temp_dir = test_temp_dir();
     let lock_path = test_startup_lock_path(temp_dir.path());
     let first_lock = acquire_app_server_startup_lock(lock_path.clone())
         .await
@@ -168,7 +168,7 @@ async fn app_server_startup_lock_serializes_waiters() {
 async fn control_socket_file_is_private_after_bind() {
     use std::os::unix::fs::PermissionsExt;
 
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let temp_dir = test_temp_dir();
     let socket_path = test_socket_path(temp_dir.path());
     let (transport_event_tx, _transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
@@ -197,6 +197,19 @@ fn absolute_path(path: &str) -> AbsolutePathBuf {
 fn default_control_socket_path() -> AbsolutePathBuf {
     let codex_home = find_codex_home().expect("codex home");
     app_server_control_socket_path(&codex_home).expect("default control socket path")
+}
+
+#[cfg(unix)]
+fn test_temp_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("codex-")
+        .tempdir_in("/tmp")
+        .expect("short temp dir")
+}
+
+#[cfg(not(unix))]
+fn test_temp_dir() -> tempfile::TempDir {
+    tempfile::TempDir::new().expect("temp dir")
 }
 
 fn test_socket_path(temp_dir: &Path) -> AbsolutePathBuf {
