@@ -423,7 +423,7 @@ async fn windows_auto_mode_prompt_requests_enabling_sandbox_feature() {
         "expected auto mode prompt to mention Administrator permissions, popup: {popup}"
     );
     assert!(
-        popup.contains("Use non-admin sandbox"),
+        popup.contains("Use non-admin sandbox (compatibility mode; limited file protection)"),
         "expected auto mode prompt to include non-admin fallback option, popup: {popup}"
     );
 }
@@ -448,7 +448,7 @@ async fn startup_prompts_for_windows_sandbox_when_agent_requested() {
         "expected startup prompt to offer default sandbox setup: {popup}"
     );
     assert!(
-        popup.contains("Use non-admin sandbox"),
+        popup.contains("Use non-admin sandbox (compatibility mode; limited file protection)"),
         "expected startup prompt to offer non-admin fallback: {popup}"
     );
     assert!(

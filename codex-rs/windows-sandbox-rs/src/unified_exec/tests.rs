@@ -108,63 +108,6 @@ fn windows_core_shell_env() -> HashMap<String, String> {
     )
 }
 
-fn run_icacls(root: &Path, args: &[String]) {
-    let status = std::process::Command::new("icacls.exe")
-        .arg(root)
-        .args(args)
-        .status()
-        .unwrap_or_else(|err| panic!("run icacls for {} with {args:?}: {err}", root.display()));
-    assert!(
-        status.success(),
-        "icacls failed for {} with {args:?}: {status}",
-        root.display()
-    );
-}
-
-fn describe_icacls(root: &Path) -> String {
-    let output = std::process::Command::new("icacls.exe")
-        .arg(root)
-        .output()
-        .unwrap_or_else(|err| panic!("inspect ACL for {}: {err}", root.display()));
-    format!(
-        "status={}\nstdout={}\nstderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
-}
-
-fn current_user_sid() -> String {
-    let output = std::process::Command::new("whoami.exe")
-        .arg("/user")
-        .output()
-        .expect("run whoami for current user SID");
-    assert!(
-        output.status.success(),
-        "whoami failed: status={} stdout={:?} stderr={:?}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .split_ascii_whitespace()
-        .find(|field| field.starts_with("S-1-"))
-        .map(str::to_string)
-        .expect("whoami output should include a user SID")
-}
-
-fn configure_world_writable_test_root_acl(root: &Path) {
-    run_icacls(root, &["/inheritance:r".to_string()]);
-    for sid in [
-        current_user_sid(),
-        "S-1-5-18".to_string(),
-        "S-1-5-32-544".to_string(),
-        "S-1-1-0".to_string(),
-    ] {
-        run_icacls(root, &["/grant:r".to_string(), format!("*{sid}:(OI)(CI)F")]);
-    }
-}
-
 fn powershell_literal(path: &Path) -> String {
     path.to_string_lossy().replace('\'', "''")
 }
@@ -687,20 +630,16 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
         .expect("sandbox descendant did not exit after release");
 }
 
-/// Named outcome so a failure reports which containment expectation broke
-/// instead of diffing an anonymous tuple.
 #[derive(Debug, PartialEq, Eq)]
-struct LegacyDeleteOutcome {
+struct LegacyWritableDeleteOutcome {
     exit_code: i32,
     workspace_file_exists: bool,
     temp_file_exists: bool,
     tmp_file_exists: bool,
-    outside_file_contents: Option<String>,
-    protected_git_dir_exists: bool,
 }
 
 #[test]
-fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
+fn legacy_workspace_write_can_delete_files_in_writable_roots() {
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
     runtime.block_on(async move {
@@ -710,26 +649,20 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             .join("windows-sandbox-tests");
         fs::create_dir_all(&scratch_root).expect("create legacy delete scratch root");
         let test_root = TempDir::new_in(scratch_root).expect("create legacy delete test root");
-        configure_world_writable_test_root_acl(test_root.path());
         let codex_home = sandbox_home("legacy-delete-writable-roots");
         let workspace = test_root.path().join("workspace");
         let temp_root = test_root.path().join("temp");
         let tmp_root = test_root.path().join("tmp");
-        let outside_root = test_root.path().join("outside");
-        for directory in [&workspace, &temp_root, &tmp_root, &outside_root] {
+        for directory in [&workspace, &temp_root, &tmp_root] {
             fs::create_dir_all(directory).expect("create legacy delete test directory");
         }
-        let protected_git_dir = workspace.join(".git");
-        fs::create_dir(&protected_git_dir).expect("create protected .git directory");
 
         let workspace_file = workspace.join("workspace-delete.txt");
         let temp_file = temp_root.join("temp-delete.txt");
         let tmp_file = tmp_root.join("tmp-delete.txt");
-        let outside_file = outside_root.join("outside-delete.txt");
         fs::write(&workspace_file, "workspace").expect("seed workspace file");
         fs::write(&temp_file, "temp").expect("seed TEMP file");
         fs::write(&tmp_file, "tmp").expect("seed TMP file");
-        fs::write(&outside_file, "outside").expect("seed outside file");
 
         let script = workspace.join("delete-fixtures.cmd");
         fs::write(
@@ -739,8 +672,6 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
                 "del /f /q \"%WORKSPACE_DELETE%\"\r\n",
                 "del /f /q \"%TEMP_DELETE%\"\r\n",
                 "del /f /q \"%TMP_DELETE%\"\r\n",
-                "del /f /q \"%OUTSIDE_DELETE%\"\r\n",
-                "rmdir \"%PROTECTED_GIT_DIR%\"\r\n",
                 "exit /b 0\r\n",
             ),
         )
@@ -761,14 +692,6 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             (
                 "TMP_DELETE".to_string(),
                 tmp_file.to_string_lossy().into_owned(),
-            ),
-            (
-                "OUTSIDE_DELETE".to_string(),
-                outside_file.to_string_lossy().into_owned(),
-            ),
-            (
-                "PROTECTED_GIT_DIR".to_string(),
-                protected_git_dir.to_string_lossy().into_owned(),
             ),
         ]);
 
@@ -798,28 +721,22 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 10))
                 .await;
         let stdout = String::from_utf8_lossy(&stdout);
-        let workspace_acl = describe_icacls(&workspace);
-        let outside_acl = describe_icacls(&outside_root);
         let sandbox_log = sandbox_log(codex_home.path());
 
         assert_eq!(
-            LegacyDeleteOutcome {
+            LegacyWritableDeleteOutcome {
                 exit_code,
                 workspace_file_exists: workspace_file.exists(),
                 temp_file_exists: temp_file.exists(),
                 tmp_file_exists: tmp_file.exists(),
-                outside_file_contents: fs::read_to_string(&outside_file).ok(),
-                protected_git_dir_exists: protected_git_dir.is_dir(),
             },
-            LegacyDeleteOutcome {
+            LegacyWritableDeleteOutcome {
                 exit_code: 0,
                 workspace_file_exists: false,
                 temp_file_exists: false,
                 tmp_file_exists: false,
-                outside_file_contents: Some("outside".to_string()),
-                protected_git_dir_exists: true,
             },
-            "test_root={}\nworkspace={}\nstdout={stdout:?}\nworkspace_acl:\n{workspace_acl}\noutside_acl:\n{outside_acl}\n{sandbox_log}",
+            "test_root={}\nworkspace={}\nstdout={stdout:?}\n{sandbox_log}",
             test_root.path().display(),
             workspace.display(),
         );
