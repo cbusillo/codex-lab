@@ -25,7 +25,7 @@ jobs:
     # and isolation its test suite expects.
     timeout-minutes: 60
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: codex-lab-linux
@@ -119,7 +119,7 @@ jobs:
     needs: authorize_self_hosted
     timeout-minutes: 60
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: codex-lab-linux
@@ -196,7 +196,7 @@ jobs:
     needs: authorize_self_hosted
     timeout-minutes: 60
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: codex-lab-linux

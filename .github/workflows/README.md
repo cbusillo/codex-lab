@@ -11,6 +11,7 @@ verification runs on a nightly or explicitly requested cadence.
 - `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
   - `cargo fmt --check`
   - `cargo shear`
+  - one hosted Linux `cargo check --workspace --tests` compile gate
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
 - `sdk.yml` runs the Python SDK suite plus TypeScript SDK build and lint checks.
   The TypeScript tests that spawn a real Codex binary run in the full suite
@@ -29,8 +30,8 @@ verification runs on a nightly or explicitly requested cadence.
 
 - `full-ci.yml` is the nightly and manual entrypoint for the heavy workflow
   fan-out. A newer full run cancels any older in-progress run for the same ref.
-  Matrices and inner test/build tools stop after their first failure instead of
-  spending the remaining runner budget on work that cannot make the suite green.
+  Matrices and inner test/build tools continue after individual failures so one
+  run returns the complete actionable failure inventory.
 - `bazel.yml` compiles the full Bazel graph and runs Bazel clippy plus
   release-build verification on the trusted persistent Linux runner. Runtime
   tests stay in `rust-ci-full.yml`, where each platform has the dependencies
@@ -49,9 +50,8 @@ verification runs on a nightly or explicitly requested cadence.
 - `v8-canary.yml` keeps the upstream V8 artifact and source-build matrix visible
   in the full suite and on relevant pull requests.
 - Bazel, Rust, SDK integration, and V8 remain independent top-level suites and
-  start in parallel. GitHub Actions does not provide native cross-workflow
-  fail-fast cancellation, so each suite fails fast internally without
-  serializing the successful path.
+  start in parallel. Full verification optimizes for diagnostic completeness;
+  the bounded pull-request gate is responsible for fast rejection.
 
 ## Release Gate
 
@@ -90,6 +90,10 @@ verification runs on a nightly or explicitly requested cadence.
   the existing Docker group. External cache keys include the runner instance,
   and each lane uses its own sccache server endpoint, so restored archives and
   compiler daemons cannot cross lane homes.
+- Persistent lane storage is limited to reusable Cargo, Bazel, repository, and
+  sccache data. Nextest extraction trees and other `TEMP`/`TMP` data use
+  runner-managed temporary storage on Unix and the fresh per-job Dev Drive on
+  Windows, so jobs cannot accumulate per-run archives in lane caches.
 - Upstream Windows Bazel jobs require authenticated RBE and custom Windows exec
   toolchains, so they are not part of public-fork blocking CI. `rust-ci-full.yml`
   retains Windows validation in the full suite on GitHub-hosted Windows runners.

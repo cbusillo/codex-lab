@@ -592,8 +592,9 @@ mod windows_impl {
                 "Restricted read-only access requires the elevated Windows sandbox backend"
             );
         }
-        // WRITE_RESTRICTED tokens consult restricting SIDs only for writes, so this
-        // backend cannot make capability-SID deny-read ACLs authoritative.
+        // WRITE_RESTRICTED tokens consult restricting SIDs only for GenericWrite.
+        // This cannot make deny-read ACLs authoritative and does not remove ambient
+        // DELETE, WRITE_DAC, or WRITE_OWNER rights from the signed-in user.
         if !additional_deny_read_paths.is_empty() {
             anyhow::bail!("deny-read overrides require the elevated Windows sandbox backend");
         }

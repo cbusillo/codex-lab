@@ -309,7 +309,7 @@ jobs:
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
     steps:
@@ -412,6 +412,8 @@ jobs:
             archive_file="$(cygpath -w "${archive_file}")"
             workspace_root="$(cygpath -w "${workspace_root}")"
           fi
+          export CODEX_CARGO_WORKSPACE_ROOT="${workspace_root}"
+          export INSTA_WORKSPACE_ROOT="${workspace_root}"
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             helper_dir="${RUNNER_TEMP}/${TEST_HELPERS_ARTIFACT}"
@@ -445,6 +447,7 @@ jobs:
             --archive-file "${archive_file}"
             --workspace-remap "${workspace_root}"
             --partition "hash:${{ matrix.shard }}/4"
+            --no-fail-fast
           )
           if [[ "${{ inputs.test_threads }}" != "0" ]]; then
             nextest_args+=(--test-threads "${{ inputs.test_threads }}")

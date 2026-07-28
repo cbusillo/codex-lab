@@ -7,6 +7,7 @@ pub use runfiles;
 
 /// Bazel sets this when runfiles directories are disabled, which we do on all platforms for consistency.
 const RUNFILES_MANIFEST_ONLY_ENV: &str = "RUNFILES_MANIFEST_ONLY";
+const CODEX_CARGO_WORKSPACE_ROOT_ENV: &str = "CODEX_CARGO_WORKSPACE_ROOT";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CargoBinError {
@@ -132,7 +133,7 @@ macro_rules! find_resource {
             $crate::resolve_bazel_runfile(option_env!("BAZEL_PACKAGE"), resource)
         } else {
             let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            Ok(manifest_dir.join(resource))
+            $crate::resolve_cargo_resource(manifest_dir, resource)
         }
     }};
 }
@@ -170,7 +171,28 @@ pub fn resolve_cargo_runfile(resource: &Path) -> std::io::Result<PathBuf> {
     Ok(manifest_dir.join(resource))
 }
 
+pub fn resolve_cargo_resource(manifest_dir: &Path, resource: &Path) -> io::Result<PathBuf> {
+    let Some(workspace_root) = runtime_cargo_workspace_root() else {
+        return Ok(manifest_dir.join(resource));
+    };
+    resolve_cargo_resource_from_workspace(&workspace_root, manifest_dir, resource)
+}
+
 pub fn repo_root() -> io::Result<PathBuf> {
+    if !runfiles_available()
+        && let Some(workspace_root) = runtime_cargo_workspace_root()
+    {
+        return workspace_root
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{CODEX_CARGO_WORKSPACE_ROOT_ENV} did not have a parent directory"),
+                )
+            });
+    }
+
     let marker = if runfiles_available() {
         let runfiles = runfiles::Runfiles::create()
             .map_err(|err| io::Error::other(format!("failed to create runfiles: {err}")))?;
@@ -204,6 +226,33 @@ pub fn repo_root() -> io::Result<PathBuf> {
             .to_path_buf();
     }
     Ok(root)
+}
+
+fn runtime_cargo_workspace_root() -> Option<PathBuf> {
+    std::env::var_os(CODEX_CARGO_WORKSPACE_ROOT_ENV).map(PathBuf::from)
+}
+
+fn resolve_cargo_resource_from_workspace(
+    workspace_root: &Path,
+    manifest_dir: &Path,
+    resource: &Path,
+) -> io::Result<PathBuf> {
+    let compiled_workspace_root = manifest_dir
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "codex-rs"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "compile-time manifest directory is outside codex-rs: {}",
+                    manifest_dir.display()
+                ),
+            )
+        })?;
+    let package_dir = manifest_dir
+        .strip_prefix(compiled_workspace_root)
+        .map_err(io::Error::other)?;
+    Ok(workspace_root.join(package_dir).join(resource))
 }
 
 fn normalize_runfile_path(path: &Path) -> PathBuf {

@@ -111,8 +111,8 @@ impl ChatWidget {
             ])
         } else {
             Line::from(vec![
-                "The Windows sandbox cannot protect writes to folders that are writable by Everyone.".into(),
-                " Consider removing write access for Everyone from the following folders:".into(),
+                "The non-admin Windows sandbox cannot guarantee file containment in folders writable by Everyone.".into(),
+                " It also cannot prevent every deletion allowed to your Windows account. Use the administrator-backed sandbox for stronger protection, or remove Everyone write access from:".into(),
             ])
         };
         header_children.push(Box::new(
@@ -275,8 +275,12 @@ impl ChatWidget {
         }];
         if allow_unelevated {
             items.push(SelectionItem {
-                name: "Use non-admin sandbox (higher risk if prompt injected)".to_string(),
-                description: None,
+                name: "Use non-admin sandbox (compatibility mode; limited file protection)"
+                    .to_string(),
+                description: Some(
+                    "Does not prevent every deletion allowed to your Windows account and is higher risk if a prompt is injected."
+                        .to_string(),
+                ),
                 actions: vec![Box::new(move |tx| {
                     legacy_otel.counter(
                         "codex.windows_sandbox.elevated_prompt_use_legacy",

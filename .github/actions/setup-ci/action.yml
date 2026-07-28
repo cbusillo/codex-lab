@@ -75,7 +75,16 @@ runs:
         # self-hosted Linux jobs cannot accumulate one persistent tree per run.
         bazel_repo_contents_cache="$RUNNER_TEMP/bazel-repo-contents-cache"
         cargo_target_dir="$CI_BUILD_ROOT/cargo-target"
-        tmp="$CI_BUILD_ROOT/tmp"
+        if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+          # The Dev Drive is recreated for each Windows job and keeps temp paths
+          # short while avoiding antivirus overhead.
+          tmp="$CI_BUILD_ROOT/tmp"
+        else
+          # Test extraction trees and other job-scoped files must not share the
+          # persistent Cargo/Bazel cache root. GitHub Runner clears RUNNER_TEMP
+          # between jobs, including after cancellation.
+          tmp="$RUNNER_TEMP/codex-ci-tmp"
+        fi
 
         build_dirs=(
           "$bazel_output_base"

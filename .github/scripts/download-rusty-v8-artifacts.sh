@@ -55,9 +55,18 @@ checksums_path="${binding_dir}/rusty_v8_release_${TARGET}.sha256"
 echo "Downloading rusty_v8 ${release_tag} artifacts for ${TARGET} from ${repository}"
 
 mkdir -p "${binding_dir}"
-curl -fsSL "${base_url}/librusty_v8_release_${TARGET}.a.gz" -o "${archive_path}"
-curl -fsSL "${base_url}/src_binding_release_${TARGET}.rs" -o "${binding_path}"
-curl -fsSL "${base_url}/rusty_v8_release_${TARGET}.sha256" -o "${checksums_path}"
+curl_args=(
+  --fail
+  --show-error
+  --location
+  --retry 5
+  --retry-all-errors
+  --retry-delay 2
+  --retry-max-time 120
+)
+curl "${curl_args[@]}" "${base_url}/librusty_v8_release_${TARGET}.a.gz" -o "${archive_path}"
+curl "${curl_args[@]}" "${base_url}/src_binding_release_${TARGET}.rs" -o "${binding_path}"
+curl "${curl_args[@]}" "${base_url}/rusty_v8_release_${TARGET}.sha256" -o "${checksums_path}"
 
 if [[ "$(wc -l < "${checksums_path}")" -ne 2 ]]; then
   echo "Expected exactly two checksums for ${TARGET} in ${checksums_path}" >&2
