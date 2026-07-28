@@ -45,6 +45,28 @@ unsafe fn token_has_restricting_sid(token: HANDLE, expected_sid: *mut c_void) ->
 }
 
 #[test]
+fn workspace_write_token_excludes_world_restricting_sid() -> Result<()> {
+    let capability_sid = LocalSid::from_string("S-1-5-21-10-20-30-40")?;
+    let base_token = unsafe { get_current_token_for_restriction()? };
+    let restricted_token = unsafe {
+        create_workspace_write_token_with_caps_from(base_token, &[capability_sid.as_ptr()])?
+    };
+    let mut world = unsafe { world_sid()? };
+    let has_capability =
+        unsafe { token_has_restricting_sid(restricted_token, capability_sid.as_ptr()) };
+    let has_world =
+        unsafe { token_has_restricting_sid(restricted_token, world.as_mut_ptr().cast()) };
+    unsafe {
+        CloseHandle(restricted_token);
+        CloseHandle(base_token);
+    }
+
+    assert!(has_capability?);
+    assert!(!has_world?);
+    Ok(())
+}
+
+#[test]
 fn elevated_token_includes_network_proxy_restricting_sid() -> Result<()> {
     let capability_sid = LocalSid::from_string("S-1-5-21-10-20-30-40")?;
     let network_proxy_sid = LocalSid::from_string("S-1-5-21-50-60-70-80")?;

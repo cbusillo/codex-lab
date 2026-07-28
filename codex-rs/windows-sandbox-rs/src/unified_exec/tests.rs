@@ -121,6 +121,19 @@ fn run_icacls(root: &Path, args: &[String]) {
     );
 }
 
+fn describe_icacls(root: &Path) -> String {
+    let output = std::process::Command::new("icacls.exe")
+        .arg(root)
+        .output()
+        .unwrap_or_else(|err| panic!("inspect ACL for {}: {err}", root.display()));
+    format!(
+        "status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
 fn current_user_sid() -> String {
     let output = std::process::Command::new("whoami.exe")
         .arg("/user")
@@ -140,15 +153,16 @@ fn current_user_sid() -> String {
         .expect("whoami output should include a user SID")
 }
 
-fn isolate_test_root_acl(root: &Path) {
+fn configure_world_writable_test_root_acl(root: &Path) {
+    run_icacls(root, &["/inheritance:r".to_string()]);
     for sid in [
         current_user_sid(),
         "S-1-5-18".to_string(),
         "S-1-5-32-544".to_string(),
+        "S-1-1-0".to_string(),
     ] {
         run_icacls(root, &["/grant:r".to_string(), format!("*{sid}:(OI)(CI)F")]);
     }
-    run_icacls(root, &["/inheritance:r".to_string()]);
 }
 
 fn powershell_literal(path: &Path) -> String {
@@ -696,7 +710,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             .join("windows-sandbox-tests");
         fs::create_dir_all(&scratch_root).expect("create legacy delete scratch root");
         let test_root = TempDir::new_in(scratch_root).expect("create legacy delete test root");
-        isolate_test_root_acl(test_root.path());
+        configure_world_writable_test_root_acl(test_root.path());
         let codex_home = sandbox_home("legacy-delete-writable-roots");
         let workspace = test_root.path().join("workspace");
         let temp_root = test_root.path().join("temp");
@@ -784,6 +798,9 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 10))
                 .await;
         let stdout = String::from_utf8_lossy(&stdout);
+        let workspace_acl = describe_icacls(&workspace);
+        let outside_acl = describe_icacls(&outside_root);
+        let sandbox_log = sandbox_log(codex_home.path());
 
         assert_eq!(
             LegacyDeleteOutcome {
@@ -802,10 +819,9 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
                 outside_file_contents: Some("outside".to_string()),
                 protected_git_dir_exists: true,
             },
-            "test_root={}\nworkspace={}\nstdout={stdout:?}\n{}",
+            "test_root={}\nworkspace={}\nstdout={stdout:?}\nworkspace_acl:\n{workspace_acl}\noutside_acl:\n{outside_acl}\n{sandbox_log}",
             test_root.path().display(),
             workspace.display(),
-            sandbox_log(codex_home.path())
         );
     });
 }
