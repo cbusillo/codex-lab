@@ -27,3 +27,18 @@ fn snapshots() {
         (Unknown, Known(&empty)),
     ]));
 }
+
+#[test]
+fn retained_matcher_recognizes_rendered_agents_md() {
+    let loaded = LoadedAgentsMd::from_text_for_testing("use the project formatter");
+    let state = AgentsMdState::new(Some(&loaded));
+    let fragment = state
+        .render_diff(PreviousSectionState::Absent)
+        .expect("AGENTS.md state should render");
+
+    assert!(AgentsMdState::has_retained_fragment_matcher());
+    assert!(AgentsMdState::matches_retained_fragment(
+        fragment.role(),
+        &fragment.render()
+    ));
+}
