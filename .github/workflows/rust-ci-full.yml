@@ -3,10 +3,15 @@ on:
   workflow_call:
   push:
     branches:
-      # Main pushes enter through postmerge-ci. Keep this opt-in branch trigger
-      # for developers who want the full suite before merging.
+      # Keep this opt-in branch trigger for developers who want the full suite
+      # before merging. Nightly and manual orchestration enters through
+      # full-ci.yml.
       - "**full-ci**"
   workflow_dispatch:
+
+concurrency:
+  group: rust-ci-full::${{ github.workflow }}::${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   authorize_self_hosted:
@@ -103,7 +108,7 @@ jobs:
       name: bazel
       deployment: false
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - name: Linux
@@ -136,7 +141,6 @@ jobs:
             -- \
             build \
             --config=argument-comment-lint \
-            --keep_going \
             --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
             -- \
             ${bazel_targets}
@@ -149,7 +153,6 @@ jobs:
           ./.github/scripts/run-argument-comment-lint-bazel.sh \
             --config=argument-comment-lint \
             --platforms=//:local_windows \
-            --keep_going \
             --build_metadata=COMMIT_SHA=${GITHUB_SHA}
 
   # --- CI to validate on different os/targets --------------------------------
@@ -169,7 +172,7 @@ jobs:
       SCCACHE_CACHE_SIZE: 10G
 
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - runner: macos-26
@@ -508,9 +511,9 @@ jobs:
       test_threads: 4
     secrets: inherit
 
-  # --- Gatherer job for the full post-merge workflow --------------------------
+  # --- Gatherer job for the full Rust workflow --------------------------------
   results:
-    name: Full CI results
+    name: Full Rust CI results
     needs:
       [
         general,
@@ -527,29 +530,15 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Summarize
-        shell: bash
-        run: |
-          echo "argpkg : ${{ needs.argument_comment_lint_package.result }}"
-          echo "arglint: ${{ needs.argument_comment_lint_prebuilt.result }}"
-          echo "general: ${{ needs.general.result }}"
-          echo "shear  : ${{ needs.cargo_shear.result }}"
-          echo "lint   : ${{ needs.lint_build.result }}"
-          echo "test macos : ${{ needs.tests_macos_aarch64.result }}"
-          echo "test linux : ${{ needs.tests_linux_x64_remote.result }}"
-          echo "test arm64 : ${{ needs.tests_linux_arm64.result }}"
-          echo "test winx64: ${{ needs.tests_windows_x64.result }}"
-          echo "test winarm: ${{ needs.tests_windows_arm64.result }}"
-          [[ '${{ needs.argument_comment_lint_package.result }}' == 'success' ]] || { echo 'argument_comment_lint_package failed'; exit 1; }
-          [[ '${{ needs.argument_comment_lint_prebuilt.result }}' == 'success' ]] || { echo 'argument_comment_lint_prebuilt failed'; exit 1; }
-          [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }
-          [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
-          [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
-          [[ '${{ needs.tests_macos_aarch64.result }}' == 'success' ]] || { echo 'tests_macos_aarch64 failed'; exit 1; }
-          [[ '${{ needs.tests_linux_x64_remote.result }}' == 'success' ]] || { echo 'tests_linux_x64_remote failed'; exit 1; }
-          [[ '${{ needs.tests_linux_arm64.result }}' == 'success' ]] || { echo 'tests_linux_arm64 failed'; exit 1; }
-          [[ '${{ needs.tests_windows_x64.result }}' == 'success' ]] || { echo 'tests_windows_x64 failed'; exit 1; }
-          [[ '${{ needs.tests_windows_arm64.result }}' == 'success' ]] || { echo 'tests_windows_arm64 failed'; exit 1; }
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require successful dependencies
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/check_ci_results.py
 
       - name: sccache summary note
         if: always()
