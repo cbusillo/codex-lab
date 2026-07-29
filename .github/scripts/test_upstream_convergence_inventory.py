@@ -231,6 +231,8 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
 
     def test_background_review_implementation_and_proof_are_owned(self) -> None:
         for path in (
+            "codex-rs/exec/src/lib.rs",
+            "codex-rs/exec/src/lib_tests.rs",
             "codex-rs/core/src/session/background_auto_review.rs",
             "codex-rs/core/src/session/background_auto_review_tests.rs",
             "codex-rs/core/tests/suite/background_review.rs",
