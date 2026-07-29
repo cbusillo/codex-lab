@@ -455,6 +455,15 @@ POST_ANCHOR_RULES = (
     ),
     Rule(
         patterns=(
+            "codex-rs/exec/src/lib.rs",
+            "codex-rs/exec/src/lib_tests.rs",
+        ),
+        lane="intentionally_owned",
+        contracts=("AGENT-1",),
+        reason="bounded headless Background Review completion restored after the upstream anchor",
+    ),
+    Rule(
+        patterns=(
             "codex-rs/tui/Cargo.toml",
             "codex-rs/tui/src/debug_config.rs",
         ),

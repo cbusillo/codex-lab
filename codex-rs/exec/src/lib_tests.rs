@@ -263,6 +263,115 @@ fn lagged_event_warning_message_is_explicit() {
 }
 
 #[test]
+fn background_review_target_matches_only_the_completed_turn_diff() {
+    let matching = ApiReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:matching".to_string(),
+    };
+    let stale = ApiReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:stale".to_string(),
+    };
+
+    assert!(background_review_target_matches_turn(
+        &matching,
+        Some("sha256:matching")
+    ));
+    assert!(!background_review_target_matches_turn(
+        &stale,
+        Some("sha256:matching")
+    ));
+    assert!(!background_review_target_matches_turn(&matching, None));
+}
+
+#[test]
+fn background_review_wait_rearms_for_completion_and_stops_on_terminal_status() {
+    let diff = "diff --git a/file b/file\n+changed\n";
+    let fingerprint = diff_fingerprint(diff).expect("reviewable diff fingerprint");
+    let target = ApiReviewTarget::CurrentTurnDiff { fingerprint };
+    let completion_grace = Duration::from_secs(/*secs*/ 300);
+    let now = tokio::time::Instant::now();
+    let mut wait = BackgroundReviewWaitState::default();
+    wait.record_turn_diff(diff);
+
+    assert!(wait.begin_wait(now, completion_grace));
+    assert_eq!(
+        wait.deadline().map(|deadline| deadline.kind),
+        Some(BackgroundReviewDeadlineKind::Schedule)
+    );
+    wait.record_status(
+        &target,
+        "run-1",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Pending,
+        now,
+        completion_grace,
+    );
+    assert_eq!(
+        wait.deadline().map(|deadline| deadline.kind),
+        Some(BackgroundReviewDeadlineKind::Completion)
+    );
+    wait.record_status(
+        &target,
+        "run-1",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Running,
+        now + Duration::from_secs(/*secs*/ 1),
+        completion_grace,
+    );
+    let completion_deadline = wait.deadline().expect("completion deadline").at;
+    wait.record_status(
+        &target,
+        "run-1",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Completed,
+        now + Duration::from_secs(/*secs*/ 2),
+        completion_grace,
+    );
+
+    assert!(completion_deadline <= now + completion_grace);
+    assert!(wait.should_shutdown());
+    assert!(wait.deadline().is_none());
+}
+
+#[test]
+fn background_review_wait_accepts_skipped_without_pending() {
+    let diff = "diff --git a/file b/file\n+changed\n";
+    let fingerprint = diff_fingerprint(diff).expect("reviewable diff fingerprint");
+    let target = ApiReviewTarget::CurrentTurnDiff { fingerprint };
+    let now = tokio::time::Instant::now();
+    let mut wait = BackgroundReviewWaitState::default();
+    wait.record_turn_diff(diff);
+    wait.record_status(
+        &target,
+        "run-1",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped,
+        now,
+        Duration::from_secs(/*secs*/ 300),
+    );
+
+    assert!(!wait.begin_wait(now, Duration::from_secs(/*secs*/ 300)));
+}
+
+#[test]
+fn background_review_wait_ignores_unobserved_terminal_run() {
+    let diff = "diff --git a/file b/file\n+changed\n";
+    let fingerprint = diff_fingerprint(diff).expect("reviewable diff fingerprint");
+    let target = ApiReviewTarget::CurrentTurnDiff { fingerprint };
+    let now = tokio::time::Instant::now();
+    let mut wait = BackgroundReviewWaitState::default();
+    wait.record_turn_diff(diff);
+    wait.record_status(
+        &target,
+        "stale-run",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Completed,
+        now,
+        Duration::from_secs(/*secs*/ 300),
+    );
+
+    assert!(wait.begin_wait(now, Duration::from_secs(/*secs*/ 300)));
+    assert_eq!(
+        wait.deadline().map(|deadline| deadline.kind),
+        Some(BackgroundReviewDeadlineKind::Schedule)
+    );
+}
+
+#[test]
 fn runtime_warnings_are_filtered_to_the_primary_thread() {
     let primary_thread_id = "thread-1";
     let turn_id = "turn-1";
