@@ -18,19 +18,27 @@ integration, and the skill-routing/context contracts audited in #83:
 
 | Contract surface     | Scenario                                                                             |
 | -------------------- | ------------------------------------------------------------------------------------ |
-| Project validation   | `auto-validation-project-command-failure.json`, `auto-validation-shellcheck-provider.json`, `auto-validation-bounded-apply-patch-feedback.json` |
+| Project validation   | `auto-validation-project-command-failure.json`, `auto-validation-shellcheck-provider.json`, `auto-validation-cargo-provider.json`, `auto-validation-no-applicable-provider.json`, `auto-validation-bounded-apply-patch-feedback.json` |
 | Background Review    | `background-review-same-turn-commit.json`                                             |
-| Provider routing     | `provider-routing-high-risk-external.json`                                            |
-| External integration | `third-party-agent-current-binary-lifecycle.json`                                     |
+| Provider routing     | `provider-routing-high-risk-external.json`, `provider-preflight-diagnostics.json`, opt-in `provider-routing-live-claude-antigravity.json` |
+| External integration | `third-party-agent-current-binary-lifecycle.json`, opt-in `third-party-agent-live-copilot.json` |
 | Model-facing tools   | `external-tools-model-facing-contract.json`                                           |
+| Agent capability     | `agent-capability-self-report.json`                                                   |
+| Model request shape  | `gpt-5-6-luna-low-request-shape.json`                                                 |
+| Local provider       | `local-provider-config.json`                                                          |
+| Token accounting     | `token-usage-report.json`                                                             |
+| Live validation      | opt-in `jetbrains-inspection-false-green-proof.json`                                  |
 | Skill routing        | `skills-guidance-binding-triggers.json`, `skills-cache-continuity.json`                |
 | Context continuity   | `project-doc-skill-dedup.json`, `multi-turn-resume.json`                              |
 
-Every scenario still recorded in `upstream/convergence-guard.json` but not
-restored here carries a `pending_restore` waiver in
-`upstream/convergence-waivers.json`. Restore a scenario together with the
-runtime contract it proves, then delete its waiver; the guard fails on a waiver
-that no longer matches a violation, so the ledger cannot go stale silently.
+Every harness path recorded in `upstream/convergence-guard.json` is restored.
+If a future refresh removes one, it must restore the path with its runtime
+contract or add an explicit evidence-backed waiver; stale waivers fail the
+guard.
+
+Aggregate reports include every scenario file, explicitly listing opt-in live
+scenarios under `skipped_scenarios` rather than silently omitting them from the
+deterministic scenario count.
 
 ## Run
 
@@ -38,6 +46,14 @@ Run the full harness suite against a freshly built local Codex binary:
 
 ```sh
 just exec-harness-test
+```
+
+Inspect rebuildable local disk usage without deleting anything, then apply the
+same bounded cleanup when needed:
+
+```sh
+just local-cleanup-space
+just local-cleanup-space --apply
 ```
 
 On Linux, this recipe also builds and stages the bundled

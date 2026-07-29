@@ -33,6 +33,16 @@ def expected_scenario_total() -> int:
     )
 
 
+def expected_skipped_scenarios() -> list[str]:
+    scenarios = sorted((Path(__file__).parent / "scenarios").glob("*.json"))
+    return [
+        scenario.stem
+        for scenario in scenarios
+        if json.loads(scenario.read_text(encoding="utf-8")).get("skip_run_all")
+        is True
+    ]
+
+
 class RunAllReportTest(unittest.TestCase):
     def test_main_writes_aggregate_report(self) -> None:
         requested_binary = str(Path("/tmp/requested-codex").resolve(strict=False))
@@ -129,7 +139,8 @@ class RunAllReportTest(unittest.TestCase):
                 ),
                 mock.patch.object(RUN_ALL.subprocess, "run", side_effect=fake_run),
             ):
-                with redirect_stdout(StringIO()):
+                stderr = StringIO()
+                with redirect_stdout(StringIO()), redirect_stderr(stderr):
                     returncode = RUN_ALL.main(
                         [
                             "--codex-bin",
@@ -149,6 +160,19 @@ class RunAllReportTest(unittest.TestCase):
         self.assertFalse(report["partial"])
         self.assertEqual("/tmp/codex", report["codex_bin"])
         self.assertEqual(expected_scenario_total(), report["scenario_total"])
+        self.assertEqual(
+            expected_scenario_total() + len(expected_skipped_scenarios()),
+            report["scenario_file_total"],
+        )
+        self.assertEqual(
+            len(expected_skipped_scenarios()), report["skipped_scenario_count"]
+        )
+        self.assertEqual(
+            expected_skipped_scenarios(),
+            [item["scenario"] for item in report["skipped_scenarios"]],
+        )
+        for scenario in expected_skipped_scenarios():
+            self.assertIn(scenario, stderr.getvalue())
         self.assertEqual("abc123", report["git_revision"])
         self.assertEqual("current", report["provenance"]["status"])
         self.assertEqual("f" * 64, report["provenance"]["binary_sha256"])
@@ -210,6 +234,9 @@ class RunAllReportTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertFalse(report["partial"])
         self.assertEqual(0, report["scenario_count"])
+        self.assertEqual(
+            len(expected_skipped_scenarios()), report["skipped_scenario_count"]
+        )
         self.assertEqual("stale", report["provenance"]["status"])
         self.assertFalse(
             any(

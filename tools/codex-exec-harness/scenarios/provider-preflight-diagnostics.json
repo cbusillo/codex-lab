@@ -1,0 +1,133 @@
+{
+  "name": "provider-preflight-diagnostics",
+  "characterization": {
+    "issue": 370,
+    "status": "runtime-covered"
+  },
+  "model": "gpt-5.6-sol",
+  "sandbox": "read-only",
+  "prompt": "Launch the configured external failure fixture, wait for it, inspect its classified provider status, interrupt it for cleanup, and finish.",
+  "files": {
+    "README.md": "# External provider diagnostics fixture\n",
+    "fixture-auth-failure.sh": "#!/bin/sh\necho 'Authentication required. Please sign in.' >&2\nexit 1\n"
+  },
+  "config_toml": "model_provider = \"harness\"\n\n[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = false\n\n[agents.fixture_external_failure]\ndescription = \"Deterministic external provider failure fixture.\"\n\n[agents.fixture_external_failure.backend]\ntype = \"external_command\"\ncommand = \"/bin/sh\"\nprotocol = \"raw_cli\"\nargs = [\"fixture-auth-failure.sh\"]\ntimeout_ms = 5000\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-provider-failure-spawn",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "arguments": "{\"message\":\"Fail with the configured authentication diagnostic.\",\"task_name\":\"provider_failure\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external_failure\",\"fork_turns\":\"none\"}",
+              "call_id": "call-provider-failure-spawn",
+              "namespace": "collaboration"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-provider-failure-wait",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "wait_agent",
+              "arguments": "{\"timeout_ms\":10000}",
+              "call_id": "call-provider-failure-wait",
+              "namespace": "collaboration"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-provider-failure-list",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "list_agents",
+              "arguments": "{}",
+              "call_id": "call-provider-failure-list",
+              "namespace": "collaboration"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-provider-failure-interrupt",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "interrupt_agent",
+              "arguments": "{\"target\":\"provider_failure\"}",
+              "call_id": "call-provider-failure-interrupt",
+              "namespace": "collaboration"
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-provider-failure-complete",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-provider-failure-complete",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "External provider diagnostics completed."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 5,
+    "turn_count": 1,
+    "thread_id": "required",
+    "tool_outputs": [
+      {
+        "request": 1,
+        "call_id": "call-provider-failure-spawn",
+        "contains_all": [
+          "provider_failure",
+          "fixture_external_failure",
+          "explicit"
+        ]
+      },
+      {
+        "request": 2,
+        "call_id": "call-provider-failure-wait",
+        "contains": "\"timed_out\":"
+      },
+      {
+        "request": 3,
+        "call_id": "call-provider-failure-list",
+        "contains_all": [
+          "authentication_required",
+          "fixture_external_failure",
+          "raw_cli",
+          "duration_ms",
+          "Authentication required"
+        ]
+      },
+      {
+        "request": 4,
+        "call_id": "call-provider-failure-interrupt",
+        "contains": "Authentication required"
+      }
+    ]
+  },
+  "timeout_seconds": 120
+}

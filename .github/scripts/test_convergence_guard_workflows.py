@@ -23,7 +23,10 @@ LINTED_WORKFLOWS = (
     WORKFLOWS / "repo-checks.yml",
     WORKFLOWS / "exec-harness.yml",
 )
-LINTED_SHELL = (ROOT / "scripts" / "local" / "exec-harness-env.sh",)
+LINTED_SHELL = (
+    ROOT / "scripts" / "local" / "cleanup-space.sh",
+    ROOT / "scripts" / "local" / "exec-harness-env.sh",
+)
 
 # CI sets this so a missing linter fails loudly instead of skipping to green.
 REQUIRED = os.environ.get("CONVERGENCE_LINT_REQUIRED") == "1"

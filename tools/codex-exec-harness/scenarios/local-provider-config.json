@@ -1,0 +1,40 @@
+{
+  "name": "local-provider-config",
+  "model": "local-test-model",
+  "prompt": "Reply with exactly: ok. LOCAL_PROVIDER_MARKER",
+  "files": {
+    "README.md": "# Local provider fixture\n"
+  },
+  "config_toml": "model_provider = \"local-fixture\"\n\n[model_providers.local-fixture]\nname = \"Local Fixture\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-local-provider"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 1,
+    "turn_count": 1,
+    "thread_id": "required",
+    "event_types": {
+      "thread.started": 1,
+      "turn.started": 1,
+      "turn.completed": 1
+    },
+    "responses": [
+      {
+        "request": 0,
+        "scope": "body",
+        "contains": "local-test-model"
+      },
+      {
+        "request": 0,
+        "scope": "input",
+        "contains": "LOCAL_PROVIDER_MARKER"
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}
