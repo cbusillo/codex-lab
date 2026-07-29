@@ -231,10 +231,6 @@ POLICY_V1_RULES = (
             "codex-rs/external-agent-migration/**",
             "codex-rs/external-agent-sessions/**",
             "codex-rs/core/src/agent/**",
-            # The skill catalog always appends Every Code's binding routing
-            # policy, including for models whose upstream base instructions
-            # already carry generic skill usage guidance.
-            "codex-rs/core-skills/src/render.rs",
             "codex-rs/core/src/review_persistence.rs",
             # Implementation and integration proofs for owned orchestration and
             # review behavior, including the explicit external-agent preflight and
@@ -451,6 +447,12 @@ GOVERNANCE_RULES = (
 )
 
 POST_ANCHOR_RULES = (
+    Rule(
+        patterns=("codex-rs/core-skills/src/render.rs",),
+        lane="intentionally_owned",
+        contracts=("AGENT-1",),
+        reason="binding skill routing restored after the upstream anchor",
+    ),
     Rule(
         patterns=feature_paths("apply_patch_validation"),
         lane="intentionally_owned",
