@@ -325,6 +325,10 @@ pub fn version() -> &'static str {
     CODE_VERSION
 }
 
+pub fn is_lab_build() -> bool {
+    BUILD_CHANNEL == Some("lab")
+}
+
 pub fn min_wire_compat_version() -> &'static str {
     MIN_WIRE_COMPAT_VERSION.as_str()
 }

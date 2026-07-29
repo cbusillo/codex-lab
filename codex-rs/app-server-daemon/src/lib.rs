@@ -27,6 +27,10 @@ use tokio::time::sleep;
 
 const START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const START_TIMEOUT: Duration = Duration::from_secs(10);
+const CODEX_CLI_VERSION: &str = match option_env!("CODE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(75);
 const PID_FILE_NAME: &str = "app-server.pid";
 const UPDATE_PID_FILE_NAME: &str = "app-server-updater.pid";
@@ -621,7 +625,7 @@ impl Daemon {
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
             socket_path: self.socket_path.clone(),
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_version: CODEX_CLI_VERSION.to_string(),
             app_server_version: info.app_server_version,
         })
     }
@@ -763,7 +767,7 @@ impl Daemon {
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
             socket_path: self.socket_path.clone(),
-            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            cli_version: Some(CODEX_CLI_VERSION.to_string()),
             app_server_version,
         }
     }
@@ -780,7 +784,7 @@ impl Daemon {
             backend,
             remote_control_enabled,
             socket_path: self.socket_path.clone(),
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_version: CODEX_CLI_VERSION.to_string(),
             app_server_version,
         }
     }

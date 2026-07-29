@@ -47,6 +47,17 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
     let mut summary = "update configuration is locally consistent".to_string();
     let mut remediation = None;
 
+    if codex_version::is_lab_build() {
+        details.push("update source: Codex Lab release installer".to_string());
+        return DoctorCheck::new(
+            "updates.status",
+            "updates",
+            CheckStatus::Ok,
+            "Codex Lab updates use the release installer",
+        )
+        .details(details);
+    }
+
     if doctor_managed_by_npm(current_exe.as_deref()) {
         match npm_global_root_check() {
             NpmRootCheck::Match { package_root } => {
@@ -88,7 +99,7 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
     match fetch_latest_version(&install_context) {
         Ok(latest_version) => {
             details.push(format!("latest version: {latest_version}"));
-            if is_newer(&latest_version, env!("CARGO_PKG_VERSION")) == Some(true) {
+            if is_newer(&latest_version, codex_version::CODE_VERSION) == Some(true) {
                 details.push("latest version status: newer version is available".to_string());
             } else {
                 details.push("latest version status: current version is not older".to_string());

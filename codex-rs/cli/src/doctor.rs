@@ -487,7 +487,7 @@ async fn build_report(
         schema_version: 1,
         generated_at: generated_at(),
         overall_status,
-        codex_version: env!("CARGO_PKG_VERSION").to_string(),
+        codex_version: codex_version::CODE_VERSION.to_string(),
         checks,
     }
 }

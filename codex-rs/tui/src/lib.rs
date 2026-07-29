@@ -408,7 +408,7 @@ async fn connect_remote_app_server(
     let app_server = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
         endpoint,
         client_name: "codex-tui".to_string(),
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        client_version: codex_version::CODE_VERSION.to_string(),
         experimental_api: true,
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
@@ -572,7 +572,7 @@ where
         session_provenance: agent_session_env::session_provenance_from_agent_env(),
         enable_codex_api_key_env: false,
         client_name: "codex-tui".to_string(),
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        client_version: codex_version::CODE_VERSION.to_string(),
         experimental_api: true,
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
@@ -1204,7 +1204,7 @@ pub async fn run_main(
     let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         codex_app_server_client::build_otel_provider(
             &config,
-            env!("CARGO_PKG_VERSION"),
+            codex_version::CODE_VERSION,
             /*service_name_override*/ None,
             /*default_analytics_enabled*/ true,
         )

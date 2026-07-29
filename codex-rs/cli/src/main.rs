@@ -100,7 +100,7 @@ use codex_terminal_detection::TerminalName;
 #[derive(Debug, Parser)]
 #[clap(
     author,
-    version,
+    version = codex_version::CODE_VERSION,
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true
 )]
@@ -826,6 +826,12 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
 }
 
 fn run_update_command() -> anyhow::Result<()> {
+    if codex_version::is_lab_build() {
+        anyhow::bail!(
+            "`codex update` does not manage Codex Lab releases. Use the Codex Lab release installer instead."
+        );
+    }
+
     #[cfg(debug_assertions)]
     {
         anyhow::bail!(

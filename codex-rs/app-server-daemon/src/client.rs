@@ -22,6 +22,8 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::client_async;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::CODEX_CLI_VERSION;
+
 pub(crate) const CONTROL_SOCKET_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const CLIENT_NAME: &str = "codex_app_server_daemon";
 const INITIALIZE_REQUEST_ID: RequestId = RequestId::Integer(1);
@@ -84,7 +86,7 @@ where
             client_info: ClientInfo {
                 name: CLIENT_NAME.to_string(),
                 title: Some("Codex App Server Daemon".to_string()),
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: CODEX_CLI_VERSION.to_string(),
             },
             capabilities: if experimental_api {
                 Some(InitializeCapabilities {

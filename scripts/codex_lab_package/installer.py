@@ -4,7 +4,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import json
-import re
 import shutil
 import stat
 import subprocess
@@ -24,6 +23,8 @@ from .distribution_manifest import read_sha256sums
 from .distribution_manifest import validate_manifest
 from .engine_contract import ENGINE_ARCHIVE_ROOT
 from .layout import build_shim_script
+from .release_tag import LAB_RELEASE_TAG_PREFIX
+from .release_tag import codex_lab_release_order
 from .smoke import smoke_check
 from .supervisor import EngineIdentity
 from .supervisor import SupervisorPaths
@@ -42,11 +43,6 @@ DEFAULT_STATE_PATH = (
 SHA256SUMS_NAME = "SHA256SUMS"
 USER_AGENT = "codex-lab-installer/0"
 DOWNLOAD_TIMEOUT_SECONDS = 60
-LAB_RELEASE_TAG_PREFIX = "codex-lab-v"
-LAB_RELEASE_ORDER_PATTERN = re.compile(
-    r"^codex-lab-v(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)"
-    r"(?:-lab\.(?P<lab>[0-9]+))?$"
-)
 MAX_LATEST_RELEASE_PAGES = 10
 
 DownloadFunc = Callable[[str, Path], None]
@@ -841,19 +837,6 @@ def select_latest_ordered_lab_release_summary(
         )
     _, release = max(ordered, key=lambda item: (item[0], item[1].published_at))
     return release
-
-
-def codex_lab_release_order(tag_name: str) -> tuple[int, int, int, int, int] | None:
-    match = LAB_RELEASE_ORDER_PATTERN.fullmatch(tag_name)
-    if match is None:
-        return None
-    major = int(match.group("major"))
-    minor = int(match.group("minor"))
-    patch = int(match.group("patch"))
-    lab = match.group("lab")
-    if lab is None:
-        return (major, minor, patch, 1, 0)
-    return (major, minor, patch, 0, int(lab))
 
 
 def lab_distribution_release_summary(
