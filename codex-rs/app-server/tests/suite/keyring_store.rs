@@ -92,7 +92,7 @@ fn persisted_store_shares_values_across_processes() -> Result<()> {
         let account = std::env::var(CHILD_ACCOUNT_ENV_VAR)?;
         let value = std::env::var(CHILD_VALUE_ENV_VAR)?;
         let store = DefaultKeyringStore;
-        assert_eq!(store.load("cross-process", &account)?, Some(value.clone()));
+        assert_eq!(store.load("cross-process", &account)?, Some(value));
         store.save("cross-process", &format!("{account}-ack"), "child-read")?;
         return Ok(());
     }
