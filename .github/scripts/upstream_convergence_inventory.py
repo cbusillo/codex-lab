@@ -487,6 +487,21 @@ POST_ANCHOR_RULES = (
         contracts=("RELEASE-1",),
         reason="Every Code distribution authority",
     ),
+    Rule(
+        patterns=(
+            "scripts/local/cleanup-space.sh",
+            "scripts/local/exec-harness-env.sh",
+        ),
+        lane="intentionally_owned",
+        contracts=("RELEASE-1",),
+        reason="bounded rebuildable artifact lifecycle",
+    ),
+    Rule(
+        patterns=("tools/codex-exec-harness/test_local_cleanup.py",),
+        lane="intentionally_owned",
+        contracts=("RELEASE-1",),
+        reason="bounded rebuildable artifact lifecycle proof",
+    ),
 )
 
 POLICY_V2_RULES = (*GOVERNANCE_RULES, *POST_ANCHOR_RULES, *POLICY_V1_RULES)

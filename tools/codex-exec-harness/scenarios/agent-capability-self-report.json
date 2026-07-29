@@ -1,0 +1,47 @@
+{
+  "name": "agent-capability-self-report",
+  "model": "gpt-5.6-sol",
+  "prompt": "What agents and model choices do you have access to in this harness? AGENT_CAPABILITY_SELF_REPORT_MARKER",
+  "files": {
+    "README.md": "# Agent capability self-report fixture\n"
+  },
+  "config_toml": "model_provider = \"local-fixture\"\nmodel_reasoning_effort = \"low\"\n\n[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = false\n\n[model_providers.local-fixture]\nname = \"Local Fixture\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-agent-capability-self-report"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 1,
+    "turn_count": 1,
+    "thread_id": "required",
+    "responses": [
+      {
+        "request": 0,
+        "scope": "model",
+        "contains": "gpt-5.6-sol"
+      },
+      {
+        "request": 0,
+        "scope": "input",
+        "contains_all": [
+          "eligible installed third-party agent",
+          "task_kind",
+          "task_size",
+          "agent_type",
+          "Task name for the new agent",
+          "Optional number of turns to fork"
+        ]
+      },
+      {
+        "request": 0,
+        "scope": "input",
+        "contains": "AGENT_CAPABILITY_SELF_REPORT_MARKER"
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}

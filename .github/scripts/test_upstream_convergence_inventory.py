@@ -193,6 +193,28 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
             inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION)["lane"],
         )
 
+    def test_local_artifact_lifecycle_is_intentionally_owned(self) -> None:
+        for path in (
+            "scripts/local/cleanup-space.sh",
+            "scripts/local/exec-harness-env.sh",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    inventory.classify_path(path),
+                    {
+                        "path": path,
+                        "lane": "intentionally_owned",
+                        "contracts": ["RELEASE-1"],
+                        "reason": "bounded rebuildable artifact lifecycle",
+                    },
+                )
+                self.assertEqual(
+                    "green_bulk_adopt",
+                    inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION)[
+                        "lane"
+                    ],
+                )
+
     def test_classify_path_omits_conflict_type(self) -> None:
         self.assertNotIn(
             "conflictType", inventory.classify_path("codex-rs/core/src/lib.rs")

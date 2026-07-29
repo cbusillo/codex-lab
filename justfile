@@ -57,6 +57,12 @@ exec-harness-test:
       fi && \
       {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin "$codex_bin" --output-root "$CODEX_EXEC_HARNESS_OUTPUT_ROOT" --report-json "$CODEX_EXEC_HARNESS_REPORT_JSON"
 
+# Remove rebuildable local build and harness artifacts. Defaults to a dry run.
+[no-cd]
+[unix]
+local-cleanup-space *args:
+    {{ justfile_directory() }}/scripts/local/cleanup-space.sh {args}
+
 # Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
 fmt:
     @{{ python }} ../scripts/format.py
