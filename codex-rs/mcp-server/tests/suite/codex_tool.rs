@@ -52,7 +52,7 @@ fn shell_command_sse_response_forwards_the_requested_login_policy() {
     ] {
         let sse = create_shell_command_sse_response(
             vec!["echo".to_string(), "hi".to_string()],
-            None,
+            /*workdir*/ None,
             Some(5_000),
             policy,
             "call1234",

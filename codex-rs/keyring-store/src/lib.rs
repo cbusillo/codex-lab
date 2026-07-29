@@ -464,7 +464,9 @@ pub mod tests {
             .get_or_init(|| {
                 if let Some(path) = std::env::var_os(super::TEST_KEYRING_DIR_ENV_VAR) {
                     let path = PathBuf::from(path);
-                    secure_directory(&path).expect("open shared app-server test keyring root");
+                    if let Err(error) = secure_directory(&path) {
+                        panic!("open shared app-server test keyring root: {error}");
+                    }
                     return SharedTestKeyringRoot { path, owned: false };
                 }
                 let process_id = std::process::id();
@@ -479,12 +481,14 @@ pub mod tests {
                 {
                     let mut dir_builder = std::fs::DirBuilder::new();
                     dir_builder.mode(0o700);
-                    dir_builder
-                        .create(&root)
-                        .expect("create shared app-server test keyring root");
+                    if let Err(error) = dir_builder.create(&root) {
+                        panic!("create shared app-server test keyring root: {error}");
+                    }
                 }
                 #[cfg(not(unix))]
-                std::fs::create_dir(&root).expect("create shared app-server test keyring root");
+                if let Err(error) = std::fs::create_dir(&root) {
+                    panic!("create shared app-server test keyring root: {error}");
+                }
                 SharedTestKeyringRoot {
                     path: root,
                     owned: true,
