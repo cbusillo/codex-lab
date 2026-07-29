@@ -76,6 +76,26 @@ tree, which no per-file check would notice.
 | `HOOKS-1`       | Hook identity and persisted hook state                    | Intentionally owned                          | A declared handler `id` anchors the persisted enable/disable and `trusted_hash` state so reordering handlers cannot silently drop a user's decision, the id stays out of the trust hash, and `hooks.json` tolerates extension keys while still rejecting misplaced event tables. | `codex-rs/config/src/hooks_tests.rs`; `codex-rs/hooks/src/engine/mod_tests.rs`; `codex-rs/hooks/src/declarations.rs` tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `GOVERNANCE-1`  | Repository planning and convergence evidence              | Intentionally owned                          | GitHub issues remain the durable plan graph, issue #28 remains the recovery point, and checked-in convergence evidence must identify immutable local, upstream, and merge-base commits.                                                                                          | Root `AGENTS.md` planning instructions plus issue #428 ancestry and tree-identity verification.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
+## Execution and agent convergence decisions
+
+Issue #307 makes the current upstream execution and multi-agent substrate the
+canonical implementation while retaining Every Code behavior only in additive,
+guarded layers:
+
+- The legacy `agent_jobs` handler, CSV batch-spawn surface, and parallel job
+  table lifecycle are retired. Native V2 spawn, list, wait, message, interrupt,
+  close, and resume operations are the only supported orchestration path.
+- External-agent configuration and import use the current
+  `external_agent_migration` service and the app-server
+  `external_agent_migration` processor. The deleted pre-anchor request-processor
+  paths are not restored.
+- Agent subtree recovery is owned by current `AgentControl` resume behavior.
+  Persisted internal identities may resume, while external live edges are not
+  reopened or duplicated after restart.
+- Every Code external-provider routing, explicit preflight, bounded completion
+  output, Code Bridge tools, and their deterministic scenarios remain additive
+  guarded contracts rather than forks of upstream multi-agent internals.
+
 ## Known missing behavior routing
 
 The six actionable rows retained from #407 remain visible without making the
