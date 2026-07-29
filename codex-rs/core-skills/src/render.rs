@@ -27,6 +27,10 @@ pub const SKILL_DESCRIPTIONS_REMOVED_WARNING_PREFIX: &str =
     "Exceeded skills context budget. All skill descriptions were removed and";
 pub const SKILLS_INTRO_WITH_ABSOLUTE_PATHS: &str = "A skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that can be used. Each entry includes a name, description, and source locator. `file` locators are on the host filesystem, `environment resource` locators are owned by an execution environment, `orchestrator resource` locators are opaque non-filesystem resources, and `custom resource` locators use their provider's access mechanism.";
 const SKILLS_INTRO_WITH_ALIASES: &str = "A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.";
+const SKILLS_BINDING_ROUTING_RULES: &str = r###"- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement in the described context. Read its complete `SKILL.md` through the listed source mechanism before taking other investigative or implementation actions for that turn.
+- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, find that delegated skill in the Available Skills list above and read its complete `SKILL.md` through the listed source mechanism before taking actions in that subdomain.
+- Match skills independently against every part of the request. One relevant skill does not suppress another: for example, regression investigation and durable GitHub planning can require separate skills in the same turn.
+- If multiple skills apply, use all relevant mandatory or delegated skills before ordinary work. Do not choose only one when another skill also matches the user's request."###;
 pub const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r###"- Discovery: The list above is the skills available in this session (name + description + source locator). `file` entries live on the host filesystem, `environment resource` and `orchestrator resource` entries must be accessed through `skills.list` and `skills.read`, and `custom resource` entries use their provider's access mechanism.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - Missing/blocked: If a named skill isn't in the list or its source can't be read, say so briefly and continue with the best fallback.
@@ -37,7 +41,7 @@ pub const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r###"- Discovery: The li
   4) For filesystem-backed skills, prefer running or patching provided scripts instead of retyping large code blocks. For environment and orchestrator skills, use `skills.read` and the available tools; do not invent a local path.
   5) Reuse provided assets or templates through the same source access mechanism instead of recreating them.
 - Coordination and sequencing:
-  - If multiple skills apply, choose the minimal set that covers the request and state the order you'll use them.
+  - For non-binding matches, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
 - Context hygiene:
   - Progressive disclosure applies to selecting relevant files, not partially reading a selected instruction file. Do not load unrelated references, scripts, or assets.
@@ -54,7 +58,7 @@ pub const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r###"- Discovery: The list abov
   4) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
   5) If `assets/` or templates exist, reuse them instead of recreating from scratch.
 - Coordination and sequencing:
-  - If multiple skills apply, choose the minimal set that covers the request and state the order you'll use them.
+  - For non-binding matches, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
 - Context hygiene:
   - Progressive disclosure applies to selecting relevant files, not partially reading a selected instruction file. Do not load unrelated references, scripts, or assets.
@@ -74,6 +78,8 @@ pub fn render_available_skills_body(skill_root_lines: &[String], skill_lines: &[
     }
     lines.push("### Available skills".to_string());
     lines.extend(skill_lines.iter().cloned());
+    lines.push("### Binding skill routing".to_string());
+    lines.push(SKILLS_BINDING_ROUTING_RULES.to_string());
 
     format!("\n{}\n", lines.join("\n"))
 }
@@ -1021,6 +1027,16 @@ mod tests {
             ));
             assert!(!instructions.contains("Read only enough to follow the workflow"));
         }
+    }
+
+    #[test]
+    fn available_skills_guidance_preserves_binding_trigger_rules() {
+        let rendered = render_available_skills_body(&[], &[]);
+
+        assert!(rendered.contains("If a skill description says it MUST be used"));
+        assert!(rendered.contains("Delegated triggers"));
+        assert!(rendered.contains("Match skills independently against every part"));
+        assert!(rendered.contains("use all relevant mandatory or delegated skills"));
     }
 
     #[test]

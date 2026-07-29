@@ -47,6 +47,8 @@ async fn host_skill_catalog_refreshes_once_when_skills_change() -> Result<()> {
     .await;
 
     let codex_home = TempDir::new()?;
+    let isolated_home = TempDir::new()?;
+    let isolated_home_env = isolated_home.path().to_string_lossy().into_owned();
     let extra_root = TempDir::new()?;
     let extra_skills_root = extra_root.path().join("skills");
     write_skill(
@@ -82,6 +84,10 @@ stream_max_retries = 0
 
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_env_overrides(&[
+            ("HOME", Some(isolated_home_env.as_str())),
+            ("USERPROFILE", Some(isolated_home_env.as_str())),
+        ])
         .build()
         .await?;
     timeout(READ_TIMEOUT, app_server.initialize()).await??;

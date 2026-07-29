@@ -388,6 +388,7 @@ fn omission_notice_follows_render_policy_and_is_charged_to_catalog_budget() {
     let rendered_metadata_cost = fragment
         .body()
         .lines()
+        .take_while(|line| *line != "### Binding skill routing")
         .filter(|line| line.starts_with("- "))
         .map(|line| approx_token_count(&format!("{line}\n")))
         .sum::<usize>();

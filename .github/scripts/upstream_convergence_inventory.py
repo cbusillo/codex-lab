@@ -448,6 +448,12 @@ GOVERNANCE_RULES = (
 
 POST_ANCHOR_RULES = (
     Rule(
+        patterns=("codex-rs/core-skills/src/render.rs",),
+        lane="intentionally_owned",
+        contracts=("AGENT-1",),
+        reason="binding skill routing restored after the upstream anchor",
+    ),
+    Rule(
         patterns=feature_paths("apply_patch_validation"),
         lane="intentionally_owned",
         contracts=("VALIDATION-1",),

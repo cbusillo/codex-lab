@@ -5,13 +5,27 @@
     "status": "runtime-covered"
   },
   "model": "gpt-5.6-sol",
-  "prompt": "Spawn the fixture_external agent as task fixture_agent, wait for it, list its terminal status, interrupt it for cleanup, and finish.",
+  "prompt": "Run generate-context.sh, then spawn the fixture_external agent as task fixture_agent with instructions to read handoff-context.txt without inlining it. Wait for it, list its terminal status, interrupt it for cleanup, and finish.",
   "files": {
-    "fixture-agent.sh": "sleep 1\nprintf 'FIXTURE_EXTERNAL_AGENT_COMPLETED cwd=%s prompt=%s\\n' \"$PWD\" \"$1\"\n"
+    "generate-context.sh": "set -eu\n{\n  printf 'FILE_CONTEXT_BEGIN\\n'\n  index=0\n  while [ \"$index\" -lt 2048 ]; do\n    printf 'context-line-%04d: bounded file-backed handoff payload\\n' \"$index\"\n    index=$((index + 1))\n  done\n  printf 'FILE_CONTEXT_END\\n'\n} > handoff-context.txt\nbytes=$(wc -c < handoff-context.txt | tr -d ' ')\nprintf 'FILE_CONTEXT_CREATED path=handoff-context.txt bytes=%s\\n' \"$bytes\"\n",
+    "fixture-agent.sh": "set -eu\nsleep 1\ncontext_file=handoff-context.txt\nbytes=$(wc -c < \"$context_file\" | tr -d ' ')\nfirst=$(sed -n '1p' \"$context_file\")\nlast=$(tail -n 1 \"$context_file\")\nprintf 'FIXTURE_EXTERNAL_AGENT_COMPLETED cwd=%s context_bytes=%s first=%s last=%s prompt=%s\\n' \"$PWD\" \"$bytes\" \"$first\" \"$last\" \"$1\"\n"
   },
   "config_toml": "model_provider = \"harness\"\n\n[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = false\n\n[agents.fixture_external]\ndescription = \"Deterministic external-command agent used only by the exec harness.\"\n\n[agents.fixture_external.backend]\ntype = \"external_command\"\ncommand = \"/bin/sh\"\nprotocol = \"raw_cli\"\nargs = [\"fixture-agent.sh\"]\ntimeout_ms = 5000\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
   "responses_api": {
     "responses": [
+      {
+        "response_id": "resp-third-party-agent-generate-context",
+        "events": [
+          {
+            "item": {
+              "type": "function_call",
+              "name": "shell_command",
+              "arguments": "{\"command\":\"sh generate-context.sh\"}",
+              "call_id": "call-third-party-agent-generate-context"
+            }
+          }
+        ]
+      },
       {
         "response_id": "resp-third-party-agent-spawn",
         "events": [
@@ -20,7 +34,7 @@
               "type": "function_call",
               "namespace": "collaboration",
               "name": "spawn_agent",
-              "arguments": "{\"message\":\"Return the fixture completion marker and workspace provenance.\",\"task_name\":\"fixture_agent\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external\",\"fork_turns\":\"none\"}",
+              "arguments": "{\"message\":\"Read handoff-context.txt from the workspace and return its byte count plus first and last markers. Do not inline the file into this message.\",\"task_name\":\"fixture_agent\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external\",\"fork_turns\":\"none\"}",
               "call_id": "call-third-party-agent-spawn"
             }
           }
@@ -91,7 +105,7 @@
   },
   "expect": {
     "returncode": 0,
-    "responses_request_count": 5,
+    "responses_request_count": 6,
     "turn_count": 1,
     "thread_id": "required",
     "responses": [
@@ -101,31 +115,53 @@
         "contains_all": ["fixture_external", "spawn_agent"]
       },
       {
-        "request": 2,
+        "request": 3,
         "scope": "input",
-        "contains_all": ["FIXTURE_EXTERNAL_AGENT_COMPLETED", "fixture_agent"]
+        "contains_all": [
+          "FIXTURE_EXTERNAL_AGENT_COMPLETED",
+          "FILE_CONTEXT_BEGIN",
+          "FILE_CONTEXT_END",
+          "fixture_agent"
+        ]
       }
     ],
     "tool_outputs": [
       {
         "request": 1,
+        "call_id": "call-third-party-agent-generate-context",
+        "contains_all": ["FILE_CONTEXT_CREATED", "handoff-context.txt"]
+      },
+      {
+        "request": 2,
         "call_id": "call-third-party-agent-spawn",
         "contains": "fixture_agent"
       },
       {
-        "request": 2,
+        "request": 3,
         "call_id": "call-third-party-agent-wait",
         "contains": "\"timed_out\":false"
       },
       {
-        "request": 3,
+        "request": 4,
         "call_id": "call-third-party-agent-list",
-        "contains_all": ["fixture_agent", "FIXTURE_EXTERNAL_AGENT_COMPLETED"]
+        "contains_all": [
+          "fixture_agent",
+          "FIXTURE_EXTERNAL_AGENT_COMPLETED",
+          "FILE_CONTEXT_BEGIN",
+          "FILE_CONTEXT_END"
+        ]
       },
       {
-        "request": 4,
+        "request": 5,
         "call_id": "call-third-party-agent-interrupt",
         "contains": "FIXTURE_EXTERNAL_AGENT_COMPLETED"
+      }
+    ],
+    "workspace_paths": [
+      {
+        "path": "handoff-context.txt",
+        "type": "file",
+        "contains_all": ["FILE_CONTEXT_BEGIN", "FILE_CONTEXT_END"]
       }
     ]
   },

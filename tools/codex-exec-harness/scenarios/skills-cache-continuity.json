@@ -1,0 +1,140 @@
+{
+  "name": "skills-cache-continuity",
+  "model": "gpt-5.6-sol",
+  "turns": [
+    {
+      "prompt": "Reply with exactly: first. FIRST_CACHE_CONTINUITY_TURN_MARKER. This asks for cache continuity mandatory trigger checks, delegated cache continuity routing, and local model mechanics."
+    },
+    {
+      "prompt": "Reply with exactly: second. SECOND_CACHE_CONTINUITY_TURN_MARKER. Continue the same cache continuity thread without duplicating project or skill guidance."
+    }
+  ],
+  "files": {
+    "AGENTS.md": "# Cache Continuity Guidance\n\nCACHE_CONTINUITY_AGENTS_MARKER Keep this project guidance available exactly once across resumed turns.\n",
+    ".codex/skills/cache-mandatory/SKILL.md": "---\nname: cache-mandatory\ndescription: Use when the task involves cache continuity mandatory trigger checks. This skill MUST be used for CACHE_CONTINUITY_MANDATORY_TRIGGER_MARKER.\n---\nCACHE_CONTINUITY_MANDATORY_BODY_MARKER\n",
+    ".codex/skills/cache-delegating/SKILL.md": "---\nname: cache-delegating\ndescription: Use when delegated cache continuity routing is mentioned. For local model mechanics, use local-llm. CACHE_CONTINUITY_DELEGATING_TRIGGER_MARKER.\n---\nCACHE_CONTINUITY_DELEGATING_BODY_MARKER\n",
+    ".codex/skills/local-llm/SKILL.md": "---\nname: local-llm\ndescription: Use when the user asks about local LLMs or LM Studio. CACHE_CONTINUITY_LOCAL_LLM_MARKER.\n---\nCACHE_CONTINUITY_LOCAL_LLM_BODY_MARKER\n",
+    "README.md": "# Skills cache continuity fixture\n"
+  },
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-skills-cache-first",
+        "usage": {
+          "input_tokens": 1000,
+          "cached_input_tokens": 0,
+          "output_tokens": 20,
+          "total_tokens": 1020
+        }
+      },
+      {
+        "response_id": "resp-skills-cache-second",
+        "usage": {
+          "input_tokens": 2100,
+          "cached_input_tokens": 1500,
+          "output_tokens": 45,
+          "total_tokens": 2145
+        }
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 2,
+    "turn_count": 2,
+    "thread_id": "required",
+    "same_thread_id": true,
+    "event_types": {
+      "thread.started": 2,
+      "turn.started": 2,
+      "turn.completed": 2,
+      "validation.completed": 2
+    },
+    "turns": [
+      {
+        "returncode": 0,
+        "event_count": 4,
+        "responses_request_count": 1,
+        "thread_id": "required",
+        "event_types": {
+          "thread.started": 1,
+          "turn.started": 1,
+          "turn.completed": 1,
+          "validation.completed": 1
+        },
+        "token_usage": {
+          "input_tokens": 1000,
+          "cached_input_tokens": 0,
+          "input_tokens_max": 1200,
+          "cache_ratio_max": 0.01
+        }
+      },
+      {
+        "returncode": 0,
+        "event_count": 4,
+        "responses_request_count": 1,
+        "thread_id": "required",
+        "event_types": {
+          "thread.started": 1,
+          "turn.started": 1,
+          "turn.completed": 1,
+          "validation.completed": 1
+        },
+        "token_usage": {
+          "input_tokens": 2100,
+          "cached_input_tokens": 1500,
+          "input_tokens_max": 2300,
+          "cached_input_tokens_min": 1400,
+          "cache_ratio_min": 0.7
+        }
+      }
+    ],
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "contains": "FIRST_CACHE_CONTINUITY_TURN_MARKER",
+        "not_contains": "SECOND_CACHE_CONTINUITY_TURN_MARKER",
+        "count": {
+          "CACHE_CONTINUITY_AGENTS_MARKER": 1,
+          "CACHE_CONTINUITY_MANDATORY_TRIGGER_MARKER": 1,
+          "CACHE_CONTINUITY_DELEGATING_TRIGGER_MARKER": 1,
+          "CACHE_CONTINUITY_LOCAL_LLM_MARKER": 1,
+          "CACHE_CONTINUITY_MANDATORY_BODY_MARKER": 0,
+          "CACHE_CONTINUITY_DELEGATING_BODY_MARKER": 0,
+          "CACHE_CONTINUITY_LOCAL_LLM_BODY_MARKER": 0,
+          "- cache-mandatory:": 1,
+          "- cache-delegating:": 1,
+          "- local-llm:": 1,
+          "Mandatory triggers": 1,
+          "Delegated triggers": 1
+        }
+      },
+      {
+        "request": 1,
+        "scope": "input",
+        "contains": "SECOND_CACHE_CONTINUITY_TURN_MARKER",
+        "input_prefix_matches_request": 0,
+        "prefix_matches_request": 0,
+        "prefix_length": 1000,
+        "count": {
+          "CACHE_CONTINUITY_AGENTS_MARKER": 1,
+          "CACHE_CONTINUITY_MANDATORY_TRIGGER_MARKER": 1,
+          "CACHE_CONTINUITY_DELEGATING_TRIGGER_MARKER": 1,
+          "CACHE_CONTINUITY_LOCAL_LLM_MARKER": 1,
+          "CACHE_CONTINUITY_MANDATORY_BODY_MARKER": 0,
+          "CACHE_CONTINUITY_DELEGATING_BODY_MARKER": 0,
+          "CACHE_CONTINUITY_LOCAL_LLM_BODY_MARKER": 0,
+          "- cache-mandatory:": 1,
+          "- cache-delegating:": 1,
+          "- local-llm:": 1,
+          "FIRST_CACHE_CONTINUITY_TURN_MARKER": 1,
+          "SECOND_CACHE_CONTINUITY_TURN_MARKER": 1,
+          "Mandatory triggers": 1,
+          "Delegated triggers": 1
+        }
+      }
+    ]
+  },
+  "timeout_seconds": 90
+}
