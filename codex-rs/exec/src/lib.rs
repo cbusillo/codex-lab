@@ -225,7 +225,7 @@ impl BackgroundReviewWaitState {
         &mut self,
         target: &ApiReviewTarget,
         run_id: &str,
-        status: &codex_app_server_protocol::BackgroundAutoReviewStatus,
+        status: codex_app_server_protocol::BackgroundAutoReviewStatus,
         now: tokio::time::Instant,
         completion_grace: Duration,
     ) {
@@ -1203,7 +1203,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     background_review_wait.record_status(
                         &payload.review_target,
                         &payload.run_id,
-                        &payload.status,
+                        payload.status,
                         tokio::time::Instant::now(),
                         background_review_completion_grace,
                     );

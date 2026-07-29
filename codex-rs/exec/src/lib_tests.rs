@@ -302,7 +302,7 @@ fn background_review_wait_rearms_for_completion_and_stops_on_terminal_status() {
     wait.record_status(
         &target,
         "run-1",
-        &codex_app_server_protocol::BackgroundAutoReviewStatus::Pending,
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Pending,
         now,
         completion_grace,
     );
@@ -313,7 +313,7 @@ fn background_review_wait_rearms_for_completion_and_stops_on_terminal_status() {
     wait.record_status(
         &target,
         "run-1",
-        &codex_app_server_protocol::BackgroundAutoReviewStatus::Running,
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Running,
         now + Duration::from_secs(/*secs*/ 1),
         completion_grace,
     );
@@ -321,7 +321,7 @@ fn background_review_wait_rearms_for_completion_and_stops_on_terminal_status() {
     wait.record_status(
         &target,
         "run-1",
-        &codex_app_server_protocol::BackgroundAutoReviewStatus::Completed,
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Completed,
         now + Duration::from_secs(/*secs*/ 2),
         completion_grace,
     );
@@ -342,7 +342,7 @@ fn background_review_wait_accepts_skipped_without_pending() {
     wait.record_status(
         &target,
         "run-1",
-        &codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped,
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped,
         now,
         Duration::from_secs(/*secs*/ 300),
     );
@@ -361,7 +361,7 @@ fn background_review_wait_ignores_unobserved_terminal_run() {
     wait.record_status(
         &target,
         "stale-run",
-        &codex_app_server_protocol::BackgroundAutoReviewStatus::Completed,
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Completed,
         now,
         Duration::from_secs(/*secs*/ 300),
     );

@@ -659,7 +659,7 @@ impl WorldState {
                 let previous = previous(id, section.as_ref());
                 section.render_diff(previous).map(|fragment| {
                     PendingWorldStateFragment::new(
-                        *id,
+                        id,
                         section
                             .snapshot()
                             .as_ref()
