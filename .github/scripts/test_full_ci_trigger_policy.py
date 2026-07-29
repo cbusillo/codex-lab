@@ -113,7 +113,14 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             ("full-v8-canary", "v8-canary.yml"),
         ):
             with self.subTest(job=job_name):
-                self.assertIn(
+                permissions = (
+                    "    permissions:\n"
+                    "      contents: read\n"
+                    "      actions: read\n"
+                    if job_name == "full-v8-canary"
+                    else ""
+                )
+                job_block = (
                     f"  {job_name}:\n"
                     "    name: Full verification / "
                     + {
@@ -124,10 +131,11 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
                     }[job_name]
                     + "\n"
                     "    needs: release-metadata\n"
-                    f"    uses: ./.github/workflows/{workflow_name}\n"
-                    "    secrets: inherit\n",
-                    workflow,
+                    + permissions
+                    + f"    uses: ./.github/workflows/{workflow_name}\n"
+                    "    secrets: inherit\n"
                 )
+                self.assertIn(job_block, workflow)
         self.assertIn(
             "  full-verification:\n"
             "    name: Full verification results\n"
@@ -193,6 +201,17 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertEqual(called_workflows(FULL_CI_WORKFLOW), FULL_VERIFICATION_WORKFLOWS)
         release_calls = called_workflows(CODEX_LAB_RELEASE_WORKFLOW)
         self.assertTrue(FULL_VERIFICATION_WORKFLOWS.issubset(release_calls))
+
+    def test_v8_callers_allow_nested_actions_reads(self) -> None:
+        permissions = (
+            "    permissions:\n"
+            "      contents: read\n"
+            "      actions: read\n"
+            "    uses: ./.github/workflows/v8-canary.yml\n"
+        )
+
+        self.assertIn(permissions, FULL_CI_WORKFLOW.read_text())
+        self.assertIn(permissions, CODEX_LAB_RELEASE_WORKFLOW.read_text())
 
     def test_reusable_workflow_nesting_stays_within_github_limit(self) -> None:
         for workflow_path in (FULL_CI_WORKFLOW, CODEX_LAB_RELEASE_WORKFLOW):
