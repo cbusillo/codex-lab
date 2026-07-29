@@ -15,11 +15,12 @@ const MAX_FILE_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_MESSAGE_BYTES: usize = 800;
 const MAX_SUMMARY_BYTES: usize = 4 * 1024;
 const MAX_TOTAL_INPUT_BYTES: usize = 4 * 1024 * 1024;
+const TRUNCATION_MARKER: &str = "... [truncated]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ValidationFinding {
     tool: &'static str,
-    file: Option<String>,
+    file: String,
     message: String,
 }
 
@@ -162,10 +163,11 @@ fn validate_file(
     checks: &mut BTreeSet<&'static str>,
     findings: &mut Vec<ValidationFinding>,
 ) {
-    let basename = path.basename();
-    let extension = basename
-        .as_deref()
-        .and_then(|basename| Path::new(basename).extension())
+    let display_name = path
+        .basename()
+        .unwrap_or_else(|| path.inferred_native_path_string());
+    let extension = Path::new(&display_name)
+        .extension()
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase);
     let (tool, label, parser) = match extension.as_deref() {
@@ -216,20 +218,25 @@ fn validate_file(
     }
 }
 
-fn display_path(path: &PathUri, cwd: &PathUri) -> Option<String> {
+fn display_path(path: &PathUri, cwd: &PathUri) -> String {
     path.relative_path_from(cwd)
-        .map(|path| truncate_utf8(&path, MAX_FILE_BYTES))
+        .or_else(|| path.basename())
+        .map_or_else(
+            || "<unavailable-path>".to_string(),
+            |path| truncate_utf8(&path, MAX_FILE_BYTES),
+        )
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();
     }
-    let mut end = max_bytes;
+    debug_assert!(max_bytes >= TRUNCATION_MARKER.len());
+    let mut end = max_bytes.saturating_sub(TRUNCATION_MARKER.len());
     while !value.is_char_boundary(end) {
         end -= 1;
     }
-    value[..end].to_string()
+    format!("{}{TRUNCATION_MARKER}", &value[..end])
 }
 
 #[cfg(test)]

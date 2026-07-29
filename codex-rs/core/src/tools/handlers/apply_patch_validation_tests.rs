@@ -31,6 +31,55 @@ fn finding(tool: &str, file: &str, message: String) -> Value {
     json!({"tool": tool, "file": file, "msg": message})
 }
 
+#[test]
+fn outside_workspace_findings_fall_back_to_bounded_basename() {
+    let cwd = std::env::temp_dir().join("validation-workspace").abs();
+    let outside = std::env::temp_dir()
+        .join("validation-outside")
+        .join("invalid.json")
+        .abs();
+    let changes = vec![added_file(outside, "{ invalid")];
+    let (_, parsed) = rendered_summary(&changes, &cwd);
+
+    assert_eq!(parsed["validation"]["issues"][0]["file"], "invalid.json");
+}
+
+#[test]
+fn text_truncation_is_explicit_and_utf8_safe() {
+    let truncated = truncate_utf8(&"🙂".repeat(MAX_MESSAGE_BYTES), MAX_MESSAGE_BYTES);
+
+    assert!(truncated.len() <= MAX_MESSAGE_BYTES);
+    assert!(truncated.ends_with(TRUNCATION_MARKER));
+}
+
+#[test]
+fn yaml_alias_expansion_hits_the_parser_repetition_limit() {
+    let cwd = std::env::temp_dir()
+        .join("validation-yaml-alias-limit")
+        .abs();
+    let yaml = r#"
+a: &a ~
+b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
+c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]
+d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]
+e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]
+f: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e]
+g: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f]
+h: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g]
+i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
+"#;
+    let changes = vec![added_file(cwd.join("aliases.yaml"), yaml)];
+    let (_, parsed) = rendered_summary(&changes, &cwd);
+    let issue = &parsed["validation"]["issues"][0];
+
+    assert_eq!(issue["tool"], "yaml-parse");
+    assert!(
+        issue["msg"]
+            .as_str()
+            .is_some_and(|message| message.contains("repetition limit exceeded"))
+    );
+}
+
 fn rendered_summary(changes: &[AppliedPatchChange], cwd: &AbsolutePathBuf) -> (String, Value) {
     let summary = render_validation_summary(
         changes,
