@@ -21,6 +21,7 @@ def manifest_entry(path: str, upstream_blob: str | None) -> dict[str, object]:
     }
 
 
+APP_SERVER_REGISTRY = "codex-rs/app-server/tests/suite/mod.rs"
 V2_REGISTRY = "codex-rs/app-server/tests/suite/v2/mod.rs"
 
 # Owned implementations and proofs that landed after the last guard regeneration.
@@ -421,26 +422,17 @@ class CheckedInLedgerTest(unittest.TestCase):
 
         self.assertEqual({"ownership_baseline", "current_tree"}, sources)
 
-    def test_owned_app_server_proofs_register_in_the_guarded_v2_registry(self) -> None:
-        """The crate-level app-server registry carries no owned entry.
+    def test_owned_app_server_proofs_register_in_guarded_registries(self) -> None:
+        """Both app-server registries now carry owned integration proofs."""
 
-        Every Every Code-owned app-server proof is a v2 suite, so reverting
-        `suite/v2/mod.rs` unregisters all of them while every proof file stays in
-        the tree. That is exactly the failure the crate-level registry cannot
-        catch, which is why its own `reverted_to_upstream` waiver is
-        `converged_with_upstream` rather than pending work.
-        """
-
-        entry = guarded_entry(self, V2_REGISTRY)
+        crate_entry = guarded_entry(self, APP_SERVER_REGISTRY)
+        v2_entry = guarded_entry(self, V2_REGISTRY)
         waivers = guard.load_waivers(guard.DEFAULT_WAIVERS)
 
-        self.assertEqual("intentionally_owned", entry["lane"])
+        self.assertEqual("intentionally_owned", crate_entry["lane"])
+        self.assertEqual("intentionally_owned", v2_entry["lane"])
+        self.assertNotIn(guard.waiver_key(APP_SERVER_REGISTRY, guard.REVERTED), waivers)
         self.assertNotIn(guard.waiver_key(V2_REGISTRY, guard.REVERTED), waivers)
-        crate_registry = waivers[
-            guard.waiver_key("codex-rs/app-server/tests/suite/mod.rs", guard.REVERTED)
-        ]
-        self.assertEqual("converged_with_upstream", crate_registry["disposition"])
-        self.assertIn(V2_REGISTRY, crate_registry["reason"])
 
     def test_reverting_the_v2_registry_to_upstream_is_detected(self) -> None:
         entry = guarded_entry(self, V2_REGISTRY)
