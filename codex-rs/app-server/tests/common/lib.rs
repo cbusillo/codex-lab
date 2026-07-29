@@ -18,6 +18,8 @@ pub use auth_fixtures::ChatGptIdTokenClaims;
 pub use auth_fixtures::encode_id_token;
 pub use auth_fixtures::write_chatgpt_auth;
 use codex_app_server_protocol::JSONRPCResponse;
+#[cfg(debug_assertions)]
+pub use codex_keyring_store::TEST_KEYRING_DIR_ENV_VAR;
 pub use config::MockResponsesConfig;
 pub use config::write_mock_responses_config_toml;
 pub use config::write_mock_responses_config_toml_with_chatgpt_base_url;
@@ -30,6 +32,7 @@ pub use core_test_support::test_absolute_path;
 pub use core_test_support::test_path_buf_with_windows;
 pub use core_test_support::test_tmp_path;
 pub use core_test_support::test_tmp_path_buf;
+pub use json_logging::AppServerJsonInvocation;
 pub use json_logging::app_server_json_shutdown_event;
 pub use mock_model_server::create_mock_responses_server_repeating_assistant;
 pub use mock_model_server::create_mock_responses_server_sequence;
@@ -54,6 +57,12 @@ pub use test_app_server::DEFAULT_CLIENT_NAME;
 pub use test_app_server::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
 pub use test_app_server::TestAppServer;
 pub use test_app_server::TestAppServerBuilder;
+#[cfg(debug_assertions)]
+pub use test_app_server::USE_TEST_KEYRING_STORE_ARG;
+#[cfg(debug_assertions)]
+pub use test_app_server::configure_test_keyring_for_std_command;
+#[cfg(debug_assertions)]
+pub use test_app_server::configure_test_keyring_for_tokio_command;
 
 pub fn to_response<T: DeserializeOwned>(response: JSONRPCResponse) -> anyhow::Result<T> {
     let value = serde_json::to_value(response.result)?;

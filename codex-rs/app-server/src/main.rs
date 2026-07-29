@@ -4,6 +4,8 @@ use codex_app_server::AppServerRuntimeOptions;
 use codex_app_server::AppServerTransport;
 use codex_app_server::AppServerWebsocketAuthArgs;
 use codex_app_server::PluginStartupTasks;
+#[cfg(debug_assertions)]
+use codex_app_server::install_test_keyring_store_from_env;
 use codex_app_server::run_main_with_transport_options;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
@@ -57,6 +59,12 @@ struct AppServerArgs {
     #[arg(long = "disable-plugin-startup-tasks-for-tests", hide = true)]
     disable_plugin_startup_tasks_for_tests: bool,
 
+    /// Hidden debug-only test hook used to redirect credential storage away
+    /// from the host keyring.
+    #[cfg(debug_assertions)]
+    #[arg(long = "use-test-keyring-store", hide = true)]
+    use_test_keyring_store: bool,
+
     /// Enable remote control for this app-server process without changing persistence.
     #[arg(long = "remote-control", hide = true)]
     remote_control: bool,
@@ -74,6 +82,8 @@ fn main() -> anyhow::Result<()> {
             strict_config,
             #[cfg(debug_assertions)]
             disable_plugin_startup_tasks_for_tests,
+            #[cfg(debug_assertions)]
+            use_test_keyring_store,
             remote_control,
         } = AppServerArgs::parse();
         let loader_overrides = if disable_managed_config_from_debug_env() {
@@ -89,6 +99,10 @@ fn main() -> anyhow::Result<()> {
             code_mode_host_transport: code_mode_host.into(),
             ..Default::default()
         };
+        #[cfg(debug_assertions)]
+        if use_test_keyring_store {
+            install_test_keyring_store_from_env()?;
+        }
         #[cfg(debug_assertions)]
         if disable_plugin_startup_tasks_for_tests {
             runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;

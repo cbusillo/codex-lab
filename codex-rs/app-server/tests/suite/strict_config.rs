@@ -1,6 +1,8 @@
 use std::process::Command;
 
 use anyhow::Result;
+#[cfg(debug_assertions)]
+use app_test_support::configure_test_keyring_for_std_command;
 use tempfile::TempDir;
 
 #[test]
@@ -13,12 +15,17 @@ foo = "bar"
 "#,
     )?;
 
-    let output = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
-        .env("CODEX_LAB_HOME", codex_home.path())
-        .env(
-            "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
-            codex_home.path().join("managed_config.toml"),
-        )
+    let mut command = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?);
+    command.env("CODEX_LAB_HOME", codex_home.path()).env(
+        "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
+        codex_home.path().join("managed_config.toml"),
+    );
+    #[cfg(debug_assertions)]
+    configure_test_keyring_for_std_command(
+        &mut command,
+        &codex_home.path().join("app-server-test-keyring"),
+    );
+    let output = command
         .args(["--strict-config", "--listen", "off"])
         .output()?;
 
