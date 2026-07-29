@@ -100,6 +100,9 @@ jobs:
   full-v8-canary:
     name: Full verification / V8 canary
     needs: release-metadata
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/v8-canary.yml
     secrets: inherit
 
