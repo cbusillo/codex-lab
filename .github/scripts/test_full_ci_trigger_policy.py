@@ -148,6 +148,47 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             workflow,
         )
 
+    def test_codex_lab_release_derives_artifact_version_from_tag(self) -> None:
+        workflow = CODEX_LAB_RELEASE_WORKFLOW.read_text()
+
+        self.assertIn(
+            "      release_version: ${{ steps.release.outputs.release_version }}",
+            workflow,
+        )
+        self.assertIn(
+            "from codex_lab_package.release_tag import release_version_from_tag",
+            workflow,
+        )
+        self.assertIn(
+            "      CODE_VERSION: ${{ needs.release-metadata.outputs.release_version }}",
+            workflow,
+        )
+        self.assertIn("Configure clean Codex Lab build provenance", workflow)
+        self.assertIn(
+            "git status --porcelain=v1 --untracked-files=normal --ignore-submodules=none",
+            workflow,
+        )
+        self.assertIn('echo "CODEX_BUILD_CHANNEL=lab"', workflow)
+        self.assertIn('echo "CODEX_BUILD_COMMIT=$(git rev-parse HEAD)"', workflow)
+        self.assertIn('echo "CODEX_BUILD_DIRTY=clean"', workflow)
+        self.assertIn(
+            "cargo build --locked --timings --release -p codex-cli --bin codex-lab",
+            workflow,
+        )
+        self.assertIn('lab_version="${CODE_VERSION:?missing release version}"', workflow)
+        self.assertIn('--embedded-cli-version "$CODE_VERSION"', workflow)
+        self.assertIn('expected_version = os.environ["CODE_VERSION"]', workflow)
+        self.assertIn('if identity.build_channel != "lab":', workflow)
+        self.assertIn('--version "$CODE_VERSION"', workflow)
+        self.assertIn(
+            '--arg version "${{ needs.build-macos-aarch64.outputs.release_version }}"',
+            workflow,
+        )
+        self.assertLess(
+            workflow.index("Fail fast when release tag is unavailable"),
+            workflow.index("Full verification / Bazel"),
+        )
+
     def test_nightly_and_release_use_the_same_full_verification_components(self) -> None:
         self.assertEqual(called_workflows(FULL_CI_WORKFLOW), FULL_VERIFICATION_WORKFLOWS)
         release_calls = called_workflows(CODEX_LAB_RELEASE_WORKFLOW)

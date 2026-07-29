@@ -31,6 +31,7 @@ jobs:
       contents: read
     outputs:
       release_tag: ${{ steps.release.outputs.release_tag }}
+      release_version: ${{ steps.release.outputs.release_version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -44,11 +45,39 @@ jobs:
         run: |
           set -euo pipefail
           release_tag="$RELEASE_TAG_INPUT"
-          [[ "$release_tag" =~ ^codex-lab-v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]] || {
+          release_version="$(PYTHONPATH=scripts python3 -c 'import sys; from codex_lab_package.release_tag import release_version_from_tag; print(release_version_from_tag(sys.argv[1]))' "$release_tag")" || {
             echo "Invalid Codex Lab release tag: $release_tag" >&2
             exit 1
           }
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+
+      - name: Fail fast when release tag is unavailable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${RELEASE_TAG:?missing release tag}"
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release already exists for $release_tag" >&2
+            exit 1
+          fi
+          set +e
+          git ls-remote --exit-code --tags \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/${release_tag}" > /dev/null
+          tag_status=$?
+          set -e
+          if [[ "$tag_status" -eq 0 ]]; then
+            echo "Git tag already exists for $release_tag" >&2
+            exit 1
+          fi
+          if [[ "$tag_status" -ne 2 ]]; then
+            echo "Unable to verify whether git tag exists for $release_tag" >&2
+            exit "$tag_status"
+          fi
 
   full-bazel:
     name: Full verification / Bazel
@@ -109,7 +138,9 @@ jobs:
       contents: read
     outputs:
       release_tag: ${{ needs.release-metadata.outputs.release_tag }}
+      release_version: ${{ needs.release-metadata.outputs.release_version }}
     env:
+      CODE_VERSION: ${{ needs.release-metadata.outputs.release_version }}
       # The release profile builds with `debug = "line-tables-only"` and
       # `split-debuginfo = "off"`, which leaves the debug map inside the shipped
       # engine. Pack it into a `.dSYM` sidecar so the engine can be stripped
@@ -147,10 +178,26 @@ jobs:
             echo "- Target size before build: \`$target_size\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Configure clean Codex Lab build provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          worktree_status="$(git status --porcelain=v1 --untracked-files=normal --ignore-submodules=none)"
+          if [[ -n "$worktree_status" ]]; then
+            echo "::error::Codex Lab release worktree is not clean"
+            printf '%s\n' "$worktree_status"
+            exit 1
+          fi
+          {
+            echo "CODEX_BUILD_CHANNEL=lab"
+            echo "CODEX_BUILD_COMMIT=$(git rev-parse HEAD)"
+            echo "CODEX_BUILD_DIRTY=clean"
+          } >> "$GITHUB_ENV"
+
       - name: Build Codex Lab CLI
         working-directory: codex-rs
         shell: bash
-        run: cargo build --timings --release -p codex-cli --bin codex-lab
+        run: cargo build --locked --timings --release -p codex-cli --bin codex-lab
 
       - name: Report Cargo cache after build
         if: always()
@@ -254,7 +301,7 @@ jobs:
           output_root="${RUNNER_TEMP}/codex-lab-app"
           app_dir="${output_root}/Codex Lab.app"
           shim_dir="${output_root}/bin"
-          lab_version="$(PYTHONPATH=scripts python3 -c 'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
+          lab_version="${CODE_VERSION:?missing release version}"
           mkdir -p "$output_root"
           start=$SECONDS
           python3 scripts/build_codex_lab_app.py \
@@ -262,6 +309,7 @@ jobs:
             --app-dir "$app_dir" \
             --shim-dir "$shim_dir" \
             --short-version "$lab_version" \
+            --embedded-cli-version "$CODE_VERSION" \
             --bundle-version "$GITHUB_RUN_NUMBER" \
             --source-commit "$(git rev-parse HEAD)" \
             --force
@@ -306,16 +354,16 @@ jobs:
             --entitlements .github/scripts/macos-signing/codex.entitlements.plist
           PYTHONPATH=scripts python3 - "$engine_path" "$(git rev-parse HEAD)" <<'PY'
           from pathlib import Path
+          import os
           import sys
 
           from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
           from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
           from codex_lab_package.supervisor import inspect_engine
-          from codex_package.version import read_workspace_version
 
           identity = inspect_engine(Path(sys.argv[1]))
           expected_source_commit = sys.argv[2]
-          expected_version = read_workspace_version()
+          expected_version = os.environ["CODE_VERSION"]
           if identity.signing_identifier != ENGINE_SIGNING_IDENTIFIER:
               raise ValueError(f"unexpected engine signing identifier: {identity}")
           if identity.team_identifier != ENGINE_TEAM_IDENTIFIER:
@@ -324,6 +372,8 @@ jobs:
               raise ValueError(f"unexpected engine source commit: {identity}")
           if identity.version != expected_version:
               raise ValueError(f"unexpected engine version: {identity}")
+          if identity.build_channel != "lab":
+              raise ValueError(f"unexpected engine build channel: {identity}")
           print(identity)
           PY
           echo "engine_path=$engine_path" >> "$GITHUB_OUTPUT"
@@ -386,6 +436,7 @@ jobs:
             --workflow "$GITHUB_WORKFLOW" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --version "$CODE_VERSION" \
             --release-tag "$release_tag" \
             --download-base-url "$download_base_url" \
             --engine-signed
@@ -439,7 +490,9 @@ jobs:
           (cd dist && sha256sum -c SHA256SUMS)
           jq -e \
             --arg tag "${{ needs.build-macos-aarch64.outputs.release_tag }}" \
-            '.release.tag == $tag
+            --arg version "${{ needs.build-macos-aarch64.outputs.release_version }}" \
+            '.version == $version
+              and .release.tag == $tag
               and .artifacts.appZip.downloadUrl
               and .artifacts.shimZip.downloadUrl
               and .artifacts.engineZip.downloadUrl

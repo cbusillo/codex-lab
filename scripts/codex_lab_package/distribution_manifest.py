@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import re
 import stat
 import zipfile
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ from codex_lab_package.engine_contract import ENGINE_ARCHIVE_ROOT
 from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
 from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
 from codex_lab_package.engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
+from codex_lab_package.release_tag import release_version_from_tag
 from codex_package.version import read_workspace_version
 
 
@@ -32,10 +32,6 @@ APP_ZIP = "codex-lab-app-aarch64-apple-darwin.zip"
 SHIM_ZIP = "codex-lab-shim-aarch64-apple-darwin.zip"
 ENGINE_ZIP = "codex-lab-engine-aarch64-apple-darwin.zip"
 MANIFEST_NAME = "codex-lab-distribution.json"
-RELEASE_TAG_PATTERN = re.compile(
-    r"^codex-lab-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)"
-    r"(-[A-Za-z0-9][A-Za-z0-9.-]*)?$"
-)
 
 
 @dataclass(frozen=True)
@@ -355,10 +351,8 @@ def validate_release(release: object, version: str) -> None:
     tag = release.get("tag")
     if not isinstance(tag, str) or not tag:
         raise ValueError("Manifest release tag must be a non-empty string")
-    match = RELEASE_TAG_PATTERN.fullmatch(tag)
-    if match is None:
-        raise ValueError(f"Manifest release tag has invalid format: {tag}")
-    if match.group("version") != version:
+    tag_version = release_version_from_tag(tag)
+    if tag_version != version:
         raise ValueError(
             f"Manifest release tag version does not match manifest version: {tag} != {version}"
         )

@@ -23,9 +23,20 @@ from codex_lab_package.distribution_manifest import validate_manifest
 from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
 from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
 from codex_lab_package.engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
+from codex_lab_package.release_tag import release_version_from_tag
 
 
 class DistributionManifestTest(unittest.TestCase):
+    def test_extracts_release_version_from_prerelease_tag(self) -> None:
+        self.assertEqual(
+            release_version_from_tag("codex-lab-v0.1.0-lab.1"),
+            "0.1.0",
+        )
+
+    def test_rejects_unorderable_prerelease_tag(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid format"):
+            release_version_from_tag("codex-lab-v0.1.0-rc.1")
+
     def test_builds_and_validates_distribution_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             dist_dir = Path(temp_dir)
