@@ -125,6 +125,10 @@ use codex_exec_server::CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID_ENV_VAR;
 use codex_exec_server::CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR;
 use codex_exec_server::CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR;
 use codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR;
+#[cfg(debug_assertions)]
+use codex_keyring_store::TEST_KEYRING_DIR_ENV_VAR;
+#[cfg(debug_assertions)]
+use codex_keyring_store::tests::shared_test_keyring_root;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
 use core_test_support::is_remote_test_environment;
 use core_test_support::test_codex::TestEnv;
@@ -163,6 +167,8 @@ pub struct TestAppServer {
 
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
 pub const DISABLE_PLUGIN_STARTUP_TASKS_ARG: &str = "--disable-plugin-startup-tasks-for-tests";
+#[cfg(debug_assertions)]
+pub const USE_TEST_KEYRING_STORE_ARG: &str = "--use-test-keyring-store";
 const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
 const CODE_MODE_HOST_PATH_ENV_VAR: &str = "CODEX_CODE_MODE_HOST_PATH";
 #[cfg(windows)]
@@ -247,6 +253,8 @@ impl TestAppServer {
         );
         cmd.env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR);
         cmd.args(args);
+        #[cfg(debug_assertions)]
+        configure_test_keyring_for_tokio_command(&mut cmd, shared_test_keyring_root());
 
         for (k, v) in env_overrides {
             match v {
@@ -1791,6 +1799,20 @@ impl TestAppServer {
             JSONRPCMessage::Notification(_) => None,
         }
     }
+}
+
+#[cfg(debug_assertions)]
+pub fn configure_test_keyring_for_std_command(command: &mut std::process::Command, root: &Path) {
+    command
+        .arg(USE_TEST_KEYRING_STORE_ARG)
+        .env(TEST_KEYRING_DIR_ENV_VAR, root);
+}
+
+#[cfg(debug_assertions)]
+pub fn configure_test_keyring_for_tokio_command(command: &mut Command, root: &Path) {
+    command
+        .arg(USE_TEST_KEYRING_STORE_ARG)
+        .env(TEST_KEYRING_DIR_ENV_VAR, root);
 }
 
 /// Builder for TestAppServer.

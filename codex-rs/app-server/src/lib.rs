@@ -80,6 +80,27 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::Registry;
 use tracing_subscriber::util::SubscriberInitExt;
 
+#[cfg(debug_assertions)]
+use codex_keyring_store::TEST_KEYRING_DIR_ENV_VAR;
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn install_test_keyring_store_from_env() -> anyhow::Result<()> {
+    let test_keyring_dir = std::env::var_os(TEST_KEYRING_DIR_ENV_VAR).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{TEST_KEYRING_DIR_ENV_VAR} must be set when --use-test-keyring-store is used"
+        )
+    })?;
+    let test_keyring_dir = std::path::PathBuf::from(test_keyring_dir);
+    anyhow::ensure!(
+        codex_keyring_store::tests::install_persisted_default_test_keyring_store(
+            &test_keyring_dir
+        )?,
+        "test keyring store was already configured"
+    );
+    Ok(())
+}
+
 const SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY: &str = "Codex rebuilt its local database.";
 
 mod analytics_utils;

@@ -11,6 +11,9 @@ use serde_json::Value;
 use serde_json::json;
 use tokio::sync::Notify;
 
+#[cfg(debug_assertions)]
+use crate::configure_test_keyring_for_std_command;
+
 #[derive(Clone, Default)]
 pub(crate) struct JsonLogCapture {
     lines: Arc<Mutex<Vec<String>>>,
@@ -75,16 +78,26 @@ impl JsonLogCapture {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum AppServerJsonInvocation {
+    Standalone,
+    CodexCli,
+}
+
 pub fn app_server_json_shutdown_event(
-    binary: &str,
-    args: &[&str],
+    invocation: AppServerJsonInvocation,
     codex_home: &Path,
 ) -> Result<Value> {
     std::fs::write(
         codex_home.join("config.toml"),
         "[features]\nplugins = false\n",
     )?;
-    let output = Command::new(codex_utils_cargo_bin::cargo_bin(binary)?)
+    let binary = match invocation {
+        AppServerJsonInvocation::Standalone => "codex-app-server",
+        AppServerJsonInvocation::CodexCli => "codex",
+    };
+    let mut command = Command::new(codex_utils_cargo_bin::cargo_bin(binary)?);
+    command
         .stdin(Stdio::null())
         .env("CODEX_LAB_HOME", codex_home)
         .env(
@@ -92,9 +105,16 @@ pub fn app_server_json_shutdown_event(
             codex_home.join("managed_config.toml"),
         )
         .env("LOG_FORMAT", "json")
-        .env("RUST_LOG", "codex_app_server=info")
-        .args(args)
-        .output()?;
+        .env("RUST_LOG", "codex_app_server=info");
+    if matches!(invocation, AppServerJsonInvocation::CodexCli) {
+        command.arg("app-server");
+    }
+    #[cfg(debug_assertions)]
+    configure_test_keyring_for_std_command(
+        &mut command,
+        &codex_home.join("app-server-test-keyring"),
+    );
+    let output = command.output()?;
 
     let stderr = String::from_utf8(output.stderr)?;
     anyhow::ensure!(output.status.success(), "app-server failed: {stderr}");

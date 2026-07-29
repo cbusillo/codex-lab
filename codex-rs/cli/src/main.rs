@@ -5,6 +5,8 @@ use clap::FromArgMatches;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
+#[cfg(debug_assertions)]
+use codex_app_server::install_test_keyring_store_from_env;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
@@ -543,6 +545,10 @@ struct AppServerCommand {
     /// Error out when config.toml contains fields that are not recognized by this version of Codex.
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
+
+    #[cfg(debug_assertions)]
+    #[arg(long = "use-test-keyring-store", hide = true)]
+    use_test_keyring_store: bool,
 
     /// Transport endpoint URL. Supported values: `stdio://` (default),
     /// `unix://`, `unix://PATH`, `ws://IP:PORT`, `off`.
@@ -1127,6 +1133,8 @@ async fn cli_main(
                 subcommand,
                 code_mode_host,
                 strict_config: app_server_strict_config,
+                #[cfg(debug_assertions)]
+                use_test_keyring_store,
                 listen,
                 stdio,
                 remote_control,
@@ -1140,6 +1148,10 @@ async fn cli_main(
                 root_remote_auth_token_env.as_deref(),
                 subcommand.as_ref(),
             )?;
+            #[cfg(debug_assertions)]
+            if use_test_keyring_store {
+                install_test_keyring_store_from_env()?;
+            }
             match subcommand {
                 None => {
                     let transport = if stdio {
