@@ -1,8 +1,11 @@
 use std::collections::VecDeque;
 use std::path::Path;
+use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::process::Stdio;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
@@ -11,14 +14,15 @@ use tokio::process::ChildStdin;
 use tokio::process::ChildStdout;
 
 use anyhow::Context;
+use anyhow::ensure;
+use codex_app_server_protocol::AppsInstalledParams;
 use codex_app_server_protocol::AppsListParams;
-use codex_app_server_protocol::AutoReviewDispositionWriteParams;
-use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
-use codex_app_server_protocol::AutoReviewSummaryReadParams;
+use codex_app_server_protocol::AppsReadParams;
 use codex_app_server_protocol::BackgroundAutoReviewControlParams;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
+use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CollaborationModeListParams;
 use codex_app_server_protocol::CommandExecParams;
 use codex_app_server_protocol::CommandExecResizeParams;
@@ -27,8 +31,8 @@ use codex_app_server_protocol::CommandExecWriteParams;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigValueWriteParams;
+use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditParams;
 use codex_app_server_protocol::ExperimentalFeatureListParams;
-use codex_app_server_protocol::FeedbackUploadParams;
 use codex_app_server_protocol::FsCopyParams;
 use codex_app_server_protocol::FsCreateDirectoryParams;
 use codex_app_server_protocol::FsGetMetadataParams;
@@ -68,24 +72,20 @@ use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginSkillReadParams;
 use codex_app_server_protocol::PluginUninstallParams;
 use codex_app_server_protocol::ProcessKillParams;
-use codex_app_server_protocol::ProcessResizePtyParams;
 use codex_app_server_protocol::ProcessSpawnParams;
-use codex_app_server_protocol::ProcessWriteStdinParams;
 use codex_app_server_protocol::RemoteControlClientsListParams;
 use codex_app_server_protocol::RemoteControlClientsRevokeParams;
 use codex_app_server_protocol::RemoteControlPairingStartParams;
 use codex_app_server_protocol::RemoteControlPairingStatusParams;
-use codex_app_server_protocol::RemoveAccountParams;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::SendAddCreditsNudgeEmailParams;
 use codex_app_server_protocol::ServerRequest;
-use codex_app_server_protocol::SkillsConfigWriteParams;
 use codex_app_server_protocol::SkillsExtraRootsSetParams;
 use codex_app_server_protocol::SkillsListParams;
-use codex_app_server_protocol::SwitchActiveAccountParams;
 use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadCompactStartParams;
+use codex_app_server_protocol::ThreadDeleteParams;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadInjectItemsParams;
 use codex_app_server_protocol::ThreadItemsListParams;
@@ -95,30 +95,56 @@ use codex_app_server_protocol::ThreadMemoryModeSetParams;
 use codex_app_server_protocol::ThreadMetadataUpdateParams;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadRealtimeAppendAudioParams;
+use codex_app_server_protocol::ThreadRealtimeAppendSpeechParams;
 use codex_app_server_protocol::ThreadRealtimeAppendTextParams;
 use codex_app_server_protocol::ThreadRealtimeListVoicesParams;
 use codex_app_server_protocol::ThreadRealtimeStartParams;
 use codex_app_server_protocol::ThreadRealtimeStopParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadRollbackParams;
+use codex_app_server_protocol::ThreadSearchOccurrencesParams;
 use codex_app_server_protocol::ThreadSearchParams;
 use codex_app_server_protocol::ThreadSetNameParams;
 use codex_app_server_protocol::ThreadSettingsUpdateParams;
 use codex_app_server_protocol::ThreadShellCommandParams;
 use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadTurnsItemsListParams;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::TurnCompletedNotification;
+use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::WindowsSandboxSetupStartParams;
+use codex_exec_server::CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR;
+use codex_exec_server::CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID_ENV_VAR;
+use codex_exec_server::CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR;
+use codex_exec_server::CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR;
+use codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR;
+#[cfg(debug_assertions)]
+use codex_keyring_store::TEST_KEYRING_DIR_ENV_VAR;
 #[cfg(debug_assertions)]
 use codex_keyring_store::tests::shared_test_keyring_root;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
+use core_test_support::is_remote_test_environment;
+use core_test_support::test_codex::TestEnv;
+use core_test_support::test_codex::test_env;
+use serde::de::DeserializeOwned;
+use tempfile::TempDir;
 use tokio::process::Command;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+
+use crate::json_logging::JsonLogCapture;
+use crate::local_websocket_exec_server::LocalWebsocketExecServer;
+use crate::rpc_delay::WebsocketDelayInterposer;
 
 pub struct TestAppServer {
     next_request_id: AtomicI64,
@@ -130,112 +156,87 @@ pub struct TestAppServer {
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     pending_messages: VecDeque<JSONRPCMessage>,
+    auto_env: Option<TestEnv>,
+    json_logs: JsonLogCapture,
+    // Fields drop in declaration order. Tear down the delayed child before
+    // removing an owned CODEX_HOME that may still be its cwd on Windows.
+    _delayed_exec_server: Option<(LocalWebsocketExecServer, WebsocketDelayInterposer)>,
+    _attribution_settings_server: Option<MockServer>,
+    _owned_codex_home: Option<TempDir>,
 }
 
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
 pub const DISABLE_PLUGIN_STARTUP_TASKS_ARG: &str = "--disable-plugin-startup-tasks-for-tests";
-pub const USE_TEST_KEYRING_STORE_ARG: &str = "--use-test-keyring-store";
-const DEFAULT_TEST_ARGS: &[&str] = &[DISABLE_PLUGIN_STARTUP_TASKS_ARG, USE_TEST_KEYRING_STORE_ARG];
-const PLUGIN_STARTUP_TEST_ARGS: &[&str] = &[USE_TEST_KEYRING_STORE_ARG];
-const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
 #[cfg(debug_assertions)]
-const TEST_KEYRING_DIR_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_KEYRING_DIR";
+pub const USE_TEST_KEYRING_STORE_ARG: &str = "--use-test-keyring-store";
+const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
+const CODE_MODE_HOST_PATH_ENV_VAR: &str = "CODEX_CODE_MODE_HOST_PATH";
+#[cfg(windows)]
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
+#[cfg(not(windows))]
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl TestAppServer {
-    pub async fn new(codex_home: &Path) -> anyhow::Result<Self> {
-        Self::new_with_env_and_args(codex_home, &[], DEFAULT_TEST_ARGS).await
+    /// Starts building a server with a temporary CODEX_HOME and the standard
+    /// automatic test environment.
+    pub fn builder() -> TestAppServerBuilder {
+        TestAppServerBuilder {
+            codex_home: None,
+            cwd: None,
+            environment: TestAppServerEnvironment::Auto,
+            program: None,
+            env_overrides: Vec::new(),
+            args: vec![DISABLE_PLUGIN_STARTUP_TASKS_ARG.to_string()],
+            exec_server_delay: None,
+        }
     }
 
-    pub async fn new_with_cwd(codex_home: &Path, cwd: &Path) -> anyhow::Result<Self> {
-        let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
-            .context("should find binary for codex-app-server")?;
-        Self::new_with_program_env_args_and_cwd(codex_home, &program, &[], DEFAULT_TEST_ARGS, cwd)
-            .await
+    pub async fn wait_for_exit(&mut self) -> std::io::Result<ExitStatus> {
+        self.process.wait().await
     }
 
-    pub async fn new_without_managed_config(codex_home: &Path) -> anyhow::Result<Self> {
-        Self::new_with_env(codex_home, &[(DISABLE_MANAGED_CONFIG_ENV_VAR, Some("1"))]).await
+    /// Closes stdio and waits for app-server's graceful thread teardown to finish.
+    pub async fn shutdown_gracefully(&mut self) -> std::io::Result<ExitStatus> {
+        drop(self.stdin.take());
+        self.process.wait().await
     }
 
-    pub async fn new_without_managed_config_with_env(
-        codex_home: &Path,
-        env_overrides: &[(&str, Option<&str>)],
-    ) -> anyhow::Result<Self> {
-        let mut all_env_overrides = vec![(DISABLE_MANAGED_CONFIG_ENV_VAR, Some("1"))];
-        all_env_overrides.extend_from_slice(env_overrides);
-        Self::new_with_env(codex_home, &all_env_overrides).await
-    }
-
-    pub async fn new_with_plugin_startup_tasks(codex_home: &Path) -> anyhow::Result<Self> {
-        Self::new_with_env_and_args(codex_home, &[], PLUGIN_STARTUP_TEST_ARGS).await
-    }
-
-    pub async fn new_with_env_and_plugin_startup_tasks(
-        codex_home: &Path,
-        env_overrides: &[(&str, Option<&str>)],
-    ) -> anyhow::Result<Self> {
-        Self::new_with_env_and_args(codex_home, env_overrides, PLUGIN_STARTUP_TEST_ARGS).await
-    }
-
-    pub async fn new_with_args(codex_home: &Path, args: &[&str]) -> anyhow::Result<Self> {
-        let mut all_args = DEFAULT_TEST_ARGS.to_vec();
-        all_args.extend_from_slice(args);
-        Self::new_with_env_and_args(codex_home, &[], &all_args).await
-    }
-
-    /// Creates a new MCP process, allowing tests to override or remove
-    /// specific environment variables for the child process only.
+    /// Returns the automatically selected test environment retained by this server.
     ///
-    /// Pass a tuple of (key, Some(value)) to set/override, or (key, None) to
-    /// remove a variable from the child's environment.
-    pub async fn new_with_env(
-        codex_home: &Path,
-        env_overrides: &[(&str, Option<&str>)],
-    ) -> anyhow::Result<Self> {
-        Self::new_with_env_and_args(codex_home, env_overrides, DEFAULT_TEST_ARGS).await
+    /// Tests can use the environment to arrange target-native filesystem fixtures before starting
+    /// a thread. Returns an error unless the builder's automatic environment is enabled.
+    pub fn auto_env(&self) -> anyhow::Result<&TestEnv> {
+        self.auto_env
+            .as_ref()
+            .context("auto environment is unavailable; enable it on TestAppServer::builder")
     }
 
-    pub async fn new_with_program_and_env(
-        codex_home: &Path,
-        program: &Path,
-        env_overrides: &[(&str, Option<&str>)],
-    ) -> anyhow::Result<Self> {
-        Self::new_with_program_env_and_args(codex_home, program, env_overrides, DEFAULT_TEST_ARGS)
-            .await
+    /// Returns app-server protocol parameters for the automatically selected
+    /// test environment. Returns an error unless the builder's automatic
+    /// environment is enabled.
+    pub fn auto_env_params(&self) -> anyhow::Result<TurnEnvironmentParams> {
+        let selection = self.auto_env()?.selection();
+        Ok(TurnEnvironmentParams {
+            environment_id: selection.environment_id.clone(),
+            cwd: selection.cwd.clone().into(),
+            runtime_workspace_roots: None,
+        })
     }
 
-    async fn new_with_env_and_args(
-        codex_home: &Path,
-        env_overrides: &[(&str, Option<&str>)],
-        args: &[&str],
-    ) -> anyhow::Result<Self> {
-        let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
-            .context("should find binary for codex-app-server")?;
-        Self::new_with_program_env_and_args(codex_home, &program, env_overrides, args).await
+    /// Waits for a JSON stderr event whose structured `event.name` field matches.
+    pub async fn wait_for_json_log_event(
+        &self,
+        event_name: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.json_logs.wait_for_event(event_name).await
     }
 
     async fn new_with_program_env_and_args(
         codex_home: &Path,
-        program: &Path,
-        env_overrides: &[(&str, Option<&str>)],
-        args: &[&str],
-    ) -> anyhow::Result<Self> {
-        Self::new_with_program_env_args_and_cwd(
-            codex_home,
-            program,
-            env_overrides,
-            args,
-            codex_home,
-        )
-        .await
-    }
-
-    async fn new_with_program_env_args_and_cwd(
-        codex_home: &Path,
-        program: &Path,
-        env_overrides: &[(&str, Option<&str>)],
-        args: &[&str],
         cwd: &Path,
+        program: &Path,
+        env_overrides: &[(&str, Option<&str>)],
+        args: &[&str],
     ) -> anyhow::Result<Self> {
         let mut cmd = Command::new(program);
 
@@ -250,10 +251,10 @@ impl TestAppServer {
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             codex_home.join("managed_config.toml"),
         );
-        #[cfg(debug_assertions)]
-        cmd.env(TEST_KEYRING_DIR_ENV_VAR, shared_test_keyring_root());
         cmd.env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR);
         cmd.args(args);
+        #[cfg(debug_assertions)]
+        configure_test_keyring_for_tokio_command(&mut cmd, shared_test_keyring_root());
 
         for (k, v) in env_overrides {
             match v {
@@ -282,10 +283,13 @@ impl TestAppServer {
 
         // Forward child's stderr to our stderr so failures are visible even
         // when stdout/stderr are captured by the test harness.
+        let json_logs = JsonLogCapture::default();
         if let Some(stderr) = process.stderr.take() {
+            let json_logs = json_logs.clone();
             let mut stderr_reader = BufReader::new(stderr).lines();
             tokio::spawn(async move {
                 while let Ok(Some(line)) = stderr_reader.next_line().await {
+                    json_logs.record(line.clone());
                     eprintln!("[mcp stderr] {line}");
                 }
             });
@@ -296,6 +300,11 @@ impl TestAppServer {
             stdin: Some(stdin),
             stdout,
             pending_messages: VecDeque::new(),
+            auto_env: None,
+            json_logs,
+            _delayed_exec_server: None,
+            _attribution_settings_server: None,
+            _owned_codex_home: None,
         })
     }
 
@@ -407,6 +416,18 @@ impl TestAppServer {
             .await
     }
 
+    /// Send an `account/rateLimitResetCredit/consume` JSON-RPC request.
+    pub async fn send_consume_account_rate_limit_reset_credit_request(
+        &mut self,
+        params: ConsumeAccountRateLimitResetCreditParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "account/rateLimitResetCredit/consume",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
     /// Send an `account/sendAddCreditsNudgeEmail` JSON-RPC request.
     pub async fn send_add_credits_nudge_email_request(
         &mut self,
@@ -438,17 +459,8 @@ impl TestAppServer {
             chatgpt_account_id,
             chatgpt_plan_type,
         };
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("account/login/start", params).await
-    }
-
-    /// Send a `feedback/upload` JSON-RPC request.
-    pub async fn send_feedback_upload_request(
-        &mut self,
-        params: FeedbackUploadParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("feedback/upload", params).await
+        self.send_login_account_request(serde_json::to_value(params)?)
+            .await
     }
 
     /// Send a `thread/start` JSON-RPC request.
@@ -458,6 +470,30 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/start", params).await
+    }
+
+    /// Sends a `thread/start` request selecting the builder's automatic
+    /// environment. Returns an error if `params` already select environments
+    /// so the caller cannot accidentally override the fixture.
+    pub async fn send_thread_start_request_with_auto_env(
+        &mut self,
+        mut params: ThreadStartParams,
+    ) -> anyhow::Result<i64> {
+        ensure!(
+            params.environments.is_none(),
+            "send_thread_start_request_with_auto_env requires params.environments to be omitted"
+        );
+        params.environments = Some(vec![self.auto_env_params()?]);
+        self.send_thread_start_request(params).await
+    }
+
+    /// Starts a thread using the standard automatic test environment.
+    pub async fn start_thread(
+        &mut self,
+        params: ThreadStartParams,
+    ) -> anyhow::Result<ThreadStartResponse> {
+        let request_id = self.send_thread_start_request_with_auto_env(params).await?;
+        tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, self.read_response(request_id)).await?
     }
 
     /// Send a `thread/resume` JSON-RPC request.
@@ -485,6 +521,15 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/archive", params).await
+    }
+
+    /// Send a `thread/delete` JSON-RPC request.
+    pub async fn send_thread_delete_request(
+        &mut self,
+        params: ThreadDeleteParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/delete", params).await
     }
 
     /// Send a `thread/name/set` JSON-RPC request.
@@ -575,6 +620,15 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/search", params).await
+    }
+
+    /// Send a `thread/searchOccurrences` JSON-RPC request.
+    pub async fn send_thread_search_occurrences_request(
+        &mut self,
+        params: ThreadSearchOccurrencesParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/searchOccurrences", params).await
     }
 
     /// Send a `thread/loaded/list` JSON-RPC request.
@@ -675,10 +729,28 @@ impl TestAppServer {
             .await
     }
 
+    /// Send a runtime-only `remoteControl/enable` JSON-RPC request.
+    pub async fn send_remote_control_ephemeral_enable_request(&mut self) -> anyhow::Result<i64> {
+        self.send_request(
+            "remoteControl/enable",
+            Some(serde_json::json!({ "ephemeral": true })),
+        )
+        .await
+    }
+
     /// Send a `remoteControl/disable` JSON-RPC request.
     pub async fn send_remote_control_disable_request(&mut self) -> anyhow::Result<i64> {
         self.send_request("remoteControl/disable", /*params*/ None)
             .await
+    }
+
+    /// Send a runtime-only `remoteControl/disable` JSON-RPC request.
+    pub async fn send_remote_control_ephemeral_disable_request(&mut self) -> anyhow::Result<i64> {
+        self.send_request(
+            "remoteControl/disable",
+            Some(serde_json::json!({ "ephemeral": true })),
+        )
+        .await
     }
 
     /// Send a `remoteControl/reconnect` JSON-RPC request.
@@ -690,12 +762,6 @@ impl TestAppServer {
     /// Send a `remoteControl/status/read` JSON-RPC request.
     pub async fn send_remote_control_status_read_request(&mut self) -> anyhow::Result<i64> {
         self.send_request("remoteControl/status/read", /*params*/ None)
-            .await
-    }
-
-    /// Send a `codeBridge/status/read` JSON-RPC request.
-    pub async fn send_code_bridge_status_read_request(&mut self) -> anyhow::Result<i64> {
-        self.send_request("codeBridge/status/read", /*params*/ None)
             .await
     }
 
@@ -744,6 +810,21 @@ impl TestAppServer {
         self.send_request("app/list", params).await
     }
 
+    /// Send an `app/installed` JSON-RPC request.
+    pub async fn send_apps_installed_request(
+        &mut self,
+        params: AppsInstalledParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("app/installed", params).await
+    }
+
+    /// Send an `app/read` JSON-RPC request.
+    pub async fn send_apps_read_request(&mut self, params: AppsReadParams) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("app/read", params).await
+    }
+
     /// Send an `mcpServer/resource/read` JSON-RPC request.
     pub async fn send_mcp_resource_read_request(
         &mut self,
@@ -778,15 +859,6 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("skills/extraRoots/set", params).await
-    }
-
-    /// Send a `skills/config/write` JSON-RPC request.
-    pub async fn send_skills_config_write_request(
-        &mut self,
-        params: SkillsConfigWriteParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("skills/config/write", params).await
     }
 
     /// Send a `hooks/list` JSON-RPC request.
@@ -932,6 +1004,39 @@ impl TestAppServer {
         self.send_request("turn/start", params).await
     }
 
+    /// Start a turn and return its matching typed completion notification.
+    pub async fn start_turn_and_wait_for_completion(
+        &mut self,
+        params: TurnStartParams,
+    ) -> anyhow::Result<TurnCompletedNotification> {
+        let thread_id = params.thread_id.clone();
+        let request_id = self.send_turn_start_request(params).await?;
+        let response = self
+            .read_stream_until_response_message(RequestId::Integer(request_id))
+            .await?;
+        let TurnStartResponse { turn } = crate::to_response(response)?;
+        let notification = self
+            .read_stream_until_matching_notification(
+                "turn/completed for started turn",
+                |notification| {
+                    notification.method == "turn/completed"
+                        && notification.params.as_ref().is_some_and(|params| {
+                            serde_json::from_value::<TurnCompletedNotification>(params.clone())
+                                .is_ok_and(|completed| {
+                                    completed.thread_id == thread_id && completed.turn.id == turn.id
+                                })
+                        })
+                },
+            )
+            .await?;
+        let params = notification
+            .params
+            .context("turn/completed notification must include params")?;
+        let completed = serde_json::from_value(params)
+            .context("failed to deserialize turn/completed notification")?;
+        Ok(completed)
+    }
+
     /// Send a `thread/inject_items` JSON-RPC request (v2).
     pub async fn send_thread_inject_items_request(
         &mut self,
@@ -957,24 +1062,6 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("process/spawn", params).await
-    }
-
-    /// Send a `process/writeStdin` JSON-RPC request (v2).
-    pub async fn send_process_write_stdin_request(
-        &mut self,
-        params: ProcessWriteStdinParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("process/writeStdin", params).await
-    }
-
-    /// Send a `process/resizePty` JSON-RPC request (v2).
-    pub async fn send_process_resize_pty_request(
-        &mut self,
-        params: ProcessResizePtyParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("process/resizePty", params).await
     }
 
     /// Send a `process/kill` JSON-RPC request (v2).
@@ -1048,6 +1135,16 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/realtime/appendText", params)
+            .await
+    }
+
+    /// Send a `thread/realtime/appendSpeech` JSON-RPC request (v2).
+    pub async fn send_thread_realtime_append_speech_request(
+        &mut self,
+        params: ThreadRealtimeAppendSpeechParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/realtime/appendSpeech", params)
             .await
     }
 
@@ -1154,33 +1251,6 @@ impl TestAppServer {
         self.send_request("review/background/control", params).await
     }
 
-    /// Send a `review/summary/read` JSON-RPC request (v2).
-    pub async fn send_auto_review_summary_read_request(
-        &mut self,
-        params: AutoReviewSummaryReadParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("review/summary/read", params).await
-    }
-
-    /// Send a `review/findingDetail/read` JSON-RPC request (v2).
-    pub async fn send_auto_review_finding_detail_read_request(
-        &mut self,
-        params: AutoReviewFindingDetailReadParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("review/findingDetail/read", params).await
-    }
-
-    /// Send a `review/disposition/write` JSON-RPC request (v2).
-    pub async fn send_auto_review_disposition_write_request(
-        &mut self,
-        params: AutoReviewDispositionWriteParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("review/disposition/write", params).await
-    }
-
     pub async fn send_windows_sandbox_setup_start_request(
         &mut self,
         params: WindowsSandboxSetupStartParams,
@@ -1195,6 +1265,11 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("config/read", params).await
+    }
+
+    pub async fn send_config_requirements_read_request(&mut self) -> anyhow::Result<i64> {
+        self.send_request("configRequirements/read", /*params*/ None)
+            .await
     }
 
     pub async fn send_config_value_write_request(
@@ -1281,6 +1356,14 @@ impl TestAppServer {
         self.send_request("account/logout", /*params*/ None).await
     }
 
+    /// Send an `account/login/start` JSON-RPC request.
+    pub async fn send_login_account_request(
+        &mut self,
+        params: serde_json::Value,
+    ) -> anyhow::Result<i64> {
+        self.send_request("account/login/start", Some(params)).await
+    }
+
     /// Send an `account/login/start` JSON-RPC request for API key login.
     pub async fn send_login_account_api_key_request(
         &mut self,
@@ -1290,6 +1373,20 @@ impl TestAppServer {
             "type": "apiKey",
             "apiKey": api_key,
         });
+        self.send_login_account_request(params).await
+    }
+
+    /// Send an `account/login/start` JSON-RPC request for managed Amazon Bedrock login.
+    pub async fn send_login_account_amazon_bedrock_request(
+        &mut self,
+        api_key: &str,
+        region: &str,
+    ) -> anyhow::Result<i64> {
+        let params = serde_json::json!({
+            "type": "amazonBedrock",
+            "apiKey": api_key,
+            "region": region,
+        });
         self.send_request("account/login/start", Some(params)).await
     }
 
@@ -1298,7 +1395,7 @@ impl TestAppServer {
         let params = serde_json::json!({
             "type": "chatgpt"
         });
-        self.send_request("account/login/start", Some(params)).await
+        self.send_login_account_request(params).await
     }
 
     /// Send an `account/login/start` JSON-RPC request for ChatGPT device code login.
@@ -1306,7 +1403,7 @@ impl TestAppServer {
         let params = serde_json::json!({
             "type": "chatgptDeviceCode"
         });
-        self.send_request("account/login/start", Some(params)).await
+        self.send_login_account_request(params).await
     }
 
     /// Send an `account/login/cancel` JSON-RPC request.
@@ -1316,29 +1413,6 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("account/login/cancel", params).await
-    }
-
-    /// Send an `account/switchActive` JSON-RPC request.
-    pub async fn send_switch_active_account_request(
-        &mut self,
-        params: SwitchActiveAccountParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("account/switchActive", params).await
-    }
-
-    /// Send an `account/list` JSON-RPC request.
-    pub async fn send_list_accounts_request(&mut self) -> anyhow::Result<i64> {
-        self.send_request("account/list", None).await
-    }
-
-    /// Send an `account/remove` JSON-RPC request.
-    pub async fn send_remove_account_request(
-        &mut self,
-        params: RemoveAccountParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("account/remove", params).await
     }
 
     /// Send a `fuzzyFileSearch` JSON-RPC request.
@@ -1428,6 +1502,26 @@ impl TestAppServer {
             .await?;
         self.read_stream_until_response_message(RequestId::Integer(request_id))
             .await
+    }
+
+    /// Sends a typed protocol request and waits for its deserialized response.
+    ///
+    /// The request builder receives a fresh ID so tests do not need to manage
+    /// the JSON-RPC request ID themselves.
+    pub async fn request<T: DeserializeOwned>(
+        &mut self,
+        make_request: impl FnOnce(RequestId) -> ClientRequest,
+    ) -> anyhow::Result<T> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request = make_request(RequestId::Integer(request_id));
+        ensure!(
+            request.id() == &RequestId::Integer(request_id),
+            "typed request must use the supplied request ID"
+        );
+        let request = serde_json::from_value::<JSONRPCRequest>(serde_json::to_value(request)?)?;
+        self.send_jsonrpc_message(JSONRPCMessage::Request(request))
+            .await?;
+        tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, self.read_response(request_id)).await?
     }
 
     async fn send_request(
@@ -1534,6 +1628,21 @@ impl TestAppServer {
         Ok(response)
     }
 
+    /// Reads and deserializes the successful response for an integer request ID.
+    ///
+    /// This does not impose a timeout, so callers can retain suite-specific
+    /// timeout policies when requests need different latency budgets.
+    pub async fn read_response<T: DeserializeOwned>(
+        &mut self,
+        request_id: i64,
+    ) -> anyhow::Result<T> {
+        let response = self
+            .read_stream_until_response_message(RequestId::Integer(request_id))
+            .await?;
+        serde_json::from_value(response.result)
+            .with_context(|| format!("failed to deserialize response for request {request_id}"))
+    }
+
     pub async fn read_stream_until_error_message(
         &mut self,
         request_id: RequestId,
@@ -1569,6 +1678,22 @@ impl TestAppServer {
             unreachable!("expected JSONRPCMessage::Notification, got {message:?}");
         };
         Ok(notification)
+    }
+
+    /// Reads and deserializes the parameters of the next matching notification.
+    ///
+    /// This does not impose a timeout, so callers can retain suite-specific
+    /// timeout policies when notifications need different latency budgets.
+    pub async fn read_notification<T: DeserializeOwned>(
+        &mut self,
+        method: &str,
+    ) -> anyhow::Result<T> {
+        let notification = self.read_stream_until_notification_message(method).await?;
+        let params = notification
+            .params
+            .with_context(|| format!("notification `{method}` is missing parameters"))?;
+        serde_json::from_value(params)
+            .with_context(|| format!("failed to deserialize notification `{method}`"))
     }
 
     pub async fn read_stream_until_matching_notification<F>(
@@ -1673,6 +1798,290 @@ impl TestAppServer {
             JSONRPCMessage::Error(err) => Some(&err.id),
             JSONRPCMessage::Notification(_) => None,
         }
+    }
+}
+
+#[cfg(debug_assertions)]
+pub fn configure_test_keyring_for_std_command(command: &mut std::process::Command, root: &Path) {
+    command
+        .arg(USE_TEST_KEYRING_STORE_ARG)
+        .env(TEST_KEYRING_DIR_ENV_VAR, root);
+}
+
+#[cfg(debug_assertions)]
+pub fn configure_test_keyring_for_tokio_command(command: &mut Command, root: &Path) {
+    command
+        .arg(USE_TEST_KEYRING_STORE_ARG)
+        .env(TEST_KEYRING_DIR_ENV_VAR, root);
+}
+
+/// Builder for TestAppServer.
+pub struct TestAppServerBuilder {
+    codex_home: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    environment: TestAppServerEnvironment,
+    program: Option<PathBuf>,
+    env_overrides: Vec<(String, Option<String>)>,
+    args: Vec<String>,
+    exec_server_delay: Option<Duration>,
+}
+
+enum TestAppServerEnvironment {
+    Auto,
+    None,
+}
+
+impl TestAppServerBuilder {
+    /// Uses this existing CODEX_HOME instead of a temporary one.
+    pub fn with_codex_home(mut self, codex_home: &Path) -> Self {
+        self.codex_home = Some(codex_home.to_path_buf());
+        self
+    }
+
+    /// Uses this working directory for the app-server child process.
+    pub fn with_cwd(mut self, cwd: &Path) -> Self {
+        self.cwd = Some(cwd.to_path_buf());
+        self
+    }
+
+    /// Starts app-server without the standard automatic test environment.
+    pub fn without_auto_env(mut self) -> Self {
+        self.environment = TestAppServerEnvironment::None;
+        self
+    }
+
+    /// Uses this app-server binary instead of the standard test binary.
+    pub fn with_program(mut self, program: &Path) -> Self {
+        self.program = Some(program.to_path_buf());
+        self
+    }
+
+    /// Adds command-line arguments after the default test arguments.
+    pub fn with_args(mut self, args: &[&str]) -> Self {
+        self.args
+            .extend(args.iter().map(|argument| (*argument).to_string()));
+        self
+    }
+
+    /// Enables startup tasks that the default test arguments disable.
+    pub fn with_plugin_startup_tasks(mut self) -> Self {
+        self.args
+            .retain(|argument| argument != DISABLE_PLUGIN_STARTUP_TASKS_ARG);
+        self
+    }
+
+    /// Adds child-process environment overrides.
+    ///
+    /// Some values set variables and None values remove inherited variables.
+    pub fn with_env_overrides(mut self, env_overrides: &[(&str, Option<&str>)]) -> Self {
+        self.env_overrides
+            .extend(env_overrides.iter().map(|(key, value)| {
+                (
+                    (*key).to_string(),
+                    value.map(std::string::ToString::to_string),
+                )
+            }));
+        self
+    }
+
+    /// Prevents the child from loading managed configuration.
+    pub fn without_managed_config(self) -> Self {
+        self.with_env_overrides(&[(DISABLE_MANAGED_CONFIG_ENV_VAR, Some("1"))])
+    }
+
+    /// Configures the child to emit JSON logs at the requested Rust log level.
+    pub fn with_json_logging(self, rust_log: impl Into<String>) -> Self {
+        let rust_log = rust_log.into();
+        let mut builder = self.with_env_overrides(&[("LOG_FORMAT", Some("json"))]);
+        builder
+            .env_overrides
+            .push(("RUST_LOG".to_string(), Some(rust_log)));
+        builder
+    }
+
+    /// Adds this fixed one-way delay to the app-server/exec-server RPC stream.
+    /// A 15ms delay contributes roughly 30ms to a round trip.
+    pub fn with_exec_server_delay(mut self, exec_server_delay: Duration) -> Self {
+        self.exec_server_delay = Some(exec_server_delay);
+        self
+    }
+
+    /// Builds a server and completes its standard initialization handshake.
+    pub async fn build_initialized(self) -> anyhow::Result<TestAppServer> {
+        self.build_initialized_with_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Builds and initializes a server while preserving a suite-specific timeout.
+    pub async fn build_initialized_with_timeout(
+        self,
+        timeout: Duration,
+    ) -> anyhow::Result<TestAppServer> {
+        let mut server = self.build().await?;
+        tokio::time::timeout(timeout, server.initialize()).await??;
+        Ok(server)
+    }
+
+    /// Builds a server with a temporary CODEX_HOME and automatic environment
+    /// by default.
+    pub async fn build(self) -> anyhow::Result<TestAppServer> {
+        let Self {
+            codex_home,
+            cwd,
+            environment,
+            program,
+            mut env_overrides,
+            args,
+            exec_server_delay,
+        } = self;
+        let (codex_home, owned_codex_home) = match codex_home {
+            Some(codex_home) => (codex_home, None),
+            None => {
+                let owned_codex_home = TempDir::new()?;
+                (
+                    owned_codex_home.path().to_path_buf(),
+                    Some(owned_codex_home),
+                )
+            }
+        };
+        let attribution_settings_server = if codex_home.join("auth.json").is_file() {
+            let config_path = codex_home.join("config.toml");
+            let config = std::fs::read_to_string(&config_path)?;
+            if config
+                .lines()
+                .any(|line| line.trim_start().starts_with("chatgpt_base_url"))
+            {
+                None
+            } else {
+                let settings_server = MockServer::start().await;
+                Mock::given(method("GET"))
+                    .and(path("/backend-api/wham/settings/user"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "commit_attribution_enabled": false,
+                    })))
+                    .mount(&settings_server)
+                    .await;
+                std::fs::write(
+                    &config_path,
+                    format!(
+                        "chatgpt_base_url = \"{}/backend-api\"\n{config}",
+                        settings_server.uri()
+                    ),
+                )?;
+                Some(settings_server)
+            }
+        } else {
+            None
+        };
+        let (auto_env, delayed_exec_server) = match environment {
+            TestAppServerEnvironment::Auto => {
+                let environments_toml = codex_home.join("environments.toml");
+                ensure!(
+                    !environments_toml.try_exists().with_context(|| format!(
+                        "check whether {} exists",
+                        environments_toml.display()
+                    ))?,
+                    "automatic environment cannot be used when {} exists",
+                    environments_toml.display()
+                );
+                let (auto_env, delayed_exec_server) = match exec_server_delay {
+                    Some(added_delay) => {
+                        ensure!(
+                            !is_remote_test_environment(),
+                            "TestAppServer exec-server delay only supports the local test environment"
+                        );
+                        let exec_server_program =
+                            codex_utils_cargo_bin::cargo_bin("exec-server")
+                                .context("should find binary for delayed exec-server fixture")?;
+                        // Local auto environments normally use stdio. Start a
+                        // host-local WebSocket fixture so the delay interposer has a
+                        // socket stream to wrap.
+                        let local_websocket_exec_server =
+                            LocalWebsocketExecServer::start(&codex_home, &exec_server_program)
+                                .await?;
+                        let interposer = WebsocketDelayInterposer::start(
+                            local_websocket_exec_server.websocket_url(),
+                            added_delay,
+                        )
+                        .await?;
+                        let auto_env = TestEnv::local_with_exec_server_url(Some(
+                            interposer.websocket_url().to_string(),
+                        ))
+                        .await?;
+                        (auto_env, Some((local_websocket_exec_server, interposer)))
+                    }
+                    None => (test_env().await?, None),
+                };
+                // Noise registry configuration takes precedence over the URL-based
+                // provider, so clear inherited values to keep the selection hermetic.
+                let mut auto_env_overrides = vec![
+                    (
+                        CODEX_EXEC_SERVER_URL_ENV_VAR.to_string(),
+                        auto_env.exec_server_url().map(str::to_string),
+                    ),
+                    (
+                        CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR.to_string(),
+                        None,
+                    ),
+                    (
+                        CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR.to_string(),
+                        None,
+                    ),
+                    (CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR.to_string(), None),
+                    (
+                        CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID_ENV_VAR.to_string(),
+                        None,
+                    ),
+                ];
+                auto_env_overrides.append(&mut env_overrides);
+                env_overrides = auto_env_overrides;
+                (Some(auto_env), delayed_exec_server)
+            }
+            TestAppServerEnvironment::None => {
+                ensure!(
+                    exec_server_delay.is_none(),
+                    "exec-server delay requires the automatic test environment"
+                );
+                (None, None)
+            }
+        };
+        if !env_overrides
+            .iter()
+            .any(|(key, _)| key == CODE_MODE_HOST_PATH_ENV_VAR)
+            && let Ok(code_mode_host_program) =
+                codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")
+        {
+            env_overrides.insert(
+                0,
+                (
+                    CODE_MODE_HOST_PATH_ENV_VAR.to_string(),
+                    Some(code_mode_host_program.to_string_lossy().into_owned()),
+                ),
+            );
+        }
+        let program = match program {
+            Some(program) => program,
+            None => codex_utils_cargo_bin::cargo_bin("codex-app-server")
+                .context("should find binary for codex-app-server")?,
+        };
+        let env_overrides = env_overrides
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_deref()))
+            .collect::<Vec<_>>();
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut app_server = TestAppServer::new_with_program_env_and_args(
+            &codex_home,
+            cwd.as_deref().unwrap_or(&codex_home),
+            &program,
+            &env_overrides,
+            &args,
+        )
+        .await?;
+        app_server.auto_env = auto_env;
+        app_server._owned_codex_home = owned_codex_home;
+        app_server._delayed_exec_server = delayed_exec_server;
+        app_server._attribution_settings_server = attribution_settings_server;
+        Ok(app_server)
     }
 }
 

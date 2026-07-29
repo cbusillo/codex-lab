@@ -11,8 +11,10 @@ use codex_analytics::SkillInvocation;
 use codex_analytics::TrackEventsContext;
 use codex_exec_server::LOCAL_FS;
 use codex_otel::SessionTelemetry;
+use codex_otel::sanitize_metric_tag_value;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::mention_syntax::TOOL_MENTION_SIGIL;
 
 #[derive(Debug, Default)]
@@ -38,6 +40,14 @@ pub struct InjectedHostSkillPrompts {
     paths: HashSet<String>,
 }
 
+/// Marks a turn whose skills extension projects the host skill catalog through
+/// WorldState.
+///
+/// Core uses this to keep its legacy thread-start catalog from duplicating the
+/// extension-owned catalog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostSkillsCatalogInWorldState;
+
 impl InjectedHostSkillPrompts {
     pub fn insert_path(&mut self, path: impl Into<String>) {
         let path = path.into();
@@ -54,6 +64,11 @@ impl InjectedHostSkillPrompts {
     }
 }
 
+#[tracing::instrument(
+    level = "trace",
+    skip_all,
+    fields(mentioned_skill_count = mentioned_skills.len())
+)]
 pub async fn build_skill_injections(
     mentioned_skills: &[SkillMetadata],
     loaded_skills: Option<&SkillLoadOutcome>,
@@ -75,10 +90,8 @@ pub async fn build_skill_injections(
         let fs = loaded_skills
             .and_then(|outcome| outcome.file_system_for_skill(skill))
             .unwrap_or_else(|| Arc::clone(&LOCAL_FS));
-        match fs
-            .read_file_text(&skill.path_to_skills_md, /*sandbox*/ None)
-            .await
-        {
+        let path = PathUri::from_abs_path(&skill.path_to_skills_md);
+        match fs.read_file_text(&path, /*sandbox*/ None).await {
             Ok(contents) => {
                 emit_skill_injected_metric(otel, skill, "ok");
                 invocations.push(SkillInvocation {
@@ -86,6 +99,7 @@ pub async fn build_skill_injections(
                     skill_scope: skill.scope,
                     skill_path: skill.path_to_skills_md.to_path_buf(),
                     plugin_id: skill.plugin_id.clone(),
+                    remote_plugin_id: skill.remote_plugin_id.clone(),
                     invocation_type: InvocationType::Explicit,
                 });
                 result.items.push(SkillInjection {
@@ -123,11 +137,12 @@ fn emit_skill_injected_metric(
     let Some(otel) = otel else {
         return;
     };
+    let skill_name_tag = sanitize_metric_tag_value(skill.name.as_str());
 
     otel.counter(
         "codex.skill.injected",
         /*inc*/ 1,
-        &[("status", status), ("skill", skill.name.as_str())],
+        &[("status", status), ("skill", skill_name_tag.as_str())],
     );
 }
 

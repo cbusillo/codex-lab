@@ -47,7 +47,6 @@ fn log_cleanup_result(result: Result<(), JoinError>) {
         warn!("connection cleanup task failed: {err}");
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

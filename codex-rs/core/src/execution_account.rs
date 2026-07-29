@@ -11,13 +11,15 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_api::AuthProvider;
 use codex_api::SharedAuthProvider;
-use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthKeyringBackendKind;
 use codex_login::AuthManager;
+use codex_login::AuthRouteConfig;
 use codex_login::CodexAuth;
 use codex_login::StoredAccount;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
+use codex_protocol::auth::AuthMode;
 use http::HeaderMap;
 use tracing::warn;
 
@@ -99,6 +101,9 @@ struct ExecutionAccountConfig {
     codex_home: PathBuf,
     auth_home: PathBuf,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    forced_chatgpt_workspace_id: Option<Vec<String>>,
+    auth_route_config: AuthRouteConfig,
     chatgpt_base_url: String,
     allow_api_key_fallback: bool,
     pooling: ExecutionAccountPooling,
@@ -146,11 +151,26 @@ impl fmt::Debug for ExecutionAccountCacheIdentity {
     }
 }
 
+impl ExecutionAccountCacheIdentity {
+    pub(crate) fn connection_discriminator(&self) -> String {
+        self.0.clone()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ExecutionAccountModelsContext {
     pub(crate) generation: u64,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) cache_key: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct ExecutionAccountSnapshot {
+    pub(crate) cache_identity: ExecutionAccountCacheIdentity,
+    pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) auth: Option<CodexAuth>,
+    pub(crate) auth_provider: SharedAuthProvider,
+    revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -186,6 +206,9 @@ pub(crate) struct ExecutionAccountOptions {
     pub(crate) codex_home: PathBuf,
     pub(crate) auth_home: PathBuf,
     pub(crate) auth_credentials_store_mode: AuthCredentialsStoreMode,
+    pub(crate) keyring_backend_kind: AuthKeyringBackendKind,
+    pub(crate) forced_chatgpt_workspace_id: Option<Vec<String>>,
+    pub(crate) auth_route_config: AuthRouteConfig,
     pub(crate) chatgpt_base_url: String,
     pub(crate) allow_api_key_fallback: bool,
     pub(crate) pooling: ExecutionAccountPooling,
@@ -240,6 +263,9 @@ impl ExecutionAccountLease {
             codex_home: options.codex_home,
             auth_home: options.auth_home,
             auth_credentials_store_mode: options.auth_credentials_store_mode,
+            keyring_backend_kind: options.keyring_backend_kind,
+            forced_chatgpt_workspace_id: options.forced_chatgpt_workspace_id,
+            auth_route_config: options.auth_route_config,
             chatgpt_base_url: options.chatgpt_base_url,
             allow_api_key_fallback: options.allow_api_key_fallback,
             pooling: options.pooling,
@@ -398,6 +424,9 @@ impl ExecutionAccountLease {
                 account_id.to_string(),
                 config.auth_credentials_store_mode,
                 Some(config.chatgpt_base_url.clone()),
+                config.keyring_backend_kind,
+                config.forced_chatgpt_workspace_id.clone(),
+                config.auth_route_config.clone(),
             )
             .await
             {
@@ -442,6 +471,7 @@ impl ExecutionAccountLease {
         ExecutionAccountCacheIdentity(self.inner.current.load().cache_identity.clone())
     }
 
+    #[cfg(test)]
     pub(crate) fn codex_apps_auth_provider(
         &self,
         expected_cache_identity: ExecutionAccountCacheIdentity,
@@ -450,6 +480,27 @@ impl ExecutionAccountLease {
             lease: self.clone(),
             expected_cache_identity,
         })
+    }
+
+    pub(crate) async fn snapshot(&self) -> ExecutionAccountSnapshot {
+        let account = self.inner.current.load_full();
+        let auth = account.auth_manager.auth().await;
+        let cache_identity = ExecutionAccountCacheIdentity(account.cache_identity.clone());
+        let auth_provider = Arc::new(ExecutionAccountCodexAppsAuthProvider {
+            lease: self.clone(),
+            expected_cache_identity: cache_identity.clone(),
+        });
+        ExecutionAccountSnapshot {
+            cache_identity,
+            auth_manager: Arc::clone(&account.auth_manager),
+            auth,
+            auth_provider,
+            revision: self.revision_for(account.generation, account.auth_manager.auth_revision()),
+        }
+    }
+
+    pub(crate) fn snapshot_is_current(&self, snapshot: &ExecutionAccountSnapshot) -> bool {
+        self.auth_revision() == snapshot.revision
     }
 
     pub(crate) fn models_context(&self) -> ExecutionAccountModelsContext {
@@ -461,11 +512,12 @@ impl ExecutionAccountLease {
         }
     }
 
-    pub(crate) async fn auth_with_revision(&self) -> (Option<CodexAuth>, u64) {
-        let account = self.inner.current.load_full();
-        let (auth, auth_revision) = account.auth_manager.auth_with_revision().await;
-        let revision = self.revision_for(account.generation, auth_revision);
-        (auth, revision)
+    pub(crate) fn models_manager_auth_matches(&self, auth_manager: Option<&AuthManager>) -> bool {
+        let Some(auth_manager) = auth_manager else {
+            return false;
+        };
+        let account = self.inner.current.load();
+        auth_managers_share_model_catalog(&account.auth_manager, auth_manager)
     }
 
     pub(crate) fn auth_revision(&self) -> u64 {
@@ -523,29 +575,32 @@ impl ExecutionAccountLease {
             return Ok(None);
         };
         switch_state.mark_limited(current_account_id, current.mode, blocked_until);
-        let Some(next_account_id) = account_switching::select_next_account_id(
-            &self.inner.config.codex_home,
-            &self.inner.config.auth_home,
-            self.inner.config.auth_credentials_store_mode,
-            switch_state,
-            self.inner.config.allow_api_key_fallback,
-            Utc::now(),
-            Some(current_account_id),
-        )?
-        else {
-            return Ok(None);
-        };
-        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
-        let Some(next) = Self::load_account(
-            &self.inner.config,
-            &next_account_id,
-            Some(&control_account_id),
-            Arc::clone(&self.inner.control_auth_manager),
-            generation,
-        )
-        .await
-        else {
-            return Ok(None);
+        let next = loop {
+            let Some(next_account_id) = account_switching::select_next_account_id(
+                &self.inner.config.codex_home,
+                &self.inner.config.auth_home,
+                self.inner.config.auth_credentials_store_mode,
+                switch_state,
+                self.inner.config.allow_api_key_fallback,
+                Utc::now(),
+                Some(current_account_id),
+            )?
+            else {
+                return Ok(None);
+            };
+            let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+            if let Some(next) = Self::load_account(
+                &self.inner.config,
+                &next_account_id,
+                Some(&control_account_id),
+                Arc::clone(&self.inner.control_auth_manager),
+                generation,
+            )
+            .await
+            {
+                break next;
+            }
+            switch_state.mark_tried(&next_account_id);
         };
         let identity = next.identity();
         let next_account_id = next.stored_account_id.clone();
@@ -667,6 +722,60 @@ impl ExecutionAccountLease {
             &self.inner.base_cache_identity,
         ) {
             warn!("failed to persist reconciled execution account lease: {error}");
+        }
+    }
+
+    pub(crate) async fn rebind_after_account_removal(&self, removed_account_id: &str) -> bool {
+        loop {
+            let current = self.inner.current.load_full();
+            if current.stored_account_id.as_deref() != Some(removed_account_id) {
+                return false;
+            }
+            let active_account_id = self
+                .inner
+                .config
+                .matching_control_account_id(&self.inner.control_auth_manager)
+                .unwrap_or_else(|error| {
+                    warn!("failed to resolve control account after account removal: {error}");
+                    None
+                });
+            let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+            let replacement = match active_account_id.as_deref() {
+                Some(account_id) => {
+                    Self::load_account(
+                        &self.inner.config,
+                        account_id,
+                        Some(account_id),
+                        Arc::clone(&self.inner.control_auth_manager),
+                        generation,
+                    )
+                    .await
+                }
+                None => None,
+            }
+            .unwrap_or_else(|| {
+                Arc::new(ExecutionAccount::from_control(
+                    active_account_id,
+                    Arc::clone(&self.inner.control_auth_manager),
+                    generation,
+                ))
+            });
+            let previous = self
+                .inner
+                .current
+                .compare_and_swap(&current, Arc::clone(&replacement));
+            if !Arc::ptr_eq(&current, &*previous) {
+                continue;
+            }
+            let account_id = replacement.stored_account_id.clone();
+            if let Err(error) = self.inner.config.write_lease_record(
+                self.inner.thread_id,
+                account_id.as_deref(),
+                &self.inner.base_cache_identity,
+            ) {
+                warn!("failed to persist execution account lease after account removal: {error}");
+            }
+            return true;
         }
     }
 
@@ -838,6 +947,28 @@ fn auth_matches_account(auth: &CodexAuth, account: &StoredAccount) -> bool {
         }
         _ => false,
     }
+}
+
+fn auth_managers_share_model_catalog(left: &AuthManager, right: &AuthManager) -> bool {
+    if std::ptr::eq(left, right) {
+        return true;
+    }
+
+    let cache_identity = |auth_manager: &AuthManager| {
+        let auth = auth_manager.auth_cached();
+        let mode = auth
+            .as_ref()
+            .map(CodexAuth::auth_mode)
+            .or_else(|| auth_manager.auth_mode())?;
+        Some(ExecutionAccount::cache_identity_for(
+            /*stored_account_id*/ None,
+            auth.as_ref(),
+            mode,
+        ))
+    };
+    cache_identity(left)
+        .zip(cache_identity(right))
+        .is_some_and(|(left, right)| left == right)
 }
 
 #[cfg(test)]

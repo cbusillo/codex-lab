@@ -180,11 +180,33 @@ def save_report(path: Path, report: dict[str, object]) -> None:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    loaded_scenarios = [
+        (scenario, load_scenario(scenario))
+        for scenario in sorted(SCENARIO_DIR.glob("*.json"))
+    ]
     scenarios = [
         scenario
-        for scenario in sorted(SCENARIO_DIR.glob("*.json"))
-        if load_scenario(scenario).get("skip_run_all") is not True
+        for scenario, config in loaded_scenarios
+        if config.get("skip_run_all") is not True
     ]
+    skipped_scenarios = []
+    for scenario, config in loaded_scenarios:
+        if config.get("skip_run_all") is not True:
+            continue
+        skipped = {
+            "scenario": config.get("name", scenario.stem),
+            "scenario_path": str(scenario),
+        }
+        characterization = config.get("characterization")
+        if isinstance(characterization, dict):
+            skipped["characterization"] = characterization
+        skipped_scenarios.append(skipped)
+        status = characterization.get("status") if isinstance(characterization, dict) else None
+        detail = f" ({status})" if isinstance(status, str) else ""
+        print(
+            f"Skipping {scenario.relative_to(ROOT)}{detail}",
+            file=sys.stderr,
+        )
     if not scenarios:
         print(f"no scenarios found in {SCENARIO_DIR}", file=sys.stderr)
         return 2
@@ -210,6 +232,9 @@ def main(argv: list[str]) -> int:
             "returncode": 1,
             "scenario_count": 0,
             "scenario_total": len(scenarios),
+            "scenario_file_total": len(loaded_scenarios),
+            "skipped_scenario_count": len(skipped_scenarios),
+            "skipped_scenarios": skipped_scenarios,
             "wall_seconds": round(time.time() - started_at, 3),
             "token_usage": aggregate_tokens,
             "provenance": provenance,
@@ -279,6 +304,9 @@ def main(argv: list[str]) -> int:
         "returncode": exit_code,
         "scenario_count": len(scenario_results),
         "scenario_total": len(scenarios),
+        "scenario_file_total": len(loaded_scenarios),
+        "skipped_scenario_count": len(skipped_scenarios),
+        "skipped_scenarios": skipped_scenarios,
         "wall_seconds": round(time.time() - started_at, 3),
         "token_usage": aggregate_tokens,
         "provenance": provenance,

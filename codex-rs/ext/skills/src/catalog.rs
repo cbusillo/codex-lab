@@ -1,4 +1,7 @@
-use codex_core_skills::model::SkillDependencies;
+use codex_protocol::protocol::SkillScope;
+use codex_skills::SkillDependencies;
+use codex_utils_path_uri::PathUri;
+use std::sync::Arc;
 
 /// Source authority that owns a skill package and must be used to read it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -8,8 +11,8 @@ pub enum SkillSourceKind {
     Host,
     /// Skills owned by an execution environment.
     Executor,
-    /// Skills read through an authenticated remote catalog/API.
-    Remote,
+    /// Skills owned by the orchestrator rather than an execution environment.
+    Orchestrator,
     /// Extension-private source kind for future providers that do not fit an
     /// existing transport category.
     Custom(String),
@@ -24,7 +27,7 @@ impl SkillSourceKind {
         match self {
             Self::Host => "host",
             Self::Executor => "executor",
-            Self::Remote => "remote",
+            Self::Orchestrator => "orchestrator",
             Self::Custom(kind) => kind,
         }
     }
@@ -56,9 +59,114 @@ impl SkillAuthority {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SkillPackageId(pub String);
 
-/// Opaque resource id inside a skill package.
+impl SkillPackageId {
+    pub(crate) fn relative_resource_path<'a>(&self, resource: &'a str) -> Option<&'a str> {
+        let relative = resource
+            .strip_prefix(self.0.trim_end_matches('/'))?
+            .strip_prefix('/')?;
+        (!relative.is_empty()
+            && relative
+                .split('/')
+                .all(|segment| !matches!(segment, "" | "." | "..")))
+        .then_some(relative)
+    }
+}
+
+/// Opaque resource id inside a skill package, optionally bound to the
+/// environment path that owns its contents.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SkillResourceId(pub String);
+pub struct SkillResourceId {
+    id: String,
+    environment_path: Option<EnvironmentSkillResource>,
+}
+
+impl SkillResourceId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            environment_path: None,
+        }
+    }
+
+    pub fn environment(
+        id: impl Into<String>,
+        environment_id: impl Into<String>,
+        path: PathUri,
+    ) -> Self {
+        let package_root = path.parent().unwrap_or_else(|| path.clone());
+        Self {
+            id: id.into(),
+            environment_path: Some(EnvironmentSkillResource {
+                environment_id: environment_id.into(),
+                package_root,
+                path,
+                contents: None,
+            }),
+        }
+    }
+
+    pub fn environment_with_contents(
+        id: impl Into<String>,
+        environment_id: impl Into<String>,
+        path: PathUri,
+        contents: String,
+    ) -> Self {
+        let package_root = path.parent().unwrap_or_else(|| path.clone());
+        Self {
+            id: id.into(),
+            environment_path: Some(EnvironmentSkillResource {
+                environment_id: environment_id.into(),
+                package_root,
+                path,
+                contents: Some(contents.into()),
+            }),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn bind_environment_package_resource(
+        &self,
+        package: &SkillPackageId,
+        resource: impl Into<String>,
+    ) -> Option<Self> {
+        let resource = resource.into();
+        let relative = package.relative_resource_path(&resource)?;
+        let environment = self.environment_path.as_ref()?;
+        let path = environment.package_root.join(relative).ok()?;
+        path.starts_with(&environment.package_root).then(|| Self {
+            id: resource,
+            environment_path: Some(EnvironmentSkillResource {
+                environment_id: environment.environment_id.clone(),
+                package_root: environment.package_root.clone(),
+                path,
+                contents: None,
+            }),
+        })
+    }
+
+    pub(crate) fn environment_path(&self) -> Option<(&str, &PathUri)> {
+        self.environment_path
+            .as_ref()
+            .map(|resource| (resource.environment_id.as_str(), &resource.path))
+    }
+
+    pub(crate) fn environment_contents(&self) -> Option<&str> {
+        self.environment_path
+            .as_ref()
+            .and_then(|resource| resource.contents.as_deref())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct EnvironmentSkillResource {
+    environment_id: String,
+    package_root: PathUri,
+    path: PathUri,
+    contents: Option<Arc<str>>,
+}
 
 /// Metadata shown in the always-visible skills catalog.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +178,8 @@ pub struct SkillCatalogEntry {
     pub short_description: Option<String>,
     pub main_prompt: SkillResourceId,
     pub display_path: Option<String>,
+    display_path_root: Option<String>,
+    prompt_scope: Option<SkillScope>,
     pub dependencies: Option<SkillDependencies>,
     pub enabled: bool,
     pub prompt_visible: bool,
@@ -91,6 +201,8 @@ impl SkillCatalogEntry {
             short_description: None,
             main_prompt,
             display_path: None,
+            display_path_root: None,
+            prompt_scope: None,
             dependencies: None,
             enabled: true,
             prompt_visible: true,
@@ -104,6 +216,17 @@ impl SkillCatalogEntry {
 
     pub fn with_display_path(mut self, display_path: impl Into<String>) -> Self {
         self.display_path = Some(display_path.into());
+        self
+    }
+
+    /// Sets the shared filesystem prefix that may be compacted in model-visible paths.
+    pub fn with_display_path_root(mut self, display_path_root: impl Into<String>) -> Self {
+        self.display_path_root = Some(display_path_root.into());
+        self
+    }
+
+    pub(crate) fn with_prompt_scope(mut self, prompt_scope: SkillScope) -> Self {
+        self.prompt_scope = Some(prompt_scope);
         self
     }
 
@@ -122,10 +245,22 @@ impl SkillCatalogEntry {
         self
     }
 
+    pub(crate) fn is_model_visible(&self) -> bool {
+        self.enabled && self.prompt_visible
+    }
+
     pub(crate) fn rendered_path(&self) -> &str {
         self.display_path
             .as_deref()
-            .unwrap_or(self.main_prompt.0.as_str())
+            .unwrap_or_else(|| self.main_prompt.as_str())
+    }
+
+    pub(crate) fn display_path_root(&self) -> Option<&str> {
+        self.display_path_root.as_deref()
+    }
+
+    pub(crate) fn prompt_scope(&self) -> Option<SkillScope> {
+        self.prompt_scope
     }
 }
 

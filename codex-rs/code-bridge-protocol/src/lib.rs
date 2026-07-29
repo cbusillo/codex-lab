@@ -1027,7 +1027,7 @@ mod tests {
         };
 
         assert_eq!(
-            validate_envelope(&envelope, 1),
+            validate_envelope(&envelope, /*serialized_len*/ 1),
             Err(ValidationError::UnsupportedProtocolVersion)
         );
 

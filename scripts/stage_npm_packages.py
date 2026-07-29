@@ -18,6 +18,7 @@ from typing import Sequence
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUILD_SCRIPT = REPO_ROOT / "codex-cli" / "scripts" / "build_npm_package.py"
+WORKFLOW_NAME = ".github/workflows/rust-release.yml"
 GITHUB_REPO = "openai/codex"
 BINARY_TARGETS = (
     "x86_64-unknown-linux-musl",
@@ -27,7 +28,6 @@ BINARY_TARGETS = (
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
 )
-ARTIFACT_CACHE_MARKER = ".stage-npm-artifact.json"
 
 _SPEC = importlib.util.spec_from_file_location("codex_build_npm_package", BUILD_SCRIPT)
 if _SPEC is None or _SPEC.loader is None:
@@ -53,40 +53,6 @@ class BinaryComponent:
 class WorkflowArtifact:
     name: str
     size_in_bytes: int
-
-
-@dataclass(frozen=True)
-class ReleaseAsset:
-    name: str
-    size_in_bytes: int
-    asset_id: str = ""
-    digest: str = ""
-    updated_at: str = ""
-
-
-@dataclass(frozen=True)
-class ReleaseArtifact:
-    name: str
-    size_in_bytes: int
-    assets: tuple[ReleaseAsset, ...]
-
-    @property
-    def asset_names(self) -> tuple[str, ...]:
-        return tuple(asset.name for asset in self.assets)
-
-
-@dataclass(frozen=True)
-class StagedPackage:
-    package: str
-    pack_output: Path
-    output: str
-
-
-class PackageStageError(RuntimeError):
-    def __init__(self, package: str, output: str):
-        super().__init__(f"Failed to stage npm package {package}")
-        self.package = package
-        self.output = output
 
 
 BINARY_COMPONENTS = {
@@ -133,14 +99,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--workflow-url",
-        help=(
-            "Optional workflow URL to reuse for native artifacts. When omitted, "
-            "native artifacts are downloaded from GitHub release assets."
-        ),
+        help="Optional workflow URL to reuse for native artifacts.",
     )
     parser.add_argument(
-        "--release-tag",
-        help="GitHub release tag to use for native artifacts (default: rust-v<release-version>).",
+        "--artifacts-dir",
+        type=Path,
+        help="Directory containing previously downloaded workflow artifacts.",
     )
     parser.add_argument(
         "--output-dir",
@@ -149,15 +113,19 @@ def parse_args() -> argparse.Namespace:
         help="Directory where npm tarballs should be written (default: dist/npm).",
     )
     parser.add_argument(
-        "--artifacts-cache-dir",
-        type=Path,
-        default=None,
-        help="Directory used to cache downloaded native artifacts.",
-    )
-    parser.add_argument(
         "--keep-staging-dirs",
         action="store_true",
         help="Retain temporary staging directories instead of deleting them.",
+    )
+    parser.add_argument(
+        "--no-expand-packages",
+        action="store_true",
+        help=(
+            "Stage exactly the requested packages instead of expanding them into "
+            "their platform packages. Staging only the root wrapper needs no "
+            "native release artifacts, which keeps CI packaging checks "
+            "reproducible from the source tree."
+        ),
     )
     return parser.parse_args()
 
@@ -178,7 +146,14 @@ def collect_native_component_sets(packages: list[str]) -> list[tuple[str, ...]]:
     return component_sets
 
 
-def expand_packages(packages: list[str]) -> list[str]:
+def expand_packages(packages: list[str], expand: bool = True) -> list[str]:
+    if not expand:
+        deduped: list[str] = []
+        for package in packages:
+            if package not in deduped:
+                deduped.append(package)
+        return deduped
+
     expanded: list[str] = []
     for package in packages:
         for expanded_package in PACKAGE_EXPANSIONS.get(package, [package]):
@@ -188,15 +163,42 @@ def expand_packages(packages: list[str]) -> list[str]:
     return expanded
 
 
-def resolve_release_tag(version: str, override: str | None) -> str:
+def resolve_release_workflow(version: str) -> dict:
+    stdout = subprocess.check_output(
+        [
+            "gh",
+            "run",
+            "list",
+            "--branch",
+            f"rust-v{version}",
+            "--json",
+            "workflowName,url,headSha",
+            "--workflow",
+            WORKFLOW_NAME,
+            "--jq",
+            "first(.[])",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+    )
+    workflow = json.loads(stdout or "null")
+    if not workflow:
+        raise RuntimeError(
+            f"Unable to find rust-release workflow for version {version}."
+        )
+    return workflow
+
+
+def resolve_workflow_url(version: str, override: str | None) -> tuple[str, str | None]:
     if override:
-        return override
-    return f"rust-v{version}"
+        return override, None
+
+    workflow = resolve_release_workflow(version)
+    return workflow["url"], workflow.get("headSha")
 
 
 def install_native_components(
-    release_tag: str,
-    workflow_url: str | None,
+    workflow_url: str,
     components: set[str],
     vendor_root: Path,
     artifacts_dir: Path,
@@ -207,220 +209,17 @@ def install_native_components(
     vendor_dir = vendor_root / "vendor"
     vendor_dir.mkdir(parents=True, exist_ok=True)
 
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    if workflow_url:
-        workflow_id = workflow_url.rstrip("/").split("/")[-1]
-        print(
-            f"Downloading native artifacts from workflow {workflow_id}...", flush=True
+    workflow_id = workflow_url.rstrip("/").split("/")[-1]
+    print(f"Downloading native artifacts from workflow {workflow_id}...", flush=True)
+    with _gha_group(f"Download native artifacts from workflow {workflow_id}"):
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        install_from_workflow_artifacts(
+            workflow_id,
+            artifacts_dir,
+            sorted(components),
+            vendor_dir,
         )
-        with _gha_group(f"Download native artifacts from workflow {workflow_id}"):
-            install_from_workflow_artifacts(
-                workflow_id,
-                artifacts_dir,
-                sorted(components),
-                vendor_dir,
-            )
-    else:
-        print(f"Downloading native artifacts from release {release_tag}...", flush=True)
-        with _gha_group(f"Download native artifacts from release {release_tag}"):
-            install_from_release_assets(
-                release_tag,
-                artifacts_dir,
-                sorted(components),
-                vendor_dir,
-            )
     print(f"Installed native dependencies into {vendor_dir}", flush=True)
-
-
-def install_from_release_assets(
-    release_tag: str,
-    artifacts_dir: Path,
-    components: Sequence[str],
-    vendor_dir: Path,
-) -> None:
-    artifacts = select_release_artifacts(release_tag, components)
-    download_release_artifacts(release_tag, artifacts_dir, artifacts)
-    if CODEX_PACKAGE_COMPONENT in components:
-        install_codex_package_archives(artifacts_dir, vendor_dir, BINARY_TARGETS)
-    install_binary_components(
-        artifacts_dir,
-        vendor_dir,
-        [BINARY_COMPONENTS[name] for name in components if name in BINARY_COMPONENTS],
-    )
-
-
-def select_release_artifacts(
-    release_tag: str,
-    components: Sequence[str],
-) -> list[ReleaseArtifact]:
-    needs_target_artifacts = CODEX_PACKAGE_COMPONENT in components or any(
-        component in BINARY_COMPONENTS for component in components
-    )
-    if not needs_target_artifacts:
-        return []
-
-    assets_by_name = {asset.name: asset for asset in list_release_assets(release_tag)}
-    selected_artifacts: list[ReleaseArtifact] = []
-    for target in BINARY_TARGETS:
-        asset_names: list[str] = []
-        if CODEX_PACKAGE_COMPONENT in components:
-            asset_names.append(f"codex-package-{target}.tar.gz")
-        for component_name in components:
-            component = BINARY_COMPONENTS.get(component_name)
-            if component is not None:
-                asset_names.append(
-                    archive_name_for_target(component.artifact_prefix, target)
-                )
-
-        selected_assets: list[ReleaseAsset] = []
-        for asset_name in asset_names:
-            asset = assets_by_name.get(asset_name)
-            if asset is None:
-                raise FileNotFoundError(
-                    f"Expected release asset not found for {release_tag}: {asset_name}"
-                )
-            selected_assets.append(asset)
-
-        selected_artifacts.append(
-            ReleaseArtifact(
-                name=target,
-                size_in_bytes=sum(asset.size_in_bytes for asset in selected_assets),
-                assets=tuple(selected_assets),
-            )
-        )
-
-    return selected_artifacts
-
-
-def list_release_assets(release_tag: str) -> list[ReleaseAsset]:
-    stdout = subprocess.check_output(
-        [
-            "gh",
-            "release",
-            "view",
-            release_tag,
-            "--repo",
-            GITHUB_REPO,
-            "--json",
-            "assets",
-        ],
-        text=True,
-    )
-    payload = json.loads(stdout)
-    assets: list[ReleaseAsset] = []
-    for asset in payload.get("assets", []):
-        assets.append(
-            ReleaseAsset(
-                name=asset["name"],
-                size_in_bytes=int(asset["size"]),
-                asset_id=str(asset.get("id", "")),
-                digest=str(asset.get("digest", "")),
-                updated_at=str(asset.get("updatedAt", "")),
-            )
-        )
-    return assets
-
-
-def download_release_artifacts(
-    release_tag: str,
-    dest_dir: Path,
-    artifacts: Sequence[ReleaseArtifact],
-) -> None:
-    total_bytes = sum(artifact.size_in_bytes for artifact in artifacts)
-    print(
-        f"Downloading {len(artifacts)} release artifact sets ({format_bytes(total_bytes)})",
-        flush=True,
-    )
-    source_id = f"github-release:{GITHUB_REPO}:{release_tag}"
-    for artifact in artifacts:
-        artifact_dir = dest_dir / artifact.name
-        if release_artifact_cache_is_complete(artifact_dir, source_id, artifact):
-            print(
-                f"  using cached {artifact.name} ({format_bytes(artifact.size_in_bytes)})",
-                flush=True,
-            )
-            continue
-
-        if artifact_dir.exists():
-            shutil.rmtree(artifact_dir)
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        print(
-            f"  downloading {artifact.name} ({format_bytes(artifact.size_in_bytes)})",
-            flush=True,
-        )
-        for asset_name in artifact.asset_names:
-            subprocess.check_call(
-                [
-                    "gh",
-                    "release",
-                    "download",
-                    release_tag,
-                    "--repo",
-                    GITHUB_REPO,
-                    "--pattern",
-                    asset_name,
-                    "--dir",
-                    str(artifact_dir),
-                    "--clobber",
-                ]
-            )
-        write_release_artifact_cache_marker(artifact_dir, source_id, artifact)
-
-
-def release_artifact_cache_is_complete(
-    artifact_dir: Path,
-    source_id: str,
-    artifact: ReleaseArtifact,
-) -> bool:
-    marker_path = artifact_dir / ARTIFACT_CACHE_MARKER
-    if not artifact_dir.is_dir() or not marker_path.is_file():
-        return False
-
-    try:
-        marker = json.loads(marker_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-
-    if marker != release_artifact_cache_marker(source_id, artifact):
-        return False
-
-    return all(
-        (artifact_dir / asset_name).is_file() for asset_name in artifact.asset_names
-    )
-
-
-def write_release_artifact_cache_marker(
-    artifact_dir: Path,
-    source_id: str,
-    artifact: ReleaseArtifact,
-) -> None:
-    marker_path = artifact_dir / ARTIFACT_CACHE_MARKER
-    marker_path.write_text(
-        json.dumps(release_artifact_cache_marker(source_id, artifact), sort_keys=True)
-        + "\n"
-    )
-
-
-def release_artifact_cache_marker(
-    source_id: str,
-    artifact: ReleaseArtifact,
-) -> dict[str, int | list[dict[str, int | str]] | str]:
-    return {
-        "assets": [release_asset_cache_marker(asset) for asset in artifact.assets],
-        "name": artifact.name,
-        "size_in_bytes": artifact.size_in_bytes,
-        "source_id": source_id,
-    }
-
-
-def release_asset_cache_marker(asset: ReleaseAsset) -> dict[str, int | str]:
-    return {
-        "digest": asset.digest,
-        "id": asset.asset_id,
-        "name": asset.name,
-        "size_in_bytes": asset.size_in_bytes,
-        "updated_at": asset.updated_at,
-    }
 
 
 def install_from_workflow_artifacts(
@@ -499,15 +298,13 @@ def download_artifacts(
     )
     for artifact in artifacts:
         artifact_dir = dest_dir / artifact.name
-        if artifact_cache_is_complete(artifact_dir, workflow_id, artifact):
+        if artifact_dir.is_dir() and any(artifact_dir.iterdir()):
             print(
                 f"  using cached {artifact.name} ({format_bytes(artifact.size_in_bytes)})",
                 flush=True,
             )
             continue
 
-        if artifact_dir.exists():
-            shutil.rmtree(artifact_dir)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         print(
             f"  downloading {artifact.name} ({format_bytes(artifact.size_in_bytes)})",
@@ -527,49 +324,6 @@ def download_artifacts(
                 workflow_id,
             ]
         )
-        write_artifact_cache_marker(artifact_dir, workflow_id, artifact)
-
-
-def artifact_cache_is_complete(
-    artifact_dir: Path,
-    workflow_id: str,
-    artifact: WorkflowArtifact,
-) -> bool:
-    marker_path = artifact_dir / ARTIFACT_CACHE_MARKER
-    if not artifact_dir.is_dir() or not marker_path.is_file():
-        return False
-
-    try:
-        marker = json.loads(marker_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-
-    if marker != artifact_cache_marker(workflow_id, artifact):
-        return False
-
-    return any(path.name != ARTIFACT_CACHE_MARKER for path in artifact_dir.iterdir())
-
-
-def write_artifact_cache_marker(
-    artifact_dir: Path,
-    workflow_id: str,
-    artifact: WorkflowArtifact,
-) -> None:
-    marker_path = artifact_dir / ARTIFACT_CACHE_MARKER
-    marker_path.write_text(
-        json.dumps(artifact_cache_marker(workflow_id, artifact), sort_keys=True) + "\n"
-    )
-
-
-def artifact_cache_marker(
-    workflow_id: str,
-    artifact: WorkflowArtifact,
-) -> dict[str, int | str]:
-    return {
-        "name": artifact.name,
-        "size_in_bytes": artifact.size_in_bytes,
-        "workflow_id": workflow_id,
-    }
 
 
 def install_codex_package_archives(
@@ -729,24 +483,9 @@ def format_bytes(size_in_bytes: int) -> str:
     return f"{value:.1f} GiB"
 
 
-def run_command(cmd: list[str]) -> str:
-    output = "+ " + " ".join(cmd) + "\n"
-    result = subprocess.run(
-        cmd,
-        cwd=REPO_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
-    )
-    output += result.stdout
-    if result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode,
-            cmd,
-            output=output,
-        )
-    return output
+def run_command(cmd: list[str]) -> None:
+    print("+", " ".join(cmd), flush=True)
+    subprocess.run(cmd, cwd=REPO_ROOT, check=True)
 
 
 def tarball_name_for_package(package: str, version: str) -> str:
@@ -754,54 +493,6 @@ def tarball_name_for_package(package: str, version: str) -> str:
         platform = package.removeprefix("codex-")
         return f"codex-npm-{platform}-{version}.tgz"
     return f"{package}-npm-{version}.tgz"
-
-
-def stage_single_package(
-    package: str,
-    release_version: str,
-    output_dir: Path,
-    runner_temp: Path,
-    vendor_src: Path | None,
-    keep_staging_dirs: bool,
-) -> StagedPackage:
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix=f"npm-stage-{package}-", dir=runner_temp)
-    )
-    pack_output = output_dir / tarball_name_for_package(package, release_version)
-    lines = [f"Staging {package} in {staging_dir}"]
-
-    cmd = [
-        str(BUILD_SCRIPT),
-        "--package",
-        package,
-        "--release-version",
-        release_version,
-        "--staging-dir",
-        str(staging_dir),
-        "--pack-output",
-        str(pack_output),
-    ]
-
-    if vendor_src is not None:
-        cmd.extend(["--vendor-src", str(vendor_src)])
-
-    try:
-        lines.append(run_command(cmd).rstrip())
-    except subprocess.CalledProcessError as error:
-        output = error.output if isinstance(error.output, str) else str(error)
-        lines.append(output.rstrip())
-        raise PackageStageError(
-            package, "\n".join(line for line in lines if line)
-        ) from error
-    finally:
-        if not keep_staging_dirs:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-
-    return StagedPackage(
-        package=package,
-        pack_output=pack_output,
-        output="\n".join(line for line in lines if line),
-    )
 
 
 def main() -> int:
@@ -812,7 +503,7 @@ def main() -> int:
 
     runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
 
-    packages = expand_packages(list(args.packages))
+    packages = expand_packages(list(args.packages), expand=not args.no_expand_packages)
     native_component_sets = collect_native_component_sets(packages)
     print("Expanded packages: " + ", ".join(packages), flush=True)
     if native_component_sets:
@@ -826,29 +517,26 @@ def main() -> int:
 
     vendor_temp_roots: list[Path] = []
     vendor_src_by_components: dict[tuple[str, ...], Path] = {}
-    artifacts_root: Path | None = None
-    cleanup_artifacts_root = False
-
-    final_messages = []
+    artifacts_temp_root: Path | None = None
+    remove_artifacts_temp_root = False
+    resolved_head_sha: str | None = None
+    staging_jobs: list[tuple[Path, list[str], str]] = []
 
     try:
         if native_component_sets:
-            workflow_url: str | None = None
-            release_tag = resolve_release_tag(args.release_version, args.release_tag)
-            if args.workflow_url:
-                workflow_url = args.workflow_url
-                print(f"Using native artifacts from {workflow_url}", flush=True)
+            workflow_url, resolved_head_sha = resolve_workflow_url(
+                args.release_version, args.workflow_url
+            )
+            print(f"Using native artifacts from {workflow_url}", flush=True)
+            if args.artifacts_dir is not None:
+                artifacts_temp_root = args.artifacts_dir.resolve()
+                artifacts_temp_root.mkdir(parents=True, exist_ok=True)
             else:
-                print(f"Using native artifacts from {release_tag}", flush=True)
-            if args.artifacts_cache_dir is not None:
-                artifacts_root = args.artifacts_cache_dir
-                artifacts_root.mkdir(parents=True, exist_ok=True)
-            else:
-                artifacts_root = Path(
+                artifacts_temp_root = Path(
                     tempfile.mkdtemp(prefix="npm-native-artifacts-", dir=runner_temp)
                 )
-                cleanup_artifacts_root = True
-            print(f"Caching downloaded artifacts in {artifacts_root}", flush=True)
+                remove_artifacts_temp_root = True
+            print(f"Using artifact cache at {artifacts_temp_root}", flush=True)
             for components in native_component_sets:
                 vendor_temp_root = Path(
                     tempfile.mkdtemp(prefix="npm-native-", dir=runner_temp)
@@ -861,67 +549,70 @@ def main() -> int:
                     flush=True,
                 )
                 install_native_components(
-                    release_tag,
                     workflow_url,
                     set(components),
                     vendor_temp_root,
-                    artifacts_root,
+                    artifacts_temp_root,
                 )
                 vendor_src_by_components[components] = vendor_temp_root / "vendor"
 
-        max_workers = min(len(packages), max(1, os.cpu_count() or 1))
-        staged_by_package: dict[str, StagedPackage] = {}
-        errors_by_package: dict[str, PackageStageError] = {}
+        if resolved_head_sha:
+            print(f"should `git checkout {resolved_head_sha}`", flush=True)
+
+        for package in packages:
+            staging_dir = Path(
+                tempfile.mkdtemp(prefix=f"npm-stage-{package}-", dir=runner_temp)
+            )
+            pack_output = output_dir / tarball_name_for_package(
+                package, args.release_version
+            )
+            print(f"Staging {package} in {staging_dir}", flush=True)
+
+            cmd = [
+                str(BUILD_SCRIPT),
+                "--package",
+                package,
+                "--release-version",
+                args.release_version,
+                "--staging-dir",
+                str(staging_dir),
+                "--pack-output",
+                str(pack_output),
+            ]
+
+            vendor_src = vendor_src_by_components.get(
+                native_components_for_package(package)
+            )
+            if vendor_src is not None:
+                cmd.extend(["--vendor-src", str(vendor_src)])
+
+            staging_jobs.append(
+                (staging_dir, cmd, f"Staged {package} at {pack_output}")
+            )
+
+        max_workers = min(len(staging_jobs), os.cpu_count() or 1)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(
-                    stage_single_package,
-                    package,
-                    args.release_version,
-                    output_dir,
-                    runner_temp,
-                    vendor_src_by_components.get(
-                        native_components_for_package(package)
-                    ),
-                    args.keep_staging_dirs,
-                ): package
-                for package in packages
+                executor.submit(run_command, cmd): staging_dir
+                for staging_dir, cmd, _message in staging_jobs
             }
             for future in as_completed(futures):
-                package = futures[future]
                 try:
-                    staged_by_package[package] = future.result()
-                except PackageStageError as error:
-                    errors_by_package[package] = error
-
-        for package in packages:
-            staged = staged_by_package.get(package)
-            output = (
-                staged.output
-                if staged is not None
-                else errors_by_package[package].output
-            )
-            with _gha_group(f"Stage {package}"):
-                print(output, flush=True)
-
-        if errors_by_package:
-            failed_packages = ", ".join(
-                package for package in packages if package in errors_by_package
-            )
-            raise RuntimeError(f"Failed to stage npm package(s): {failed_packages}")
-
-        for package in packages:
-            staged = staged_by_package[package]
-            final_messages.append(f"Staged {package} at {staged.pack_output}")
+                    future.result()
+                finally:
+                    if not args.keep_staging_dirs:
+                        shutil.rmtree(futures[future], ignore_errors=True)
     finally:
         if not args.keep_staging_dirs:
+            for staging_dir, _cmd, _message in staging_jobs:
+                shutil.rmtree(staging_dir, ignore_errors=True)
             for vendor_temp_root in vendor_temp_roots:
                 shutil.rmtree(vendor_temp_root, ignore_errors=True)
-        if cleanup_artifacts_root and artifacts_root is not None:
-            shutil.rmtree(artifacts_root, ignore_errors=True)
+        if remove_artifacts_temp_root and artifacts_temp_root is not None:
+            shutil.rmtree(artifacts_temp_root, ignore_errors=True)
 
-    for msg in final_messages:
-        print(msg, flush=True)
+    for _staging_dir, _cmd, message in staging_jobs:
+        print(message, flush=True)
 
     return 0
 

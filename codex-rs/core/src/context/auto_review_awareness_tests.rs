@@ -16,7 +16,12 @@ use tempfile::TempDir;
 use crate::context::ContextualUserFragment;
 use crate::state::BackgroundAutoReviewActiveSnapshot;
 
+use super::AWARENESS_BODY_WRAPPER_BYTES;
 use super::AutoReviewAwareness;
+use super::MARKER;
+use super::MAX_AWARENESS_BYTES;
+use super::MAX_RENDERED_AWARENESS_BYTES;
+use super::MAX_STATUS_LINES;
 use super::build_auto_review_awareness;
 use super::render_awareness;
 
@@ -31,6 +36,98 @@ fn awareness_renders_marked_bounded_context() {
             .starts_with("<auto_review_awareness>\nAuto Review awareness:")
     );
     assert!(awareness.render().ends_with("\n</auto_review_awareness>"));
+}
+
+#[test]
+fn awareness_render_is_capped_at_the_reviewed_budget() {
+    let body = format!("Auto Review awareness:\n{}", "x".repeat(64 * 1024));
+
+    let awareness = AutoReviewAwareness::new(body).expect("oversized body should still render");
+    let rendered = awareness.render();
+
+    assert_eq!(rendered.len(), MAX_RENDERED_AWARENESS_BYTES);
+    assert_eq!(
+        awareness.body().len(),
+        MAX_AWARENESS_BYTES + AWARENESS_BODY_WRAPPER_BYTES
+    );
+    assert!(rendered.starts_with("<auto_review_awareness>\nAuto Review awareness:"));
+    assert!(rendered.ends_with(&format!("{MARKER}\n</auto_review_awareness>")));
+}
+
+#[test]
+fn awareness_render_stays_within_budget_for_multibyte_bodies() {
+    let body = format!("Auto Review awareness:\n{}", "é".repeat(64 * 1024));
+
+    let awareness = AutoReviewAwareness::new(body).expect("oversized body should still render");
+    let rendered = awareness.render();
+
+    assert!(
+        rendered.len() <= MAX_RENDERED_AWARENESS_BYTES,
+        "rendered {} bytes",
+        rendered.len()
+    );
+    assert!(rendered.ends_with(&format!("{MARKER}\n</auto_review_awareness>")));
+}
+
+#[test]
+fn awareness_render_from_many_runs_stays_within_budget_and_line_caps() {
+    let statuses = [
+        AutoReviewRunStatus::Pending,
+        AutoReviewRunStatus::Snapshotting,
+        AutoReviewRunStatus::Running,
+        AutoReviewRunStatus::Reviewing,
+        AutoReviewRunStatus::Resolving,
+        AutoReviewRunStatus::Completed,
+        AutoReviewRunStatus::Failed,
+        AutoReviewRunStatus::Cancelled,
+        AutoReviewRunStatus::Superseded,
+        AutoReviewRunStatus::Skipped,
+        AutoReviewRunStatus::Lost,
+    ];
+    let runs = statuses
+        .into_iter()
+        .enumerate()
+        .map(|(index, status)| AutoReviewRun {
+            run_id: format!("run_{index}_{}", "r".repeat(512)),
+            started_at_unix_secs: index as i64,
+            ..sample_run(
+                "unused",
+                status,
+                vec![sample_finding(
+                    &format!("f{index}"),
+                    &"Very long finding title ".repeat(64),
+                    "hidden body",
+                )],
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let awareness = render_awareness(
+        &runs,
+        &sample_target("main", "head-2", "/repo"),
+        &ReviewTarget::UncommittedChanges,
+        &BackgroundAutoReviewActiveSnapshot {
+            pending_run_id: Some("pending_1".to_string()),
+            running_run_id: Some("running_1".to_string()),
+        },
+    )
+    .expect("dense run set should render awareness");
+    let rendered = awareness.render();
+
+    assert!(
+        rendered.len() <= MAX_RENDERED_AWARENESS_BYTES,
+        "rendered {} bytes",
+        rendered.len()
+    );
+    assert!(!rendered.contains("hidden body"));
+    let status_count_lines = rendered
+        .lines()
+        .filter(|line| line.starts_with("  - "))
+        .count();
+    assert!(
+        status_count_lines <= MAX_STATUS_LINES,
+        "{status_count_lines} status count lines"
+    );
 }
 
 #[test]

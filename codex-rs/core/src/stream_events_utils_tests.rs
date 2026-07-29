@@ -4,18 +4,16 @@ use super::completed_item_defers_mailbox_delivery_to_next_turn;
 use super::finalize_non_tool_response_item;
 use super::handle_non_tool_response_item;
 use super::handle_output_item_done;
-use super::image_generation_artifact_path;
 use super::last_assistant_message_from_item;
-use super::log_response_item;
 use super::response_item_may_include_external_context;
-use super::save_image_generation_result;
+use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::tools::ToolRouter;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnItemContributor;
-use codex_protocol::error::CodexErr;
+use codex_protocol::ResponseItemId;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::TurnItem;
 use codex_protocol::memory_citation::MemoryCitation;
@@ -26,11 +24,9 @@ use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::LocalShellStatus;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
-use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing_test::traced_test;
 
 fn assistant_output_text(text: &str) -> ResponseItem {
     assistant_output_text_with_phase(text, /*phase*/ None)
@@ -38,28 +34,14 @@ fn assistant_output_text(text: &str) -> ResponseItem {
 
 fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     ResponseItem::Message {
-        id: Some("msg-1".to_string()),
+        id: Some(ResponseItemId::with_suffix("msg", "1")),
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
         }],
         phase,
+        internal_chat_message_metadata_passthrough: None,
     }
-}
-
-#[test]
-#[traced_test]
-fn response_item_logging_omits_payload_and_keeps_bounded_metadata() {
-    let sensitive_payload = "sensitive-response-payload-7f3c9a";
-    log_response_item(&assistant_output_text(sensitive_payload));
-
-    let logs = tracing_test::internal::global_buf()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let logs = String::from_utf8_lossy(&logs);
-    assert!(logs.contains("item_type"));
-    assert!(logs.contains("msg-1"));
-    assert!(!logs.contains(sensitive_payload));
 }
 
 #[test]
@@ -69,6 +51,7 @@ fn external_context_pollution_items_include_web_search_and_tool_search() {
             id: None,
             status: Some("completed".to_string()),
             action: None,
+            internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::ToolSearchCall {
             id: None,
@@ -76,6 +59,7 @@ fn external_context_pollution_items_include_web_search_and_tool_search() {
             status: None,
             execution: "client".to_string(),
             arguments: serde_json::json!({"query": "calendar"}),
+            internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::ToolSearchOutput {
             id: None,
@@ -83,6 +67,7 @@ fn external_context_pollution_items_include_web_search_and_tool_search() {
             status: "completed".to_string(),
             execution: "client".to_string(),
             tools: Vec::new(),
+            internal_chat_message_metadata_passthrough: None,
         },
     ];
 
@@ -107,6 +92,7 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
                 env: None,
                 user: None,
             }),
+            internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
             id: None,
@@ -114,24 +100,29 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
             namespace: None,
             arguments: "{}".to_string(),
             call_id: "call-1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCallOutput {
             id: None,
             call_id: "call-1".to_string(),
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::CustomToolCall {
             id: None,
             status: None,
             call_id: "custom-1".to_string(),
             name: "apply_patch".to_string(),
+            namespace: None,
             input: "*** Begin Patch\n*** End Patch\n".to_string(),
+            internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::CustomToolCallOutput {
             id: None,
             call_id: "custom-1".to_string(),
             name: Some("apply_patch".to_string()),
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
         },
         assistant_output_text("plain assistant text"),
     ];
@@ -145,14 +136,13 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
 
 #[tokio::test]
 async fn handle_non_tool_response_item_strips_citations_from_assistant_message() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (session, _) = make_session_and_context().await;
     let item = assistant_output_text(
         "hello<oai-mem-citation><citation_entries>\nMEMORY.md:1-2|note=[x]\n</citation_entries>\n<rollout_ids>\n019cc2ea-1dff-7902-8d40-c8f6e5d83cc4\n</rollout_ids></oai-mem-citation> world",
     );
 
     let turn_item = handle_non_tool_response_item(
         &session,
-        &turn_context,
         TurnItemContributorPolicy::Skip,
         &item,
         /*plan_mode*/ false,
@@ -187,41 +177,43 @@ struct TestTurnItemContributor;
 #[derive(Debug)]
 struct TurnItemContributorRan;
 
-#[async_trait::async_trait]
 impl TurnItemContributor for TestTurnItemContributor {
-    async fn contribute(
-        &self,
-        _thread_store: &ExtensionData,
-        turn_store: &ExtensionData,
-        item: &mut TurnItem,
-    ) -> Result<(), String> {
-        turn_store.insert(TurnItemContributorRan);
-        if let TurnItem::AgentMessage(agent_message) = item {
-            agent_message.memory_citation = Some(MemoryCitation {
-                entries: Vec::new(),
-                rollout_ids: Vec::new(),
-            });
-        }
-        Ok(())
+    fn contribute<'a>(
+        &'a self,
+        _thread_store: &'a ExtensionData,
+        turn_store: &'a ExtensionData,
+        item: &'a mut TurnItem,
+    ) -> codex_extension_api::ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            turn_store.insert(TurnItemContributorRan);
+            if let TurnItem::AgentMessage(agent_message) = item {
+                agent_message.memory_citation = Some(MemoryCitation {
+                    entries: Vec::new(),
+                    rollout_ids: Vec::new(),
+                });
+            }
+            Ok(())
+        })
     }
 }
 
 struct RewriteAgentMessageContributor;
 
-#[async_trait::async_trait]
 impl TurnItemContributor for RewriteAgentMessageContributor {
-    async fn contribute(
-        &self,
-        _thread_store: &ExtensionData,
-        _turn_store: &ExtensionData,
-        item: &mut TurnItem,
-    ) -> Result<(), String> {
-        if let TurnItem::AgentMessage(agent_message) = item {
-            agent_message.content = vec![AgentMessageContent::Text {
-                text: "contributed assistant text".to_string(),
-            }];
-        }
-        Ok(())
+    fn contribute<'a>(
+        &'a self,
+        _thread_store: &'a ExtensionData,
+        _turn_store: &'a ExtensionData,
+        item: &'a mut TurnItem,
+    ) -> codex_extension_api::ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            if let TurnItem::AgentMessage(agent_message) = item {
+                agent_message.content = vec![AgentMessageContent::Text {
+                    text: "contributed assistant text".to_string(),
+                }];
+            }
+            Ok(())
+        })
     }
 }
 
@@ -238,7 +230,6 @@ async fn handle_non_tool_response_item_runs_turn_item_contributors_only_when_req
 
     let provisional_turn_item = handle_non_tool_response_item(
         &session,
-        &turn_context,
         TurnItemContributorPolicy::Skip,
         &item,
         /*plan_mode*/ false,
@@ -254,7 +245,6 @@ async fn handle_non_tool_response_item_runs_turn_item_contributors_only_when_req
 
     let turn_item = handle_non_tool_response_item(
         &session,
-        &turn_context,
         TurnItemContributorPolicy::Run(&turn_store),
         &item,
         /*plan_mode*/ false,
@@ -285,23 +275,22 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
     session.services.extensions = Arc::new(builder.build());
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context);
-    let router = Arc::new(ToolRouter::from_turn_context(
-        &turn_context,
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
+    let router = Arc::new(ToolRouter::from_context(
+        step_context.turn.as_ref(),
+        &step_context.environments,
+        step_context.mcp.as_ref(),
         crate::tools::router::ToolRouterParams {
-            mcp_tools: None,
-            deferred_mcp_tools: None,
-            discoverable_tools: None,
+            tool_suggest_candidates: None,
+            tool_runtimes: Vec::new(),
             extension_tool_executors: Vec::new(),
+            wait_for_environment_tool_config: None,
             dynamic_tools: turn_context.dynamic_tools.as_slice(),
         },
+        &Default::default(),
     ));
     let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
-    let tool_runtime = ToolCallRuntime::new(
-        router,
-        Arc::clone(&session),
-        Arc::clone(&turn_context),
-        tracker,
-    );
+    let tool_runtime = ToolCallRuntime::new(router, Arc::clone(&session), step_context, tracker);
     let item = assistant_output_text("original assistant text");
     let mut ctx = HandleOutputCtx {
         sess: session,
@@ -332,7 +321,6 @@ async fn finalized_turn_item_defers_mailbox_for_contributed_visible_text() {
 
     let finalized = finalize_non_tool_response_item(
         &session,
-        &turn_context,
         TurnItemContributorPolicy::Run(&turn_store),
         &item,
         /*plan_mode*/ false,
@@ -358,7 +346,6 @@ async fn finalized_turn_item_keeps_mailbox_open_for_commentary_text() {
 
     let finalized = finalize_non_tool_response_item(
         &session,
-        &turn_context,
         TurnItemContributorPolicy::Run(&turn_store),
         &item,
         /*plan_mode*/ false,
@@ -421,110 +408,4 @@ fn completed_item_keeps_mailbox_delivery_open_for_commentary_messages() {
     assert!(!completed_item_defers_mailbox_delivery_to_next_turn(
         &item, /*plan_mode*/ false,
     ));
-}
-
-#[test]
-fn completed_item_defers_mailbox_delivery_for_image_generation_calls() {
-    let item = ResponseItem::ImageGenerationCall {
-        id: Some("ig-1".to_string()),
-        status: "completed".to_string(),
-        revised_prompt: None,
-        result: "Zm9v".to_string(),
-    };
-
-    assert!(completed_item_defers_mailbox_delivery_to_next_turn(
-        &item, /*plan_mode*/ false,
-    ));
-}
-
-#[tokio::test]
-async fn save_image_generation_result_saves_base64_to_png_in_codex_home() {
-    let codex_home = tempfile::tempdir().expect("create codex home");
-    let codex_home = codex_home.path().abs();
-    let expected_path = image_generation_artifact_path(&codex_home, "session-1", "ig_save_base64");
-    let _ = std::fs::remove_file(&expected_path);
-
-    let saved_path =
-        save_image_generation_result(&codex_home, "session-1", "ig_save_base64", "Zm9v")
-            .await
-            .expect("image should be saved");
-
-    assert_eq!(saved_path, expected_path);
-    assert_eq!(std::fs::read(&saved_path).expect("saved file"), b"foo");
-    let _ = std::fs::remove_file(&saved_path);
-}
-
-#[tokio::test]
-async fn save_image_generation_result_rejects_data_url_payload() {
-    let result = "data:image/jpeg;base64,Zm9v";
-    let codex_home = tempfile::tempdir().expect("create codex home");
-    let codex_home = codex_home.path().abs();
-
-    let err = save_image_generation_result(&codex_home, "session-1", "ig_456", result)
-        .await
-        .expect_err("data url payload should error");
-    assert!(matches!(err, CodexErr::InvalidRequest(_)));
-}
-
-#[tokio::test]
-async fn save_image_generation_result_overwrites_existing_file() {
-    let codex_home = tempfile::tempdir().expect("create codex home");
-    let codex_home = codex_home.path().abs();
-    let existing_path = image_generation_artifact_path(&codex_home, "session-1", "ig_overwrite");
-    std::fs::create_dir_all(
-        existing_path
-            .parent()
-            .expect("generated image path should have a parent"),
-    )
-    .expect("create image output dir");
-    std::fs::write(&existing_path, b"existing").expect("seed existing image");
-
-    let saved_path = save_image_generation_result(&codex_home, "session-1", "ig_overwrite", "Zm9v")
-        .await
-        .expect("image should be saved");
-
-    assert_eq!(saved_path, existing_path);
-    assert_eq!(std::fs::read(&saved_path).expect("saved file"), b"foo");
-    let _ = std::fs::remove_file(&saved_path);
-}
-
-#[tokio::test]
-async fn save_image_generation_result_sanitizes_call_id_for_codex_home_output_path() {
-    let codex_home = tempfile::tempdir().expect("create codex home");
-    let codex_home = codex_home.path().abs();
-    let expected_path = image_generation_artifact_path(&codex_home, "session-1", "../ig/..");
-    let _ = std::fs::remove_file(&expected_path);
-
-    let saved_path = save_image_generation_result(&codex_home, "session-1", "../ig/..", "Zm9v")
-        .await
-        .expect("image should be saved");
-
-    assert_eq!(saved_path, expected_path);
-    assert_eq!(std::fs::read(&saved_path).expect("saved file"), b"foo");
-    let _ = std::fs::remove_file(&saved_path);
-}
-
-#[tokio::test]
-async fn save_image_generation_result_rejects_non_standard_base64() {
-    let codex_home = tempfile::tempdir().expect("create codex home");
-    let codex_home = codex_home.path().abs();
-    let err = save_image_generation_result(&codex_home, "session-1", "ig_urlsafe", "_-8")
-        .await
-        .expect_err("non-standard base64 should error");
-    assert!(matches!(err, CodexErr::InvalidRequest(_)));
-}
-
-#[tokio::test]
-async fn save_image_generation_result_rejects_non_base64_data_urls() {
-    let codex_home = tempfile::tempdir().expect("create codex home");
-    let codex_home = codex_home.path().abs();
-    let err = save_image_generation_result(
-        &codex_home,
-        "session-1",
-        "ig_svg",
-        "data:image/svg+xml,<svg/>",
-    )
-    .await
-    .expect_err("non-base64 data url should error");
-    assert!(matches!(err, CodexErr::InvalidRequest(_)));
 }

@@ -171,7 +171,7 @@ async fn matching_shellcheck_files(repo_root: &Path, changed_files: &[PathBuf]) 
     let mut matching_files = Vec::new();
     for path in changed_files {
         if path.extension().and_then(|extension| extension.to_str()) == Some("sh")
-            || file_starts_with_shebang(&repo_root.join(&path)).await
+            || file_starts_with_shebang(&repo_root.join(path)).await
         {
             matching_files.push(path.clone());
         }

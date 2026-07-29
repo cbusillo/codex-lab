@@ -86,7 +86,7 @@ fn activation_records_source_and_preserves_legacy_credentials() -> anyhow::Resul
         };
         let accounts_bytes = seed_accounts_file_with_key(temp.path(), catalog_key)?;
         let document = activate(temp.path(), mode, keyring.clone())?;
-        assert!(temp.path().join("secrets/codex_auth.age").exists());
+        assert!(temp.path().join("secrets/login_aggregate.age").exists());
         assert_eq!(document.provenance.store_mode, mode);
         assert_eq!(document.provenance.active_auth_source, Some(source));
         assert_eq!(document.active_auth.as_ref(), Some(&expected_auth));
@@ -130,7 +130,7 @@ fn initial_activation_defers_on_keyring_error() -> anyhow::Result<()> {
         );
         let result = activate_encrypted_aggregate(temp.path(), mode, keyring)?;
         assert_eq!(result, PreparedMigration::Deferred);
-        assert!(!temp.path().join("secrets/codex_auth.age").exists());
+        assert!(!temp.path().join("secrets/login_aggregate.age").exists());
     }
     Ok(())
 }
@@ -148,11 +148,11 @@ fn access_token_activation_is_idempotent_and_preserves_legacy() -> anyhow::Resul
         let accounts_bytes = seed_accounts_file(temp.path())?;
         let document = activate(temp.path(), File, keyring.clone())?;
         assert_eq!(document.accounts.accounts.len(), 1);
-        let encrypted_bytes = fs::read(temp.path().join("secrets/codex_auth.age"))?;
+        let encrypted_bytes = fs::read(temp.path().join("secrets/login_aggregate.age"))?;
         let result = activate_encrypted_aggregate(temp.path(), File, keyring)?;
         assert_eq!(result, PreparedMigration::AlreadyEncrypted(document));
         assert_eq!(
-            fs::read(temp.path().join("secrets/codex_auth.age"))?,
+            fs::read(temp.path().join("secrets/login_aggregate.age"))?,
             encrypted_bytes
         );
         assert_eq!(fs::read(temp.path().join("auth.json"))?, auth_bytes);
@@ -171,13 +171,13 @@ fn no_source_and_ephemeral_paths_do_not_write() -> anyhow::Result<()> {
     fs::write(temp.path().join("auth_accounts.json"), "{\"version\":1}")?;
     let result = activate_encrypted_aggregate(temp.path(), File, keyring.clone())?;
     assert_eq!(result, PreparedMigration::Nothing);
-    assert!(!temp.path().join("secrets/codex_auth.age").exists());
+    assert!(!temp.path().join("secrets/login_aggregate.age").exists());
     let auth_bytes = seed_auth_file(temp.path())?;
     let accounts_bytes = seed_accounts_file(temp.path())?;
     let result =
         activate_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::Ephemeral, keyring)?;
     assert_eq!(result, PreparedMigration::Nothing);
-    assert!(!temp.path().join("secrets/codex_auth.age").exists());
+    assert!(!temp.path().join("secrets/login_aggregate.age").exists());
     assert_eq!(fs::read(temp.path().join("auth.json"))?, auth_bytes);
     assert_eq!(
         fs::read(temp.path().join("auth_accounts.json"))?,
@@ -226,12 +226,12 @@ fn corrupt_encrypted_aggregate_fails_closed() -> anyhow::Result<()> {
     let auth_bytes = seed_auth_file(temp.path())?;
     let accounts_bytes = seed_accounts_file(temp.path())?;
     activate_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring.clone())?;
-    fs::write(temp.path().join("secrets/codex_auth.age"), b"garbage")?;
+    fs::write(temp.path().join("secrets/login_aggregate.age"), b"garbage")?;
     let err = activate_encrypted_aggregate(temp.path(), AuthCredentialsStoreMode::File, keyring)
         .expect_err("corrupt encrypted aggregate must fail");
     assert!(err.to_string().contains("failed"));
     assert_eq!(
-        fs::read(temp.path().join("secrets/codex_auth.age"))?,
+        fs::read(temp.path().join("secrets/login_aggregate.age"))?,
         b"garbage"
     );
     assert_eq!(fs::read(temp.path().join("auth.json"))?, auth_bytes);
@@ -302,7 +302,7 @@ fn valid_drift_refreshes_shadow_and_orphaned_shadow_is_deleted() -> anyhow::Resu
     let keyring = Arc::new(MockKeyringStore::default());
     seed_auth_file(temp.path())?;
     seed_accounts_file_with_key(temp.path(), "sk-mismatch")?;
-    let encrypted_path = temp.path().join("secrets/codex_auth.age");
+    let encrypted_path = temp.path().join("secrets/login_aggregate.age");
     assert_eq!(
         activate_encrypted_aggregate(temp.path(), File, keyring.clone())?,
         PreparedMigration::Deferred
@@ -412,7 +412,7 @@ fn initial_activation_write_failure_preserves_legacy_load() -> anyhow::Result<()
         .expect("legacy auth should load when shadow creation fails");
 
     assert_eq!(loaded.openai_api_key.as_deref(), Some("sk-file"));
-    assert!(!temp.path().join("secrets/codex_auth.age").exists());
+    assert!(!temp.path().join("secrets/login_aggregate.age").exists());
     Ok(())
 }
 
@@ -564,7 +564,7 @@ fn corrupt_shadow_blocks_reads_and_trusted_mutations() -> anyhow::Result<()> {
     let accounts_bytes = seed_accounts_file(temp.path())?;
     load_activated_auth_with_keyring_store(temp.path(), File, keyring.clone())?
         .expect("legacy auth should load");
-    fs::write(temp.path().join("secrets/codex_auth.age"), b"garbage")?;
+    fs::write(temp.path().join("secrets/login_aggregate.age"), b"garbage")?;
 
     let updated_auth: AuthDotJson = serde_json::from_value(json!({
         "OPENAI_API_KEY": "sk-updated",
@@ -604,7 +604,7 @@ fn read_only_home_still_rejects_corrupt_shadow() -> anyhow::Result<()> {
     seed_auth_file(temp.path())?;
     load_activated_auth_with_keyring_store(temp.path(), File, keyring.clone())?
         .expect("legacy auth should load");
-    fs::write(temp.path().join("secrets/codex_auth.age"), b"garbage")?;
+    fs::write(temp.path().join("secrets/login_aggregate.age"), b"garbage")?;
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o500))?;
 
     let loaded = load_activated_auth_with_keyring_store(temp.path(), File, keyring);
@@ -647,12 +647,13 @@ fn seed_keyring_auth(
     api_key: &str,
 ) -> anyhow::Result<AuthDotJson> {
     let auth = AuthDotJson {
-        auth_mode: Some(codex_app_server_protocol::AuthMode::ApiKey),
+        auth_mode: Some(codex_protocol::auth::AuthMode::ApiKey),
         openai_api_key: Some(api_key.to_string()),
         tokens: None,
         last_refresh: None,
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
     save_auth_with_keyring_store(home, &auth, AuthCredentialsStoreMode::Keyring, keyring)?;
     Ok(auth)
@@ -714,7 +715,7 @@ fn secrets_manager(home: &Path, keyring: Arc<MockKeyringStore>) -> SecretsManage
         home.to_path_buf(),
         SecretsBackendKind::Local,
         keyring,
-        LocalSecretsNamespace::CodexAuth,
+        LocalSecretsNamespace::LoginAggregate,
     )
 }
 

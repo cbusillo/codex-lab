@@ -2,11 +2,12 @@ load("//:defs.bzl", "codex_rust_crate")
 
 codex_rust_crate(
     name = "version",
-    crate_name = "codex_version",
     compile_data = [
         "//:announcement_tip.toml",
         "//codex-rs/models-manager:models.json",
+        "build.rs",
     ],
+    crate_name = "codex_version",
 )
 
 # Source-archive and release builds that need exact provenance pass the complete tuple through

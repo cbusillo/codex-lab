@@ -6,7 +6,7 @@ use pretty_assertions::assert_eq;
 use tokio::sync::mpsc::unbounded_channel;
 
 fn all_model_presets() -> Vec<ModelPreset> {
-    crate::legacy_core::test_support::all_model_presets().clone()
+    crate::test_support::TEST_MODEL_PRESETS.clone()
 }
 
 fn model_presets_with_test_upgrades() -> Vec<ModelPreset> {
@@ -68,18 +68,6 @@ async fn model_migration_prompt_only_shows_for_deprecated_models() {
     assert!(!should_show_model_migration_prompt(
         "gpt-5.4", "gpt-5.4", &seen, &presets
     ));
-    assert!(should_show_model_migration_prompt(
-        "gpt-5.3-codex",
-        "gpt-5.4",
-        &seen,
-        &presets
-    ));
-    assert!(!should_show_model_migration_prompt(
-        "gpt-5.3-codex",
-        "gpt-5.3-codex",
-        &seen,
-        &presets
-    ));
 }
 
 #[test]
@@ -108,7 +96,7 @@ fn select_model_availability_nux_picks_only_eligible_model() {
 }
 
 #[test]
-fn select_model_availability_nux_skips_missing_and_exhausted_models() {
+fn select_model_availability_nux_does_not_fall_back_to_older_announcement() {
     let mut presets = all_model_presets();
     presets.iter_mut().for_each(|preset| {
         preset.availability_nux = None;
@@ -133,13 +121,7 @@ fn select_model_availability_nux_skips_missing_and_exhausted_models() {
         &model_availability_nux_config(&[("gpt-5.4", MODEL_AVAILABILITY_NUX_MAX_SHOW_COUNT)]),
     );
 
-    assert_eq!(
-        selected,
-        Some(StartupTooltipOverride {
-            model_slug: "gpt-5.4-mini".to_string(),
-            message: "gpt-5.4-mini is available".to_string(),
-        })
-    );
+    assert_eq!(selected, None);
 }
 
 #[test]
@@ -364,13 +346,13 @@ async fn model_migration_prompt_shows_for_hidden_model() {
     let mut available_models = model_presets_with_test_upgrades();
     let current = available_models
         .iter_mut()
-        .find(|preset| preset.model == "gpt-5.3-codex")
-        .expect("gpt-5.3-codex preset present");
+        .find(|preset| preset.model == "gpt-5.2")
+        .expect("gpt-5.2 preset present");
     current.show_in_picker = false;
     let current = current.clone();
     assert!(
         !current.show_in_picker,
-        "expected gpt-5.3-codex to be hidden from picker for this test"
+        "expected gpt-5.2 to be hidden from picker for this test"
     );
 
     let upgrade = current.upgrade.as_ref().expect("upgrade configured");

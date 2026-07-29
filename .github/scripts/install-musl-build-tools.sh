@@ -4,20 +4,12 @@ set -euo pipefail
 : "${TARGET:?TARGET environment variable is required}"
 : "${GITHUB_ENV:?GITHUB_ENV environment variable is required}"
 
-apt_update_args=()
-if [[ -n "${APT_UPDATE_ARGS:-}" ]]; then
-  # shellcheck disable=SC2206
-  apt_update_args=(${APT_UPDATE_ARGS})
-fi
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-apt_install_args=()
-if [[ -n "${APT_INSTALL_ARGS:-}" ]]; then
-  # shellcheck disable=SC2206
-  apt_install_args=(${APT_INSTALL_ARGS})
-fi
-
-sudo apt-get update "${apt_update_args[@]}"
-sudo apt-get install -y "${apt_install_args[@]}" ca-certificates curl musl-tools pkg-config libcap-dev g++ clang libc++-dev libc++abi-dev lld xz-utils
+# APT_UPDATE_ARGS/APT_INSTALL_ARGS still pass through; install-apt-packages.sh
+# reads the same variables and skips apt entirely when nothing is missing.
+bash "${script_dir}/install-apt-packages.sh" \
+  ca-certificates curl musl-tools pkg-config libcap-dev g++ clang libc++-dev libc++abi-dev lld xz-utils
 
 case "${TARGET}" in
   x86_64-unknown-linux-musl)

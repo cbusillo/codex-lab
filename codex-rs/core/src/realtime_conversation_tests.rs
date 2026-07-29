@@ -1,14 +1,32 @@
+use super::AGENT_FINAL_MESSAGE_PREFIX;
+use super::HANDOFF_STREAM_TRUNCATION_MARKER;
+use super::REALTIME_DELEGATION_INPUT_TOKEN_BUDGET;
+use super::REALTIME_DELEGATION_TRANSCRIPT_DELTA_TOKEN_BUDGET;
 use super::RealtimeHandoffState;
 use super::RealtimeSessionKind;
+use super::RealtimeStreamedItem;
 use super::realtime_delegation_from_handoff;
 use super::realtime_request_headers;
 use super::realtime_text_from_handoff_request;
 use super::wrap_realtime_delegation_input;
+use crate::context::REALTIME_DELEGATION_RENDERED_TOKEN_CAP;
+use crate::context::RealtimeDelegationSource;
 use async_channel::bounded;
-use codex_config::config_toml::RealtimeWsVersion;
+use codex_api::RealtimeEventParser;
+use codex_protocol::models::MessagePhase;
+use codex_protocol::protocol::CodexResponseHandoffMode;
 use codex_protocol::protocol::RealtimeHandoffRequested;
 use codex_protocol::protocol::RealtimeTranscriptEntry;
+use codex_utils_output_truncation::approx_token_count;
 use pretty_assertions::assert_eq;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
+
+/// The model-visible context rule this fragment has to satisfy: no single injected item may reach
+/// 10K approximate tokens.
+const REALTIME_ITEM_TOKEN_CEILING: usize = 10_000;
 
 #[test]
 fn prefers_handoff_input_transcript_over_active_transcript() {
@@ -104,7 +122,11 @@ fn ignores_empty_handoff_request_input_transcript() {
 #[test]
 fn wraps_realtime_delegation_input() {
     assert_eq!(
-        wrap_realtime_delegation_input("hello", /*transcript_delta*/ None),
+        wrap_realtime_delegation_input(
+            "hello",
+            /*transcript_delta*/ None,
+            RealtimeDelegationSource::Handoff,
+        ),
         "<realtime_delegation>\n  <input>hello</input>\n</realtime_delegation>"
     );
 }
@@ -112,7 +134,11 @@ fn wraps_realtime_delegation_input() {
 #[test]
 fn wraps_realtime_delegation_input_with_xml_escaping() {
     assert_eq!(
-        wrap_realtime_delegation_input("use a < b && c > d", Some("saw <that>")),
+        wrap_realtime_delegation_input(
+            "use a < b && c > d",
+            Some("saw <that>"),
+            RealtimeDelegationSource::Handoff,
+        ),
         "<realtime_delegation>\n  <input>use a &lt; b &amp;&amp; c &gt; d</input>\n  <transcript_delta>saw &lt;that&gt;</transcript_delta>\n</realtime_delegation>"
     );
 }
@@ -120,24 +146,202 @@ fn wraps_realtime_delegation_input_with_xml_escaping() {
 #[test]
 fn wraps_realtime_delegation_input_with_xml_escaping_without_transcript() {
     assert_eq!(
-        wrap_realtime_delegation_input("use a < b && c > d", /*transcript_delta*/ None),
+        wrap_realtime_delegation_input(
+            "use a < b && c > d",
+            /*transcript_delta*/ None,
+            RealtimeDelegationSource::Handoff,
+        ),
         "<realtime_delegation>\n  <input>use a &lt; b &amp;&amp; c &gt; d</input>\n</realtime_delegation>"
     );
+}
+
+#[test]
+fn bounds_transcript_tail_flush_delegation_input_and_transcript_delta() {
+    // Realtime transcripts grow with session length, so both halves of the fragment are bounded
+    // with the shared realtime token-budget helper before injection.
+    let rendered = wrap_realtime_delegation_input(
+        &"input ".repeat(200_000),
+        Some(&"delta ".repeat(200_000)),
+        RealtimeDelegationSource::TranscriptTailFlush,
+    );
+
+    assert!(
+        approx_token_count(&rendered)
+            <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET
+                + REALTIME_DELEGATION_TRANSCRIPT_DELTA_TOKEN_BUDGET
+                + 100,
+        "rendered delegation was {} tokens",
+        approx_token_count(&rendered)
+    );
+    assert!(rendered.contains("<source>transcript_tail_flush</source>"));
+}
+
+#[test]
+fn bounds_handoff_delegation_input() {
+    let rendered = wrap_realtime_delegation_input(
+        &"input ".repeat(200_000),
+        /*transcript_delta*/ None,
+        RealtimeDelegationSource::Handoff,
+    );
+
+    assert!(
+        approx_token_count(&rendered) <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET + 100,
+        "rendered delegation was {} tokens",
+        approx_token_count(&rendered)
+    );
+}
+
+#[test]
+fn bounds_multibyte_delegation_input_without_splitting_characters() {
+    let rendered = wrap_realtime_delegation_input(
+        &"🙂".repeat(200_000),
+        /*transcript_delta*/ None,
+        RealtimeDelegationSource::Handoff,
+    );
+
+    assert!(rendered.is_char_boundary(rendered.len()));
+    assert!(approx_token_count(&rendered) <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET + 100);
+}
+
+/// The pre-escape token budgets are not the size the model sees. `&` renders as `&amp;`, so a
+/// transcript made entirely of XML metacharacters expands 5x on the way into history. Assert on
+/// the rendered fragment for every source, both halves, and every metacharacter.
+fn assert_rendered_delegation_is_bounded(rendered: &str) {
+    let rendered_tokens = approx_token_count(rendered);
+    assert!(
+        rendered_tokens <= REALTIME_DELEGATION_RENDERED_TOKEN_CAP,
+        "rendered delegation was {rendered_tokens} tokens"
+    );
+    assert!(
+        rendered_tokens < REALTIME_ITEM_TOKEN_CEILING,
+        "rendered delegation was {rendered_tokens} tokens, at or above the per-item ceiling"
+    );
+    assert!(rendered.is_char_boundary(rendered.len()));
+    assert!(rendered.starts_with("<realtime_delegation>"));
+    assert!(rendered.ends_with("</realtime_delegation>"));
+}
+
+#[test]
+fn bounds_rendered_handoff_delegation_made_entirely_of_xml_metacharacters() {
+    for metacharacter in ['&', '<', '>'] {
+        let rendered = wrap_realtime_delegation_input(
+            &metacharacter.to_string().repeat(200_000),
+            /*transcript_delta*/ None,
+            RealtimeDelegationSource::Handoff,
+        );
+
+        assert_rendered_delegation_is_bounded(&rendered);
+    }
+}
+
+#[test]
+fn bounds_rendered_transcript_tail_flush_delegation_made_entirely_of_xml_metacharacters() {
+    for metacharacter in ['&', '<', '>'] {
+        let text = metacharacter.to_string().repeat(200_000);
+        let rendered = wrap_realtime_delegation_input(
+            &text,
+            Some(&text),
+            RealtimeDelegationSource::TranscriptTailFlush,
+        );
+
+        assert_rendered_delegation_is_bounded(&rendered);
+        assert!(rendered.contains("<source>transcript_tail_flush</source>"));
+    }
+}
+
+#[test]
+fn bounds_rendered_delegation_mixing_multibyte_text_and_xml_metacharacters() {
+    let text = "🙂&<>".repeat(200_000);
+    let rendered = wrap_realtime_delegation_input(
+        &text,
+        Some(&text),
+        RealtimeDelegationSource::TranscriptTailFlush,
+    );
+
+    assert_rendered_delegation_is_bounded(&rendered);
+    // Truncating inside an entity would leave a `&` that no longer starts one.
+    for (index, _) in rendered.match_indices('&') {
+        let tail = &rendered[index..];
+        assert!(
+            tail.starts_with("&amp;") || tail.starts_with("&lt;") || tail.starts_with("&gt;"),
+            "rendered delegation truncated inside an XML entity at byte {index}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn clears_active_handoff_explicitly() {
     let (tx, _rx) = bounded(1);
-    let state = RealtimeHandoffState::new(tx, RealtimeSessionKind::V1);
+    let state = RealtimeHandoffState {
+        output_tx: tx,
+        last_output: Arc::new(Mutex::new(None)),
+        stream: Arc::new(Mutex::new(Default::default())),
+        client_managed_handoffs: false,
+        codex_responses_as_items: false,
+        codex_response_item_prefix: None,
+        codex_response_handoff_mode: CodexResponseHandoffMode::Thinking,
+        codex_response_handoff_channel_prefixes: Arc::new(BTreeMap::new()),
+        session_kind: RealtimeSessionKind::V1,
+        event_parser: RealtimeEventParser::V1,
+    };
 
-    *state.active_handoff.lock().await = Some("handoff_1".to_string());
+    state.stream.lock().await.active_handoff = Some("handoff_1".to_string());
     assert_eq!(
-        state.active_handoff.lock().await.clone(),
+        state.stream.lock().await.active_handoff.clone(),
         Some("handoff_1".to_string())
     );
 
-    *state.active_handoff.lock().await = None;
-    assert_eq!(state.active_handoff.lock().await.clone(), None);
+    state.stream.lock().await.active_handoff = None;
+    assert_eq!(state.stream.lock().await.active_handoff.clone(), None);
+}
+
+#[test]
+fn streamed_handoff_preserves_a_bounded_final_tail() {
+    let mut item = RealtimeStreamedItem {
+        handoff_id: "handoff_1".to_string(),
+        phase: Some(MessagePhase::FinalAnswer),
+        bem_channel_parser: None,
+        prefix_final_message: true,
+        sent_bytes: 0,
+        buffered_text: String::new(),
+        tail_text: String::new(),
+        truncated: false,
+        last_flush_at: Instant::now(),
+        flush_scheduled: false,
+    };
+    item.push_text(&format!("HEAD{}TAIL", "x".repeat(/*n*/ 5_000)));
+
+    let first = item
+        .drain_stream_chunk()
+        .expect("oversized output should retain a streamable head");
+    let final_chunk = item
+        .drain_final_chunk()
+        .expect("oversized output should retain a final tail");
+    let output = format!("{first}{final_chunk}");
+
+    assert!(output.len() <= 4_000);
+    assert!(output.starts_with(&format!("{AGENT_FINAL_MESSAGE_PREFIX}HEAD")));
+    assert!(output.contains(HANDOFF_STREAM_TRUNCATION_MARKER));
+    assert!(output.ends_with("TAIL"));
+}
+
+#[test]
+fn streamed_v3_handoff_omits_the_final_message_prefix() {
+    let mut item = RealtimeStreamedItem {
+        handoff_id: "handoff_1".to_string(),
+        phase: Some(MessagePhase::FinalAnswer),
+        bem_channel_parser: None,
+        prefix_final_message: false,
+        sent_bytes: 0,
+        buffered_text: String::new(),
+        tail_text: String::new(),
+        truncated: false,
+        last_flush_at: Instant::now(),
+        flush_scheduled: false,
+    };
+    item.push_text("done");
+
+    assert_eq!(item.drain_final_chunk(), Some("done".to_string()));
 }
 
 #[test]
@@ -145,8 +349,8 @@ fn uses_quicksilver_alpha_header_for_realtime_v1() {
     let headers = realtime_request_headers(
         Some("session_1"),
         Some("sk-test"),
-        RealtimeWsVersion::V1,
-        /*model*/ None,
+        RealtimeEventParser::V1,
+        "codex_work_desktop",
     )
     .expect("headers")
     .expect("headers");
@@ -164,8 +368,8 @@ fn omits_quicksilver_alpha_header_for_realtime_v2() {
     let headers = realtime_request_headers(
         Some("session_1"),
         Some("sk-test"),
-        RealtimeWsVersion::V2,
-        /*model*/ None,
+        RealtimeEventParser::RealtimeV2,
+        "codex_work_desktop",
     )
     .expect("headers")
     .expect("headers");
@@ -174,26 +378,45 @@ fn omits_quicksilver_alpha_header_for_realtime_v2() {
 }
 
 #[test]
-fn uses_model_compatible_headers_for_realtime_requests() {
-    let expected_user_agent =
-        codex_login::default_client::get_codex_user_agent_for_model("gpt-5.6-luna");
+fn uses_frameless_alpha_header_for_realtime_v3() {
     let headers = realtime_request_headers(
         Some("session_1"),
         Some("sk-test"),
-        RealtimeWsVersion::V2,
-        Some("gpt-5.6-luna"),
+        RealtimeEventParser::FramelessBidi,
+        "codex_work_desktop",
     )
     .expect("headers")
     .expect("headers");
 
     assert_eq!(
-        headers.get("version").and_then(|value| value.to_str().ok()),
-        Some("0.144.0")
-    );
-    assert_eq!(
         headers
-            .get("user-agent")
+            .get("openai-alpha")
             .and_then(|value| value.to_str().ok()),
-        Some(expected_user_agent.as_str())
+        Some("quicksilver=v2")
     );
+}
+
+#[test]
+fn realtime_headers_include_only_non_default_originator() {
+    let default_originator = codex_login::default_client::originator();
+    for (originator, expected_header) in [
+        ("codex_work_desktop", Some("codex_work_desktop")),
+        (default_originator.value.as_str(), None),
+    ] {
+        let headers = realtime_request_headers(
+            Some("session_1"),
+            Some("sk-test"),
+            RealtimeEventParser::RealtimeV2,
+            originator,
+        )
+        .expect("headers")
+        .expect("headers");
+
+        assert_eq!(
+            headers
+                .get("originator")
+                .and_then(|value| value.to_str().ok()),
+            expected_header
+        );
+    }
 }

@@ -10,9 +10,11 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthKeyringBackendKind;
 use codex_core::CodexThread;
 use codex_core::ForkSnapshot;
 use codex_core::NewThread;
+use codex_core::StartThreadOptions;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_login::StoredAccount;
@@ -56,6 +58,8 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+
+const CODEX_APPS_MCP_PATH: &str = "/api/codex/ps/mcp";
 
 fn chatgpt_tokens(account_id: &str) -> TokenData {
     chatgpt_tokens_with_access(account_id, &format!("access-{account_id}"))
@@ -142,6 +146,7 @@ fn record_rate_limits(
             secondary: secondary_resets_at.map(rate_limit_window),
             credits: None,
             individual_limit: None,
+            spend_control_reached: None,
             plan_type: None,
             rate_limit_reached_type: None,
         },
@@ -185,7 +190,6 @@ fn lease_account_id(home: &Path, thread_id: ThreadId) -> Result<String> {
 async fn submit_text(thread: &CodexThread, text: &str) -> Result<()> {
     thread
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: text.to_string(),
                 text_elements: Vec::new(),
@@ -453,7 +457,7 @@ async fn api_key_fallback_serves_turns_when_all_chatgpt_accounts_are_limited() -
     assert!(
         received_requests
             .iter()
-            .all(|request| request.url.path() != "/api/codex/apps"),
+            .all(|request| request.url.path() != CODEX_APPS_MCP_PATH),
         "API-key fallback unexpectedly attempted an Apps MCP handshake"
     );
 
@@ -561,11 +565,6 @@ async fn live_chatgpt_429_falls_back_to_api_key_without_apps_on_retry() -> Resul
 
     let initial_developer_text = requests[0].message_input_texts("developer").join("\n");
     assert!(initial_developer_text.contains("<apps_instructions>"));
-    assert!(
-        requests[0].body_json()["tools"]
-            .to_string()
-            .contains("mcp__codex_apps__")
-    );
     let retry_developer_text = requests[1].message_input_texts("developer").join("\n");
     assert_eq!(
         retry_developer_text.matches("<apps_instructions>").count(),
@@ -586,7 +585,7 @@ async fn live_chatgpt_429_falls_back_to_api_key_without_apps_on_retry() -> Resul
         .expect("initial model request should be recorded");
     let initial_apps_requests = received_requests[..first_model_request_index]
         .iter()
-        .filter(|request| request.url.path() == "/api/codex/apps")
+        .filter(|request| request.url.path() == CODEX_APPS_MCP_PATH)
         .collect::<Vec<_>>();
     assert!(!initial_apps_requests.is_empty());
     assert!(initial_apps_requests.iter().all(|request| {
@@ -599,7 +598,7 @@ async fn live_chatgpt_429_falls_back_to_api_key_without_apps_on_retry() -> Resul
     assert!(
         received_requests[first_model_request_index + 1..]
             .iter()
-            .all(|request| request.url.path() != "/api/codex/apps"),
+            .all(|request| request.url.path() != CODEX_APPS_MCP_PATH),
         "API-key retry unexpectedly attempted an Apps MCP handshake"
     );
 
@@ -649,7 +648,12 @@ async fn prompt_cache_key_survives_control_switch_detach_and_reattach() -> Resul
     )?;
     let (_account, alternate_auth) =
         codex_login::auth_for_account(home.path(), AuthCredentialsStoreMode::File, &alternate.id)?;
-    save_auth(home.path(), &alternate_auth, AuthCredentialsStoreMode::File)?;
+    save_auth(
+        home.path(),
+        &alternate_auth,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
     codex_login::set_active_account_id(
         home.path(),
         AuthCredentialsStoreMode::File,
@@ -663,7 +667,12 @@ async fn prompt_cache_key_survives_control_switch_detach_and_reattach() -> Resul
 
     let (_account, control_auth) =
         codex_login::auth_for_account(home.path(), AuthCredentialsStoreMode::File, &control.id)?;
-    save_auth(home.path(), &control_auth, AuthCredentialsStoreMode::File)?;
+    save_auth(
+        home.path(),
+        &control_auth,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
     codex_login::set_active_account_id(
         home.path(),
         AuthCredentialsStoreMode::File,
@@ -725,7 +734,7 @@ async fn loaded_threads_pin_execution_auth_across_a_control_account_switch() -> 
         ..
     } = fixture
         .thread_manager
-        .start_thread(fixture.config.clone())
+        .start_thread(StartThreadOptions::new(fixture.config.clone()))
         .await?;
     assert_ne!(thread_a_id, thread_b_id);
 
@@ -741,7 +750,12 @@ async fn loaded_threads_pin_execution_auth_across_a_control_account_switch() -> 
     )?;
     let (_account, alternate_auth) =
         codex_login::auth_for_account(home.path(), AuthCredentialsStoreMode::File, &alternate.id)?;
-    save_auth(home.path(), &alternate_auth, AuthCredentialsStoreMode::File)?;
+    save_auth(
+        home.path(),
+        &alternate_auth,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
     codex_login::set_active_account_id(
         home.path(),
         AuthCredentialsStoreMode::File,
@@ -758,7 +772,12 @@ async fn loaded_threads_pin_execution_auth_across_a_control_account_switch() -> 
     // Switch the active control account back to the original control.
     let (_account, control_auth) =
         codex_login::auth_for_account(home.path(), AuthCredentialsStoreMode::File, &control.id)?;
-    save_auth(home.path(), &control_auth, AuthCredentialsStoreMode::File)?;
+    save_auth(
+        home.path(),
+        &control_auth,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
     codex_login::set_active_account_id(
         home.path(),
         AuthCredentialsStoreMode::File,
@@ -842,14 +861,14 @@ async fn resumed_and_forked_threads_reuse_the_source_execution_lease() -> Result
         home.path(),
         &control,
         initial_time + Duration::hours(4),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
     record_rate_limits(
         home.path(),
         &execution,
         initial_time + Duration::minutes(10),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
 
@@ -882,14 +901,14 @@ async fn resumed_and_forked_threads_reuse_the_source_execution_lease() -> Result
         home.path(),
         &control,
         changed_time + Duration::minutes(5),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
     record_rate_limits(
         home.path(),
         &execution,
         changed_time + Duration::hours(3),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
 
@@ -982,21 +1001,21 @@ async fn model_catalog_cache_isolated_per_account_and_provider_config_across_res
         home.path(),
         &control,
         initial_time + Duration::hours(5),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
     record_rate_limits(
         home.path(),
         &account_a,
         initial_time + Duration::minutes(10),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
     record_rate_limits(
         home.path(),
         &account_b,
         initial_time + Duration::minutes(30),
-        None,
+        /*secondary_resets_at*/ None,
         initial_time,
     )?;
 
@@ -1021,21 +1040,21 @@ async fn model_catalog_cache_isolated_per_account_and_provider_config_across_res
         home.path(),
         &control,
         changed_time + Duration::hours(5),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
     record_rate_limits(
         home.path(),
         &account_a,
         changed_time + Duration::hours(3),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
     record_rate_limits(
         home.path(),
         &account_b,
         changed_time + Duration::minutes(5),
-        None,
+        /*secondary_resets_at*/ None,
         changed_time,
     )?;
 

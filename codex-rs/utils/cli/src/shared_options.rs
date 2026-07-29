@@ -316,4 +316,31 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn auth_profile_parses_and_is_inherited_by_subcommand_scopes() {
+        let cli = TestCli::try_parse_from(["test", "--auth-profile", "work"])
+            .expect("auth profile should parse");
+        assert_eq!(cli.shared.auth_profile.as_deref(), Some("work"));
+
+        let mut subcommand = SharedCliOptions::default();
+        subcommand.inherit_exec_root_options(&cli.shared);
+        assert_eq!(subcommand.auth_profile.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn subcommand_auth_profile_overrides_root_auth_profile() {
+        let mut root = SharedCliOptions {
+            auth_profile: Some("work".to_string()),
+            ..Default::default()
+        };
+        let subcommand = SharedCliOptions {
+            auth_profile: Some("personal".to_string()),
+            ..Default::default()
+        };
+
+        root.apply_subcommand_overrides(subcommand);
+
+        assert_eq!(root.auth_profile.as_deref(), Some("personal"));
+    }
 }

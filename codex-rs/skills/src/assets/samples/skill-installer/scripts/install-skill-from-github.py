@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install a skill from a GitHub repo path into $CODEX_LAB_HOME/skills."""
+"""Install a skill from a GitHub repo path into $CODEX_HOME/skills."""
 
 from __future__ import annotations
 

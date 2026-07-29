@@ -80,6 +80,7 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::ThreadConfigLoader;
+use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_exec_server::EnvironmentManager;
@@ -97,6 +98,8 @@ use tracing::warn;
 
 const IN_PROCESS_CONNECTION_ID: ConnectionId = ConnectionId(0);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+// Covers both bounded runtime drains plus the analytics client's 25-second best-effort flush.
+const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(35);
 /// Default bounded channel capacity for in-process runtime queues.
 pub const DEFAULT_IN_PROCESS_CHANNEL_CAPACITY: usize = CHANNEL_CAPACITY;
 
@@ -105,7 +108,9 @@ type PendingClientRequestResponse = std::result::Result<Result, JSONRPCErrorErro
 fn server_notification_requires_delivery(notification: &ServerNotification) -> bool {
     matches!(
         notification,
-        ServerNotification::TurnCompleted(_) | ServerNotification::ThreadSettingsUpdated(_)
+        ServerNotification::TurnCompleted(_)
+            | ServerNotification::ThreadSettingsUpdated(_)
+            | ServerNotification::ExternalAgentConfigImportCompleted(_)
     )
 }
 
@@ -155,6 +160,7 @@ pub struct InProcessStartArgs {
 ///
 /// [`Lagged`](Self::Lagged) is a transport health marker, not an application
 /// event — it signals that the consumer fell behind and some events were dropped.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum InProcessServerEvent {
     /// Server request that requires client response/rejection.
@@ -330,7 +336,7 @@ impl InProcessClientHandle {
             .await
             .is_ok()
         {
-            let _ = timeout(SHUTDOWN_TIMEOUT, done_rx).await;
+            let _ = timeout(SHUTDOWN_ACK_TIMEOUT, done_rx).await;
         }
 
         if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut runtime_handle).await {
@@ -350,7 +356,16 @@ impl InProcessClientHandle {
 /// This function sends `initialize` followed by `initialized` before returning
 /// the handle, so callers receive a ready-to-use runtime. If initialize fails,
 /// the runtime is shut down and an `InvalidData` error is returned.
-pub async fn start(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+    if let Ok(Some(err)) = check_execpolicy_for_warnings(&args.config.config_layer_stack).await {
+        let (path, range) = crate::exec_policy_warning_location(&err);
+        args.config_warnings.push(ConfigWarningNotification {
+            summary: "Error parsing rules; custom rules not applied.".to_string(),
+            details: Some(err.to_string()),
+            path,
+            range,
+        });
+    }
     let initialize = args.initialize.clone();
     let client = start_uninitialized(args).await?;
 
@@ -385,6 +400,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 .await;
         let analytics_events_client =
             analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
+        let analytics_events_flush_client = analytics_events_client.clone();
         let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
             outgoing_tx,
             analytics_events_client.clone(),
@@ -415,7 +431,6 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
         let config_manager = ConfigManager::new(
             args.config.codex_home.to_path_buf(),
-            args.config.auth_home.to_path_buf(),
             args.cli_overrides,
             args.loader_overrides,
             args.strict_config,
@@ -440,6 +455,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 session_provenance: args.session_provenance,
                 auth_manager,
                 installation_id,
+                code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
@@ -660,7 +676,8 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                                     .await;
                             }
                         }
-                        OutgoingMessage::AppServerNotification(notification) => {
+                        OutgoingMessage::AppServerNotification(envelope) => {
+                            let notification = envelope.notification;
                             if server_notification_requires_delivery(&notification) {
                                 if event_tx
                                     .send(InProcessServerEvent::ServerNotification(notification))
@@ -715,6 +732,8 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
             let _ = outbound_handle.await;
         }
 
+        analytics_events_flush_client.flush().await;
+
         if let Some(done_tx) = shutdown_ack {
             let _ = done_tx.send(());
         }
@@ -734,6 +753,7 @@ mod tests {
     use super::*;
     use codex_app_server_protocol::ClientInfo;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
+    use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
@@ -882,6 +902,35 @@ mod tests {
             .expect("in-process runtime should shutdown cleanly");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn in_process_shutdown_waits_for_analytics_flush_budget() {
+        let (client_tx, mut client_rx) = mpsc::channel(/*buffer*/ 1);
+        let (_event_tx, event_rx) = mpsc::channel(/*buffer*/ 1);
+        let completed = Arc::new(AtomicBool::new(false));
+        let runtime_completed = Arc::clone(&completed);
+        let runtime_handle = tokio::spawn(async move {
+            let done_tx = match client_rx.recv().await {
+                Some(InProcessClientMessage::Shutdown { done_tx }) => done_tx,
+                _ => panic!("expected in-process shutdown request"),
+            };
+            tokio::time::sleep(SHUTDOWN_TIMEOUT + SHUTDOWN_TIMEOUT + Duration::from_secs(24)).await;
+            runtime_completed.store(true, Ordering::Release);
+            let _ = done_tx.send(());
+        });
+        let client = InProcessClientHandle {
+            client: InProcessClientSender { client_tx },
+            event_rx,
+            runtime_handle,
+            _test_codex_home: None,
+        };
+
+        client
+            .shutdown()
+            .await
+            .expect("in-process runtime should shutdown cleanly");
+        assert!(completed.load(Ordering::Acquire));
+    }
+
     #[test]
     fn guaranteed_delivery_helpers_cover_terminal_server_notifications() {
         assert!(server_notification_requires_delivery(
@@ -898,6 +947,14 @@ mod tests {
                     duration_ms: None,
                 },
             })
+        ));
+        assert!(server_notification_requires_delivery(
+            &ServerNotification::ExternalAgentConfigImportCompleted(
+                ExternalAgentConfigImportCompletedNotification {
+                    import_id: "import".to_string(),
+                    item_type_results: Vec::new(),
+                },
+            )
         ));
     }
 }

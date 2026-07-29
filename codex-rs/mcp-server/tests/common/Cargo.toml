@@ -18,10 +18,10 @@ codex-login = { workspace = true }
 codex-mcp-server = { workspace = true }
 codex-terminal-detection = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
+codex-version = { workspace = true }
 rmcp = { workspace = true }
 os_info = { workspace = true }
 pretty_assertions = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = [
     "io-std",

@@ -50,12 +50,49 @@ impl MutationCallbackGuard {
 }
 
 fn canonical_lock_identity(lock_path: &Path) -> Result<PathBuf> {
-    fs::canonicalize(lock_path).with_context(|| {
-        format!(
-            "failed to resolve secrets lock identity at {}",
-            lock_path.display()
-        )
-    })
+    let mut existing_ancestor = if lock_path.is_absolute() {
+        lock_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(lock_path)
+    };
+    let mut missing_components = Vec::new();
+
+    loop {
+        match fs::canonicalize(&existing_ancestor) {
+            Ok(mut canonical) => {
+                for component in missing_components.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = existing_ancestor.file_name().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to resolve secrets lock identity at {}",
+                        lock_path.display()
+                    )
+                })?;
+                missing_components.push(component.to_os_string());
+                existing_ancestor = existing_ancestor
+                    .parent()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "failed to resolve secrets lock identity at {}",
+                            lock_path.display()
+                        )
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to resolve secrets lock identity at {}",
+                        lock_path.display()
+                    )
+                });
+            }
+        }
+    }
 }
 
 impl Drop for MutationCallbackGuard {

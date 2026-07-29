@@ -18,7 +18,6 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::ThreadHistoryMode;
 use codex_thread_store::StoredThread;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -31,6 +30,7 @@ use tempfile::TempDir;
 fn stored_thread(cwd: &str, title: &str, first_user_message: &str) -> StoredThread {
     StoredThread {
         thread_id: ThreadId::new(),
+        extra_config: None,
         rollout_path: Some(PathBuf::from("/tmp/rollout.jsonl")),
         forked_from_id: None,
         parent_thread_id: None,
@@ -47,12 +47,17 @@ fn stored_thread(cwd: &str, title: &str, first_user_message: &str) -> StoredThre
             .timestamp_opt(1_709_251_200, 0)
             .single()
             .expect("valid timestamp"),
+        recency_at: Utc
+            .timestamp_opt(1_709_251_200, 0)
+            .single()
+            .expect("valid timestamp"),
         archived_at: None,
+        is_pinned: false,
         cwd: PathBuf::from(cwd),
         cli_version: "test".to_string(),
         source: SessionSource::Cli,
-        history_mode: ThreadHistoryMode::Legacy,
         session_provenance: None,
+        history_mode: Default::default(),
         thread_source: None,
         agent_nickname: None,
         agent_role: None,
@@ -76,6 +81,7 @@ fn message(role: &str, content: ContentItem) -> ResponseItem {
         role: role.to_string(),
         content: vec![content],
         phase: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 

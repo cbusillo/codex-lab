@@ -183,6 +183,39 @@ fn mutation_callback_reentry_fails_without_blocking() -> Result<()> {
 }
 
 #[test]
+fn mutation_callback_can_access_an_uninitialized_namespace() -> Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let keyring_store = Arc::new(MockKeyringStore::default());
+    let aggregate_manager = SecretsManager::new_with_keyring_store_and_namespace(
+        codex_home.path().to_path_buf(),
+        SecretsBackendKind::Local,
+        keyring_store.clone(),
+        LocalSecretsNamespace::LoginAggregate,
+    );
+    let auth_manager = SecretsManager::new_with_keyring_store_and_namespace(
+        codex_home.path().to_path_buf(),
+        SecretsBackendKind::Local,
+        keyring_store,
+        LocalSecretsNamespace::CodexAuth,
+    );
+    let scope = SecretScope::Global;
+    let aggregate_name = SecretName::new("LOGIN_STATE")?;
+    let auth_name = SecretName::new("CODEX_AUTH")?;
+    aggregate_manager.set(&scope, &aggregate_name, "aggregate")?;
+
+    assert!(!aggregate_manager.mutate(&scope, &aggregate_name, |_| {
+        auth_manager.set(&scope, &auth_name, "auth")?;
+        Ok(SecretMutation::Keep)
+    })?);
+
+    assert_eq!(
+        auth_manager.get(&scope, &auth_name)?,
+        Some("auth".to_string())
+    );
+    Ok(())
+}
+
+#[test]
 fn mutation_callback_alias_reentry_fails_without_blocking() -> Result<()> {
     let codex_home = tempfile::tempdir()?;
     let keyring_store = Arc::new(MockKeyringStore::default());

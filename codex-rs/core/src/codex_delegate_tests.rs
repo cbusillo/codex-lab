@@ -1,9 +1,11 @@
 use super::*;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_DECLINE_SYNTHETIC;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX;
 use async_channel::bounded;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
@@ -14,6 +16,9 @@ use codex_protocol::protocol::GuardianAssessmentAction;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::GuardianCommandSource;
 use codex_protocol::protocol::McpInvocation;
+use codex_protocol::protocol::McpStartupCompleteEvent;
+use codex_protocol::protocol::McpStartupStatus;
+use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TurnAbortReason;
@@ -30,20 +35,31 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time::timeout;
 
 #[tokio::test]
-async fn forward_events_cancelled_while_send_blocked_shuts_down_delegate() {
-    let (tx_events, rx_events) = bounded(1);
+async fn dropped_approval_review_fails_closed() {
+    let (tx, rx) = oneshot::channel();
+    drop(tx);
+
+    assert_eq!(
+        receive_approval_review(rx).await,
+        ReviewDecision::denied("automatic approval review could not complete")
+    );
+}
+
+#[tokio::test]
+async fn forward_events_filters_private_events_before_blocked_send_is_cancelled() {
+    let (tx_events, rx_events) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
     let (session, ctx, _rx_evt) = crate::session::tests::make_session_and_context_with_rx().await;
-    let codex = Arc::new(Codex {
+    let io = Arc::new(SessionIo {
         tx_sub,
         rx_event: rx_events,
         agent_status,
-        session: Arc::clone(&session),
         session_loop_termination: completed_session_loop_termination(),
     });
 
@@ -53,8 +69,8 @@ async fn forward_events_cancelled_while_send_blocked_shuts_down_delegate() {
             id: "full".to_string(),
             msg: EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some("turn-1".to_string()),
-                reason: TurnAbortReason::Interrupted,
                 started_at: None,
+                reason: TurnAbortReason::Interrupted,
                 completed_at: None,
                 duration_ms: None,
             }),
@@ -64,7 +80,8 @@ async fn forward_events_cancelled_while_send_blocked_shuts_down_delegate() {
 
     let cancel = CancellationToken::new();
     let forward = tokio::spawn(forward_events(
-        Arc::clone(&codex),
+        Arc::clone(&io),
+        Arc::clone(&session),
         tx_out.clone(),
         session,
         ctx,
@@ -72,31 +89,53 @@ async fn forward_events_cancelled_while_send_blocked_shuts_down_delegate() {
         cancel.clone(),
     ));
 
-    tx_events
-        .send(Event {
-            id: "evt".to_string(),
-            msg: EventMsg::RawResponseItem(RawResponseItemEvent {
-                item: ResponseItem::CustomToolCall {
-                    id: None,
-                    status: None,
-                    call_id: "call-1".to_string(),
-                    name: "tool".to_string(),
-                    input: "{}".to_string(),
-                },
-            }),
-        })
-        .await
-        .unwrap();
+    for msg in [
+        EventMsg::McpStartupUpdate(McpStartupUpdateEvent {
+            server: "pending".to_string(),
+            status: McpStartupStatus::Starting,
+        }),
+        EventMsg::McpStartupComplete(McpStartupCompleteEvent::default()),
+    ] {
+        tx_events
+            .send(Event {
+                id: "delegate-startup".to_string(),
+                msg,
+            })
+            .await
+            .unwrap();
+    }
+    let visible_msg = EventMsg::RawResponseItem(RawResponseItemEvent {
+        item: ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: "call-1".to_string(),
+            name: "tool".to_string(),
+            namespace: None,
+            input: "{}".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    });
+    for id in ["visible-1", "visible-2", "blocked"] {
+        tx_events
+            .send(Event {
+                id: id.to_string(),
+                msg: visible_msg.clone(),
+            })
+            .await
+            .unwrap();
+    }
 
     drop(tx_events);
+    let received = rx_out.recv().await.expect("prefilled event missing");
+    assert_eq!(received.id, "full");
+    let received = rx_out.recv().await.expect("visible event missing");
+    assert_eq!(received.id, "visible-1");
     cancel.cancel();
     timeout(std::time::Duration::from_millis(1000), forward)
         .await
         .expect("forward_events hung")
         .expect("forward_events join error");
 
-    let received = rx_out.recv().await.expect("prefilled event missing");
-    assert_eq!("full", received.id);
     let mut ops = Vec::new();
     while let Ok(sub) = rx_sub.try_recv() {
         ops.push(sub.op);
@@ -116,17 +155,15 @@ async fn forward_ops_preserves_submission_trace_context() {
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_tx_events, rx_events) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
-    let (session, _ctx, _rx_evt) = crate::session::tests::make_session_and_context_with_rx().await;
-    let codex = Arc::new(Codex {
+    let io = Arc::new(SessionIo {
         tx_sub,
         rx_event: rx_events,
         agent_status,
-        session,
         session_loop_termination: completed_session_loop_termination(),
     });
     let (tx_ops, rx_ops) = bounded(1);
     let cancel = CancellationToken::new();
-    let forward = tokio::spawn(forward_ops(Arc::clone(&codex), rx_ops, cancel));
+    let forward = tokio::spawn(forward_ops(Arc::clone(&io), rx_ops, cancel));
 
     let submission = Submission {
         id: "sub-1".to_string(),
@@ -173,12 +210,17 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
             cancel_token,
             SubAgentSource::Review,
             /*initial_history*/ None,
+            crate::session::GitEnrichmentPolicy::Fresh,
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         ),
     )
     .await
     .expect("cancelled delegate spawn should not hang");
 
-    assert!(matches!(result, Err(CodexErr::TurnAborted)));
+    assert!(matches!(
+        result,
+        Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted)
+    ));
 }
 
 #[tokio::test]
@@ -187,16 +229,19 @@ async fn handle_request_permissions_uses_tool_call_id_for_round_trip() {
         crate::session::tests::make_session_and_context_with_rx().await;
     *parent_session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
     let parent_ctx_mut = Arc::get_mut(&mut parent_ctx).expect("single turn context ref");
-    parent_ctx_mut.environments.turn_environments[0].environment_id = "remote".to_string();
+    let TurnEnvironmentState::Ready(environment) = &mut parent_ctx_mut.environments.environments[0]
+    else {
+        panic!("expected ready primary environment");
+    };
+    environment.environment_id = "remote".to_string();
 
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_tx_events, rx_events_child) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
-    let codex = Arc::new(Codex {
+    let io = Arc::new(SessionIo {
         tx_sub,
         rx_event: rx_events_child,
         agent_status,
-        session: Arc::clone(&parent_session),
         session_loop_termination: completed_session_loop_termination(),
     });
 
@@ -218,13 +263,13 @@ async fn handle_request_permissions_uses_tool_call_id_for_round_trip() {
     let request_cwd = delegated_cwd.clone();
 
     let handle = tokio::spawn({
-        let codex = Arc::clone(&codex);
+        let io = Arc::clone(&io);
         let parent_session = Arc::clone(&parent_session);
         let parent_ctx = Arc::clone(&parent_ctx);
         let cancel_token = cancel_token.clone();
         async move {
             handle_request_permissions(
-                codex.as_ref(),
+                io.as_ref(),
                 &parent_session,
                 &parent_ctx,
                 RequestPermissionsEvent {
@@ -297,30 +342,32 @@ async fn handle_exec_approval_uses_call_id_for_guardian_review_and_approval_id_f
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_tx_events, rx_events_child) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
-    let codex = Arc::new(Codex {
+    let io = Arc::new(SessionIo {
         tx_sub,
         rx_event: rx_events_child,
         agent_status,
-        session: Arc::clone(&parent_session),
         session_loop_termination: completed_session_loop_termination(),
     });
 
     let cancel_token = CancellationToken::new();
     let handle = tokio::spawn({
-        let codex = Arc::clone(&codex);
+        let io = Arc::clone(&io);
         let parent_session = Arc::clone(&parent_session);
         let parent_ctx = Arc::clone(&parent_ctx);
         let cancel_token = cancel_token.clone();
         async move {
             handle_exec_approval(
-                codex.as_ref(),
+                io.as_ref(),
                 "child-turn-1".to_string(),
                 &parent_session,
                 &parent_ctx,
                 ExecApprovalRequestEvent {
                     call_id: "command-item-1".to_string(),
+                    plugin_id: Some("sample@openai-curated".to_string()),
+                    script_path: Some("scripts/run.py".to_string()),
                     approval_id: Some("callback-approval-1".to_string()),
                     turn_id: "child-turn-1".to_string(),
+                    environment_id: Some("remote".to_string()),
                     started_at_ms: 0,
                     command: vec!["rm".to_string(), "-rf".to_string(), "tmp".to_string()],
                     cwd: test_path_buf("/tmp").abs(),
@@ -360,6 +407,14 @@ async fn handle_exec_approval_uses_call_id_for_guardian_review_and_approval_id_f
     assert_eq!(
         assessment_event.target_item_id.as_deref(),
         Some("command-item-1")
+    );
+    assert_eq!(
+        assessment_event.plugin_id.as_deref(),
+        Some("sample@openai-curated")
+    );
+    assert_eq!(
+        assessment_event.script_path.as_deref(),
+        Some("scripts/run.py")
     );
     assert_eq!(assessment_event.turn_id, parent_ctx.sub_id);
     assert_eq!(
@@ -409,10 +464,13 @@ async fn delegated_mcp_guardian_abort_returns_synthetic_decline_answer() {
 
     let pending_mcp_invocations = Arc::new(Mutex::new(HashMap::from([(
         "call-1".to_string(),
-        McpInvocation {
-            server: "custom_server".to_string(),
-            tool: "dangerous_tool".to_string(),
-            arguments: None,
+        PendingMcpInvocation {
+            invocation: McpInvocation {
+                server: "custom_server".to_string(),
+                tool: "dangerous_tool".to_string(),
+                arguments: None,
+            },
+            metadata: None,
         },
     )])));
     let cancel_token = CancellationToken::new();
@@ -433,6 +491,7 @@ async fn delegated_mcp_guardian_abort_returns_synthetic_decline_answer() {
                 is_secret: false,
                 options: None,
             }],
+            auto_resolution_ms: None,
         },
         &cancel_token,
     )
@@ -452,33 +511,21 @@ async fn delegated_mcp_guardian_abort_returns_synthetic_decline_answer() {
 }
 
 #[tokio::test]
-async fn delegated_mcp_user_reviewer_waits_for_metadata_lookup() {
+async fn delegated_mcp_user_reviewer_returns_none_without_metadata() {
     let (parent_session, parent_ctx, _rx_events) =
         crate::session::tests::make_session_and_context_with_rx().await;
     let pending_mcp_invocations = Arc::new(Mutex::new(HashMap::from([(
         "call-1".to_string(),
-        McpInvocation {
-            server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
-            tool: "dangerous_tool".to_string(),
-            arguments: None,
+        PendingMcpInvocation {
+            invocation: McpInvocation {
+                server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                tool: "dangerous_tool".to_string(),
+                arguments: None,
+            },
+            metadata: None,
         },
     )])));
     let cancel_token = CancellationToken::new();
-    let manager = Arc::clone(&parent_session.services.mcp_connection_manager);
-    let (manager_locked_tx, manager_locked_rx) = std::sync::mpsc::sync_channel(0);
-    let (release_manager_tx, release_manager_rx) = std::sync::mpsc::sync_channel(0);
-    let manager_lock = tokio::task::spawn_blocking(move || {
-        let _manager_guard = manager.blocking_write();
-        manager_locked_tx
-            .send(())
-            .expect("manager lock receiver should remain open");
-        release_manager_rx
-            .recv()
-            .expect("manager lock release sender should remain open");
-    });
-    manager_locked_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("manager write lock should be acquired");
 
     let event = RequestUserInputEvent {
         call_id: "call-1".to_string(),
@@ -491,6 +538,7 @@ async fn delegated_mcp_user_reviewer_waits_for_metadata_lookup() {
             is_secret: false,
             options: None,
         }],
+        auto_resolution_ms: None,
     };
     let response = maybe_auto_review_mcp_request_user_input(
         &parent_session,
@@ -498,24 +546,7 @@ async fn delegated_mcp_user_reviewer_waits_for_metadata_lookup() {
         &pending_mcp_invocations,
         &event,
         &cancel_token,
-    );
-    tokio::pin!(response);
-    assert!(
-        timeout(Duration::from_millis(100), &mut response)
-            .await
-            .is_err(),
-        "manual reviewer should wait for MCP metadata"
-    );
-    release_manager_tx
-        .send(())
-        .expect("manager lock holder should remain open");
-    manager_lock
-        .await
-        .expect("manager lock task should not panic");
-    assert_eq!(
-        timeout(Duration::from_secs(1), response)
-            .await
-            .expect("manual reviewer should finish after MCP metadata lookup"),
-        None
-    );
+    )
+    .await;
+    assert_eq!(response, None);
 }

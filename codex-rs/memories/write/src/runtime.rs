@@ -7,12 +7,17 @@ use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::content_items_to_text;
+use codex_core::detached_memory_responses_metadata;
 use codex_core::resolve_installation_id;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_login::default_client::originator;
+use codex_model_provider::ModelProvider;
+use codex_model_provider::SharedModelProvider;
+use codex_model_provider::create_model_provider;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::SessionId;
@@ -20,7 +25,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
@@ -46,7 +50,6 @@ pub(crate) struct StageOneRequestContext {
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) reasoning_summary: ReasoningSummary,
     pub(crate) service_tier: Option<String>,
-    pub(crate) turn_metadata_header: Option<String>,
 }
 
 impl StageOneRequestContext {
@@ -68,7 +71,40 @@ pub(crate) struct MemoryStartupContext {
     thread: Arc<CodexThread>,
     thread_manager: Arc<ThreadManager>,
     auth_manager: Arc<AuthManager>,
+    provider: SharedModelProvider,
     session_telemetry: SessionTelemetry,
+}
+
+fn build_session_telemetry(
+    auth_manager: &AuthManager,
+    thread_id: ThreadId,
+    config: &Config,
+    source: SessionSource,
+    model: &str,
+    originator: String,
+) -> SessionTelemetry {
+    let auth = auth_manager.auth_cached();
+    let auth = auth.as_ref();
+    let auth_mode = auth.map(CodexAuth::auth_mode).map(TelemetryAuthMode::from);
+    let account_id = auth.and_then(CodexAuth::get_account_id);
+    let account_email = auth.and_then(CodexAuth::get_account_email);
+    let auth_env_telemetry = collect_auth_env_telemetry(
+        &config.model_provider,
+        auth_manager.codex_api_key_env_enabled(),
+    );
+    SessionTelemetry::new(
+        thread_id,
+        model,
+        model,
+        account_id,
+        account_email,
+        auth_mode,
+        originator,
+        config.otel.log_user_prompt,
+        user_agent(),
+        source,
+    )
+    .with_auth_env(auth_env_telemetry.to_otel_metadata())
 }
 
 impl MemoryStartupContext {
@@ -80,35 +116,67 @@ impl MemoryStartupContext {
         config: &Config,
         source: SessionSource,
     ) -> Self {
-        let auth = auth_manager.auth_cached();
-        let auth = auth.as_ref();
-        let auth_mode = auth.map(CodexAuth::auth_mode).map(TelemetryAuthMode::from);
-        let account_id = auth.and_then(CodexAuth::get_account_id);
-        let account_email = auth.and_then(CodexAuth::get_account_email);
-        let model = config.model.as_deref().unwrap_or("unknown");
-        let auth_env_telemetry = collect_auth_env_telemetry(
-            &config.model_provider,
-            auth_manager.codex_api_key_env_enabled(),
+        let provider = create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
         );
-        let session_telemetry = SessionTelemetry::new(
+        Self::new_with_provider(
+            thread_manager,
+            auth_manager,
             thread_id,
-            model,
-            model,
-            account_id,
-            account_email,
-            auth_mode,
-            originator().value,
-            config.otel.log_user_prompt,
-            user_agent(),
+            thread,
+            config,
             source,
+            provider,
         )
-        .with_auth_env(auth_env_telemetry.to_otel_metadata());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_testing(
+        thread_manager: Arc<ThreadManager>,
+        auth_manager: Arc<AuthManager>,
+        thread_id: ThreadId,
+        thread: Arc<CodexThread>,
+        config: &Config,
+        source: SessionSource,
+        provider: SharedModelProvider,
+    ) -> Self {
+        Self::new_with_provider(
+            thread_manager,
+            auth_manager,
+            thread_id,
+            thread,
+            config,
+            source,
+            provider,
+        )
+    }
+
+    fn new_with_provider(
+        thread_manager: Arc<ThreadManager>,
+        auth_manager: Arc<AuthManager>,
+        thread_id: ThreadId,
+        thread: Arc<CodexThread>,
+        config: &Config,
+        source: SessionSource,
+        provider: SharedModelProvider,
+    ) -> Self {
+        let model = config.model.as_deref().unwrap_or("unknown");
+        let session_telemetry = build_session_telemetry(
+            &auth_manager,
+            thread_id,
+            config,
+            source,
+            model,
+            originator().value,
+        );
 
         Self {
             thread_id,
             thread,
             thread_manager,
             auth_manager,
+            provider,
             session_telemetry,
         }
     }
@@ -119,6 +187,10 @@ impl MemoryStartupContext {
 
     pub(crate) fn state_db(&self) -> Option<Arc<StateRuntime>> {
         self.thread.state_db()
+    }
+
+    pub(crate) fn provider(&self) -> &dyn ModelProvider {
+        self.provider.as_ref()
     }
 
     pub(crate) fn counter(&self, name: &str, inc: i64, tags: &[(&str, &str)]) {
@@ -145,22 +217,23 @@ impl MemoryStartupContext {
             .get_models_manager()
             .get_model_info(model_name, &config.to_models_manager_config())
             .await;
-        let turn_metadata_header =
-            codex_core::build_turn_metadata_header(&config.cwd, /*sandbox*/ None).await;
         let reasoning_summary = config
             .model_reasoning_summary
             .unwrap_or(model_info.default_reasoning_summary);
 
         StageOneRequestContext {
             model_info,
-            session_telemetry: self
-                .session_telemetry
-                .clone()
-                .with_model(model_name, model_name),
+            session_telemetry: build_session_telemetry(
+                &self.auth_manager,
+                self.thread_id,
+                config,
+                config_snapshot.session_source,
+                model_name,
+                config_snapshot.originator,
+            ),
             reasoning_effort: Some(reasoning_effort),
             reasoning_summary,
             service_tier: config_snapshot.service_tier,
-            turn_metadata_header,
         }
     }
 
@@ -173,22 +246,36 @@ impl MemoryStartupContext {
         let installation_id = resolve_installation_id(&config.codex_home).await?;
         let config_snapshot = self.thread.config_snapshot().await;
         let session_source = config_snapshot.session_source;
+        let session_id = SessionId::from(self.thread_id);
+        let session_id_string = session_id.to_string();
         let model_client = ModelClient::new(
             Some(Arc::clone(&self.auth_manager)),
-            SessionId::from(self.thread_id), // We use thread_id to detach this query from the foreground user session.
+            AgentIdentityAuthPolicy::JwtOnly,
             self.thread_id,
-            installation_id,
             config.model_provider.clone(),
-            session_source,
-            config_snapshot.parent_thread_id,
+            session_source.clone(),
+            config_snapshot.originator,
             config.model_verbosity,
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
             /*beta_features_header*/ None,
+            /*concurrent_reasoning_summaries_enabled*/ false,
             /*attestation_provider*/ None,
+            config.http_client_factory(),
         );
 
         let mut client_session = model_client.new_session();
+        let window_id = format!("{}:0", self.thread_id);
+        let responses_metadata = detached_memory_responses_metadata(
+            installation_id,
+            session_id_string,
+            self.thread_id.to_string(),
+            window_id,
+            &session_source,
+            &config.cwd,
+            /*sandbox*/ None,
+        )
+        .await;
         let mut stream = client_session
             .stream(
                 prompt,
@@ -197,7 +284,7 @@ impl MemoryStartupContext {
                 context.reasoning_effort.clone(),
                 context.reasoning_summary,
                 context.service_tier.clone(),
-                context.turn_metadata_header.as_deref(),
+                &responses_metadata,
                 &InferenceTraceContext::disabled(),
             )
             .await?;
@@ -233,25 +320,16 @@ impl MemoryStartupContext {
         config: Config,
         prompt: Vec<UserInput>,
     ) -> anyhow::Result<SpawnedConsolidationAgent> {
-        let environments = self
-            .thread_manager
-            .default_environment_selections(&config.cwd);
         let NewThread {
             thread_id, thread, ..
         } = self
             .thread_manager
-            .start_thread_with_options(StartThreadOptions {
-                config,
-                initial_history: InitialHistory::New,
+            .start_thread(StartThreadOptions {
                 session_source: Some(SessionSource::Internal(
                     InternalSessionSource::MemoryConsolidation,
                 )),
-                session_provenance: None,
                 thread_source: Some(ThreadSource::MemoryConsolidation),
-                dynamic_tools: Vec::new(),
-                metrics_service_name: None,
-                parent_trace: None,
-                environments,
+                ..StartThreadOptions::new(config)
             })
             .await?;
 
@@ -260,7 +338,6 @@ impl MemoryStartupContext {
             .thread
             .submit(Op::UserInput {
                 items: prompt,
-                environments: None,
                 final_output_json_schema: None,
                 responsesapi_client_metadata: None,
                 additional_context: Default::default(),

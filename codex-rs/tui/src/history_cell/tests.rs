@@ -6,37 +6,31 @@ use crate::exec_cell::ExecCall;
 use crate::exec_cell::ExecCell;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::ConfigBuilder;
+use crate::line_truncation::line_width;
+use crate::render::highlight::MAX_HIGHLIGHT_LINE_BYTES;
 use crate::session_state::ThreadSessionState;
 use crate::wrapping::word_wrap_lines;
 use codex_app_server_protocol::AskForApproval;
-use codex_app_server_protocol::AutoReviewBudget;
-use codex_app_server_protocol::AutoReviewDiagnosticsSummary;
-use codex_app_server_protocol::AutoReviewDispositionActor;
-use codex_app_server_protocol::AutoReviewFindingDisposition;
-use codex_app_server_protocol::AutoReviewFindingDispositionRecord;
 use codex_app_server_protocol::AutoReviewFreshness;
 use codex_app_server_protocol::AutoReviewRunSource;
 use codex_app_server_protocol::AutoReviewRunSummary;
-use codex_app_server_protocol::AutoReviewStatusCount;
 use codex_app_server_protocol::AutoReviewSummaryReadResponse;
-use codex_app_server_protocol::AutoReviewTerminalReason;
-use codex_app_server_protocol::AutoReviewUsage;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
-use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::McpAuthStatus;
 use codex_app_server_protocol::ProjectValidationSkipReason;
 use codex_app_server_protocol::ProjectValidationStatus;
-use codex_app_server_protocol::ReviewTarget;
 use codex_config::types::McpServerConfig;
 use codex_otel::RuntimeMetricTotals;
 use codex_otel::RuntimeMetricsSummary;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
+use codex_protocol::error::UnexpectedResponseError;
 use codex_protocol::parse_command::ParsedCommand;
 use dirs::home_dir;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use reqwest::StatusCode;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -78,6 +72,97 @@ fn streaming_agent_tail_blank_line_uses_one_viewport_row() {
 
   second");
     assert_eq!(cell.desired_height(/*width*/ 80), 3);
+}
+
+#[test]
+fn project_validation_disposition_snapshots() {
+    let cells = [
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::Passed,
+            skip_reason: None,
+            changed_file_count: Some(1),
+            command: &["shellcheck".to_string(), "script.sh".to_string()],
+            command_truncated: false,
+            exit_code: Some(0),
+            duration_ms: 42,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::ActionableFailure,
+            skip_reason: None,
+            changed_file_count: Some(2),
+            command: &["cargo".to_string(), "check".to_string()],
+            command_truncated: false,
+            exit_code: Some(7),
+            duration_ms: 99,
+            output_truncated: true,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::ConfigurationError,
+            skip_reason: None,
+            changed_file_count: None,
+            command: &[],
+            command_truncated: false,
+            exit_code: None,
+            duration_ms: 0,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::TimedOut,
+            skip_reason: None,
+            changed_file_count: None,
+            command: &[],
+            command_truncated: false,
+            exit_code: None,
+            duration_ms: 0,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::InfrastructureFailure,
+            skip_reason: None,
+            changed_file_count: None,
+            command: &[],
+            command_truncated: false,
+            exit_code: None,
+            duration_ms: 0,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::Cancelled,
+            skip_reason: None,
+            changed_file_count: Some(3),
+            command: &["shellcheck".to_string()],
+            command_truncated: false,
+            exit_code: None,
+            duration_ms: 12,
+            output_truncated: false,
+        }),
+        new_project_validation_cell(ProjectValidationCellData {
+            status: ProjectValidationStatus::Skipped,
+            skip_reason: Some(ProjectValidationSkipReason::NoApplicableProvider),
+            changed_file_count: Some(1),
+            command: &["shellcheck".to_string()],
+            command_truncated: true,
+            exit_code: None,
+            duration_ms: 0,
+            output_truncated: false,
+        }),
+    ];
+    let rendered = cells
+        .into_iter()
+        .flat_map(|cell| render_lines(&cell.display_lines(/*width*/ 160)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @"
+✔ Automatic Validation passed · 1 changed file · shellcheck script.sh · 42 ms
+✗ Automatic Validation failed · 2 changed files · exit 7 · cargo check · 99 ms · output truncated
+✗ Automatic Validation configuration error
+✗ Automatic Validation timed out
+✗ Automatic Validation infrastructure failure
+○ Automatic Validation cancelled · 3 changed files · shellcheck · 12 ms
+○ Automatic Validation skipped · no applicable provider · 1 changed file · shellcheck · command truncated
+");
 }
 
 fn stdio_server_config(
@@ -262,195 +347,6 @@ fn auto_review_summary(
 }
 
 #[test]
-fn auto_review_status_snapshot() {
-    let notification = BackgroundAutoReviewStatusChangedNotification {
-        thread_id: "thread-1".to_string(),
-        run_id: "run-queued".to_string(),
-        status: BackgroundAutoReviewStatus::Pending,
-        review_target: ReviewTarget::CurrentTurnDiff {
-            fingerprint: "turn-1".to_string(),
-        },
-        error_summary: None,
-    };
-
-    let cell = new_auto_review_status_cell(&notification);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"○ Background Review queued for current turn changes · run-queued");
-}
-
-#[test]
-fn project_validation_disposition_snapshots() {
-    let cells = [
-        new_project_validation_cell(
-            ProjectValidationStatus::Passed,
-            None,
-            Some(1),
-            &["shellcheck".to_string(), "script.sh".to_string()],
-            false,
-            Some(0),
-            42,
-            false,
-        ),
-        new_project_validation_cell(
-            ProjectValidationStatus::ActionableFailure,
-            None,
-            Some(2),
-            &["cargo".to_string(), "check".to_string()],
-            false,
-            Some(7),
-            99,
-            true,
-        ),
-        new_project_validation_cell(
-            ProjectValidationStatus::ConfigurationError,
-            None,
-            None,
-            &[],
-            false,
-            None,
-            0,
-            false,
-        ),
-        new_project_validation_cell(
-            ProjectValidationStatus::InfrastructureFailure,
-            None,
-            None,
-            &[],
-            false,
-            None,
-            0,
-            false,
-        ),
-        new_project_validation_cell(
-            ProjectValidationStatus::Cancelled,
-            None,
-            Some(3),
-            &["shellcheck".to_string()],
-            false,
-            None,
-            12,
-            false,
-        ),
-        new_project_validation_cell(
-            ProjectValidationStatus::Skipped,
-            Some(ProjectValidationSkipReason::NoApplicableProvider),
-            Some(1),
-            &["shellcheck".to_string()],
-            true,
-            None,
-            0,
-            false,
-        ),
-    ];
-    let rendered = cells
-        .into_iter()
-        .flat_map(|cell| render_lines(&cell.display_lines(/*width*/ 160)))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    insta::assert_snapshot!(rendered, @"
-✔ Automatic Validation passed · 1 changed file · shellcheck script.sh · 42 ms
-✗ Automatic Validation failed · 2 changed files · exit 7 · cargo check · 99 ms · output truncated
-✗ Automatic Validation configuration error
-✗ Automatic Validation infrastructure failure
-○ Automatic Validation cancelled · 3 changed files · shellcheck · 12 ms
-○ Automatic Validation skipped · no applicable provider · 1 changed file · shellcheck · command truncated
-");
-}
-
-#[test]
-fn auto_review_summary_clean_snapshot() {
-    let summary = auto_review_summary(
-        "run-clean",
-        AutoReviewFreshness::Current,
-        /*rendered_findings*/ 0,
-        "",
-    );
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(summary.clone()),
-        current: Some(summary),
-        status_counts: Vec::new(),
-        diagnostics: None,
-    };
-
-    let cell = new_auto_review_summary_cell(&response);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-✔ Background Review found no findings · run-clean
-  completed · current · code-gpt-5.5
-  No findings.
-");
-}
-
-#[test]
-fn auto_review_summary_surfaces_budget_usage_and_terminal_reason() {
-    let mut summary = auto_review_summary(
-        "run-budget",
-        AutoReviewFreshness::Current,
-        /*rendered_findings*/ 0,
-        "",
-    );
-    summary.status = BackgroundAutoReviewStatus::Cancelled;
-    summary.error_summary = Some("background review exceeded token budget".to_string());
-    summary.budget = Some(AutoReviewBudget {
-        max_scope_bytes: 120 * 1024,
-        max_elapsed_ms: 5 * 60 * 1_000,
-        max_total_tokens: 250_000,
-        max_output_bytes: 64 * 1024,
-        max_findings: 20,
-    });
-    summary.usage = AutoReviewUsage {
-        scope_bytes: Some(32 * 1024),
-        elapsed_ms: Some(4 * 60 * 1_000),
-        total_tokens: Some(250_000),
-        output_bytes: None,
-        finding_count: None,
-    };
-    summary.terminal_reason = Some(AutoReviewTerminalReason::BudgetTotalTokens);
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(summary),
-        current: None,
-        status_counts: Vec::new(),
-        diagnostics: None,
-    };
-
-    let rendered =
-        render_lines(&new_auto_review_summary_cell(&response).display_lines(160)).join("\n");
-
-    assert!(rendered.contains("stopped: token budget"));
-    assert!(rendered.contains("elapsed 4m/5m"));
-    assert!(rendered.contains("tokens 250k/250k"));
-    assert!(rendered.contains("scope 32KiB/120KiB"));
-}
-
-#[test]
-fn auto_review_summary_surfaces_finding_disposition() {
-    let mut summary = auto_review_summary(
-        "run-attention",
-        AutoReviewFreshness::Current,
-        /*rendered_findings*/ 1,
-        "[P1] f1: Fix the regression",
-    );
-    summary.finding_disposition = Some(AutoReviewFindingDispositionRecord {
-        disposition: AutoReviewFindingDisposition::NeedsAttention,
-        actor: AutoReviewDispositionActor::System,
-        reason: None,
-        updated_at: 1_700_000_001_000,
-    });
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(summary.clone()),
-        current: Some(summary),
-        status_counts: Vec::new(),
-        diagnostics: None,
-    };
-
-    let rendered =
-        render_lines(&new_auto_review_summary_cell(&response).display_lines(120)).join("\n");
-
-    assert!(rendered.contains("needs attention"));
-}
-
-#[test]
 fn auto_review_summary_findings_snapshot() {
     let mut summary = auto_review_summary(
         "run-findings",
@@ -474,219 +370,6 @@ fn auto_review_summary_findings_snapshot() {
   completed · current · code-gpt-5.5 · 1 omitted · truncated
   [P1] Fix request ordering
   The resumed turn can miss sandbox propagation.
-");
-}
-
-#[test]
-fn auto_review_summary_stale_latest_snapshot() {
-    let latest = auto_review_summary(
-        "run-stale",
-        AutoReviewFreshness::Stale,
-        /*rendered_findings*/ 1,
-        "",
-    );
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(latest),
-        current: None,
-        status_counts: vec![AutoReviewStatusCount {
-            status: BackgroundAutoReviewStatus::Completed,
-            source: AutoReviewRunSource::Background,
-            freshness: AutoReviewFreshness::Stale,
-            target_matches: false,
-            count: 1,
-        }],
-        diagnostics: None,
-    };
-
-    let cell = new_auto_review_summary_cell(&response);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-○ Background Review has no current findings · latest stale · run-stale
-  completed · stale · code-gpt-5.5
-  Latest review output is stale and hidden because it no longer matches this worktree.
-  1 stale completed off-target
-");
-}
-
-#[test]
-fn auto_review_summary_stale_latest_with_content_stays_hidden_snapshot() {
-    let latest = auto_review_summary(
-        "run-stale-content",
-        AutoReviewFreshness::Stale,
-        /*rendered_findings*/ 2,
-        "[P1] Old finding\nThis finding belonged to an older checkout.",
-    );
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(latest),
-        current: None,
-        status_counts: vec![AutoReviewStatusCount {
-            status: BackgroundAutoReviewStatus::Completed,
-            source: AutoReviewRunSource::Background,
-            freshness: AutoReviewFreshness::Stale,
-            target_matches: false,
-            count: 1,
-        }],
-        diagnostics: None,
-    };
-
-    let cell = new_auto_review_summary_cell(&response);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-○ Background Review has no current findings · latest stale · run-stale-content
-  completed · stale · code-gpt-5.5
-  Latest review output is stale and hidden because it no longer matches this worktree.
-  1 stale completed off-target
-");
-}
-
-#[test]
-fn auto_review_summary_detached_latest_with_content_stays_hidden_snapshot() {
-    let latest = auto_review_summary(
-        "run-detached-content",
-        AutoReviewFreshness::Detached,
-        /*rendered_findings*/ 1,
-        "[P1] Detached finding\nThis finding belonged to a detached snapshot.",
-    );
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(latest),
-        current: None,
-        status_counts: vec![AutoReviewStatusCount {
-            status: BackgroundAutoReviewStatus::Completed,
-            source: AutoReviewRunSource::Background,
-            freshness: AutoReviewFreshness::Detached,
-            target_matches: false,
-            count: 1,
-        }],
-        diagnostics: None,
-    };
-
-    let cell = new_auto_review_summary_cell(&response);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-○ Background Review has no current findings · latest detached · run-detached-content
-  completed · detached · code-gpt-5.5
-  Latest review output is detached and hidden because it no longer matches this worktree.
-  1 detached completed off-target
-");
-}
-
-#[test]
-fn auto_review_summary_current_latest_without_current_stays_hidden_snapshot() {
-    let latest = auto_review_summary(
-        "run-current-off-target",
-        AutoReviewFreshness::Current,
-        /*rendered_findings*/ 1,
-        "[P1] Different review target\nThis finding belongs to another review target.",
-    );
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(latest),
-        current: None,
-        status_counts: vec![AutoReviewStatusCount {
-            status: BackgroundAutoReviewStatus::Completed,
-            source: AutoReviewRunSource::Background,
-            freshness: AutoReviewFreshness::Current,
-            target_matches: false,
-            count: 1,
-        }],
-        diagnostics: None,
-    };
-
-    let cell = new_auto_review_summary_cell(&response);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-○ Background Review has no current findings · latest current · run-current-off-target
-  completed · current · code-gpt-5.5
-  Latest review output is hidden because it does not apply to this review target.
-  1 current completed off-target
-");
-}
-
-#[test]
-fn auto_review_summary_error_snapshot() {
-    let cell = new_auto_review_summary_error_cell("review/summary/read failed".to_string());
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"✗ Background Review summary unavailable · review/summary/read failed");
-}
-
-#[test]
-fn auto_review_summary_failed_current_snapshot() {
-    let mut summary = auto_review_summary(
-        "run-failed",
-        AutoReviewFreshness::Current,
-        /*rendered_findings*/ 0,
-        "",
-    );
-    summary.status = BackgroundAutoReviewStatus::Failed;
-    summary.error_summary = Some("review model unavailable".to_string());
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(summary.clone()),
-        current: Some(summary),
-        status_counts: Vec::new(),
-        diagnostics: None,
-    };
-
-    let cell = new_auto_review_summary_cell(&response);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"), @"
-✗ Background Review failed · run-failed
-  failed · current · code-gpt-5.5 · review model unavailable
-");
-}
-
-#[test]
-fn auto_review_summary_superseded_current_snapshot() {
-    let mut summary = auto_review_summary(
-        "run-superseded",
-        AutoReviewFreshness::Current,
-        /*rendered_findings*/ 0,
-        "",
-    );
-    summary.status = BackgroundAutoReviewStatus::Superseded;
-    summary.error_summary =
-        Some("background auto review was superseded by run next-run".to_string());
-    let response = AutoReviewSummaryReadResponse {
-        latest: Some(summary.clone()),
-        current: Some(summary),
-        status_counts: Vec::new(),
-        diagnostics: None,
-    };
-
-    let cell = new_auto_review_summary_cell(&response);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 100)).join("\n"), @"
-○ Background Review superseded · run-superseded
-  superseded · current · code-gpt-5.5 · background auto review was superseded by run next-run
-");
-}
-
-#[test]
-fn auto_review_summary_diagnostics_snapshot() {
-    let response = AutoReviewSummaryReadResponse {
-        latest: None,
-        current: None,
-        status_counts: Vec::new(),
-        diagnostics: Some(AutoReviewDiagnosticsSummary {
-            recent_runs: 4,
-            in_flight_runs: 0,
-            terminal_runs: 4,
-            skipped_runs: 2,
-            duplicate_skipped_runs: 1,
-            superseded_runs: 0,
-            failed_runs: 1,
-            cancelled_runs: 0,
-            lost_runs: 0,
-            suppressed_stale_runs: 1,
-            compact: "recent_runs=4 in_flight=0 terminal=4 suppressed_stale=1 skipped=2 \
-                      duplicate_skipped=1 failed=1"
-                .to_string(),
-        }),
-    };
-
-    let cell = new_auto_review_summary_cell(&response);
-
-    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 120)).join("\n"), @"
-✔ Background Review has no stored result for this thread
-  diagnostics recent_runs=4 in_flight=0 terminal=4 suppressed_stale=1 skipped=2 duplicate_skipped=1 failed=1
 ");
 }
 
@@ -819,10 +502,10 @@ fn composite_cell_preserves_child_web_links() {
 
     assert_eq!(
         lines[2].hyperlinks,
-        vec![crate::terminal_hyperlinks::TerminalHyperlink {
-            columns: 0..destination.len(),
-            destination: destination.to_string(),
-        }]
+        vec![crate::terminal_hyperlinks::TerminalHyperlink::web(
+            /*columns*/ 0..destination.len(),
+            destination.to_string(),
+        )]
     );
 }
 
@@ -946,6 +629,7 @@ fn image_generation_call_renders_saved_path() {
     );
     let cell = new_image_generation_call(
         "call-image-generation".to_string(),
+        "completed",
         Some("A tiny blue square".to_string()),
         Some(saved_path),
     );
@@ -1033,8 +717,8 @@ fn final_message_separator_hides_short_worked_label_and_includes_runtime_metrics
         responses_api_inference_time_ms: 1_940,
         responses_api_engine_iapi_ttft_ms: 410,
         responses_api_engine_service_ttft_ms: 460,
-        responses_api_engine_iapi_tbt_ms: 1_180,
-        responses_api_engine_service_tbt_ms: 1_240,
+        responses_api_engine_iapi_tbt_ms: 1_180.0,
+        responses_api_engine_service_tbt_ms: 1_240.0,
         turn_ttft_ms: 0,
         turn_ttfm_ms: 0,
     };
@@ -1052,6 +736,17 @@ fn final_message_separator_hides_short_worked_label_and_includes_runtime_metrics
     assert!(rendered[0].contains("Responses API inference: 1.9s"));
     assert!(rendered[0].contains("TTFT: 410ms (iapi) 460ms (service)"));
     assert!(rendered[0].contains("TBT: 1.2s (iapi) 1.2s (service)"));
+}
+
+#[test]
+fn runtime_metrics_label_rounds_fractional_tbt_milliseconds() {
+    let summary = RuntimeMetricsSummary {
+        responses_api_engine_iapi_tbt_ms: 2.450638,
+        responses_api_engine_service_tbt_ms: 5.267279,
+        ..RuntimeMetricsSummary::default()
+    };
+
+    insta::assert_snapshot!(runtime_metrics_label(summary).expect("TBT label"), @"TBT: 2ms (iapi) 5ms (service)");
 }
 
 #[test]
@@ -1169,6 +864,13 @@ fn cyber_policy_error_event_snapshot() {
 }
 
 #[test]
+fn safety_access_block_event_snapshot() {
+    let cell = new_safety_access_block_event();
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
 fn cyber_policy_error_event_narrow_snapshot() {
     let cell = new_cyber_policy_error_event();
     let rendered = render_lines(&cell.display_lines(/*width*/ 36)).join("\n");
@@ -1220,6 +922,31 @@ fn error_event_oversized_input_snapshot() {
         "Message exceeds the maximum length of 1048576 characters (1048577 provided).".to_string(),
     );
     let rendered = render_lines(&cell.display_lines(/*width*/ 120)).join("\n");
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn error_event_bedrock_expired_signature_snapshot() {
+    let error = UnexpectedResponseError {
+        status: StatusCode::UNAUTHORIZED,
+        body: "Signature expired: 20260609T133205Z is now earlier than 20260614T062525Z \
+(20260614T063025Z - 5 min.)"
+            .to_string(),
+        user_message: Some(
+            "Amazon Bedrock rejected the request because its AWS signature has expired. \
+Refresh your AWS credentials and retry. If `AWS_BEARER_TOKEN_BEDROCK` is set, update or \
+unset it, then restart Codex"
+                .to_string(),
+        ),
+        url: Some("https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses".to_string()),
+        cf_ray: None,
+        request_id: None,
+        identity_authorization_error: None,
+        identity_error_code: None,
+    };
+    let cell = new_error_event(error.to_string());
+    let rendered = render_lines(&cell.display_lines(/*width*/ 100)).join("\n");
+
     insta::assert_snapshot!(rendered);
 }
 
@@ -1569,6 +1296,15 @@ fn standalone_unix_update_available_history_cell_snapshot() {
 fn standalone_windows_update_available_history_cell_snapshot() {
     let cell =
         UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneWindows));
+    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn pnpm_update_available_history_cell_snapshot() {
+    let cell =
+        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::PnpmGlobalLatest));
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
@@ -1986,6 +1722,25 @@ fn session_header_hides_fast_status_when_disabled() {
 }
 
 #[test]
+fn session_header_clamps_to_narrow_width() {
+    const WIDTH: u16 = 44;
+    let cell = SessionHeaderHistoryCell::new(
+        "gpt-5.6-sol".to_string(),
+        Some(ReasoningEffortConfig::XHigh),
+        /*show_fast_status*/ true,
+        PathBuf::from("project"),
+        "test",
+    )
+    .with_yolo_mode(/*yolo_mode*/ true);
+
+    let lines = cell.display_lines(WIDTH);
+    let widths = lines.iter().map(line_width).collect::<Vec<_>>();
+
+    assert_eq!(widths, vec![usize::from(WIDTH); lines.len()]);
+    insta::assert_snapshot!(render_lines(&lines).join("\n"));
+}
+
+#[test]
 #[cfg_attr(
     target_os = "windows",
     ignore = "snapshot path rendering differs on Windows"
@@ -2116,34 +1871,30 @@ fn coalesces_reads_across_multiple_calls() {
     // Call 1: Search only
     cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
     // Call 2: Read A
-    cell = cell
-        .with_added_call(
-            "c2".into(),
-            vec!["bash".into(), "-lc".into(), "echo".into()],
-            vec![ParsedCommand::Read {
-                name: "shimmer.rs".into(),
-                cmd: "cat shimmer.rs".into(),
-                path: "shimmer.rs".into(),
-            }],
-            ExecCommandSource::Agent,
-            /*interaction_input*/ None,
-        )
-        .unwrap();
+    assert!(cell.add_call(
+        "c2".into(),
+        vec!["bash".into(), "-lc".into(), "echo".into()],
+        vec![ParsedCommand::Read {
+            name: "shimmer.rs".into(),
+            cmd: "cat shimmer.rs".into(),
+            path: "shimmer.rs".into(),
+        }],
+        ExecCommandSource::Agent,
+        /*interaction_input*/ None,
+    ));
     cell.complete_call("c2", CommandOutput::default(), Duration::from_millis(1));
     // Call 3: Read B
-    cell = cell
-        .with_added_call(
-            "c3".into(),
-            vec!["bash".into(), "-lc".into(), "echo".into()],
-            vec![ParsedCommand::Read {
-                name: "status_indicator_widget.rs".into(),
-                cmd: "cat status_indicator_widget.rs".into(),
-                path: "status_indicator_widget.rs".into(),
-            }],
-            ExecCommandSource::Agent,
-            /*interaction_input*/ None,
-        )
-        .unwrap();
+    assert!(cell.add_call(
+        "c3".into(),
+        vec!["bash".into(), "-lc".into(), "echo".into()],
+        vec![ParsedCommand::Read {
+            name: "status_indicator_widget.rs".into(),
+            cmd: "cat status_indicator_widget.rs".into(),
+            path: "status_indicator_widget.rs".into(),
+        }],
+        ExecCommandSource::Agent,
+        /*interaction_input*/ None,
+    ));
     cell.complete_call("c3", CommandOutput::default(), Duration::from_millis(1));
 
     let lines = cell.display_lines(/*width*/ 80);
@@ -2263,6 +2014,30 @@ fn single_line_command_wraps_with_four_space_continuation() {
 }
 
 #[test]
+fn single_line_command_over_highlight_limit_uses_plain_text_fallback() {
+    let call_id = "c1".to_string();
+    let base64_like = "A".repeat(MAX_HIGHLIGHT_LINE_BYTES + 1);
+    let mut cell = ExecCell::new(
+        ExecCall {
+            call_id: call_id.clone(),
+            command: vec!["bash".into(), "-lc".into(), base64_like],
+            parsed: Vec::new(),
+            output: None,
+            source: ExecCommandSource::Agent,
+            start_time: Some(Instant::now()),
+            duration: None,
+            interaction_input: None,
+        },
+        /*animations_enabled*/ true,
+    );
+    cell.complete_call(&call_id, CommandOutput::default(), Duration::from_millis(1));
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 24)).join("\n");
+
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
 fn multiline_command_without_wrap_uses_branch_then_eight_spaces() {
     let call_id = "c1".to_string();
     let cmd = "echo one\necho two".to_string();
@@ -2333,11 +2108,7 @@ fn stderr_tail_more_than_five_lines_snapshot() {
         .join("\n");
     cell.complete_call(
         &call_id,
-        CommandOutput {
-            exit_code: 1,
-            formatted_output: String::new(),
-            aggregated_output: stderr,
-        },
+        CommandOutput::new(/*exit_code*/ 1, stderr),
         Duration::from_millis(1),
     );
 
@@ -2381,11 +2152,7 @@ fn ran_cell_multiline_with_stderr_snapshot() {
     let stderr = "error: first line on stderr\nerror: second line on stderr".to_string();
     cell.complete_call(
         &call_id,
-        CommandOutput {
-            exit_code: 1,
-            formatted_output: String::new(),
-            aggregated_output: stderr,
-        },
+        CommandOutput::new(/*exit_code*/ 1, stderr),
         Duration::from_millis(5),
     );
 
@@ -2406,7 +2173,7 @@ fn ran_cell_multiline_with_stderr_snapshot() {
 }
 #[test]
 fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
-    let msg = "one two three four five six seven";
+    let msg = "_count_r\x1b[13;2:3uows";
     let cell = UserHistoryCell {
         message: msg.to_string(),
         text_elements: Vec::new(),
@@ -2419,6 +2186,7 @@ fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
     let lines = cell.display_lines(width);
     let rendered = render_lines(&lines).join("\n");
 
+    assert_eq!(render_lines(&cell.raw_lines()), ["_count_rows"]);
     insta::assert_snapshot!(rendered);
 }
 
@@ -2676,7 +2444,7 @@ fn plan_update_does_not_split_url_like_tokens_in_note_or_step() {
 #[test]
 fn reasoning_summary_block() {
     let cell = new_reasoning_summary_block(
-        "**High level reasoning**\n\nDetailed reasoning goes here.".to_string(),
+        vec!["**High level reasoning**\n\nDetailed reasoning goes here.".to_string()],
         &test_cwd(),
     );
 
@@ -2734,8 +2502,10 @@ fn reasoning_summary_height_matches_wrapped_rendering_for_url_like_content() {
 
 #[test]
 fn reasoning_summary_block_returns_reasoning_cell_when_feature_disabled() {
-    let cell =
-        new_reasoning_summary_block("Detailed reasoning goes here.".to_string(), &test_cwd());
+    let cell = new_reasoning_summary_block(
+        vec!["Detailed reasoning goes here.".to_string()],
+        &test_cwd(),
+    );
 
     let rendered = render_transcript(cell.as_ref());
     assert_eq!(rendered, vec!["• Detailed reasoning goes here."]);
@@ -2745,9 +2515,8 @@ fn reasoning_summary_block_returns_reasoning_cell_when_feature_disabled() {
 async fn reasoning_summary_block_respects_config_overrides() {
     let mut config = test_config().await;
     config.model = Some("gpt-3.5-turbo".to_string());
-    config.model_supports_reasoning_summaries = Some(true);
     let cell = new_reasoning_summary_block(
-        "**High level reasoning**\n\nDetailed reasoning goes here.".to_string(),
+        vec!["**High level reasoning**\n\nDetailed reasoning goes here.".to_string()],
         &test_cwd(),
     );
 
@@ -2758,7 +2527,7 @@ async fn reasoning_summary_block_respects_config_overrides() {
 #[test]
 fn reasoning_summary_block_falls_back_when_header_is_missing() {
     let cell = new_reasoning_summary_block(
-        "**High level reasoning without closing".to_string(),
+        vec!["**High level reasoning without closing".to_string()],
         &test_cwd(),
     );
 
@@ -2769,7 +2538,7 @@ fn reasoning_summary_block_falls_back_when_header_is_missing() {
 #[test]
 fn reasoning_summary_block_falls_back_when_summary_is_missing() {
     let cell = new_reasoning_summary_block(
-        "**High level reasoning without closing**".to_string(),
+        vec!["**High level reasoning without closing**".to_string()],
         &test_cwd(),
     );
 
@@ -2777,7 +2546,7 @@ fn reasoning_summary_block_falls_back_when_summary_is_missing() {
     assert_eq!(rendered, vec!["• High level reasoning without closing"]);
 
     let cell = new_reasoning_summary_block(
-        "**High level reasoning without closing**\n\n  ".to_string(),
+        vec!["**High level reasoning without closing**\n\n  ".to_string()],
         &test_cwd(),
     );
 
@@ -2788,7 +2557,7 @@ fn reasoning_summary_block_falls_back_when_summary_is_missing() {
 #[test]
 fn reasoning_summary_block_splits_header_and_summary_when_present() {
     let cell = new_reasoning_summary_block(
-        "**High level plan**\n\nWe should fix the bug next.".to_string(),
+        vec!["**High level plan**\n\nWe should fix the bug next.".to_string()],
         &test_cwd(),
     );
 
@@ -2797,6 +2566,100 @@ fn reasoning_summary_block_splits_header_and_summary_when_present() {
 
     let rendered_transcript = render_transcript(cell.as_ref());
     assert_eq!(rendered_transcript, vec!["• We should fix the bug next."]);
+}
+
+#[test]
+fn reasoning_summary_block_hides_empty_html_comment_parts() {
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Checking the first thing**\n\n<!-- -->".to_string(),
+            "**Checking the second thing**\n\n<!-- -->".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, Vec::<String>::new());
+}
+
+#[test]
+fn reasoning_summary_block_preserves_bold_content_after_empty_html_comment_part() {
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Status**\n\n<!-- -->".to_string(),
+            "**Important conclusion**".to_string(),
+            "<!-- -->".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"• Important conclusion");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• Important conclusion"]);
+
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Status**\n\n<!-- -->".to_string(),
+            "**Result:** keep **this**".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• Result: keep this"]);
+}
+
+#[test]
+fn reasoning_summary_block_strips_header_after_leading_empty_part() {
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Status**\n\n<!-- -->".to_string(),
+            "**Checking tests**\n\nTests passed".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"• Tests passed");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• Tests passed"]);
+}
+
+#[test]
+fn reasoning_summary_block_drops_empty_part_after_real_content() {
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Plan**\n\ndone".to_string(),
+            "**Checking tests**\n\n<!-- -->".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"• done");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• done"]);
+}
+
+#[test]
+fn reasoning_summary_block_preserves_literal_html_comment() {
+    let cell = new_reasoning_summary_block(
+        vec!["**Plan**\n\nUse `<!-- -->` in JSX.".to_string()],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"• Use <!-- --> in JSX.");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• Use <!-- --> in JSX."]);
 }
 
 #[test]

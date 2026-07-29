@@ -1,10 +1,11 @@
+use std::sync::atomic::AtomicBool;
+
 use codex_auto_review::ReviewCoordination;
 use codex_auto_review::ReviewLockGuard;
-use codex_core_skills::HostLoadedSkills;
-use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::BackgroundAutoReviewStatus;
 use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
-use std::sync::atomic::AtomicBool;
+use codex_protocol::protocol::ReviewPersistence;
+use codex_protocol::protocol::ReviewRequest;
 
 use super::*;
 use crate::review_persistence::ReviewPersistenceContext;
@@ -30,7 +31,7 @@ impl PreparedReviewThread {
 
 pub(super) enum ReviewPersistenceSpec {
     Mode(ReviewPersistence),
-    Context(ReviewPersistenceContext),
+    Context(Box<ReviewPersistenceContext>),
 }
 
 /// Spawn a review thread using the given prompt.
@@ -76,20 +77,21 @@ pub(super) async fn spawn_review_thread(
         }
         sess.abort_all_tasks(TurnAbortReason::Replaced).await;
         sess.clear_connector_selection().await;
-        sess.send_event(
-            prepared.turn_context.as_ref(),
-            EventMsg::EnteredReviewMode(review_request),
-        )
-        .await;
+        let turn_context = Arc::clone(&prepared.turn_context);
         sess.start_task(prepared.turn_context, prepared.input, prepared.task)
             .await;
+        let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
+            id: uuid::Uuid::now_v7().to_string(),
+            target: review_request.target,
+            user_facing_hint: review_request.user_facing_hint.unwrap_or_default(),
+        });
+        sess.emit_turn_item_started(turn_context.as_ref(), &item)
+            .await;
+        sess.emit_turn_item_completed(turn_context.as_ref(), item)
+            .await;
     } else {
-        sess.spawn_task(
-            Arc::clone(&prepared.turn_context),
-            prepared.input,
-            prepared.task,
-        )
-        .await;
+        sess.spawn_task(prepared.turn_context, prepared.input, prepared.task)
+            .await;
     }
 }
 
@@ -162,7 +164,10 @@ pub(super) async fn prepare_review_thread(
     let available_models = sess
         .services
         .models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            config.http_client_factory(),
+        )
         .await;
     let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
         codex_tools::unified_exec_feature_mode_for_features(review_features.get()),
@@ -180,15 +185,14 @@ pub(super) async fn prepare_review_thread(
     let mut per_turn_config = (*config).clone();
     per_turn_config.model = Some(model.clone());
     per_turn_config.features = review_features.clone();
-    let tool_mode = model_info.tool_mode.unwrap_or_else(|| {
-        if per_turn_config.features.enabled(Feature::CodeModeOnly) {
-            ToolMode::CodeModeOnly
-        } else if per_turn_config.features.enabled(Feature::CodeMode) {
-            ToolMode::CodeMode
-        } else {
-            ToolMode::Direct
-        }
-    });
+    per_turn_config.permissions.shell_environment_policy = parent_turn_context
+        .config
+        .permissions
+        .shell_environment_policy
+        .clone();
+    per_turn_config.codex_linux_sandbox_exe =
+        parent_turn_context.config.codex_linux_sandbox_exe.clone();
+    per_turn_config.compact_prompt = parent_turn_context.config.compact_prompt.clone();
     if let Err(err) = per_turn_config.web_search_mode.set(review_web_search_mode) {
         let fallback_value = per_turn_config.web_search_mode.value();
         tracing::warn!(
@@ -211,9 +215,12 @@ pub(super) async fn prepare_review_thread(
         .model_reasoning_summary
         .unwrap_or(model_info.default_reasoning_summary);
     let session_source = parent_turn_context.session_source.clone();
-    let forked_from_thread_id = {
+    let (forked_from_thread_id, thread_source) = {
         let state = sess.state.lock().await;
-        state.session_configuration.forked_from_thread_id
+        (
+            state.session_configuration.forked_from_thread_id,
+            state.session_configuration.thread_source.clone(),
+        )
     };
 
     let per_turn_config = Arc::new(per_turn_config);
@@ -224,7 +231,7 @@ pub(super) async fn prepare_review_thread(
         forked_from_thread_id,
         parent_turn_context.parent_thread_id,
         &session_source,
-        parent_turn_context.thread_source,
+        thread_source,
         review_turn_id.clone(),
         #[allow(deprecated)]
         parent_turn_context.cwd.clone(),
@@ -236,9 +243,7 @@ pub(super) async fn prepare_review_thread(
     let extension_data = Arc::new(codex_extension_api::ExtensionData::new(
         review_turn_id.clone(),
     ));
-    extension_data.insert(HostLoadedSkills::new(
-        parent_turn_context.turn_skills.outcome.clone(),
-    ));
+    extension_data.insert(parent_turn_context.turn_skills.snapshot.clone());
 
     let review_turn_context = TurnContext {
         sub_id: review_turn_id.clone(),
@@ -247,43 +252,38 @@ pub(super) async fn prepare_review_thread(
         config: per_turn_config,
         auth_manager: auth_manager_for_context,
         model_info: model_info.clone(),
-        tool_mode,
         session_telemetry: session_telemetry_for_context,
         provider: provider_for_context,
         reasoning_effort,
         reasoning_summary,
         session_source,
+        history_mode: parent_turn_context.history_mode,
         parent_thread_id: parent_turn_context.parent_thread_id,
-        thread_source: parent_turn_context.thread_source,
+        originator: parent_turn_context.originator.clone(),
         environments: parent_turn_context.environments.clone(),
         available_models,
         unified_exec_shell_mode,
-        features: review_features,
-        ghost_snapshot: parent_turn_context.ghost_snapshot.clone(),
         current_date: parent_turn_context.current_date.clone(),
         timezone: parent_turn_context.timezone.clone(),
         app_server_client_name: parent_turn_context.app_server_client_name.clone(),
         developer_instructions: None,
-        user_instructions: None,
-        compact_prompt: parent_turn_context.compact_prompt.clone(),
-        collaboration_mode: parent_turn_context.collaboration_mode.clone(),
+        mode: parent_turn_context.mode,
+        collaboration_mode_developer_instructions: parent_turn_context
+            .collaboration_mode_developer_instructions
+            .clone(),
         multi_agent_version: MultiAgentVersion::Disabled,
         personality: parent_turn_context.personality,
         approval_policy: parent_turn_context.approval_policy.clone(),
         permission_profile: parent_turn_context.permission_profile(),
         network: parent_turn_context.network.clone(),
         windows_sandbox_level: parent_turn_context.windows_sandbox_level,
-        shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
         #[allow(deprecated)]
         cwd: parent_turn_context.cwd.clone(),
         final_output_json_schema: None,
-        codex_self_exe: parent_turn_context.codex_self_exe.clone(),
-        codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
-        truncation_policy: model_info.truncation_policy.into(),
         turn_metadata_state,
         extension_data,
-        turn_skills: TurnSkillsContext::new(parent_turn_context.turn_skills.outcome.clone()),
+        turn_skills: TurnSkillsContext::new(parent_turn_context.turn_skills.snapshot.clone()),
         turn_timing_state: Arc::new(TurnTimingState::default()),
         terminal_error: Arc::new(Mutex::new(None)),
         server_model_warning_emitted: AtomicBool::new(false),
@@ -304,9 +304,6 @@ pub(super) async fn prepare_review_thread(
     if tc.environments.single_local_environment_cwd().is_some() {
         tc.turn_metadata_state.spawn_git_enrichment_task();
     }
-    // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
-    // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
-    // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
     let should_emit_review_mode = persistence.as_ref().is_none_or(|persistence| {
         matches!(
             persistence,
@@ -321,18 +318,18 @@ pub(super) async fn prepare_review_thread(
     } else {
         None
     };
-    if let Some(persistence) = persistence {
+    let task = if let Some(persistence) = persistence {
         let persistence = match persistence {
             ReviewPersistenceSpec::Mode(mode) => {
-                let target_cwd = tc
-                    .environments
-                    .single_local_environment_cwd()
+                let selected_cwd = tc.environments.single_local_environment_cwd();
+                let target_cwd = selected_cwd
+                    .as_ref()
                     .map(std::convert::AsRef::as_ref)
                     .unwrap_or_else(|| tc.config.cwd.as_ref());
-                crate::review_persistence::ReviewPersistenceContext::new(
-                    review_turn_id.clone(),
+                ReviewPersistenceContext::new(
+                    review_turn_id,
                     mode,
-                    resolved.target.clone(),
+                    resolved.target,
                     tc.config.codex_home.as_ref(),
                     target_cwd,
                     Some(model),
@@ -342,22 +339,18 @@ pub(super) async fn prepare_review_thread(
                 )
                 .await
             }
-            ReviewPersistenceSpec::Context(persistence) => persistence,
+            ReviewPersistenceSpec::Context(persistence) => *persistence,
         }
         .with_prompt_token_estimate(prompt_token_estimate);
-        PreparedReviewThread {
-            turn_context: tc,
-            input,
-            task: ReviewTask::with_persistence(persistence),
-            manual_review_request,
-        }
+        ReviewTask::with_persistence(persistence)
     } else {
-        PreparedReviewThread {
-            turn_context: tc,
-            input,
-            task: ReviewTask::new(),
-            manual_review_request,
-        }
+        ReviewTask::new()
+    };
+    PreparedReviewThread {
+        turn_context: tc,
+        input,
+        task,
+        manual_review_request,
     }
 }
 
@@ -388,7 +381,8 @@ pub(super) fn spawn_detached_review_thread(
     let completion = running_review.completion;
     tokio::spawn(async move {
         let _review_lock_guard = review_lock_guard;
-        task.run(session_ctx, turn_context, input, cancellation_token)
+        let _ = task
+            .run(session_ctx, turn_context, input, cancellation_token)
             .await;
         sess.clear_background_auto_review(generation).await;
         completion.mark_done();

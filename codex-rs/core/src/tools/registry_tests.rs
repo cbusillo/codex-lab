@@ -1,11 +1,11 @@
 use super::*;
+use crate::session::step_context::StepContext;
 use pretty_assertions::assert_eq;
 
 struct TestHandler {
     tool_name: codex_tools::ToolName,
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for TestHandler {
     fn tool_name(&self) -> codex_tools::ToolName {
         self.tool_name.clone()
@@ -15,13 +15,15 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
         test_spec(&self.tool_name)
     }
 
-    async fn handle(
-        &self,
-        _invocation: ToolInvocation,
-    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        Ok(Box::new(
-            crate::tools::context::FunctionToolOutput::from_text("ok".to_string(), Some(true)),
-        ))
+    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async {
+            Ok(
+                Box::new(crate::tools::context::FunctionToolOutput::from_text(
+                    "ok".to_string(),
+                    Some(true),
+                )) as Box<dyn crate::tools::context::ToolOutput>,
+            )
+        })
     }
 }
 
@@ -38,7 +40,6 @@ struct LifecycleTestHandler {
     result: LifecycleTestResult,
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for LifecycleTestHandler {
     fn tool_name(&self) -> codex_tools::ToolName {
         self.tool_name.clone()
@@ -48,9 +49,14 @@ impl ToolExecutor<ToolInvocation> for LifecycleTestHandler {
         test_spec(&self.tool_name)
     }
 
-    async fn handle(
+    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call())
+    }
+}
+
+impl LifecycleTestHandler {
+    async fn handle_call(
         &self,
-        _invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         match self.result.clone() {
             LifecycleTestResult::Ok { success } => Ok(Box::new(
@@ -58,7 +64,8 @@ impl ToolExecutor<ToolInvocation> for LifecycleTestHandler {
                     "ok".to_string(),
                     Some(success),
                 ),
-            )),
+            )
+                as Box<dyn crate::tools::context::ToolOutput>),
             LifecycleTestResult::Err => Err(FunctionCallError::RespondToModel(
                 "handler failed".to_string(),
             )),
@@ -392,20 +399,26 @@ async fn dispatch_notifies_tool_lifecycle_contributors() -> anyhow::Result<()> {
     let turn = Arc::new(turn);
 
     registry
-        .dispatch_any(test_invocation(
-            Arc::clone(&session),
-            Arc::clone(&turn),
-            "ok-call",
-            ok_tool.clone(),
-        ))
+        .dispatch_any_with_terminal_outcome(
+            test_invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "ok-call",
+                ok_tool.clone(),
+            ),
+            /*terminal_outcome_reached*/ None,
+        )
         .await?;
     let err = match registry
-        .dispatch_any(test_invocation(
-            Arc::clone(&session),
-            Arc::clone(&turn),
-            "failing-call",
-            failing_tool.clone(),
-        ))
+        .dispatch_any_with_terminal_outcome(
+            test_invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "failing-call",
+                failing_tool.clone(),
+            ),
+            /*terminal_outcome_reached*/ None,
+        )
         .await
     {
         Ok(_) => panic!("failing handler should return an error"),
@@ -451,8 +464,10 @@ fn test_invocation(
     call_id: &str,
     tool_name: codex_tools::ToolName,
 ) -> ToolInvocation {
+    let step_context = StepContext::for_test(Arc::clone(&turn));
     ToolInvocation {
         session,
+        step_context,
         turn,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         tracker: Arc::new(tokio::sync::Mutex::new(

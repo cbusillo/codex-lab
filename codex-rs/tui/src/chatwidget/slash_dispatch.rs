@@ -5,7 +5,6 @@
 //! dispatch step and records the staged entry once the command has been handled, so
 //! slash-command recall follows the same submitted-input rule as ordinary text.
 
-use super::goal_validation::GoalObjectiveValidationSource;
 use super::*;
 use crate::app_event::AuthProfileSelection;
 use crate::app_event::ThreadGoalSetMode;
@@ -17,6 +16,7 @@ use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
+use crate::goal_files::GoalDraft;
 use codex_app_server_protocol::AccountListEntry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +28,7 @@ enum SlashCommandDispatchSource {
 struct PreparedSlashCommandArgs {
     args: String,
     text_elements: Vec<TextElement>,
+    pending_pastes: Vec<(String, String)>,
     local_images: Vec<LocalImageAttachment>,
     remote_image_urls: Vec<String>,
     mention_bindings: Vec<MentionBinding>,
@@ -40,6 +41,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const LOGIN_USAGE: &str = "Usage: /login [add|default|<profile>|add <profile>]";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
+const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
 impl ChatWidget {
     pub(crate) fn show_login_accounts_view_with_feedback(
@@ -52,6 +54,7 @@ impl ChatWidget {
             self.app_event_tx.clone(),
             default_auth_home_is_current,
             self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
             feedback,
         );
         self.bottom_pane.show_view(Box::new(view));
@@ -126,10 +129,7 @@ impl ChatWidget {
             });
         } else {
             self.add_error_message(format!("Unknown auth profile `{trimmed}`."));
-            self.add_info_message(
-                LOGIN_USAGE.to_string(),
-                Some(format!("Add it with `/login add {trimmed}`.")),
-            );
+            self.add_info_message(LOGIN_USAGE.to_string(), /*hint*/ None);
         }
     }
 
@@ -225,6 +225,13 @@ impl ChatWidget {
             .send(AppEvent::RawOutputModeChanged { enabled });
     }
 
+    fn slash_command_blocked_by_active_task(&self, cmd: SlashCommand) -> bool {
+        (!cmd.available_during_task() && self.bottom_pane.is_task_running())
+            || (cmd == SlashCommand::Resume
+                && (self.input_queue.user_turn_pending_start
+                    || self.turn_lifecycle.agent_turn_running))
+    }
+
     pub(super) fn dispatch_command(&mut self, cmd: SlashCommand) {
         if !self.ensure_slash_command_allowed_in_side_conversation(cmd) {
             return;
@@ -232,7 +239,7 @@ impl ChatWidget {
         if !self.ensure_side_command_allowed_outside_review(cmd) {
             return;
         }
-        if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
+        if self.slash_command_blocked_by_active_task(cmd) {
             let message = format!(
                 "'/{}' is disabled while a task is in progress.",
                 cmd.command()
@@ -258,7 +265,7 @@ impl ChatWidget {
                 self.request_redraw();
             }
             SlashCommand::New => {
-                self.app_event_tx.send(AppEvent::NewSession);
+                self.app_event_tx.send(AppEvent::NewSession { name: None });
             }
             SlashCommand::Archive => {
                 self.bottom_pane.show_selection_view(SelectionViewParams {
@@ -289,8 +296,36 @@ impl ChatWidget {
                 });
                 self.request_redraw();
             }
+            SlashCommand::Delete => {
+                self.bottom_pane.show_selection_view(SelectionViewParams {
+                    title: Some("Delete this session?".to_string()),
+                    subtitle: Some(
+                        "Cannot be undone. Subagent threads will also be deleted.".to_string(),
+                    ),
+                    footer_hint: Some(standard_popup_hint_line()),
+                    items: vec![
+                        SelectionItem {
+                            name: "No, keep this session".to_string(),
+                            description: Some("Return to the current session".to_string()),
+                            dismiss_on_select: true,
+                            ..Default::default()
+                        },
+                        SelectionItem {
+                            name: "Yes, delete and exit".to_string(),
+                            description: Some("Permanently delete this session now".to_string()),
+                            actions: vec![Box::new(|tx| {
+                                tx.send(AppEvent::DeleteCurrentThread);
+                            })],
+                            dismiss_on_select: true,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                });
+                self.request_redraw();
+            }
             SlashCommand::Clear => {
-                self.app_event_tx.send(AppEvent::ClearUi);
+                self.app_event_tx.send(AppEvent::ClearUi { name: None });
             }
             SlashCommand::Resume => {
                 self.app_event_tx.send(AppEvent::OpenResumePicker);
@@ -309,18 +344,14 @@ impl ChatWidget {
                     .send(AppEvent::OpenDesktopThread { thread_id });
             }
             SlashCommand::Init => {
-                let init_target = self.config.cwd.join(DEFAULT_AGENTS_MD_FILENAME);
-                if init_target.exists() {
-                    let message = format!(
-                        "{DEFAULT_AGENTS_MD_FILENAME} already exists here. Skipping /init to avoid overwriting it."
-                    );
-                    self.add_info_message(message, /*hint*/ None);
-                    return;
-                }
                 const INIT_PROMPT: &str = include_str!("../../prompt_for_init_command.md");
                 self.submit_user_message(INIT_PROMPT.to_string().into());
             }
             SlashCommand::Compact => {
+                if self.blocks_direct_input {
+                    self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
+                    return;
+                }
                 self.clear_token_usage();
                 if !self.bottom_pane.is_task_running() {
                     self.bottom_pane.set_task_running(/*running*/ true);
@@ -337,22 +368,11 @@ impl ChatWidget {
             }
             SlashCommand::Model => {
                 self.open_model_popup();
-            }
-            SlashCommand::Realtime => {
-                if !self.realtime_conversation_enabled() {
-                    return;
-                }
-                if self.realtime_conversation.is_live() {
-                    self.stop_realtime_conversation_from_ui();
-                } else {
-                    self.start_realtime_conversation();
-                }
-            }
-            SlashCommand::Settings => {
-                self.open_settings_popup();
+                self.defer_input_until_settings_applied();
             }
             SlashCommand::Personality => {
                 self.open_personality_popup();
+                self.defer_input_until_settings_applied();
             }
             SlashCommand::Plan => {
                 self.apply_plan_slash_command();
@@ -380,6 +400,7 @@ impl ChatWidget {
             }
             SlashCommand::Permissions => {
                 self.open_permissions_popup();
+                self.defer_input_until_settings_applied();
             }
             SlashCommand::Vim => {
                 self.toggle_vim_mode_and_notify();
@@ -390,12 +411,11 @@ impl ChatWidget {
             SlashCommand::ElevateSandbox => {
                 #[cfg(target_os = "windows")]
                 {
-                    let windows_sandbox_level = WindowsSandboxLevel::from_config(&self.config);
+                    let windows_sandbox_level =
+                        crate::windows_sandbox::level_from_config(&self.config);
                     let windows_degraded_sandbox_enabled =
                         matches!(windows_sandbox_level, WindowsSandboxLevel::RestrictedToken);
-                    if !windows_degraded_sandbox_enabled
-                        || !crate::legacy_core::windows_sandbox::ELEVATED_SANDBOX_NUX_ENABLED
-                    {
+                    if !windows_degraded_sandbox_enabled {
                         // This command should not be visible/recognized outside degraded mode,
                         // but guard anyway in case something dispatches it directly.
                         return;
@@ -460,6 +480,12 @@ impl ChatWidget {
             SlashCommand::Logout => {
                 self.app_event_tx.send(AppEvent::Logout);
             }
+            SlashCommand::Login => {
+                self.app_event_tx.send(AppEvent::ShowLoginAccounts);
+            }
+            SlashCommand::Settings => {
+                self.open_settings_popup();
+            }
             SlashCommand::Copy => {
                 self.copy_last_agent_markdown();
             }
@@ -499,6 +525,10 @@ impl ChatWidget {
             SlashCommand::Skills => {
                 self.open_skills_menu();
             }
+            SlashCommand::Import => {
+                self.app_event_tx
+                    .send(AppEvent::OpenExternalAgentConfigMigration);
+            }
             SlashCommand::Hooks => {
                 self.add_hooks_output();
             }
@@ -515,6 +545,11 @@ impl ChatWidget {
                     self.add_status_output(
                         /*refreshing_rate_limits*/ false, /*request_id*/ None,
                     );
+                }
+            }
+            SlashCommand::Usage => {
+                if self.ensure_usage_command_available() {
+                    self.open_usage_menu();
                 }
             }
             SlashCommand::Ide => {
@@ -555,9 +590,6 @@ impl ChatWidget {
             }
             SlashCommand::Plugins => {
                 self.add_plugins_output();
-            }
-            SlashCommand::Login => {
-                self.app_event_tx.send(AppEvent::ShowLoginAccounts);
             }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
@@ -627,7 +659,7 @@ impl ChatWidget {
             self.dispatch_command(cmd);
             return;
         }
-        if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
+        if self.slash_command_blocked_by_active_task(cmd) {
             let message = format!(
                 "'/{}' is disabled while a task is in progress.",
                 cmd.command()
@@ -643,9 +675,19 @@ impl ChatWidget {
             return;
         }
 
-        if cmd == SlashCommand::Goal
-            && !self.goal_objective_with_pending_pastes_is_allowed(&args, &text_elements)
-        {
+        if cmd == SlashCommand::Goal {
+            self.dispatch_prepared_command_with_args(
+                cmd,
+                PreparedSlashCommandArgs {
+                    args,
+                    text_elements,
+                    pending_pastes: self.bottom_pane.composer_pending_pastes(),
+                    local_images: self.bottom_pane.composer_local_images(),
+                    remote_image_urls: self.bottom_pane.remote_image_urls(),
+                    mention_bindings: Vec::new(),
+                    source: SlashCommandDispatchSource::Live,
+                },
+            );
             return;
         }
 
@@ -659,6 +701,7 @@ impl ChatWidget {
             PreparedSlashCommandArgs {
                 args: prepared_args,
                 text_elements: prepared_elements,
+                pending_pastes: Vec::new(),
                 local_images: Vec::new(),
                 remote_image_urls: Vec::new(),
                 mention_bindings: Vec::new(),
@@ -678,6 +721,13 @@ impl ChatWidget {
             self.bottom_pane
                 .prepare_inline_args_submission(/*record_history*/ false)
         }
+    }
+
+    fn clear_live_goal_submission(&mut self) {
+        self.bottom_pane
+            .set_composer_text(String::new(), Vec::new(), Vec::new());
+        self.bottom_pane.set_composer_pending_pastes(Vec::new());
+        self.bottom_pane.drain_pending_submission_state();
     }
 
     fn prepared_inline_user_message(
@@ -713,6 +763,7 @@ impl ChatWidget {
         let PreparedSlashCommandArgs {
             args,
             text_elements,
+            pending_pastes,
             local_images,
             remote_image_urls,
             mention_bindings,
@@ -720,6 +771,16 @@ impl ChatWidget {
         } = prepared;
         let trimmed = args.trim();
         match cmd {
+            SlashCommand::Usage => {
+                if self.ensure_usage_command_available() {
+                    match tokens::TokenActivityView::parse(trimmed) {
+                        Some(view) => self.add_token_activity_output(view),
+                        None => self.add_error_message(
+                            "Usage: /usage [daily|weekly|cumulative]".to_string(),
+                        ),
+                    }
+                }
+            }
             SlashCommand::Ide => {
                 self.handle_ide_command_args(trimmed);
             }
@@ -761,11 +822,21 @@ impl ChatWidget {
                 }
                 self.session_telemetry
                     .counter("codex.thread.rename", /*inc*/ 1, &[]);
-                let Some(name) = crate::legacy_core::util::normalize_thread_name(&args) else {
+                let Some(name) = normalize_thread_name(&args) else {
                     self.add_error_message("Thread name cannot be empty.".to_string());
                     return;
                 };
                 self.app_event_tx.set_thread_name(name);
+            }
+            SlashCommand::New if !trimmed.is_empty() => {
+                self.app_event_tx.send(AppEvent::NewSession {
+                    name: Some(trimmed.to_string()),
+                });
+            }
+            SlashCommand::Clear if !trimmed.is_empty() => {
+                self.app_event_tx.send(AppEvent::ClearUi {
+                    name: Some(trimmed.to_string()),
+                });
             }
             SlashCommand::Plan if !trimmed.is_empty() => {
                 if !self.apply_plan_slash_command() {
@@ -781,7 +852,8 @@ impl ChatWidget {
                 );
                 if self.is_session_configured() {
                     self.reasoning_buffer.clear();
-                    self.full_reasoning_buffer.clear();
+                    self.reasoning_header = None;
+                    self.reasoning_summary_parts.clear();
                     self.set_status_header(String::from("Working"));
                     self.submit_user_message(user_message);
                 } else {
@@ -790,6 +862,9 @@ impl ChatWidget {
             }
             SlashCommand::Goal if !trimmed.is_empty() => {
                 if !self.config.features.enabled(Feature::Goals) {
+                    if source == SlashCommandDispatchSource::Live {
+                        self.clear_live_goal_submission();
+                    }
                     return;
                 }
                 enum GoalControlCommand {
@@ -803,7 +878,7 @@ impl ChatWidget {
                             thread_id: self.thread_id,
                         });
                         if source == SlashCommandDispatchSource::Live {
-                            self.bottom_pane.drain_pending_submission_state();
+                            self.clear_live_goal_submission();
                         }
                         return;
                     }
@@ -819,6 +894,9 @@ impl ChatWidget {
                                 "The session must start before you can change a goal.".to_string(),
                             ),
                         );
+                        if source == SlashCommandDispatchSource::Live {
+                            self.clear_live_goal_submission();
+                        }
                         return;
                     };
                     match command {
@@ -833,42 +911,42 @@ impl ChatWidget {
                     }
                     self.append_message_history_entry(format!("/goal {trimmed}"));
                     if source == SlashCommandDispatchSource::Live {
-                        self.bottom_pane.drain_pending_submission_state();
+                        self.clear_live_goal_submission();
                     }
                     return;
                 }
-                let objective = args.trim();
-                if objective.is_empty() {
-                    self.add_error_message("Goal objective must not be empty.".to_string());
-                    self.add_info_message(
-                        GOAL_USAGE.to_string(),
-                        Some(GOAL_USAGE_HINT.to_string()),
-                    );
-                    if source == SlashCommandDispatchSource::Live {
-                        self.bottom_pane.drain_pending_submission_state();
-                    }
-                    return;
-                }
-                let validation_source = match source {
-                    SlashCommandDispatchSource::Live => GoalObjectiveValidationSource::Live,
-                    SlashCommandDispatchSource::Queued => GoalObjectiveValidationSource::Queued,
+                let draft = GoalDraft {
+                    objective: args,
+                    text_elements,
+                    pending_pastes,
+                    local_images,
+                    remote_image_urls,
                 };
-                if !self.goal_objective_is_allowed(objective, validation_source) {
-                    return;
-                }
                 let Some(thread_id) = self.thread_id else {
                     if source == SlashCommandDispatchSource::Live {
+                        const GOAL_PREFIX: &str = "/goal ";
+                        let text_elements = draft
+                            .text_elements
+                            .into_iter()
+                            .map(|element| {
+                                element.map_range(|range| ByteRange {
+                                    start: range.start + GOAL_PREFIX.len(),
+                                    end: range.end + GOAL_PREFIX.len(),
+                                })
+                            })
+                            .collect();
                         self.queue_user_message_with_options(
                             UserMessage {
-                                text: format!("/goal {args}"),
-                                local_images: Vec::new(),
-                                remote_image_urls: Vec::new(),
-                                text_elements: Vec::new(),
+                                text: format!("{GOAL_PREFIX}{}", draft.objective),
+                                local_images: draft.local_images,
+                                remote_image_urls: draft.remote_image_urls,
+                                text_elements,
                                 mention_bindings: Vec::new(),
                             },
                             QueuedInputAction::ParseSlash,
+                            draft.pending_pastes,
                         );
-                        self.bottom_pane.drain_pending_submission_state();
+                        self.clear_live_goal_submission();
                     } else {
                         self.add_info_message(
                             GOAL_USAGE.to_string(),
@@ -877,14 +955,15 @@ impl ChatWidget {
                     }
                     return;
                 };
-                self.app_event_tx.send(AppEvent::SetThreadGoalObjective {
+                let history_objective = draft.objective.clone();
+                self.app_event_tx.send(AppEvent::SetThreadGoalDraft {
                     thread_id,
-                    objective: objective.to_string(),
+                    draft,
                     mode: ThreadGoalSetMode::ConfirmIfExists,
                 });
-                self.append_message_history_entry(format!("/goal {trimmed}"));
+                self.append_message_history_entry(format!("/goal {history_objective}"));
                 if source == SlashCommandDispatchSource::Live {
-                    self.bottom_pane.drain_pending_submission_state();
+                    self.clear_live_goal_submission();
                 }
             }
             SlashCommand::Side | SlashCommand::Btw if !trimmed.is_empty() => {
@@ -936,7 +1015,15 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn submit_queued_slash_prompt(&mut self, user_message: UserMessage) -> QueueDrain {
+    pub(super) fn submit_queued_slash_prompt(
+        &mut self,
+        queued_message: QueuedUserMessage,
+    ) -> QueueDrain {
+        let QueuedUserMessage {
+            user_message,
+            pending_pastes,
+            ..
+        } = queued_message;
         let UserMessage {
             text,
             local_images,
@@ -1021,16 +1108,12 @@ impl ChatWidget {
             rest_offset + leading_trimmed,
             &text_elements,
         );
-        if cmd == SlashCommand::Goal
-            && !self.goal_objective_is_allowed(trimmed_rest, GoalObjectiveValidationSource::Queued)
-        {
-            return QueueDrain::Continue;
-        }
         self.dispatch_prepared_command_with_args(
             cmd,
             PreparedSlashCommandArgs {
                 args: trimmed_rest.to_string(),
                 text_elements: args_elements,
+                pending_pastes,
                 local_images,
                 remote_image_urls,
                 mention_bindings,
@@ -1043,7 +1126,7 @@ impl ChatWidget {
     fn builtin_command_flags(&self) -> BuiltinCommandFlags {
         #[cfg(target_os = "windows")]
         let allow_elevate_sandbox = {
-            let windows_sandbox_level = WindowsSandboxLevel::from_config(&self.config);
+            let windows_sandbox_level = crate::windows_sandbox::level_from_config(&self.config);
             matches!(windows_sandbox_level, WindowsSandboxLevel::RestrictedToken)
         };
         #[cfg(not(target_os = "windows"))]
@@ -1053,14 +1136,21 @@ impl ChatWidget {
             collaboration_modes_enabled: self.collaboration_modes_enabled(),
             connectors_enabled: self.connectors_enabled(),
             plugins_command_enabled: self.config.features.enabled(Feature::Plugins),
+            token_activity_command_enabled: self.has_codex_backend_auth,
             goal_command_enabled: self.config.features.enabled(Feature::Goals),
             service_tier_commands_enabled: self.fast_mode_enabled(),
             personality_command_enabled: self.config.features.enabled(Feature::Personality),
-            realtime_conversation_enabled: self.realtime_conversation_enabled(),
-            audio_device_selection_enabled: self.realtime_audio_device_selection_enabled(),
             allow_elevate_sandbox,
             side_conversation_active: self.active_side_conversation,
         }
+    }
+
+    fn ensure_usage_command_available(&mut self) -> bool {
+        if self.has_codex_backend_auth {
+            return true;
+        }
+        self.add_error_message(USAGE_CHATGPT_LOGIN_REQUIRED.to_string());
+        false
     }
 
     fn queued_command_drain_result(&self, cmd: SlashCommand) -> QueueDrain {
@@ -1070,6 +1160,7 @@ impl ChatWidget {
         match cmd {
             SlashCommand::Ide
             | SlashCommand::Status
+            | SlashCommand::Usage
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop
@@ -1089,6 +1180,7 @@ impl ChatWidget {
             SlashCommand::Feedback
             | SlashCommand::New
             | SlashCommand::Archive
+            | SlashCommand::Delete
             | SlashCommand::Clear
             | SlashCommand::Resume
             | SlashCommand::Fork
@@ -1096,8 +1188,6 @@ impl ChatWidget {
             | SlashCommand::Compact
             | SlashCommand::Review
             | SlashCommand::Model
-            | SlashCommand::Realtime
-            | SlashCommand::Settings
             | SlashCommand::Personality
             | SlashCommand::Plan
             | SlashCommand::Goal
@@ -1116,8 +1206,10 @@ impl ChatWidget {
             | SlashCommand::Exit
             | SlashCommand::Logout
             | SlashCommand::Login
+            | SlashCommand::Settings
             | SlashCommand::Mention
             | SlashCommand::Skills
+            | SlashCommand::Import
             | SlashCommand::Hooks
             | SlashCommand::Title
             | SlashCommand::Statusline

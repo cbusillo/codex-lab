@@ -1,78 +1,158 @@
 use anyhow::Result;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_shell_command_sse_response;
-use app_test_support::to_response;
 use codex_app_server_protocol::AutoReviewDetailKind;
 use codex_app_server_protocol::AutoReviewDispositionAction;
-use codex_app_server_protocol::AutoReviewDispositionActor as ApiAutoReviewDispositionActor;
+use codex_app_server_protocol::AutoReviewDispositionActor;
 use codex_app_server_protocol::AutoReviewDispositionWriteParams;
 use codex_app_server_protocol::AutoReviewDispositionWriteResponse;
 use codex_app_server_protocol::AutoReviewFindingDetailReadParams;
 use codex_app_server_protocol::AutoReviewFindingDetailReadResponse;
-use codex_app_server_protocol::AutoReviewFindingDisposition as ApiAutoReviewFindingDisposition;
-use codex_app_server_protocol::AutoReviewFreshness as ApiAutoReviewFreshness;
-use codex_app_server_protocol::AutoReviewRunSource as ApiAutoReviewRunSource;
+use codex_app_server_protocol::AutoReviewFindingDisposition;
+use codex_app_server_protocol::AutoReviewFreshness;
+use codex_app_server_protocol::AutoReviewRunSource;
+use codex_app_server_protocol::AutoReviewRunSummary;
 use codex_app_server_protocol::AutoReviewSummaryReadParams;
 use codex_app_server_protocol::AutoReviewSummaryReadResponse;
+use codex_app_server_protocol::AutoReviewUsage;
 use codex_app_server_protocol::BackgroundAutoReviewControlAction;
 use codex_app_server_protocol::BackgroundAutoReviewControlParams;
 use codex_app_server_protocol::BackgroundAutoReviewControlReason;
-use codex_app_server_protocol::BackgroundAutoReviewControlResponse;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
+use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
-use codex_app_server_protocol::JSONRPCNotification;
-use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
-use codex_app_server_protocol::ReviewStartTarget;
+use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
-use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
-use codex_auto_review::AutoReviewBudget;
-use codex_auto_review::AutoReviewDispositionActor;
-use codex_auto_review::AutoReviewFindingDisposition;
-use codex_auto_review::AutoReviewFindingDispositionRecord;
 use codex_auto_review::AutoReviewRun;
-use codex_auto_review::AutoReviewRunSource;
-use codex_auto_review::AutoReviewRunState;
+use codex_auto_review::AutoReviewRunFreshness;
+use codex_auto_review::AutoReviewRunSource as CoreAutoReviewRunSource;
 use codex_auto_review::AutoReviewRunStatus;
 use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
-use codex_auto_review::AutoReviewUsage;
-use codex_auto_review::ReviewCoordination;
+use codex_auto_review::DETAIL_MAX_BYTES;
 use codex_auto_review::SCHEMA_VERSION;
-use codex_git_utils::collect_git_info;
-use codex_git_utils::get_git_repo_root;
-use codex_git_utils::get_worktree_diff_fingerprint;
+use codex_auto_review::finding_digests;
+use codex_features::Feature;
 use codex_protocol::protocol::ReviewCodeLocation;
 use codex_protocol::protocol::ReviewFinding;
 use codex_protocol::protocol::ReviewLineRange;
 use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
+use codex_skills::system_cache_root_dir;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::Path;
+use std::process::Command;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+const COLLIDING_REVIEW_SKILL_MARKER: &str = "COLLIDING_REVIEW_SKILL_MARKER";
+
+#[tokio::test]
+async fn background_auto_review_control_rejects_empty_run_id() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let thread_id = start_default_thread(&mut mcp).await?;
+
+    let request_id = mcp
+        .send_background_auto_review_control_request(BackgroundAutoReviewControlParams {
+            thread_id,
+            run_id: "  \t  ".to_string(),
+            action: BackgroundAutoReviewControlAction::Cancel,
+            reason: BackgroundAutoReviewControlReason::UserRequested,
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error.error.message.contains("runId must not be empty"),
+        "unexpected message: {}",
+        error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_start_rejects_detached_delivery_for_paginated_parent() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                history_mode: Some(ThreadHistoryMode::Paginated),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let review_id = mcp
+        .send_review_start_request(ReviewStartParams {
+            thread_id: thread.id,
+            delivery: Some(ReviewDelivery::Detached),
+            target: ReviewTarget::Custom {
+                instructions: "detached review".to_string(),
+            },
+        })
+        .await?;
+    let review_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(review_id)),
+    )
+    .await??;
+    assert_eq!(review_err.error.code, -32600);
+    assert_eq!(
+        review_err.error.message,
+        "paginated threads do not support detached review"
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()> {
@@ -99,30 +179,27 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-
-    let thread_id = start_default_thread(&mut mcp).await?;
-
-    let review_req = mcp
-        .send_review_start_request(ReviewStartParams {
-            thread_id: thread_id.clone(),
-            delivery: Some(ReviewDelivery::Inline),
-            target: ReviewStartTarget::Commit {
-                sha: "1234567deadbeef".to_string(),
-                title: Some("Tidy UI colors".to_string()),
-            },
-        })
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
         .await?;
-    let review_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(review_req)),
-    )
-    .await??;
+    let thread_id = start_default_thread(&mut mcp).await?;
     let ReviewStartResponse {
         turn,
         review_thread_id,
-    } = to_response::<ReviewStartResponse>(review_resp)?;
+    } = mcp
+        .request(|request_id| ClientRequest::ReviewStart {
+            request_id,
+            params: ReviewStartParams {
+                thread_id: thread_id.clone(),
+                delivery: Some(ReviewDelivery::Inline),
+                target: ReviewTarget::Commit {
+                    sha: "1234567deadbeef".to_string(),
+                    title: Some("Tidy UI colors".to_string()),
+                },
+            },
+        })
+        .await?;
     assert_eq!(review_thread_id, thread_id.clone());
     let turn_id = turn.id.clone();
     assert_eq!(turn.status, TurnStatus::InProgress);
@@ -142,16 +219,11 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     // Confirm we see the EnteredReviewMode marker on the main thread.
     let mut saw_entered_review_mode = false;
     for _ in 0..10 {
-        let item_started: JSONRPCNotification = timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_notification_message("item/started"),
-        )
-        .await??;
         let started: ItemStartedNotification =
-            serde_json::from_value(item_started.params.expect("params must be present"))?;
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("item/started")).await??;
         match started.item {
-            ThreadItem::EnteredReviewMode { id, review } => {
-                assert_eq!(id, turn_id);
+            ThreadItem::EnteredReviewMode { review, .. } => {
+                assert_eq!(started.turn_id, turn_id);
                 assert_eq!(review, "commit 1234567: Tidy UI colors");
                 saw_entered_review_mode = true;
                 break;
@@ -168,16 +240,14 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     // on the same turn. Ignore any other items the stream surfaces.
     let mut review_body: Option<String> = None;
     for _ in 0..10 {
-        let review_notif: JSONRPCNotification = timeout(
+        let completed: ItemCompletedNotification = timeout(
             DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_notification_message("item/completed"),
+            mcp.read_notification("item/completed"),
         )
         .await??;
-        let completed: ItemCompletedNotification =
-            serde_json::from_value(review_notif.params.expect("params must be present"))?;
         match completed.item {
-            ThreadItem::ExitedReviewMode { id, review } => {
-                assert_eq!(id, turn_id);
+            ThreadItem::ExitedReviewMode { review, .. } => {
+                assert_eq!(completed.turn_id, turn_id);
                 review_body = Some(review);
                 break;
             }
@@ -211,29 +281,30 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     let server = create_mock_responses_server_sequence(responses).await;
 
     let codex_home = TempDir::new()?;
-    create_config_toml_with_approval_policy(codex_home.path(), &server.uri(), "untrusted")?;
+    MockResponsesConfig::new(&server.uri())
+        .with_provider_name("Mock provider")
+        .with_approval_policy("untrusted")
+        .disable_feature(Feature::ShellSnapshot)
+        .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
     let thread_id = start_default_thread(&mut mcp).await?;
-
-    let review_req = mcp
-        .send_review_start_request(ReviewStartParams {
-            thread_id,
-            delivery: Some(ReviewDelivery::Inline),
-            target: ReviewStartTarget::Commit {
-                sha: "1234567deadbeef".to_string(),
-                title: Some("Check review approvals".to_string()),
+    let ReviewStartResponse { turn, .. } = mcp
+        .request(|request_id| ClientRequest::ReviewStart {
+            request_id,
+            params: ReviewStartParams {
+                thread_id,
+                delivery: Some(ReviewDelivery::Inline),
+                target: ReviewTarget::Commit {
+                    sha: "1234567deadbeef".to_string(),
+                    title: Some("Check review approvals".to_string()),
+                },
             },
         })
         .await?;
-    let review_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(review_req)),
-    )
-    .await??;
-    let ReviewStartResponse { turn, .. } = to_response::<ReviewStartResponse>(review_resp)?;
     let turn_id = turn.id.clone();
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
     assert_eq!(
@@ -261,13 +332,8 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
 
     let mut command_item_id = None;
     for _ in 0..10 {
-        let item_started: JSONRPCNotification = timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_notification_message("item/started"),
-        )
-        .await??;
         let started: ItemStartedNotification =
-            serde_json::from_value(item_started.params.expect("params must be present"))?;
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("item/started")).await??;
         if let ThreadItem::CommandExecution { id, .. } = started.item {
             command_item_id = Some(id);
             break;
@@ -296,15 +362,17 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
     let thread_id = start_default_thread(&mut mcp).await?;
 
     let request_id = mcp
         .send_review_start_request(ReviewStartParams {
             thread_id,
             delivery: Some(ReviewDelivery::Inline),
-            target: ReviewStartTarget::BaseBranch {
+            target: ReviewTarget::BaseBranch {
                 branch: "   ".to_string(),
             },
         })
@@ -324,83 +392,67 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn review_start_rejects_current_turn_diff_target() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-
-    let request_id = mcp
-        .send_raw_request(
-            "review/start",
-            Some(json!({
-                "threadId": thread_id,
-                "delivery": "inline",
-                "target": {
-                    "type": "currentTurnDiff",
-                    "fingerprint": "sha256:turn"
-                }
-            })),
-        )
-        .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error.error.message.contains("unknown variant"),
-        "unexpected message: {}",
-        error.error.message
-    );
-
-    Ok(())
-}
-
 #[cfg_attr(target_os = "windows", ignore = "flaky on windows CI")]
 #[tokio::test]
 async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<()> {
-    let review_payload = json!({
-        "findings": [],
-        "overall_correctness": "ok",
-        "overall_explanation": "detached review",
-        "overall_confidence_score": 0.5
-    })
-    .to_string();
-    let server = create_mock_responses_server_repeating_assistant(&review_payload).await;
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("materialize-response"),
+                responses::ev_assistant_message("materialize-message", "materialized"),
+                responses::ev_completed("materialize-response"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("review-response"),
+                responses::ev_assistant_message("review-message", "No findings."),
+                responses::ev_completed("review-response"),
+            ]),
+        ],
+    )
+    .await;
 
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
+    let colliding_skill_dir = codex_home.path().join("skills/review-agent-collision");
+    std::fs::create_dir_all(&colliding_skill_dir)?;
+    std::fs::write(
+        colliding_skill_dir.join("SKILL.md"),
+        format!(
+            "---\nname: review-agent\ndescription: Colliding user review skill.\n---\n\n{COLLIDING_REVIEW_SKILL_MARKER}\n"
+        ),
+    )?;
+    let canonical_codex_home = std::fs::canonicalize(codex_home.path())?.try_into()?;
+    let review_skill_path = system_cache_root_dir(&canonical_codex_home)
+        .join("review-agent")
+        .join("SKILL.md");
+    let expected_prompt = format!(
+        "Use [$review-agent]({}) for this review.\n\ndetached review",
+        review_skill_path.display()
+    );
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
     let thread_id = start_default_thread(&mut mcp).await?;
     materialize_thread_rollout(&mut mcp, &thread_id).await?;
-
-    let review_req = mcp
-        .send_review_start_request(ReviewStartParams {
-            thread_id: thread_id.clone(),
-            delivery: Some(ReviewDelivery::Detached),
-            target: ReviewStartTarget::Custom {
-                instructions: "detached review".to_string(),
-            },
-        })
-        .await?;
-    let review_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(review_req)),
-    )
-    .await??;
     let ReviewStartResponse {
         turn,
         review_thread_id,
-    } = to_response::<ReviewStartResponse>(review_resp)?;
+    } = mcp
+        .request(|request_id| ClientRequest::ReviewStart {
+            request_id,
+            params: ReviewStartParams {
+                thread_id: thread_id.clone(),
+                delivery: Some(ReviewDelivery::Detached),
+                target: ReviewTarget::Custom {
+                    instructions: "detached review".to_string(),
+                },
+            },
+        })
+        .await?;
 
     assert_eq!(turn.status, TurnStatus::InProgress);
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
@@ -410,7 +462,7 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
             id: turn.id.clone(),
             client_id: None,
             content: vec![V2UserInput::Text {
-                text: "detached review".to_string(),
+                text: expected_prompt.clone(),
                 text_elements: Vec::new(),
             }],
         }]
@@ -446,135 +498,25 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
     assert_eq!(started.thread.id, review_thread_id);
     assert_eq!(started.thread.session_id, review_thread_id);
 
-    let _completed = timeout(
+    timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
 
-    let runs = load_auto_review_runs(codex_home.path())?;
-    assert_eq!(runs.len(), 1, "expected detached review to persist one run");
-    let run = runs.into_iter().next().expect("one run");
-    assert_eq!(run.status, AutoReviewRunStatus::Completed);
-    assert_eq!(run.source, AutoReviewRunSource::Manual);
-    assert_eq!(run.run_id, turn.id);
-    assert_eq!(run.finding_count, 0);
-    assert!(run.finding_digests.is_empty());
-
-    Ok(())
-}
-
-#[cfg_attr(target_os = "windows", ignore = "flaky on windows CI")]
-#[tokio::test]
-async fn review_start_detached_manual_review_is_readable_via_auto_review_apis() -> Result<()> {
-    let review_payload = json!({
-        "findings": [
-            {
-                "title": "Use durable review details",
-                "body": "Manual detached review body from the live review path.",
-                "confidence_score": 0.91,
-                "priority": 1,
-                "code_location": {
-                    "absolute_file_path": "/tmp/file.rs",
-                    "line_range": {"start": 4, "end": 4}
-                }
-            }
-        ],
-        "overall_correctness": "patch is incorrect",
-        "overall_explanation": "manual durable review",
-        "overall_confidence_score": 0.8
-    })
-    .to_string();
-    let server = create_mock_responses_server_repeating_assistant(&review_payload).await;
-
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-
-    let thread_id = start_default_thread(&mut mcp).await?;
-    materialize_thread_rollout(&mut mcp, &thread_id).await?;
-
-    let review_req = mcp
-        .send_review_start_request(ReviewStartParams {
-            thread_id: thread_id.clone(),
-            delivery: Some(ReviewDelivery::Detached),
-            target: ReviewStartTarget::UncommittedChanges,
-        })
-        .await?;
-    let review_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(review_req)),
-    )
-    .await??;
-    let ReviewStartResponse {
-        turn,
-        review_thread_id,
-    } = to_response::<ReviewStartResponse>(review_resp)?;
-
-    assert_ne!(review_thread_id, thread_id);
-
-    let started = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/started"),
-    )
-    .await??;
-    let started: ThreadStartedNotification =
-        serde_json::from_value(started.params.expect("params must be present"))?;
-    assert_eq!(started.thread.id, review_thread_id);
-
-    let _completed = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-
-    let summary_request_id = mcp
-        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams {
-            thread_id: thread_id.clone(),
-        })
-        .await?;
-    let summary_response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(summary_request_id)),
-    )
-    .await??;
-    let summary = to_response::<AutoReviewSummaryReadResponse>(summary_response)?;
-    let current = summary.current.expect("current run summary");
-    assert_eq!(current.run_id, turn.id);
-    assert_eq!(current.status, BackgroundAutoReviewStatus::Completed);
-    assert_eq!(current.source, ApiAutoReviewRunSource::Manual);
-    assert_eq!(current.freshness, ApiAutoReviewFreshness::Current);
-    assert_eq!(current.rendered_findings, 1);
-    assert!(current.content.contains("f1"));
-    assert_eq!(
-        summary.latest.as_ref().map(|run| run.run_id.as_str()),
-        Some(current.run_id.as_str())
-    );
-
-    let detail_request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: current.run_id,
-            finding_id: Some("f1".to_string()),
-            max_bytes: Some(4096),
-        })
-        .await?;
-    let detail_response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(detail_request_id)),
-    )
-    .await??;
-    let detail = to_response::<AutoReviewFindingDetailReadResponse>(detail_response)?;
-    assert_eq!(detail.detail_kind, AutoReviewDetailKind::Finding);
-    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
-    assert_eq!(detail.finding_count, 1);
-    assert!(
-        detail
-            .content
-            .contains("Manual detached review body from the live review path.")
-    );
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let review_request = &requests[1];
+    assert_eq!(review_request.header("x-openai-subagent"), None);
+    assert!(review_request.body_contains_text("Colliding user review skill."));
+    let user_messages = review_request.message_input_texts("user");
+    assert!(user_messages.iter().any(|text| text == &expected_prompt));
+    assert!(user_messages.iter().any(|text| {
+        text.starts_with("<skill>")
+            && text.contains("<name>review-agent</name>")
+            && text.contains("Do not modify files")
+    }));
+    assert!(!review_request.body_contains_text(COLLIDING_REVIEW_SKILL_MARKER));
 
     Ok(())
 }
@@ -585,15 +527,17 @@ async fn review_start_rejects_empty_commit_sha() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
     let thread_id = start_default_thread(&mut mcp).await?;
 
     let request_id = mcp
         .send_review_start_request(ReviewStartParams {
             thread_id,
             delivery: Some(ReviewDelivery::Inline),
-            target: ReviewStartTarget::Commit {
+            target: ReviewTarget::Commit {
                 sha: "\t".to_string(),
                 title: None,
             },
@@ -620,15 +564,17 @@ async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
     let thread_id = start_default_thread(&mut mcp).await?;
 
     let request_id = mcp
         .send_review_start_request(ReviewStartParams {
             thread_id,
             delivery: Some(ReviewDelivery::Inline),
-            target: ReviewStartTarget::Custom {
+            target: ReviewTarget::Custom {
                 instructions: "\n\n".to_string(),
             },
         })
@@ -651,960 +597,234 @@ async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
     Ok(())
 }
 
+/// Clients read Background Review results and write dispositions purely over
+/// the v2 RPC surface, so summary/read, findingDetail/read, and
+/// disposition/write must agree with each other over one persisted run.
 #[tokio::test]
-async fn background_auto_review_control_rejects_empty_run_id() -> Result<()> {
+async fn auto_review_summary_detail_and_disposition_round_trip_over_persisted_run() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
+    let workspace = TempDir::new()?;
+    // Canonicalize so the seeded run target matches the path the server records.
+    let workspace_path =
+        AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(workspace.path())?)?
+            .into_path_buf();
+    init_git_repo(&workspace_path)?;
+    let head_sha = git_head_sha(&workspace_path)?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-
-    let request_id = mcp
-        .send_background_auto_review_control_request(BackgroundAutoReviewControlParams {
-            thread_id,
-            run_id: "  \t  ".to_string(),
-            action: BackgroundAutoReviewControlAction::Cancel,
-            reason: BackgroundAutoReviewControlReason::UserRequested,
-        })
+    // Auto-env would relocate the thread's local environment to its own
+    // workspace, which is the path Background Review scopes its store to.
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
         .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error.error.message.contains("runId must not be empty"),
-        "unexpected message: {}",
-        error.error.message
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn background_auto_review_control_rejects_empty_superseded_run_id() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-
-    let request_id = mcp
-        .send_background_auto_review_control_request(BackgroundAutoReviewControlParams {
-            thread_id: "thread-without-validation".to_string(),
-            run_id: "pending-run".to_string(),
-            action: BackgroundAutoReviewControlAction::Supersede,
-            reason: BackgroundAutoReviewControlReason::SupersededByRun {
-                run_id: "  \t  ".to_string(),
+    let ThreadStartResponse { thread, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                model: Some("mock-model".to_string()),
+                cwd: Some(workspace_path.to_string_lossy().into_owned()),
+                ..Default::default()
             },
         })
         .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error
-            .error
-            .message
-            .contains("superseded runId must not be empty"),
-        "unexpected message: {}",
-        error.error.message
-    );
+    let thread_id = thread.id;
 
-    Ok(())
-}
+    let store = AutoReviewStore::for_scope(codex_home.path(), &workspace_path);
+    seed_completed_background_review(&store, &workspace_path, &head_sha)?;
 
-#[tokio::test]
-async fn background_auto_review_control_unknown_run_is_acknowledged() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-
-    let request_id = mcp
-        .send_background_auto_review_control_request(BackgroundAutoReviewControlParams {
-            thread_id,
-            run_id: "missing-run".to_string(),
-            action: BackgroundAutoReviewControlAction::Supersede,
-            reason: BackgroundAutoReviewControlReason::SupersededByRun {
-                run_id: "replacement-run".to_string(),
+    let summary: AutoReviewSummaryReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams {
+                thread_id: thread_id.clone(),
             },
         })
         .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let _response: BackgroundAutoReviewControlResponse =
-        to_response::<BackgroundAutoReviewControlResponse>(response)?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_summary_read_returns_empty_state() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-
-    let request_id = mcp
-        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
-    assert_eq!(summary.latest, None);
-    assert_eq!(summary.current, None);
-    assert_eq!(summary.status_counts, Vec::new());
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_summary_read_returns_current_summary_and_counts() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run("run_summary", &thread_cwd, "Stored body");
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
-    let current = summary.current.expect("current run summary");
-    assert_eq!(current.run_id, "run_summary");
-    assert_eq!(current.status, BackgroundAutoReviewStatus::Completed);
-    assert_eq!(current.source, ApiAutoReviewRunSource::Background);
-    assert_eq!(current.freshness, ApiAutoReviewFreshness::Current);
-    assert_eq!(current.rendered_findings, 1);
-    assert_eq!(current.omitted_findings, 0);
-    assert!(current.content.contains("f1"));
+    let current = summary.current.clone().expect("current run summary");
+    assert_eq!(summary.latest, Some(current.clone()));
     assert_eq!(
-        summary.latest.as_ref().map(|run| run.run_id.as_str()),
-        Some("run_summary")
-    );
-    assert_eq!(summary.status_counts.len(), 1);
-    assert_eq!(summary.status_counts[0].count, 1);
-    assert_eq!(
-        summary.diagnostics.as_ref().map(|diagnostics| (
-            diagnostics.recent_runs,
-            diagnostics.terminal_runs,
-            diagnostics.suppressed_stale_runs
-        )),
-        Some((1, 1, 0))
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_disposition_write_updates_durable_attention_state() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run("run_disposition", &thread_cwd, "Stored body");
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-    let store = AutoReviewStore::for_scope(codex_home.path(), &thread_cwd);
-    let mut state = AutoReviewRunState::new(&run.run_id);
-    state.budget = Some(AutoReviewBudget {
-        max_scope_bytes: 120_000,
-        max_elapsed_ms: 300_000,
-        max_total_tokens: 250_000,
-        max_output_bytes: 65_536,
-        max_findings: 20,
-    });
-    state.usage = AutoReviewUsage {
-        scope_bytes: Some(12_000),
-        elapsed_ms: Some(5_000),
-        total_tokens: Some(25_000),
-        output_bytes: Some(2_000),
-        finding_count: Some(1),
-    };
-    state.finding_disposition = Some(AutoReviewFindingDispositionRecord {
-        disposition: AutoReviewFindingDisposition::NeedsAttention,
-        actor: AutoReviewDispositionActor::System,
-        reason: None,
-        updated_at_unix_secs: 2,
-    });
-    store.save_run_state(&state)?;
-
-    let request_id = mcp
-        .send_auto_review_disposition_write_request(AutoReviewDispositionWriteParams {
-            thread_id: thread_id.clone(),
-            run_id: run.run_id.clone(),
-            action: AutoReviewDispositionAction::Defer,
-            reason: Some("acknowledged for the next dogfood pass".to_string()),
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let response = to_response::<AutoReviewDispositionWriteResponse>(response)?;
-    assert_eq!(response.run_id, run.run_id);
-    assert_eq!(
-        response.finding_disposition.disposition,
-        ApiAutoReviewFindingDisposition::Deferred
-    );
-    assert_eq!(
-        response.finding_disposition.actor,
-        ApiAutoReviewDispositionActor::User
-    );
-
-    let summary_request_id = mcp
-        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
-        .await?;
-    let summary_response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(summary_request_id)),
-    )
-    .await??;
-    let summary = to_response::<AutoReviewSummaryReadResponse>(summary_response)?;
-    let current = summary.current.expect("current run summary");
-    assert_eq!(
-        current
-            .budget
-            .as_ref()
-            .map(|budget| budget.max_total_tokens),
-        Some(250_000)
-    );
-    assert_eq!(current.usage.total_tokens, Some(25_000));
-    assert_eq!(
-        current
-            .finding_disposition
-            .as_ref()
-            .map(|record| record.disposition),
-        Some(ApiAutoReviewFindingDisposition::Deferred)
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_repair_disposition_requires_durable_detail() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run("run_missing_detail", &thread_cwd, "Stored body");
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-    let store = AutoReviewStore::for_scope(codex_home.path(), &thread_cwd);
-    let mut state = AutoReviewRunState::new(&run.run_id);
-    state.finding_disposition = Some(AutoReviewFindingDispositionRecord {
-        disposition: AutoReviewFindingDisposition::NeedsAttention,
-        actor: AutoReviewDispositionActor::System,
-        reason: None,
-        updated_at_unix_secs: 2,
-    });
-    store.save_run_state(&state)?;
-    std::fs::remove_file(store.output_path(&run.run_id)?)?;
-
-    let request_id = mcp
-        .send_auto_review_disposition_write_request(AutoReviewDispositionWriteParams {
-            thread_id,
-            run_id: run.run_id.clone(),
-            action: AutoReviewDispositionAction::Repair,
-            reason: None,
-        })
-        .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert!(
-        error
-            .error
-            .message
-            .contains("auto review repair detail is unavailable"),
-        "unexpected message: {}",
-        error.error.message
-    );
-    let persisted_state = store
-        .load_run_state(&run.run_id)?
-        .expect("durable run state");
-    assert_eq!(
-        persisted_state
-            .finding_disposition
-            .as_ref()
-            .map(|record| record.disposition),
-        Some(AutoReviewFindingDisposition::NeedsAttention)
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_summary_read_returns_duplicate_skip_diagnostics() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (mut run, output) = sample_auto_review_run("run_duplicate_skip", &thread_cwd, "");
-    run.status = AutoReviewRunStatus::Skipped;
-    run.freshness = codex_auto_review::AutoReviewRunFreshness::Superseded;
-    run.superseded_by = Some("existing-run".to_string());
-    run.cancel_reason = Some("duplicate_auto_review_scope".to_string());
-    run.error_summary = Some("equivalent background auto review already exists".to_string());
-    run.finding_count = 0;
-    run.omitted_finding_digest_count = 0;
-    run.finding_digests.clear();
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
-    let diagnostics = summary.diagnostics.expect("diagnostics");
-    assert_eq!(diagnostics.recent_runs, 1);
-    assert_eq!(diagnostics.skipped_runs, 1);
-    assert_eq!(diagnostics.duplicate_skipped_runs, 1);
-    assert_eq!(
-        diagnostics.compact,
-        "recent_runs=1 in_flight=0 terminal=1 skipped=1 duplicate_skipped=1"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_summary_read_treats_current_turn_diff_as_current() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    let repo = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-    init_git_repo(repo.path())?;
-    std::fs::write(repo.path().join("tracked.txt"), "base\nchange\n")?;
-    let thread_cwd = std::fs::canonicalize(repo.path())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_thread_with_cwd(&mut mcp, &thread_cwd).await?;
-    let active_target = auto_review_target_for_cwd(codex_home.path(), &thread_cwd).await;
-    let (mut run, output) = sample_auto_review_run("run_turn_diff", &thread_cwd, "Stored body");
-    run.review_target = CoreReviewTarget::CurrentTurnDiff {
-        fingerprint: "sha256:synthetic-turn-diff".to_string(),
-    };
-    run.target = active_target;
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
-    let current = summary.current.expect("current run summary");
-    assert_eq!(current.run_id, "run_turn_diff");
-    assert_eq!(current.freshness, ApiAutoReviewFreshness::Current);
-    assert_eq!(current.rendered_findings, 1);
-    assert!(current.content.contains("f1"));
-    assert!(summary.status_counts.iter().any(|count| {
-        count.freshness == ApiAutoReviewFreshness::Current && count.target_matches
-    }));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_summary_read_suppresses_stale_findings_by_default() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (mut current_run, current_output) =
-        sample_auto_review_run("run_current", &thread_cwd, "Current body");
-    current_run.completed_at_unix_secs = Some(2);
-    let (mut stale_run, stale_output) =
-        sample_auto_review_run("run_stale", &thread_cwd, "Stale body");
-    stale_run.target.head_sha = Some("old-head".to_string());
-    stale_run.started_at_unix_secs = 10;
-    stale_run.completed_at_unix_secs = Some(11);
-    save_auto_review_fixture(
-        codex_home.path(),
-        &thread_cwd,
-        &current_run,
-        &current_output,
-    )?;
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &stale_run, &stale_output)?;
-
-    let request_id = mcp
-        .send_auto_review_summary_read_request(AutoReviewSummaryReadParams { thread_id })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let summary = to_response::<AutoReviewSummaryReadResponse>(response)?;
-    let current = summary.current.expect("current run summary");
-    assert_eq!(current.run_id, "run_current");
-    assert!(current.content.contains("f1"));
-
-    let latest = summary.latest.expect("latest run summary");
-    assert_eq!(latest.run_id, "run_stale");
-    assert_eq!(latest.freshness, ApiAutoReviewFreshness::Stale);
-    assert_eq!(latest.rendered_findings, 0);
-    assert!(!latest.content.contains("Stale body"));
-    assert!(summary.status_counts.iter().any(|count| {
-        count.freshness == ApiAutoReviewFreshness::Current && count.target_matches
-    }));
-    assert!(summary.status_counts.iter().any(|count| {
-        count.freshness == ApiAutoReviewFreshness::Stale && !count.target_matches
-    }));
-    assert_eq!(
-        summary
-            .status_counts
-            .iter()
-            .map(|count| count.count)
-            .sum::<usize>(),
-        2
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_finding_detail_read_returns_bounded_detail() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run(
-        "run_detail",
-        &thread_cwd,
-        &"Use the existing bounded detail store instead of embedding the whole finding. ".repeat(8),
-    );
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: "run_detail".to_string(),
-            finding_id: Some("f1".to_string()),
-            max_bytes: Some(180),
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
-    assert_eq!(detail.run_id, "run_detail");
-    assert_eq!(detail.detail_kind, AutoReviewDetailKind::Finding);
-    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
-    assert_eq!(detail.finding_count, 1);
-    assert_eq!(detail.omitted_findings, 0);
-    assert_eq!(detail.max_bytes, 180);
-    assert!(detail.truncated);
-    assert!(detail.bytes <= 180);
-    assert!(detail.original_bytes > detail.bytes);
-    assert!(detail.content.contains("Prefer bounded details"));
-    assert!(detail.content.contains("body:"));
-    assert!(!detail.content.contains("code_location"));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_finding_detail_read_returns_bounded_run_detail() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run_with_findings(
-        "run_detail_all",
-        &thread_cwd,
-        (1..=12)
-            .map(|index| (format!("Finding {index}"), format!("Stored body {index}")))
-            .collect(),
-    );
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: "run_detail_all".to_string(),
-            finding_id: None,
-            max_bytes: Some(4096),
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
-    assert_eq!(detail.run_id, "run_detail_all");
-    assert_eq!(detail.detail_kind, AutoReviewDetailKind::Run);
-    assert_eq!(detail.finding_id, None);
-    assert_eq!(detail.finding_count, 12);
-    assert_eq!(detail.omitted_findings, 2);
-    assert!(detail.truncated);
-    assert!(detail.content.contains("overall_correctness"));
-    assert!(detail.content.contains("finding_id=f1"));
-    assert!(detail.content.contains("finding_id=f10"));
-    assert!(!detail.content.contains("finding_id=f11"));
-    assert!(detail.content.contains("request a specific findingId"));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_finding_detail_read_uses_selected_environment_cwd() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    let environment_cwd = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams {
-            cwd: Some(codex_home.path().to_string_lossy().into_owned()),
-            environments: Some(vec![TurnEnvironmentParams {
-                environment_id: "local".to_string(),
-                cwd: environment_cwd.path().to_path_buf().try_into()?,
-            }]),
+        current,
+        AutoReviewRunSummary {
+            run_id: SEEDED_RUN_ID.to_string(),
+            status: BackgroundAutoReviewStatus::Completed,
+            source: AutoReviewRunSource::Background,
+            freshness: AutoReviewFreshness::Current,
+            started_at: SEEDED_STARTED_AT,
+            completed_at: Some(SEEDED_COMPLETED_AT),
             model: Some("mock-model".to_string()),
-            ..Default::default()
+            error_summary: None,
+            rendered_findings: 1,
+            omitted_findings: 0,
+            truncated: false,
+            content: "[P1] f1: Guard the new branch (/tmp/feature.rs:1-3)".to_string(),
+            budget: None,
+            usage: AutoReviewUsage::default(),
+            terminal_reason: None,
+            finding_disposition: None,
+        }
+    );
+
+    let detail: AutoReviewFindingDetailReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewFindingDetailRead {
+            request_id,
+            params: AutoReviewFindingDetailReadParams {
+                thread_id: thread_id.clone(),
+                run_id: SEEDED_RUN_ID.to_string(),
+                finding_id: Some("f1".to_string()),
+                max_bytes: None,
+            },
         })
         .await?;
-    let thread_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
-    )
-    .await??;
-    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/started"),
-    )
-    .await??;
-
-    let (run, output) = sample_auto_review_run(
-        "run_environment_detail",
-        environment_cwd.path(),
-        "Stored environment body",
-    );
-    save_auto_review_fixture(codex_home.path(), environment_cwd.path(), &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id: thread.id,
-            run_id: "run_environment_detail".to_string(),
+    let expected_content = "finding_id=f1 priority=1 confidence=0.9 location=/tmp/feature.rs:1-3\ntitle: Guard the new branch\nbody:\nThe new branch is unreachable without a guard.";
+    assert_eq!(
+        detail,
+        AutoReviewFindingDetailReadResponse {
+            run_id: SEEDED_RUN_ID.to_string(),
+            detail_kind: AutoReviewDetailKind::Finding,
             finding_id: Some("f1".to_string()),
-            max_bytes: Some(1024),
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
-    assert_eq!(detail.run_id, "run_environment_detail");
-    assert_eq!(detail.finding_id.as_deref(), Some("f1"));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_finding_detail_read_allows_omitted_summary_findings() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run_with_findings(
-        "run_omitted_detail",
-        &thread_cwd,
-        (1..=21)
-            .map(|index| (format!("Finding {index}"), format!("Stored body {index}")))
-            .collect(),
+            finding_count: 1,
+            omitted_findings: 0,
+            bytes: expected_content.len(),
+            original_bytes: expected_content.len(),
+            max_bytes: DETAIL_MAX_BYTES,
+            truncated: false,
+            content: expected_content.to_string(),
+        }
     );
-    assert_eq!(run.finding_count, 21);
-    assert_eq!(run.finding_digests.len(), 20);
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
 
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: "run_omitted_detail".to_string(),
-            finding_id: Some("f21".to_string()),
-            max_bytes: Some(4096),
+    let write: AutoReviewDispositionWriteResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewDispositionWrite {
+            request_id,
+            params: AutoReviewDispositionWriteParams {
+                thread_id: thread_id.clone(),
+                run_id: SEEDED_RUN_ID.to_string(),
+                action: AutoReviewDispositionAction::Defer,
+                reason: Some("  handled in a follow-up  ".to_string()),
+            },
         })
         .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
+    assert_eq!(write.run_id, SEEDED_RUN_ID);
+    assert_eq!(
+        write.finding_disposition.disposition,
+        AutoReviewFindingDisposition::Deferred
+    );
+    assert_eq!(
+        write.finding_disposition.actor,
+        AutoReviewDispositionActor::User
+    );
+    assert_eq!(
+        write.finding_disposition.reason.as_deref(),
+        Some("handled in a follow-up")
+    );
 
-    let detail = to_response::<AutoReviewFindingDetailReadResponse>(response)?;
-    assert_eq!(detail.finding_id.as_deref(), Some("f21"));
-    assert!(detail.content.contains("Stored body 21"));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_finding_detail_read_rejects_empty_finding_id_when_provided() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: "run_detail".to_string(),
-            finding_id: Some(" \t ".to_string()),
-            max_bytes: Some(180),
+    // The write must be durable and visible to the next read.
+    let summary: AutoReviewSummaryReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams { thread_id },
         })
         .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error
-            .error
-            .message
-            .contains("findingId must not be empty when provided"),
-        "unexpected message: {}",
-        error.error.message
+    assert_eq!(
+        summary.current.and_then(|run| run.finding_disposition),
+        Some(write.finding_disposition)
     );
 
     Ok(())
 }
 
-#[tokio::test]
-async fn auto_review_finding_detail_read_rejects_unknown_finding_id() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+const SEEDED_RUN_ID: &str = "seeded-background-review";
+const SEEDED_STARTED_AT: i64 = 1_700_000_000;
+const SEEDED_COMPLETED_AT: i64 = 1_700_000_060;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run("run_detail", &thread_cwd, "Stored body");
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: "run_detail".to_string(),
-            finding_id: Some("missing".to_string()),
-            max_bytes: Some(180),
-        })
-        .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error.error.message.contains("auto review detail not found"),
-        "unexpected message: {}",
-        error.error.message
+fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git").args(args).current_dir(cwd).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
     );
-
     Ok(())
 }
 
-#[tokio::test]
-async fn auto_review_finding_detail_read_rejects_wrong_review_target() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let thread_id = start_thread_with_cwd(&mut mcp, &thread_cwd).await?;
-    let (mut run, output) = sample_auto_review_run("run_wrong_target", &thread_cwd, "Stored body");
-    run.target = auto_review_target_for_cwd(codex_home.path(), &thread_cwd).await;
-    run.review_target = CoreReviewTarget::Custom {
-        instructions: "review a different target".to_string(),
-    };
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: "run_wrong_target".to_string(),
-            finding_id: Some("f1".to_string()),
-            max_bytes: Some(180),
-        })
-        .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error.error.message.contains("auto review detail not found"),
-        "unexpected message: {}",
-        error.error.message
-    );
-
+fn init_git_repo(path: &Path) -> Result<()> {
+    for args in [
+        &["init", "--quiet", "-b", "main"][..],
+        &["config", "user.email", "background-review@example.invalid"][..],
+        &["config", "user.name", "Background Review"][..],
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "baseline",
+        ][..],
+    ] {
+        run_git(path, args)?;
+    }
     Ok(())
 }
 
-#[tokio::test]
-async fn auto_review_finding_detail_read_rejects_stale_run() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run(
-        "run_detail",
-        &thread_cwd.join("other-worktree"),
-        "Stored body",
+fn git_head_sha(path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: "run_detail".to_string(),
-            finding_id: Some("f1".to_string()),
-            max_bytes: Some(180),
-        })
-        .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error.error.message.contains("auto review detail not found"),
-        "unexpected message: {}",
-        error.error.message
-    );
-
-    Ok(())
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
-#[tokio::test]
-async fn auto_review_finding_detail_read_rejects_stale_run_detail() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_default_thread(&mut mcp).await?;
-    let thread_cwd = std::fs::canonicalize(codex_home.path())?;
-    let (run, output) = sample_auto_review_run(
-        "run_detail",
-        &thread_cwd.join("other-worktree"),
-        "Stored body",
-    );
-    save_auto_review_fixture(codex_home.path(), &thread_cwd, &run, &output)?;
-
-    let request_id = mcp
-        .send_auto_review_finding_detail_read_request(AutoReviewFindingDetailReadParams {
-            thread_id,
-            run_id: "run_detail".to_string(),
-            finding_id: None,
-            max_bytes: Some(180),
-        })
-        .await?;
-    let error: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(
-        error.error.message.contains("auto review detail not found"),
-        "unexpected message: {}",
-        error.error.message
-    );
-
-    Ok(())
-}
-
-async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
-    start_thread(mcp, /*cwd*/ None).await
-}
-
-async fn start_thread_with_cwd(mcp: &mut TestAppServer, cwd: &std::path::Path) -> Result<String> {
-    start_thread(mcp, Some(cwd.to_string_lossy().into_owned())).await
-}
-
-async fn start_thread(mcp: &mut TestAppServer, cwd: Option<String>) -> Result<String> {
-    let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams {
-            cwd,
-            model: Some("mock-model".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let thread_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
-    )
-    .await??;
-    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/started"),
-    )
-    .await??;
-    Ok(thread.id)
-}
-
-fn sample_auto_review_run(
-    run_id: &str,
-    worktree_path: &std::path::Path,
-    body: &str,
-) -> (AutoReviewRun, ReviewOutputEvent) {
-    sample_auto_review_run_with_findings(
-        run_id,
-        worktree_path,
-        vec![("Prefer bounded details".to_string(), body.to_string())],
-    )
-}
-
-fn sample_auto_review_run_with_findings(
-    run_id: &str,
-    worktree_path: &std::path::Path,
-    findings: Vec<(String, String)>,
-) -> (AutoReviewRun, ReviewOutputEvent) {
+/// Persists a completed background review whose target matches what the
+/// app-server computes for a clean single-commit workspace repository.
+fn seed_completed_background_review(
+    store: &AutoReviewStore,
+    cwd: &Path,
+    head_sha: &str,
+) -> Result<()> {
     let output = ReviewOutputEvent {
-        findings: findings
-            .into_iter()
-            .zip(1_u32..)
-            .map(|((title, body), line)| ReviewFinding {
-                title,
-                body,
-                confidence_score: 0.92,
-                priority: 1,
-                code_location: ReviewCodeLocation {
-                    absolute_file_path: PathBuf::from("/repo/src/lib.rs"),
-                    line_range: ReviewLineRange {
-                        start: line,
-                        end: line,
-                    },
-                },
-            })
-            .collect(),
-        overall_correctness: "patch is incorrect".to_string(),
-        overall_explanation: "summary".to_string(),
+        findings: vec![ReviewFinding {
+            title: "Guard the new branch".to_string(),
+            body: "The new branch is unreachable without a guard.".to_string(),
+            confidence_score: 0.9,
+            priority: 1,
+            code_location: ReviewCodeLocation {
+                absolute_file_path: std::path::PathBuf::from("/tmp/feature.rs"),
+                line_range: ReviewLineRange { start: 1, end: 3 },
+            },
+        }],
+        overall_correctness: "needs attention".to_string(),
+        overall_explanation: "One finding needs attention.".to_string(),
         overall_confidence_score: 0.8,
     };
-    let finding_digests = codex_auto_review::finding_digests(&output);
     let run = AutoReviewRun {
         schema_version: SCHEMA_VERSION,
-        run_id: run_id.to_string(),
+        run_id: SEEDED_RUN_ID.to_string(),
         status: AutoReviewRunStatus::Completed,
-        freshness: codex_auto_review::AutoReviewRunFreshness::Current,
-        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewRunFreshness::Current,
+        source: CoreAutoReviewRunSource::Background,
         target: AutoReviewRunTarget {
-            branch: None,
-            head_sha: None,
+            branch: Some("main".to_string()),
+            head_sha: Some(head_sha.to_string()),
             base_sha: None,
-            worktree_path: Some(worktree_path.to_path_buf()),
+            worktree_path: Some(cwd.to_path_buf()),
             snapshot_epoch: None,
-            snapshot_commit: None,
-            head_at_launch: None,
+            snapshot_commit: Some(head_sha.to_string()),
+            head_at_launch: Some(head_sha.to_string()),
             worktree_diff_fingerprint: None,
         },
         review_target: CoreReviewTarget::UncommittedChanges,
-        started_at_unix_secs: 1,
-        completed_at_unix_secs: Some(2),
-        model: Some("review-model".to_string()),
+        started_at_unix_secs: SEEDED_STARTED_AT,
+        completed_at_unix_secs: Some(SEEDED_COMPLETED_AT),
+        model: Some("mock-model".to_string()),
         reasoning_effort: None,
         prompt_token_estimate: None,
         token_count: None,
@@ -1613,112 +833,44 @@ fn sample_auto_review_run_with_findings(
         cancel_reason: None,
         error_summary: None,
         finding_count: output.findings.len(),
-        omitted_finding_digest_count: output.findings.len().saturating_sub(finding_digests.len()),
-        finding_digests,
+        finding_digests: finding_digests(&output),
+        omitted_finding_digest_count: 0,
     };
-    (run, output)
-}
-
-fn save_auto_review_fixture(
-    codex_home: &std::path::Path,
-    store_scope: &std::path::Path,
-    run: &AutoReviewRun,
-    output: &ReviewOutputEvent,
-) -> Result<()> {
-    let store = AutoReviewStore::for_scope(codex_home, store_scope);
-    store.save_run(run)?;
-    store.save_output(&run.run_id, output)?;
+    store.save_run(&run)?;
+    store.save_output(SEEDED_RUN_ID, &output)?;
     Ok(())
 }
 
-async fn auto_review_target_for_cwd(
-    codex_home: &std::path::Path,
-    cwd: &std::path::Path,
-) -> AutoReviewRunTarget {
-    let git_info = collect_git_info(cwd).await;
-    let repo_root = get_git_repo_root(cwd);
-    let worktree_path = repo_root.or_else(|| Some(cwd.to_path_buf()));
-    let snapshot_epoch = worktree_path.as_ref().and_then(|scope| {
-        ReviewCoordination::for_scope(codex_home, scope)
-            .current_snapshot_epoch()
-            .ok()
-            .filter(|epoch| *epoch > 0)
-    });
-    AutoReviewRunTarget {
-        branch: git_info.as_ref().and_then(|git| git.branch.clone()),
-        head_sha: git_info
-            .as_ref()
-            .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
-        base_sha: None,
-        worktree_path,
-        snapshot_epoch,
-        snapshot_commit: git_info
-            .as_ref()
-            .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
-        head_at_launch: git_info
-            .as_ref()
-            .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
-        worktree_diff_fingerprint: get_worktree_diff_fingerprint(cwd).await,
-    }
-}
-
-fn init_git_repo(repo_path: &std::path::Path) -> Result<()> {
-    run_git(repo_path, &["init", "-b", "main"])?;
-    run_git(repo_path, &["config", "user.email", "test@example.com"])?;
-    run_git(repo_path, &["config", "user.name", "Test User"])?;
-    std::fs::write(repo_path.join("tracked.txt"), "base\n")?;
-    run_git(repo_path, &["add", "tracked.txt"])?;
-    run_git(repo_path, &["commit", "-m", "initial"])?;
-    Ok(())
-}
-
-fn run_git(repo_path: &std::path::Path, args: &[&str]) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .output()?;
-    anyhow::ensure!(
-        output.status.success(),
-        "git {:?} failed: stdout={:?} stderr={:?}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
-}
-
-fn load_auto_review_runs(codex_home: &std::path::Path) -> Result<Vec<AutoReviewRun>> {
-    let review_dir = codex_home.join("state/review");
-    if !review_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut runs = Vec::new();
-    for entry in std::fs::read_dir(&review_dir)? {
-        let store_root = entry?.path().join("auto-review");
-        runs.extend(AutoReviewStore::from_store_root(store_root).list_runs()?);
-    }
-    runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
-    Ok(runs)
-}
-
-async fn materialize_thread_rollout(mcp: &mut TestAppServer, thread_id: &str) -> Result<()> {
-    let turn_req = mcp
-        .send_turn_start_request(TurnStartParams {
-            thread_id: thread_id.to_string(),
-            client_user_message_id: None,
-            input: vec![V2UserInput::Text {
-                text: "materialize rollout".to_string(),
-                text_elements: Vec::new(),
-            }],
+async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
             ..Default::default()
         })
         .await?;
     timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+        mcp.read_stream_until_notification_message("thread/started"),
     )
     .await??;
+    Ok(thread.id)
+}
+
+async fn materialize_thread_rollout(mcp: &mut TestAppServer, thread_id: &str) -> Result<()> {
+    let _: TurnStartResponse = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread_id.to_string(),
+                client_user_message_id: None,
+                input: vec![V2UserInput::Text {
+                    text: "materialize rollout".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("turn/completed"),
@@ -1728,35 +880,8 @@ async fn materialize_thread_rollout(mcp: &mut TestAppServer, thread_id: &str) ->
 }
 
 fn create_config_toml(codex_home: &std::path::Path, server_uri: &str) -> std::io::Result<()> {
-    create_config_toml_with_approval_policy(codex_home, server_uri, "never")
-}
-
-fn create_config_toml_with_approval_policy(
-    codex_home: &std::path::Path,
-    server_uri: &str,
-    approval_policy: &str,
-) -> std::io::Result<()> {
-    let config_toml = codex_home.join("config.toml");
-    std::fs::write(
-        config_toml,
-        format!(
-            r#"
-model = "mock-model"
-approval_policy = "{approval_policy}"
-sandbox_mode = "read-only"
-
-model_provider = "mock_provider"
-
-[features]
-shell_snapshot = false
-
-[model_providers.mock_provider]
-name = "Mock provider"
-base_url = "{server_uri}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-"#
-        ),
-    )
+    MockResponsesConfig::new(server_uri)
+        .with_provider_name("Mock provider")
+        .disable_feature(Feature::ShellSnapshot)
+        .write(codex_home)
 }

@@ -2,11 +2,15 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_plugins::PluginIdentity;
 use codex_utils_plugins::PluginSkillRoot;
+use codex_utils_plugins::SkillDiscoveryMode;
 
 use crate::AppConnectorId;
+use crate::AppDeclaration;
 use crate::PluginCapabilitySummary;
 use crate::PluginHookSource;
+use crate::app_connector_ids_from_declarations;
 
 const MAX_CAPABILITY_SUMMARY_DESCRIPTION_LEN: usize = 1024;
 
@@ -14,7 +18,9 @@ const MAX_CAPABILITY_SUMMARY_DESCRIPTION_LEN: usize = 1024;
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedPlugin<M> {
     pub config_name: String,
+    pub remote_plugin_id: Option<String>,
     pub manifest_name: Option<String>,
+    pub plugin_namespace: Option<String>,
     pub manifest_description: Option<String>,
     pub root: AbsolutePathBuf,
     pub enabled: bool,
@@ -22,7 +28,7 @@ pub struct LoadedPlugin<M> {
     pub disabled_skill_paths: HashSet<AbsolutePathBuf>,
     pub has_enabled_skills: bool,
     pub mcp_servers: HashMap<String, M>,
-    pub apps: Vec<AppConnectorId>,
+    pub apps: Vec<AppDeclaration>,
     pub hook_sources: Vec<PluginHookSource>,
     pub hook_load_warnings: Vec<String>,
     pub error: Option<String>,
@@ -31,6 +37,10 @@ pub struct LoadedPlugin<M> {
 impl<M> LoadedPlugin<M> {
     pub fn is_active(&self) -> bool {
         self.enabled && self.error.is_none()
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.manifest_name.as_deref().unwrap_or(&self.config_name)
     }
 }
 
@@ -46,14 +56,11 @@ fn plugin_capability_summary_from_loaded<M>(
 
     let summary = PluginCapabilitySummary {
         config_name: plugin.config_name.clone(),
-        display_name: plugin
-            .manifest_name
-            .clone()
-            .unwrap_or_else(|| plugin.config_name.clone()),
+        display_name: plugin.display_name().to_string(),
         description: prompt_safe_plugin_description(plugin.manifest_description.as_deref()),
         has_skills: plugin.has_enabled_skills,
         mcp_server_names,
-        app_connector_ids: plugin.apps.clone(),
+        app_connector_ids: app_connector_ids_from_declarations(&plugin.apps),
     };
 
     (summary.has_skills
@@ -80,7 +87,9 @@ pub fn prompt_safe_plugin_description(description: Option<&str>) -> Option<Strin
     )
 }
 
-/// Outcome of loading configured plugins (skills roots, MCP, apps, errors).
+/// Runtime view of loaded plugins and their derived capability summaries.
+///
+/// Callers must apply any runtime capability policies before constructing this outcome.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginLoadOutcome<M> {
     plugins: Vec<LoadedPlugin<M>>,
@@ -121,12 +130,20 @@ impl<M: Clone> PluginLoadOutcome<M> {
         let mut skill_roots = Vec::new();
         let mut seen_paths = HashSet::new();
         for plugin in self.plugins.iter().filter(|plugin| plugin.is_active()) {
+            let Some(plugin_namespace) = &plugin.plugin_namespace else {
+                continue;
+            };
             for path in &plugin.skill_roots {
                 if seen_paths.insert(path.clone()) {
                     skill_roots.push(PluginSkillRoot {
                         path: path.clone(),
-                        plugin_id: plugin.config_name.clone(),
+                        plugin_identity: PluginIdentity {
+                            plugin_id: plugin.config_name.clone(),
+                            remote_plugin_id: plugin.remote_plugin_id.clone(),
+                        },
+                        plugin_namespace: plugin_namespace.clone(),
                         plugin_root: plugin.root.clone(),
+                        discovery_mode: SkillDiscoveryMode::Recursive,
                     });
                 }
             }
@@ -149,18 +166,12 @@ impl<M: Clone> PluginLoadOutcome<M> {
     }
 
     pub fn effective_apps(&self) -> Vec<AppConnectorId> {
-        let mut apps = Vec::new();
-        let mut seen_connector_ids = HashSet::new();
-
-        for plugin in self.plugins.iter().filter(|plugin| plugin.is_active()) {
-            for connector_id in &plugin.apps {
-                if seen_connector_ids.insert(connector_id.clone()) {
-                    apps.push(connector_id.clone());
-                }
-            }
-        }
-
-        apps
+        app_connector_ids_from_declarations(
+            self.plugins
+                .iter()
+                .filter(|plugin| plugin.is_active())
+                .flat_map(|plugin| plugin.apps.iter()),
+        )
     }
 
     pub fn effective_plugin_hook_sources(&self) -> Vec<PluginHookSource> {
@@ -218,7 +229,14 @@ mod tests {
     fn loaded_plugin(config_name: &str, skill_roots: Vec<AbsolutePathBuf>) -> LoadedPlugin<()> {
         LoadedPlugin {
             config_name: config_name.to_string(),
+            remote_plugin_id: None,
             manifest_name: None,
+            plugin_namespace: Some(
+                config_name
+                    .split_once('@')
+                    .map_or(config_name, |(name, _)| name)
+                    .to_string(),
+            ),
             manifest_description: None,
             root: test_path(config_name),
             enabled: true,
@@ -236,8 +254,10 @@ mod tests {
     #[test]
     fn effective_plugin_skill_roots_preserves_first_plugin_for_shared_root() {
         let shared_root = test_path("shared-skills");
+        let mut first_plugin = loaded_plugin("zeta@test", vec![shared_root.clone()]);
+        first_plugin.remote_plugin_id = Some("plugins~Plugin_zeta".to_string());
         let outcome = PluginLoadOutcome::from_plugins(vec![
-            loaded_plugin("zeta@test", vec![shared_root.clone()]),
+            first_plugin,
             loaded_plugin("alpha@test", vec![shared_root.clone()]),
         ]);
 
@@ -245,8 +265,13 @@ mod tests {
             outcome.effective_plugin_skill_roots(),
             vec![PluginSkillRoot {
                 path: shared_root,
-                plugin_id: "zeta@test".to_string(),
+                plugin_identity: PluginIdentity {
+                    plugin_id: "zeta@test".to_string(),
+                    remote_plugin_id: Some("plugins~Plugin_zeta".to_string()),
+                },
+                plugin_namespace: "zeta".to_string(),
                 plugin_root: test_path("zeta@test"),
+                discovery_mode: SkillDiscoveryMode::Recursive,
             }]
         );
     }

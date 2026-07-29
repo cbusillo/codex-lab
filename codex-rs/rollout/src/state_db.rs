@@ -5,14 +5,16 @@ use crate::list::SortDirection;
 use crate::list::ThreadSortKey;
 use crate::metadata;
 use crate::sqlite_metrics;
+use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 pub use codex_state::LogEntry;
+use codex_state::SqliteConfig;
 use codex_state::ThreadMetadataBuilder;
-use codex_state::ThreadMetadataProjection;
 use codex_utils_path::normalize_for_path_comparison;
 use serde_json::Value;
 use std::path::Path;
@@ -42,16 +44,10 @@ const STARTUP_BACKFILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// initialized handle.
 pub async fn init(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
     let config = RolloutConfig::from_view(config);
-    match try_init_with_roots(
-        config.codex_home,
-        config.sqlite_home,
-        config.model_provider_id,
-    )
-    .await
-    {
+    match try_init_with_roots(config.codex_home, config.sqlite, config.model_provider_id).await {
         Ok(runtime) => Some(runtime),
         Err(err) => {
-            emit_startup_warning(&format!("failed to initialize state runtime: {err}"));
+            emit_startup_warning(&format!("failed to initialize state runtime: {err:#}"));
             None
         }
     }
@@ -63,22 +59,17 @@ pub async fn init(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
 /// tracing or UI setup has completed.
 pub async fn try_init(config: &impl RolloutConfigView) -> anyhow::Result<StateDbHandle> {
     let config = RolloutConfig::from_view(config);
-    try_init_with_roots(
-        config.codex_home,
-        config.sqlite_home,
-        config.model_provider_id,
-    )
-    .await
+    try_init_with_roots(config.codex_home, config.sqlite, config.model_provider_id).await
 }
 
 async fn try_init_with_roots(
     codex_home: PathBuf,
-    sqlite_home: PathBuf,
+    sqlite: SqliteConfig,
     default_model_provider_id: String,
 ) -> anyhow::Result<StateDbHandle> {
     try_init_with_roots_inner(
         codex_home,
-        sqlite_home,
+        sqlite,
         default_model_provider_id,
         /*backfill_lease_seconds*/ None,
     )
@@ -88,13 +79,13 @@ async fn try_init_with_roots(
 #[cfg(test)]
 async fn try_init_with_roots_and_backfill_lease(
     codex_home: PathBuf,
-    sqlite_home: PathBuf,
+    sqlite: SqliteConfig,
     default_model_provider_id: String,
     backfill_lease_seconds: i64,
 ) -> anyhow::Result<StateDbHandle> {
     try_init_with_roots_inner(
         codex_home,
-        sqlite_home,
+        sqlite,
         default_model_provider_id,
         Some(backfill_lease_seconds),
     )
@@ -103,17 +94,17 @@ async fn try_init_with_roots_and_backfill_lease(
 
 async fn try_init_with_roots_inner(
     codex_home: PathBuf,
-    sqlite_home: PathBuf,
+    sqlite: SqliteConfig,
     default_model_provider_id: String,
     backfill_lease_seconds: Option<i64>,
 ) -> anyhow::Result<StateDbHandle> {
     let runtime =
-        codex_state::StateRuntime::init(sqlite_home.clone(), default_model_provider_id.clone())
+        codex_state::StateRuntime::init(sqlite.clone(), default_model_provider_id.clone())
             .await
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "failed to initialize state runtime at {}: {err}",
-                    sqlite_home.display()
+            .with_context(|| {
+                format!(
+                    "failed to initialize state runtime at {}",
+                    sqlite.home().display()
                 )
             })?;
     let backfill_gate_started = Instant::now();
@@ -129,7 +120,10 @@ async fn try_init_with_roots_inner(
         backfill_gate_started.elapsed(),
         &backfill_gate_result,
     );
-    backfill_gate_result?;
+    if let Err(err) = backfill_gate_result {
+        runtime.close().await;
+        return Err(err);
+    }
     Ok(runtime)
 }
 
@@ -212,7 +206,7 @@ fn emit_startup_warning(message: &str) {
 /// Unlike [`init`], this helper does not run rollout backfill. It is for
 /// optional local reads from non-owning contexts such as remote app-server mode.
 pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
-    let state_path = codex_state::state_db_path(config.sqlite_home());
+    let state_path = config.sqlite_config().state_db_path();
     if !tokio::fs::try_exists(&state_path).await.unwrap_or(false) {
         codex_state::record_fallback(
             "get_state_db",
@@ -222,7 +216,7 @@ pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHand
         return None;
     }
     let runtime = match codex_state::StateRuntime::init(
-        config.sqlite_home().to_path_buf(),
+        config.sqlite_config().clone(),
         config.model_provider_id().to_string(),
     )
     .await
@@ -237,7 +231,7 @@ pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHand
             return None;
         }
     };
-    require_backfill_complete(runtime, config.sqlite_home()).await
+    require_backfill_complete(runtime, config.sqlite_config().home()).await
 }
 
 /// Build a SQLite telemetry recorder backed by an OTEL metrics client.
@@ -287,7 +281,10 @@ fn cursor_to_anchor(cursor: Option<&Cursor>) -> Option<codex_state::Anchor> {
     let millis = cursor.timestamp().unix_timestamp_nanos() / 1_000_000;
     let millis = i64::try_from(millis).ok()?;
     let ts = chrono::DateTime::<Utc>::from_timestamp_millis(millis)?;
-    Some(codex_state::Anchor { ts })
+    Some(codex_state::Anchor {
+        ts,
+        id: cursor.thread_id(),
+    })
 }
 
 pub fn normalize_cwd_for_state_db(cwd: &Path) -> PathBuf {
@@ -298,7 +295,7 @@ pub fn normalize_cwd_for_state_db(cwd: &Path) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 pub async fn list_thread_ids_db(
     context: Option<&codex_state::StateRuntime>,
-    codex_home: &Path,
+    sqlite: &codex_state::SqliteConfig,
     page_size: usize,
     cursor: Option<&Cursor>,
     sort_key: ThreadSortKey,
@@ -308,12 +305,13 @@ pub async fn list_thread_ids_db(
     stage: &str,
 ) -> Option<Vec<ThreadId>> {
     let ctx = context?;
-    if ctx.codex_home() != codex_home {
+    if ctx.sqlite() != sqlite {
         warn!(
-            "state db codex_home mismatch: expected {}, got {}",
-            ctx.codex_home().display(),
-            codex_home.display()
+            "state db SQLite home mismatch: expected {}, got {}",
+            sqlite.home().display(),
+            ctx.sqlite().home().display()
         );
+        return None;
     }
 
     let anchor = cursor_to_anchor(cursor);
@@ -333,6 +331,7 @@ pub async fn list_thread_ids_db(
             match sort_key {
                 ThreadSortKey::CreatedAt => codex_state::SortKey::CreatedAt,
                 ThreadSortKey::UpdatedAt => codex_state::SortKey::UpdatedAt,
+                ThreadSortKey::RecencyAt => codex_state::SortKey::RecencyAt,
             },
             allowed_sources.as_slice(),
             model_providers.as_deref(),
@@ -352,7 +351,7 @@ pub async fn list_thread_ids_db(
 #[allow(clippy::too_many_arguments)]
 pub async fn list_threads_db(
     context: Option<&codex_state::StateRuntime>,
-    codex_home: &Path,
+    sqlite: &codex_state::SqliteConfig,
     page_size: usize,
     cursor: Option<&Cursor>,
     sort_key: ThreadSortKey,
@@ -360,16 +359,19 @@ pub async fn list_threads_db(
     allowed_sources: &[SessionSource],
     model_providers: Option<&[String]>,
     cwd_filters: Option<&[PathBuf]>,
+    relation_filter: Option<codex_state::ThreadRelationFilter>,
     archived: bool,
+    is_pinned: Option<bool>,
     search_term: Option<&str>,
 ) -> Option<codex_state::ThreadsPage> {
     let ctx = context?;
-    if ctx.codex_home() != codex_home {
+    if ctx.sqlite() != sqlite {
         warn!(
-            "state db codex_home mismatch: expected {}, got {}",
-            ctx.codex_home().display(),
-            codex_home.display()
+            "state db SQLite home mismatch: expected {}, got {}",
+            sqlite.home().display(),
+            ctx.sqlite().home().display()
         );
+        return None;
     }
 
     let anchor = cursor_to_anchor(cursor);
@@ -388,29 +390,37 @@ pub async fn list_threads_db(
             .map(|cwd| normalize_cwd_for_state_db(cwd))
             .collect::<Vec<_>>()
     });
-    match ctx
-        .list_threads(
-            page_size,
-            codex_state::ThreadFilterOptions {
-                archived_only: archived,
-                allowed_sources: allowed_sources.as_slice(),
-                model_providers: model_providers.as_deref(),
-                cwd_filters: normalized_cwd_filters.as_deref(),
-                anchor: anchor.as_ref(),
-                sort_key: match sort_key {
-                    ThreadSortKey::CreatedAt => codex_state::SortKey::CreatedAt,
-                    ThreadSortKey::UpdatedAt => codex_state::SortKey::UpdatedAt,
-                },
-                sort_direction: match sort_direction {
-                    SortDirection::Asc => codex_state::SortDirection::Asc,
-                    SortDirection::Desc => codex_state::SortDirection::Desc,
-                },
-                search_term,
-            },
-        )
-        .await
-    {
+    let filters = codex_state::ThreadFilterOptions {
+        archived_only: archived,
+        is_pinned,
+        allowed_sources: allowed_sources.as_slice(),
+        model_providers: model_providers.as_deref(),
+        cwd_filters: normalized_cwd_filters.as_deref(),
+        anchor: anchor.as_ref(),
+        sort_key: match sort_key {
+            ThreadSortKey::CreatedAt => codex_state::SortKey::CreatedAt,
+            ThreadSortKey::UpdatedAt => codex_state::SortKey::UpdatedAt,
+            ThreadSortKey::RecencyAt => codex_state::SortKey::RecencyAt,
+        },
+        sort_direction: match sort_direction {
+            SortDirection::Asc => codex_state::SortDirection::Asc,
+            SortDirection::Desc => codex_state::SortDirection::Desc,
+        },
+        search_term,
+    };
+    let page = match relation_filter {
+        Some(relation_filter) => {
+            ctx.list_threads_by_relation(page_size, relation_filter, filters)
+                .await
+        }
+        None => ctx.list_threads(page_size, filters).await,
+    };
+    match page {
         Ok(mut page) => {
+            // Relationship-filtered listings intentionally treat persisted state as authoritative.
+            if relation_filter.is_some() {
+                return Some(page);
+            }
             let mut valid_items = Vec::with_capacity(page.items.len());
             for item in page.items {
                 if let Some(existing_path) =
@@ -477,11 +487,28 @@ pub async fn reconcile_rollout(
     context: Option<&codex_state::StateRuntime>,
     rollout_path: &Path,
     default_provider: &str,
+    builder: Option<&ThreadMetadataBuilder>,
+    items: &[RolloutItem],
     archived_only: Option<bool>,
+    new_thread_memory_mode: Option<&str>,
 ) {
     let Some(ctx) = context else {
         return;
     };
+    if builder.is_some() || !items.is_empty() {
+        apply_rollout_items(
+            Some(ctx),
+            rollout_path,
+            default_provider,
+            builder,
+            items,
+            "reconcile_rollout",
+            new_thread_memory_mode,
+            /*updated_at_override*/ None,
+        )
+        .await;
+        return;
+    }
     let outcome =
         match metadata::extract_metadata_from_rollout(rollout_path, default_provider).await {
             Ok(outcome) => outcome,
@@ -496,9 +523,14 @@ pub async fn reconcile_rollout(
     let mut metadata = outcome.metadata;
     let memory_mode = outcome.memory_mode.unwrap_or_else(|| "enabled".to_string());
     metadata.cwd = normalize_cwd_for_state_db(&metadata.cwd);
-    if let Ok(Some(existing_metadata)) = ctx.get_thread(metadata.id).await {
-        metadata.prefer_existing_git_info(&existing_metadata);
-        metadata.prefer_existing_explicit_title(&existing_metadata);
+    let existing_metadata = ctx.get_thread(metadata.id).await.ok().flatten();
+    // Paginated metadata updates are SQLite-only. Use the rollout mode to seed a
+    // missing row, then keep the value from SQLite.
+    let restore_memory_mode_from_rollout =
+        existing_metadata.is_none() || matches!(metadata.history_mode, ThreadHistoryMode::Legacy);
+    if let Some(existing_metadata) = existing_metadata.as_ref() {
+        metadata.prefer_existing_git_info(existing_metadata);
+        metadata.prefer_existing_explicit_title(existing_metadata);
     }
     match archived_only {
         Some(true) if metadata.archived_at.is_none() => {
@@ -516,9 +548,10 @@ pub async fn reconcile_rollout(
         );
         return;
     }
-    if let Err(err) = ctx
-        .set_thread_memory_mode(metadata.id, memory_mode.as_str())
-        .await
+    if restore_memory_mode_from_rollout
+        && let Err(err) = ctx
+            .set_thread_memory_mode(metadata.id, memory_mode.as_str())
+            .await
     {
         warn!(
             "state db reconcile_rollout memory_mode update failed {}: {err}",
@@ -585,20 +618,22 @@ pub async fn read_repair_rollout_path(
         Some(ctx),
         rollout_path,
         default_provider.as_str(),
+        /*builder*/ None,
+        &[],
         archived_only,
+        /*new_thread_memory_mode*/ None,
     )
     .await;
 }
 
-/// Apply the next rollout items with projection state owned by an ordered stream lifecycle.
+/// Apply rollout items incrementally to SQLite.
 #[allow(clippy::too_many_arguments)]
-pub async fn apply_rollout_items_with_projection(
+pub async fn apply_rollout_items(
     context: Option<&codex_state::StateRuntime>,
     rollout_path: &Path,
     default_provider: &str,
     builder: Option<&ThreadMetadataBuilder>,
     items: &[RolloutItem],
-    projection: &mut ThreadMetadataProjection,
     stage: &str,
     new_thread_memory_mode: Option<&str>,
     updated_at_override: Option<DateTime<Utc>>,
@@ -626,13 +661,7 @@ pub async fn apply_rollout_items_with_projection(
     builder.rollout_path = rollout_path.to_path_buf();
     builder.cwd = normalize_cwd_for_state_db(&builder.cwd);
     if let Err(err) = ctx
-        .apply_rollout_items_with_projection(
-            &builder,
-            items,
-            projection,
-            new_thread_memory_mode,
-            updated_at_override,
-        )
+        .apply_rollout_items(&builder, items, new_thread_memory_mode, updated_at_override)
         .await
     {
         warn!(

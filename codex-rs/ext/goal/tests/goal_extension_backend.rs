@@ -1,12 +1,18 @@
+#![recursion_limit = "256"]
+#![allow(clippy::expect_used)]
+
+use codex_utils_absolute_path::test_support::PathExt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::Weak;
 use std::time::Duration;
 
+use codex_analytics::AnalyticsEventsClient;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ExtensionWarning;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::NoopTurnItemEmitter;
 use codex_extension_api::ThreadResumeInput;
@@ -124,7 +130,7 @@ async fn goal_tools_hidden_for_review_subagents() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn installed_goal_tools_reject_duplicate_goal_creation() -> anyhow::Result<()> {
+async fn installed_goal_tools_only_replace_complete_goal() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
@@ -152,10 +158,31 @@ async fn installed_goal_tools_reject_duplicate_goal_creation() -> anyhow::Result
     assert_eq!(
         err,
         FunctionCallError::RespondToModel(
-            "cannot create a new goal because this thread already has a goal; use update_goal only when the existing goal is complete"
+            "cannot create a new goal because this thread has an unfinished goal; complete the existing goal first"
                 .to_string()
         )
     );
+
+    let update_tool = tool_by_name(&tools, "update_goal");
+    update_tool
+        .handle(tool_call(
+            "update_goal",
+            "call-complete-goal",
+            json!({ "status": "complete" }),
+        ))
+        .await?;
+
+    let invocation = tool_call(
+        "create_goal",
+        "call-create-goal-3",
+        json!({ "objective": "replacement goal" }),
+    );
+    let output = create_tool.handle(invocation.clone()).await?;
+    let result = output.code_mode_result(&invocation.payload);
+
+    assert_eq!(json!("replacement goal"), result["goal"]["objective"]);
+    assert_eq!(json!("active"), result["goal"]["status"]);
+    assert_eq!(json!(0), result["goal"]["tokensUsed"]);
     Ok(())
 }
 
@@ -1093,6 +1120,7 @@ async fn installed_tools_with_start(
     install_with_backend(
         &mut builder,
         runtime,
+        AnalyticsEventsClient::disabled(),
         /*metrics_client*/ None,
         Weak::new(),
         goal_service,
@@ -1107,6 +1135,8 @@ async fn installed_tools_with_start(
                 config: &(),
                 session_source: &session_source,
                 persistent_thread_state_available,
+                environments: &[],
+                mcp_resource_client: None,
                 session_store: &session_store,
                 thread_store: &thread_store,
             })
@@ -1143,6 +1173,7 @@ impl GoalExtensionHarness {
         install_with_backend(
             &mut builder,
             runtime,
+            AnalyticsEventsClient::disabled(),
             /*metrics_client*/ None,
             Weak::new(),
             Arc::clone(&goal_service),
@@ -1158,6 +1189,8 @@ impl GoalExtensionHarness {
                     config: &(),
                     session_source: &session_source,
                     persistent_thread_state_available: true,
+                    environments: &[],
+                    mcp_resource_client: None,
                     session_store: &session_store,
                     thread_store: &thread_store,
                 })
@@ -1294,7 +1327,7 @@ impl GoalExtensionHarness {
     fn runtime_handle(&self) -> Arc<GoalRuntimeHandle> {
         self.thread_store
             .get::<GoalRuntimeHandle>()
-            .unwrap_or_else(|| panic!("goal runtime handle should exist"))
+            .expect("goal runtime handle should exist")
     }
 }
 
@@ -1305,7 +1338,7 @@ fn tool_by_name<'a>(
     tools
         .iter()
         .find(|tool| tool.tool_name().namespace.is_none() && tool.tool_name().name == name)
-        .unwrap_or_else(|| panic!("missing tool {name}"))
+        .expect("requested goal tool should exist")
 }
 
 fn tool_call(tool_name: &str, call_id: &str, arguments: serde_json::Value) -> ToolCall {
@@ -1314,9 +1347,11 @@ fn tool_call(tool_name: &str, call_id: &str, arguments: serde_json::Value) -> To
         call_id: call_id.to_string(),
         tool_name: codex_extension_api::ToolName::plain(tool_name),
         model: "gpt-test".to_string(),
+        codex_turn_metadata: None,
         truncation_policy: TruncationPolicy::Bytes(1024),
         conversation_history: codex_extension_api::ConversationHistory::default(),
         turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+        environments: Vec::new(),
         payload: ToolPayload::Function {
             arguments: arguments.to_string(),
         },
@@ -1325,7 +1360,11 @@ fn tool_call(tool_name: &str, call_id: &str, arguments: serde_json::Value) -> To
 
 async fn test_runtime() -> anyhow::Result<Arc<codex_state::StateRuntime>> {
     let tempdir = TempDir::new()?;
-    codex_state::StateRuntime::init(tempdir.keep(), "test-provider".to_string()).await
+    codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(tempdir.keep().as_path().abs()),
+        "test-provider".to_string(),
+    )
+    .await
 }
 
 fn test_thread_id() -> anyhow::Result<ThreadId> {
@@ -1339,7 +1378,8 @@ async fn seed_thread_metadata(
     let builder = codex_state::ThreadMetadataBuilder::new(
         thread_id,
         runtime
-            .codex_home()
+            .sqlite()
+            .home()
             .join(format!("rollout-{thread_id}.jsonl")),
         chrono::Utc::now(),
         SessionSource::Cli,
@@ -1381,6 +1421,10 @@ impl ExtensionEventSink for RecordingEventSink {
     fn emit(&self, event: Event) {
         self.events().push(event);
     }
+
+    fn emit_warning(&self, _warning: ExtensionWarning) {
+        panic!("goal extension tests do not emit warnings");
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1412,6 +1456,7 @@ fn token_usage(
     TokenUsage {
         input_tokens,
         cached_input_tokens,
+        cache_write_input_tokens: 0,
         output_tokens,
         reasoning_output_tokens,
         total_tokens,

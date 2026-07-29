@@ -23,7 +23,6 @@ use crate::render::RectExt as _;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
 use crate::skills_helpers::match_skill;
-use crate::skills_helpers::truncate_skill_name;
 use crate::style::user_message_style;
 
 use super::CancellationEvent;
@@ -145,7 +144,7 @@ impl SkillsToggleView {
                     let is_selected = self.state.selected_idx == Some(visible_idx);
                     let prefix = if is_selected { '›' } else { ' ' };
                     let marker = if item.enabled { 'x' } else { ' ' };
-                    let item_name = truncate_skill_name(&item.name);
+                    let item_name = &item.name;
                     let name = format!("{prefix} [{marker}] {item_name}");
                     GenericDisplayRow {
                         name,
@@ -211,17 +210,6 @@ impl SkillsToggleView {
             path: item.path.clone(),
             enabled: item.enabled,
         });
-    }
-
-    pub(crate) fn set_item_enabled(&mut self, path: &AbsolutePathBuf, enabled: bool) -> bool {
-        let Some(item) = self.items.iter_mut().find(|item| item.path == *path) else {
-            return false;
-        };
-        if item.enabled == enabled {
-            return false;
-        }
-        item.enabled = enabled;
-        true
     }
 
     fn close(&mut self) {
@@ -305,10 +293,6 @@ impl BottomPaneView for SkillsToggleView {
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         self.close();
         CancellationEvent::Handled
-    }
-
-    fn update_skill_enabled(&mut self, path: &AbsolutePathBuf, enabled: bool) -> bool {
-        self.set_item_enabled(path, enabled)
     }
 }
 
@@ -442,6 +426,7 @@ mod tests {
     use crate::test_support::PathBufExt;
     use crate::test_support::test_path_buf;
     use insta::assert_snapshot;
+    use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -466,6 +451,25 @@ mod tests {
             })
             .collect();
         lines.join("\n")
+    }
+
+    fn long_name_items() -> Vec<SkillsToggleItem> {
+        vec![
+            SkillsToggleItem {
+                name: "superpowers-systematic-debugging (polish)".to_string(),
+                skill_name: "polish:superpowers-systematic-debugging".to_string(),
+                description: "Find root causes before fixing bugs".to_string(),
+                enabled: true,
+                path: test_path_buf("/tmp/skills/systematic-debugging/SKILL.md").abs(),
+            },
+            SkillsToggleItem {
+                name: "superpowers-verification-before-completion (polish)".to_string(),
+                skill_name: "polish:superpowers-verification-before-completion".to_string(),
+                description: "Verify completion before claiming success".to_string(),
+                enabled: false,
+                path: test_path_buf("/tmp/skills/verification-before-completion/SKILL.md").abs(),
+            },
+        ]
     }
 
     #[test]
@@ -493,6 +497,87 @@ mod tests {
     }
 
     #[test]
+    fn build_rows_preserves_full_skill_display_names() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let view = SkillsToggleView::new(
+            long_name_items(),
+            tx,
+            crate::keymap::RuntimeKeymap::defaults().list,
+        );
+
+        let row_names = view
+            .build_rows()
+            .into_iter()
+            .map(|row| row.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            row_names,
+            vec![
+                "› [x] superpowers-systematic-debugging (polish)",
+                "  [ ] superpowers-verification-before-completion (polish)",
+            ]
+        );
+    }
+
+    #[test]
+    fn filtering_long_skill_names_preserves_the_matching_row() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut view = SkillsToggleView::new(
+            long_name_items(),
+            tx,
+            crate::keymap::RuntimeKeymap::defaults().list,
+        );
+        view.search_query = "completion".to_string();
+        view.apply_filter();
+
+        let row_names = view
+            .build_rows()
+            .into_iter()
+            .map(|row| row.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            row_names,
+            vec!["› [ ] superpowers-verification-before-completion (polish)"]
+        );
+    }
+
+    #[test]
+    fn renders_long_names_using_available_width() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let view = SkillsToggleView::new(
+            long_name_items(),
+            tx,
+            crate::keymap::RuntimeKeymap::defaults().list,
+        );
+
+        assert_snapshot!(
+            "skills_toggle_long_names_use_available_width",
+            render_lines(&view, /*width*/ 96)
+        );
+    }
+
+    #[test]
+    fn renders_long_names_at_narrow_width() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let view = SkillsToggleView::new(
+            long_name_items(),
+            tx,
+            crate::keymap::RuntimeKeymap::defaults().list,
+        );
+
+        assert_snapshot!(
+            "skills_toggle_long_names_at_narrow_width",
+            render_lines(&view, /*width*/ 48)
+        );
+    }
+
+    #[test]
     fn footer_hint_uses_list_keymap_accept_and_cancel() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
@@ -506,49 +591,5 @@ mod tests {
         assert!(rendered.contains("ctrl + x"));
         assert!(!rendered.contains("enter"));
         assert!(!rendered.contains("esc"));
-    }
-
-    #[test]
-    fn set_item_enabled_updates_visible_skill_state_by_path() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let skill_path = test_path_buf("/tmp/skills/repo_scout/SKILL.md").abs();
-        let mut view = SkillsToggleView::new(
-            vec![SkillsToggleItem {
-                name: "Repo Scout".to_string(),
-                skill_name: "repo_scout".to_string(),
-                description: "Summarize the repo layout".to_string(),
-                enabled: true,
-                path: skill_path.clone(),
-            }],
-            tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
-        );
-
-        assert!(view.set_item_enabled(&skill_path, /*enabled*/ false));
-        assert!(!view.items[0].enabled);
-        assert!(render_lines(&view, /*width*/ 72).contains("[ ] Repo Scout"));
-    }
-
-    #[test]
-    fn set_item_enabled_ignores_unknown_path() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let skill_path = test_path_buf("/tmp/skills/repo_scout/SKILL.md").abs();
-        let mut view = SkillsToggleView::new(
-            vec![SkillsToggleItem {
-                name: "Repo Scout".to_string(),
-                skill_name: "repo_scout".to_string(),
-                description: "Summarize the repo layout".to_string(),
-                enabled: true,
-                path: skill_path,
-            }],
-            tx,
-            crate::keymap::RuntimeKeymap::defaults().list,
-        );
-
-        let missing_path = test_path_buf("/tmp/skills/missing/SKILL.md").abs();
-        assert!(!view.set_item_enabled(&missing_path, /*enabled*/ false));
-        assert!(view.items[0].enabled);
     }
 }

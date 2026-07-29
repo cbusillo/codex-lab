@@ -1,8 +1,7 @@
 use super::auth_change_tests::auth_manager_for_account;
 use super::auth_change_tests::respond_with_remote_control_enrollment;
 use super::*;
-use crate::transport::remote_control::enroll::REMOTE_CONTROL_ACCOUNT_ID_HEADER;
-use codex_config::types::AuthCredentialsStoreMode;
+use crate::transport::remote_control::auth::REMOTE_CONTROL_ACCOUNT_ID_HEADER;
 use futures::SinkExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -19,7 +18,7 @@ struct WorkerHandles {
     shutdown_token: CancellationToken,
     // Must be kept alive: dropping it closes the enabled channel and makes
     // connect() return Shutdown immediately.
-    _enabled_tx: watch::Sender<bool>,
+    _desired_state_tx: Arc<watch::Sender<RemoteControlDesiredState>>,
     // Must be kept alive: dropping it closes the reconnect channel and makes
     // the backoff select return Shutdown immediately.
     _reconnect_tx: mpsc::Sender<u64>,
@@ -42,7 +41,7 @@ async fn worker_with_listener(
     let (transport_event_tx, transport_event_rx) = mpsc::channel(/*buffer*/ 16);
     let (status_publisher, _status_rx) = remote_control_status_channel();
     let shutdown_token = CancellationToken::new();
-    let (enabled_tx, enabled_rx) = watch::channel(/*init*/ true);
+    let desired_state_tx = Arc::new(enabled_desired_state_sender());
     let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
     let initial_enrollment = pre_seeded_account.map(|(account_id, server_token)| {
         let mut enrollment = remote_control_enrollment(Some(server_token));
@@ -64,14 +63,15 @@ async fn worker_with_listener(
             status_publisher,
             current_enrollment: test_current_enrollment(initial_enrollment),
             pairing_persistence_key: watch::channel(None).0,
+            desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
         },
         shutdown_token.clone(),
-        enabled_rx,
+        Arc::clone(&desired_state_tx),
         reconnect_rx,
     );
     let handles = WorkerHandles {
         shutdown_token,
-        _enabled_tx: enabled_tx,
+        _desired_state_tx: desired_state_tx,
         _reconnect_tx: reconnect_tx,
         transport_event_rx,
     };
@@ -100,10 +100,10 @@ async fn accept_enroll_request(listener: &TcpListener) -> (TcpStream, String) {
             break;
         }
         let line = line.trim_end_matches("\r\n");
-        if let Some((name, value)) = line.split_once(':') {
-            if name.to_ascii_lowercase() == REMOTE_CONTROL_ACCOUNT_ID_HEADER {
-                account_id_header = value.trim().to_string();
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case(REMOTE_CONTROL_ACCOUNT_ID_HEADER)
+        {
+            account_id_header = value.trim().to_string();
         }
     }
     (reader.into_inner(), account_id_header)
@@ -130,8 +130,13 @@ async fn worker_outer_loop_reconnects_under_new_account() {
     let codex_home = TempDir::new().expect("temp dir should create");
     let auth_manager = auth_manager_for_account(&codex_home, "account-a", "access-a").await;
 
-    let (websocket, handles) =
-        worker_with_listener(&listener, &codex_home, auth_manager.clone(), None).await;
+    let (websocket, handles) = worker_with_listener(
+        &listener,
+        &codex_home,
+        auth_manager.clone(),
+        /*pre_seeded_account*/ None,
+    )
+    .await;
 
     let run_task = tokio::spawn(websocket.run(/*app_server_client_name_rx*/ None));
 
@@ -145,7 +150,8 @@ async fn worker_outer_loop_reconnects_under_new_account() {
     save_auth(
         codex_home.path(),
         &remote_control_auth_dot_json_for_account("account-b", "access-b"),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("replacement auth should save");
     auth_manager.reload().await;
@@ -180,8 +186,13 @@ async fn worker_outer_loop_closes_virtual_clients_on_account_change() {
     let codex_home = TempDir::new().expect("temp dir should create");
     let auth_manager = auth_manager_for_account(&codex_home, "account-a", "access-a").await;
 
-    let (websocket, mut handles) =
-        worker_with_listener(&listener, &codex_home, auth_manager.clone(), None).await;
+    let (websocket, mut handles) = worker_with_listener(
+        &listener,
+        &codex_home,
+        auth_manager.clone(),
+        /*pre_seeded_account*/ None,
+    )
+    .await;
 
     let run_task = tokio::spawn(websocket.run(/*app_server_client_name_rx*/ None));
 
@@ -236,7 +247,8 @@ async fn worker_outer_loop_closes_virtual_clients_on_account_change() {
     save_auth(
         codex_home.path(),
         &remote_control_auth_dot_json_for_account("account-b", "access-b"),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("replacement auth should save");
     auth_manager.reload().await;
@@ -278,8 +290,13 @@ async fn worker_outer_loop_clears_subscribe_cursor_on_account_change() {
     let codex_home = TempDir::new().expect("temp dir should create");
     let auth_manager = auth_manager_for_account(&codex_home, "account-a", "access-a").await;
 
-    let (websocket, handles) =
-        worker_with_listener(&listener, &codex_home, auth_manager.clone(), None).await;
+    let (websocket, handles) = worker_with_listener(
+        &listener,
+        &codex_home,
+        auth_manager.clone(),
+        /*pre_seeded_account*/ None,
+    )
+    .await;
 
     let run_task = tokio::spawn(websocket.run(/*app_server_client_name_rx*/ None));
 
@@ -311,7 +328,8 @@ async fn worker_outer_loop_clears_subscribe_cursor_on_account_change() {
     save_auth(
         codex_home.path(),
         &remote_control_auth_dot_json_for_account("account-b", "access-b"),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("replacement auth should save");
     auth_manager.reload().await;
@@ -396,8 +414,10 @@ async fn worker_outer_loop_survives_logout_then_reconnects_on_relogin() {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("logout auth should save");
     auth_manager.reload().await;
@@ -412,7 +432,8 @@ async fn worker_outer_loop_survives_logout_then_reconnects_on_relogin() {
     save_auth(
         codex_home.path(),
         &remote_control_auth_dot_json_for_account("account-b", "access-b"),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("relogin auth should save");
     auth_manager.reload().await;
@@ -461,14 +482,16 @@ async fn worker_outer_loop_handles_api_key_transition_safely() {
     save_auth(
         codex_home.path(),
         &AuthDotJson {
-            auth_mode: Some(codex_app_server_protocol::AuthMode::ApiKey),
+            auth_mode: Some(AuthMode::ApiKey),
             openai_api_key: Some("sk-test-api-key".to_string()),
             tokens: None,
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("api-key auth should save");
     auth_manager.reload().await;
@@ -483,7 +506,8 @@ async fn worker_outer_loop_handles_api_key_transition_safely() {
     save_auth(
         codex_home.path(),
         &remote_control_auth_dot_json_for_account("account-b", "access-b"),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("chatgpt relogin auth should save");
     auth_manager.reload().await;

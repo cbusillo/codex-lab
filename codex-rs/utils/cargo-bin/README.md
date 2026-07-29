@@ -13,7 +13,9 @@ Function behavior:
   `CARGO_BIN_EXE_*` and returns an error otherwise.
 - `find_resource!`: used by tests to locate fixtures. It chooses the Bazel
   runfiles resolution path when `RUNFILES_MANIFEST_FILE` is set, otherwise it
-  falls back to a `CARGO_MANIFEST_DIR`-relative path for Cargo runs.
+  falls back to a `CARGO_MANIFEST_DIR`-relative path for Cargo runs. Archived
+  nextest runs can set `CODEX_CARGO_WORKSPACE_ROOT` to remap that compile-time
+  package path into the runtime checkout.
 
 Background:
 - https://bazel.build/docs/runfiles

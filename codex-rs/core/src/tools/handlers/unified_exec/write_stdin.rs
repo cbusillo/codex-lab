@@ -7,9 +7,8 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::TerminalInteractionEvent;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
@@ -31,7 +30,6 @@ struct WriteStdinArgs {
 
 pub struct WriteStdinHandler;
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("write_stdin")
@@ -41,7 +39,17 @@ impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
         create_write_stdin_tool()
     }
 
-    async fn handle(
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl WriteStdinHandler {
+    async fn handle_call(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
@@ -70,28 +78,16 @@ impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
                 input: &args.chars,
                 yield_time_ms: args.yield_time_ms,
                 max_output_tokens: args.max_output_tokens,
-                truncation_policy: turn.truncation_policy,
+                truncation_policy: turn.model_info.truncation_policy.into(),
+                interaction_event: Some(WriteStdinInteractionEvent {
+                    session: &session,
+                    turn: &turn,
+                }),
             })
             .await
             .map_err(|err| {
                 FunctionCallError::RespondToModel(format!("write_stdin failed: {err}"))
             })?;
-
-        // Empty stdin is a background poll, so emit it only while there is
-        // still a live process for the UI to wait on. Non-empty stdin is a real
-        // terminal interaction and should remain visible even if it completes
-        // the process before the response returns.
-        if !args.chars.is_empty() || response.process_id.is_some() {
-            let process_id = response.process_id.unwrap_or(args.session_id);
-            let interaction = TerminalInteractionEvent {
-                call_id: response.event_call_id.clone(),
-                process_id: process_id.to_string(),
-                stdin: args.chars.clone(),
-            };
-            session
-                .send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction))
-                .await;
-        }
 
         Ok(boxed_tool_output(response))
     }

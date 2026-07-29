@@ -1,22 +1,135 @@
+use codex_exec_server::CopyOptions;
+use codex_exec_server::CreateDirectoryOptions;
+use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::ExecutorFileSystemFuture;
+use codex_exec_server::FileMetadata;
+use codex_exec_server::FileSystemReadStream;
+use codex_exec_server::FileSystemResult;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::LOCAL_FS;
+use codex_exec_server::ReadDirectoryEntry;
+use codex_exec_server::RemoveOptions;
 use codex_git_utils::GitInfo;
 use codex_git_utils::GitSha;
 use codex_git_utils::collect_git_info;
-use codex_git_utils::get_git_repo_root_with_fs;
 use codex_git_utils::get_has_changes;
 use codex_git_utils::git_diff_to_remote;
 use codex_git_utils::recent_commits;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_utils_path::normalize_for_path_comparison;
+use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use core_test_support::skip_if_sandbox;
+use pretty_assertions::assert_eq;
 use std::fs;
+use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::process::Command;
+
+struct FailingMetadataFileSystem {
+    path: PathUri,
+}
+
+impl FailingMetadataFileSystem {
+    fn unsupported<T>() -> FileSystemResult<T> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "operation is not used by Git root discovery",
+        ))
+    }
+}
+
+impl ExecutorFileSystem for FailingMetadataFileSystem {
+    fn canonicalize<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, PathUri> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn read_file<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn read_file_stream<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileSystemReadStream> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn write_file<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _contents: Vec<u8>,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn create_directory<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _options: CreateDirectoryOptions,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn get_metadata<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
+        Box::pin(async move {
+            if path == &self.path {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected metadata failure",
+                ))
+            } else {
+                LOCAL_FS.get_metadata(path, sandbox).await
+            }
+        })
+    }
+
+    fn read_directory<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Vec<ReadDirectoryEntry>> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn remove<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _options: RemoveOptions,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn copy<'a>(
+        &'a self,
+        _source_path: &'a PathUri,
+        _destination_path: &'a PathUri,
+        _options: CopyOptions,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        Box::pin(async { Self::unsupported() })
+    }
+}
 
 // Helper function to create a test git repository
 async fn create_test_git_repo(temp_dir: &TempDir) -> PathBuf {
@@ -342,46 +455,6 @@ async fn test_get_has_changes_with_untracked_change_returns_true() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_get_has_changes_ignores_repo_fsmonitor_config() {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let repo_path = create_test_git_repo(&temp_dir).await;
-    let helper_path = repo_path.join("fsmonitor-helper.sh");
-    let marker_path = repo_path.join("fsmonitor-ran");
-
-    fs::write(
-        &helper_path,
-        format!(
-            "#!/bin/sh\nprintf ran > \"{}\"\n",
-            marker_path.to_string_lossy()
-        ),
-    )
-    .expect("write fsmonitor helper");
-    let mut permissions = fs::metadata(&helper_path)
-        .expect("read fsmonitor helper metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&helper_path, permissions).expect("mark fsmonitor helper executable");
-
-    Command::new("git")
-        .args([
-            "config",
-            "core.fsmonitor",
-            helper_path.to_string_lossy().as_ref(),
-        ])
-        .current_dir(&repo_path)
-        .output()
-        .await
-        .expect("configure fsmonitor helper");
-
-    assert_eq!(get_has_changes(&repo_path).await, Some(true));
-    assert!(
-        !marker_path.exists(),
-        "metadata collection should not invoke repository fsmonitor helpers"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn test_get_has_changes_ignores_configured_hooks_path() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let repo_path = create_test_git_repo(&temp_dir).await;
@@ -528,16 +601,52 @@ async fn resolve_root_git_project_for_trust_returns_none_outside_repo() {
 }
 
 #[tokio::test]
-async fn get_git_repo_root_with_fs_detects_gitdir_pointer() {
+async fn resolve_root_git_project_for_trust_starts_at_parent_for_file() {
     let tmp = TempDir::new().expect("tempdir");
     let proj = tmp.path().join("proj");
     let nested = proj.join("nested");
+    std::fs::create_dir_all(proj.join(".git")).unwrap();
     std::fs::create_dir_all(&nested).unwrap();
-    std::fs::write(proj.join(".git"), "gitdir: /tmp/fake-worktree\n").unwrap();
+    let file = nested.join("file.txt");
+    std::fs::write(&file, "contents").unwrap();
 
     assert_eq!(
-        get_git_repo_root_with_fs(LOCAL_FS.as_ref(), &nested.abs()).await,
+        resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &file.abs()).await,
         Some(proj.abs())
+    );
+}
+
+#[tokio::test]
+async fn resolve_root_git_project_for_trust_ignores_metadata_errors() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path().join("proj");
+    let nested = proj.join("nested");
+    std::fs::create_dir_all(proj.join(".git")).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    let fs = FailingMetadataFileSystem {
+        path: PathUri::from_abs_path(&nested.join(".git").abs()),
+    };
+
+    assert_eq!(
+        resolve_root_git_project_for_trust(&fs, &nested.abs()).await,
+        Some(proj.abs())
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn resolve_root_git_project_for_trust_supports_windows_namespace_paths() {
+    let tmp = TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("nested")).unwrap();
+
+    let namespace_repo = PathBuf::from(format!(r"\\?\{}", repo.display()));
+    let namespace_nested = namespace_repo.join("nested");
+
+    assert_eq!(
+        resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &namespace_nested.abs()).await,
+        Some(namespace_repo.abs())
     );
 }
 

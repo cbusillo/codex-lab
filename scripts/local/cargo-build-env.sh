@@ -90,4 +90,4 @@ if [[ "${CODEX_LAB_CARGO_TARGET_NO_MKDIR:-}" != "1" ]]; then
 	mkdir -p "$target_dir"
 fi
 
-printf 'export CARGO_TARGET_DIR=%q\n' "$target_dir"
+printf '%s\n' "$target_dir"

@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
 
-use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -22,6 +22,7 @@ use super::compression;
 const MATCH_CONTEXT_BEFORE_CHARS: usize = 48;
 const MATCH_CONTEXT_AFTER_CHARS: usize = 96;
 
+/// Search matches keyed by the canonical `.jsonl` path for each rollout.
 pub type RolloutSearchMatches = HashMap<PathBuf, Option<String>>;
 
 pub async fn search_rollout_paths(
@@ -80,6 +81,7 @@ async fn ripgrep_rollout_paths(
         .arg("--")
         .arg(search_term)
         .arg(root)
+        .stdin(Stdio::null())
         .output()
         .await
     {
@@ -146,7 +148,10 @@ async fn scan_rollout_matches(
                 if let Some(snippet) =
                     first_rollout_content_match_snippet(rollout_file.path(), search_term).await?
                 {
-                    matches.insert(rollout_file.into_path(), Some(snippet));
+                    matches.insert(
+                        compression::plain_rollout_path(rollout_file.path()),
+                        Some(snippet),
+                    );
                 }
                 continue;
             }
@@ -218,7 +223,10 @@ async fn scan_compressed_rollout_matches(
             if let Some(snippet) =
                 first_rollout_content_match_snippet(rollout_file.path(), search_term).await?
             {
-                matches.insert(rollout_file.into_path(), Some(snippet));
+                matches.insert(
+                    compression::plain_rollout_path(rollout_file.path()),
+                    Some(snippet),
+                );
             }
         }
     }
@@ -261,18 +269,6 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
                 Some(agent.message.trim().to_string())
             }
         }
-        RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
-            let TurnItem::UserMessage(user) = &event.item else {
-                return None;
-            };
-            let user = user.as_legacy_user_message_event();
-            let text = strip_user_message_prefix(user.message.as_str());
-            if text.is_empty() {
-                None
-            } else {
-                Some(text.to_string())
-            }
-        }
         RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) => {
             let text = content
                 .iter()
@@ -289,14 +285,17 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_)
         | RolloutItem::ResponseItem(_)
-        | RolloutItem::Compacted(_) => None,
+        | RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::Compacted(_)
+        | RolloutItem::WorldState(_) => None,
     }
 }
 
 fn content_item_text(item: &ContentItem) -> Option<&str> {
     match item {
         ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text.as_str()),
-        ContentItem::InputImage { .. } => None,
+        ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
     }
 }
 
@@ -344,7 +343,3 @@ fn char_end_after(text: &str, byte_index: usize, chars_after: usize) -> usize {
         .map(|(offset, _)| byte_index.saturating_add(offset))
         .unwrap_or(text.len())
 }
-
-#[cfg(test)]
-#[path = "search_tests.rs"]
-mod tests;

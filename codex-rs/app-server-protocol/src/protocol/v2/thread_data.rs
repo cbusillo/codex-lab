@@ -2,6 +2,7 @@ use super::CodexErrorInfo;
 use super::ThreadItem;
 use super::ThreadStatus;
 use super::TurnStatus;
+use codex_experimental_api_macros::ExperimentalApi;
 use codex_protocol::protocol::SessionProvenance as CoreSessionProvenance;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
@@ -9,6 +10,8 @@ use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource as CoreThreadSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use schemars::JsonSchema;
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::Schema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -49,7 +52,21 @@ impl From<CoreSessionSource> for SessionSource {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS, Default)]
+impl From<SessionSource> for CoreSessionSource {
+    fn from(value: SessionSource) -> Self {
+        match value {
+            SessionSource::Cli => CoreSessionSource::Cli,
+            SessionSource::VsCode => CoreSessionSource::VSCode,
+            SessionSource::Exec => CoreSessionSource::Exec,
+            SessionSource::AppServer => CoreSessionSource::Mcp,
+            SessionSource::Custom(source) => CoreSessionSource::Custom(source),
+            SessionSource::SubAgent(sub) => CoreSessionSource::SubAgent(sub),
+            SessionSource::Unknown => CoreSessionSource::Unknown,
+        }
+    }
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(rename_all = "lowercase", export_to = "v2/")]
 pub enum ThreadHistoryMode {
@@ -74,29 +91,6 @@ impl From<ThreadHistoryMode> for CoreThreadHistoryMode {
             ThreadHistoryMode::Paginated => Self::Paginated,
         }
     }
-}
-
-impl From<SessionSource> for CoreSessionSource {
-    fn from(value: SessionSource) -> Self {
-        match value {
-            SessionSource::Cli => CoreSessionSource::Cli,
-            SessionSource::VsCode => CoreSessionSource::VSCode,
-            SessionSource::Exec => CoreSessionSource::Exec,
-            SessionSource::AppServer => CoreSessionSource::Mcp,
-            SessionSource::Custom(source) => CoreSessionSource::Custom(source),
-            SessionSource::SubAgent(sub) => CoreSessionSource::SubAgent(sub),
-            SessionSource::Unknown => CoreSessionSource::Unknown,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(rename_all = "snake_case", export_to = "v2/")]
-pub enum ThreadSource {
-    User,
-    Subagent,
-    MemoryConsolidation,
 }
 
 /// Structured provenance for a thread started by an external orchestrator.
@@ -171,8 +165,8 @@ impl From<SessionProvenance> for CoreSessionProvenance {
     }
 }
 
-impl From<SessionProvenanceParams> for CoreSessionProvenance {
-    fn from(value: SessionProvenanceParams) -> Self {
+impl From<CoreSessionProvenance> for SessionProvenanceParams {
+    fn from(value: CoreSessionProvenance) -> Self {
         Self {
             request_id: value.request_id,
             repository: value.repository,
@@ -184,8 +178,8 @@ impl From<SessionProvenanceParams> for CoreSessionProvenance {
     }
 }
 
-impl From<CoreSessionProvenance> for SessionProvenanceParams {
-    fn from(value: CoreSessionProvenance) -> Self {
+impl From<SessionProvenanceParams> for CoreSessionProvenance {
+    fn from(value: SessionProvenanceParams) -> Self {
         Self {
             request_id: value.request_id,
             repository: value.repository,
@@ -223,11 +217,47 @@ impl From<SessionProvenanceParams> for SessionProvenance {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, TS)]
+#[serde(try_from = "String", into = "String")]
+#[ts(type = "string")]
+#[ts(export_to = "v2/")]
+pub enum ThreadSource {
+    User,
+    Subagent,
+    Feature(String),
+    MemoryConsolidation,
+}
+
+impl JsonSchema for ThreadSource {
+    fn schema_name() -> String {
+        "ThreadSource".to_string()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        String::json_schema(generator)
+    }
+}
+
+impl TryFrom<String> for ThreadSource {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse::<CoreThreadSource>().map(Into::into)
+    }
+}
+
+impl From<ThreadSource> for String {
+    fn from(value: ThreadSource) -> Self {
+        CoreThreadSource::from(value).into()
+    }
+}
+
 impl From<CoreThreadSource> for ThreadSource {
     fn from(value: CoreThreadSource) -> Self {
         match value {
             CoreThreadSource::User => ThreadSource::User,
             CoreThreadSource::Subagent => ThreadSource::Subagent,
+            CoreThreadSource::Feature(feature) => ThreadSource::Feature(feature),
             CoreThreadSource::MemoryConsolidation => ThreadSource::MemoryConsolidation,
         }
     }
@@ -238,10 +268,17 @@ impl From<ThreadSource> for CoreThreadSource {
         match value {
             ThreadSource::User => CoreThreadSource::User,
             ThreadSource::Subagent => CoreThreadSource::Subagent,
+            ThreadSource::Feature(feature) => CoreThreadSource::Feature(feature),
             ThreadSource::MemoryConsolidation => CoreThreadSource::MemoryConsolidation,
         }
     }
 }
+
+/// Extra app-server data for a thread.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub struct ThreadExtra {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -252,11 +289,15 @@ pub struct GitInfo {
     pub origin_url: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct Thread {
+    /// Identifier for this thread. Codex-generated thread IDs are UUIDv7.
     pub id: String,
+    /// Optional implementation-specific thread data.
+    #[experimental("thread.extra")]
+    pub extra: Option<ThreadExtra>,
     /// Session id shared by threads that belong to the same session tree.
     pub session_id: String,
     /// Source thread id when this thread was created by forking another thread.
@@ -267,7 +308,13 @@ pub struct Thread {
     pub preview: String,
     /// Whether the thread is ephemeral and should not be materialized on disk.
     pub ephemeral: bool,
-    /// Persisted history contract selected when this thread was created.
+    /// Whether the thread has been pinned by the user.
+    #[serde(default)]
+    pub is_pinned: bool,
+    /// Persisted thread history contract selected when this thread was created.
+    ///
+    /// This field is part of the published stable `Thread` surface; keep it
+    /// non-experimental so existing clients continue to receive it.
     #[serde(default)]
     pub history_mode: ThreadHistoryMode,
     /// Model provider used for this thread (for example, 'openai').
@@ -278,6 +325,9 @@ pub struct Thread {
     /// Unix timestamp (in seconds) when the thread was last updated.
     #[ts(type = "number")]
     pub updated_at: i64,
+    /// Unix timestamp (in seconds) used for thread recency ordering.
+    #[ts(type = "number | null")]
+    pub recency_at: Option<i64>,
     /// Current runtime status for the thread.
     pub status: ThreadStatus,
     /// [UNSTABLE] Path to the thread on disk.
@@ -288,6 +338,10 @@ pub struct Thread {
     pub cli_version: String,
     /// Origin of the thread (CLI, VSCode, codex exec, codex app-server, etc.).
     pub source: SessionSource,
+    /// Whether the app server accepts direct turn input for this loaded thread.
+    /// `None` means the capability is unavailable, such as for an unloaded stored thread.
+    #[experimental("thread.canAcceptDirectInput")]
+    pub can_accept_direct_input: Option<bool>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Optional structured launch provenance supplied by an external agent
@@ -313,6 +367,7 @@ pub struct Thread {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct Turn {
+    /// Identifier for this turn. Codex-generated turn IDs are UUIDv7.
     pub id: String,
     /// Thread items currently included in this turn payload.
     pub items: Vec<ThreadItem>,

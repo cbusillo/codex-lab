@@ -1,7 +1,7 @@
-use codex_app_server_protocol::AuthMode;
 use codex_login::StoredAccount;
 use codex_login::token_data::TokenData;
 use codex_login::token_data::parse_chatgpt_jwt_claims;
+use codex_protocol::auth::AuthMode;
 use pretty_assertions::assert_eq;
 
 use super::account_display_label;

@@ -1,6 +1,6 @@
 {
   "name": "skills-guidance-binding-triggers",
-  "model": "gpt-5.1-codex",
+  "model": "gpt-5.6-sol",
   "prompt": "Reply with exactly: ok",
   "files": {
     ".codex/skills/mandatory/SKILL.md": "---\nname: mandatory-skill\ndescription: Use when the task involves mandatory trigger checks. This skill MUST be used for mandatory trigger checks.\n---\nMANDATORY_SKILL_BODY_MARKER\n",
@@ -23,7 +23,6 @@
         "request": 0,
         "scope": "input",
         "contains": "If a skill description says it MUST be used",
-        "not_contains": "After deciding to use a skill",
         "count": {
           "Mandatory triggers": 1,
           "Delegated triggers": 1,

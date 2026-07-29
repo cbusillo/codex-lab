@@ -283,18 +283,17 @@ async fn find_nearest_rust_toolchain(
                 }
                 Err(_) => None,
             };
-            if let Some(document) = document {
-                if document
+            if let Some(document) = document
+                && document
                     .get("toolchain")
                     .and_then(toml::Value::as_table)
                     .is_some_and(|toolchain| toolchain.contains_key("path"))
-                {
-                    return Err(configuration_error(
-                        config.command.clone(),
-                        repo_root.clone(),
-                        "cargo validation does not allow repository rust toolchain path overrides",
-                    ));
-                }
+            {
+                return Err(configuration_error(
+                    config.command.clone(),
+                    repo_root.clone(),
+                    "cargo validation does not allow repository rust toolchain path overrides",
+                ));
             }
             return Ok(Some(CargoToolchainFile { name, contents }));
         }
@@ -762,11 +761,8 @@ fn select_cargo_target(
         && impacts
             .iter()
             .all(|impact| impact.workspace_manifest.is_some())
+        && let Some(workspace_manifest) = workspace_manifests.into_iter().next()
     {
-        let workspace_manifest = workspace_manifests
-            .into_iter()
-            .next()
-            .expect("one workspace manifest should be present");
         let Some(workspace_summary) = manifest_cache.get(&workspace_manifest) else {
             return Err(infrastructure_error(
                 config.command.clone(),

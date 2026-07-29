@@ -5,10 +5,14 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
+#[cfg(unix)]
+use codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1;
 use codex_exec_server::CODEX_FS_HELPER_ARG1;
 use codex_install_context::InstallContext;
 use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
 use codex_utils_home_dir::find_codex_home;
+#[cfg(target_os = "windows")]
+use codex_windows_sandbox::CODEX_WINDOWS_SANDBOX_ARG1;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
@@ -96,8 +100,16 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
     }
 
     let argv1 = args.next().unwrap_or_default();
+    #[cfg(unix)]
+    if argv1 == CODEX_ARG0_EXEC_HELPER_ARG1 {
+        codex_exec_server::run_arg0_exec_helper_main();
+    }
     if argv1 == CODEX_FS_HELPER_ARG1 {
         codex_exec_server::run_fs_helper_main();
+    }
+    #[cfg(target_os = "windows")]
+    if argv1 == CODEX_WINDOWS_SANDBOX_ARG1 {
+        codex_windows_sandbox::run_windows_sandbox_wrapper_main();
     }
     if argv1 == CODEX_CORE_APPLY_PATCH_ARG1 {
         let patch_arg = args.next().and_then(|s| s.to_str().map(str::to_owned));
@@ -116,6 +128,7 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
                     Ok(runtime) => runtime,
                     Err(_) => std::process::exit(1),
                 };
+                let cwd = cwd.into();
                 match runtime.block_on(codex_apply_patch::apply_patch(
                     &patch_arg,
                     &cwd,
@@ -184,7 +197,7 @@ fn prepare_path_env_var_with_aliases(
 /// `codex-linux-sandbox` we *directly* execute
 /// [`codex_linux_sandbox::run_main`] (which never returns). Otherwise we:
 ///
-/// 1.  Load `.env` values from `~/.codex-lab/.env` before creating any threads.
+/// 1.  Load `.env` values from `~/.codex/.env` before creating any threads.
 /// 2.  Spawn a main runtime thread with a controlled stack size.
 /// 3.  Construct a Tokio multi-thread runtime.
 /// 4.  Capture the current executable path and derive the
@@ -278,7 +291,7 @@ fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 
 const ILLEGAL_ENV_VAR_PREFIX: &str = "CODEX_";
 
-/// Load env vars from ~/.codex-lab/.env.
+/// Load env vars from ~/.codex/.env.
 ///
 /// Security: Do not allow `.env` files to create or modify any variables
 /// with names starting with `CODEX_`.
@@ -336,7 +349,7 @@ fn prepare_path_entry_for_codex_aliases(
     }
 
     std::fs::create_dir_all(&codex_home)?;
-    // Use a CODEX_LAB_HOME-scoped temp root to avoid cluttering the top-level directory.
+    // Use a CODEX_HOME-scoped temp root to avoid cluttering the top-level directory.
     let temp_root = codex_home.join("tmp").join("arg0");
     std::fs::create_dir_all(&temp_root)?;
     #[cfg(unix)]

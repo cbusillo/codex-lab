@@ -12,7 +12,9 @@ use super::seatbelt_regex_for_unreadable_glob;
 use super::unix_socket_dir_params;
 use super::unix_socket_policy;
 use codex_network_proxy::ConfigReloader;
+use codex_network_proxy::ConfigReloaderFuture;
 use codex_network_proxy::ConfigState;
+use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::NetworkMode;
 use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::NetworkProxyConfig;
@@ -39,8 +41,13 @@ use tempfile::TempDir;
 fn assert_seatbelt_denied(stderr: &[u8], path: &Path) {
     let stderr = String::from_utf8_lossy(stderr);
     let expected = format!("bash: {}: Operation not permitted\n", path.display());
+    let expected_with_line = format!(
+        "bash: line 1: {}: Operation not permitted\n",
+        path.display()
+    );
     assert!(
         stderr == expected
+            || stderr == expected_with_line
             || stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted"),
         "unexpected stderr: {stderr}"
     );
@@ -81,18 +88,17 @@ fn seatbelt_protected_metadata_name_requirements(root: &Path) -> String {
 
 struct TestConfigReloader;
 
-#[async_trait::async_trait]
 impl ConfigReloader for TestConfigReloader {
     fn source_label(&self) -> String {
         "seatbelt test config".to_string()
     }
 
-    async fn maybe_reload(&self) -> anyhow::Result<Option<ConfigState>> {
-        Ok(None)
+    fn maybe_reload(&self) -> ConfigReloaderFuture<'_, Option<ConfigState>> {
+        Box::pin(async { Ok(None) })
     }
 
-    async fn reload_now(&self) -> anyhow::Result<ConfigState> {
-        Err(anyhow::anyhow!("seatbelt test config cannot reload"))
+    fn reload_now(&self) -> ConfigReloaderFuture<'_, ConfigState> {
+        Box::pin(async { Err(anyhow::anyhow!("seatbelt test config cannot reload")) })
     }
 }
 
@@ -192,10 +198,12 @@ fn explicit_unreadable_paths_are_excluded_from_full_disk_read_and_write_access()
                 value: FileSystemSpecialPath::Root,
             },
             access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::Path { path: unreadable },
             access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ]);
 
@@ -205,9 +213,12 @@ fn explicit_unreadable_paths_are_excluded_from_full_disk_read_and_write_access()
         network_sandbox_policy: NetworkSandboxPolicy::Restricted,
         sandbox_policy_cwd: Path::new("/"),
         enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
         network: None,
         extra_allow_unix_sockets: &[],
-    });
+    })
+    .unwrap();
 
     let policy = seatbelt_policy_arg(&args);
     let unreadable_roots = file_system_policy.get_unreadable_roots_with_cwd(Path::new("/"));
@@ -257,6 +268,37 @@ fn explicit_unreadable_paths_are_excluded_from_full_disk_read_and_write_access()
 }
 
 #[test]
+fn prepared_managed_network_context_allows_only_its_proxy_ports() {
+    let file_system_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+        &SandboxPolicy::new_read_only_policy(),
+        Path::new("/"),
+    );
+    let managed_network = ManagedNetworkSandboxContext {
+        loopback_ports: vec![43123, 48081],
+        allow_local_binding: false,
+    };
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/true".to_string()],
+        file_system_sandbox_policy: &file_system_policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: Path::new("/"),
+        enforce_managed_network: true,
+        managed_network: Some(&managed_network),
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .unwrap();
+
+    let policy = seatbelt_policy_arg(&args);
+    assert!(policy.contains("(allow network-outbound (remote ip \"localhost:43123\"))"));
+    assert!(policy.contains("(allow network-outbound (remote ip \"localhost:48081\"))"));
+    assert!(!policy.contains("(allow network-outbound (remote ip \"localhost:9999\"))"));
+    assert!(!policy.contains("(allow network-bind (local ip \"*:*\"))"));
+    assert!(!policy.contains("(allow network-outbound)\n"));
+}
+
+#[test]
 fn explicit_unreadable_paths_are_excluded_from_readable_roots() {
     let root = absolute_path("/tmp/codex-readable");
     let unreadable = absolute_path("/tmp/codex-readable/private");
@@ -264,10 +306,12 @@ fn explicit_unreadable_paths_are_excluded_from_readable_roots() {
         FileSystemSandboxEntry {
             path: FileSystemPath::Path { path: root },
             access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::Path { path: unreadable },
             access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ]);
 
@@ -277,9 +321,12 @@ fn explicit_unreadable_paths_are_excluded_from_readable_roots() {
         network_sandbox_policy: NetworkSandboxPolicy::Restricted,
         sandbox_policy_cwd: Path::new("/"),
         enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
         network: None,
         extra_allow_unix_sockets: &[],
-    });
+    })
+    .unwrap();
 
     let policy = seatbelt_policy_arg(&args);
     let readable_roots = file_system_policy.get_readable_roots_with_cwd(Path::new("/"));
@@ -373,6 +420,7 @@ fn unreadable_glob_policy_includes_canonicalized_static_prefix() {
     policy.entries.push(FileSystemSandboxEntry {
         path: FileSystemPath::GlobPattern { pattern },
         access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
     });
 
     let seatbelt_policy = build_seatbelt_unreadable_glob_policy(&policy, temp_dir.path());
@@ -392,7 +440,8 @@ fn seatbelt_args_without_extension_profile_keep_legacy_preferences_read_access()
         cwd.as_path(),
         /*enforce_managed_network*/ false,
         /*network*/ None,
-    );
+    )
+    .unwrap();
     let policy = &args[1];
     assert!(policy.contains("(allow user-preference-read)"));
     assert!(!policy.contains("(allow user-preference-write)"));
@@ -580,9 +629,12 @@ fn create_seatbelt_args_allowlists_explicit_unix_socket_paths_without_proxy() {
         network_sandbox_policy: NetworkSandboxPolicy::Restricted,
         sandbox_policy_cwd: cwd.path(),
         enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
         network: None,
         extra_allow_unix_sockets: &extra_allow_unix_sockets,
-    });
+    })
+    .unwrap();
     let policy = seatbelt_policy_arg(&args);
 
     assert!(
@@ -615,12 +667,12 @@ async fn create_seatbelt_args_merges_proxy_and_explicit_unix_socket_paths() -> a
     );
     let network_socket = "/tmp/codex-proxy-use";
     let explicit_socket = "/tmp/codex-browser-use";
-    let mut network_config = NetworkProxyConfig::default();
-    network_config.network.enabled = true;
-    network_config.network.mode = NetworkMode::Full;
-    network_config
-        .network
-        .set_allow_unix_sockets(vec![network_socket.to_string()]);
+    let mut network_config = NetworkProxyConfig {
+        enabled: true,
+        mode: NetworkMode::Full,
+        ..Default::default()
+    };
+    network_config.set_allow_unix_sockets(vec![network_socket.to_string()]);
     let state = build_config_state(network_config, NetworkProxyConstraints::default())?;
     let network_proxy = NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
@@ -638,9 +690,12 @@ async fn create_seatbelt_args_merges_proxy_and_explicit_unix_socket_paths() -> a
         network_sandbox_policy: NetworkSandboxPolicy::Restricted,
         sandbox_policy_cwd: cwd.path(),
         enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
         network: Some(&network_proxy),
         extra_allow_unix_sockets: &extra_allow_unix_sockets,
-    });
+    })
+    .unwrap();
 
     let expected_explicit_socket = normalize_path_for_sandbox(Path::new(explicit_socket))
         .expect("explicit socket root should normalize");
@@ -679,9 +734,12 @@ fn create_seatbelt_args_preserves_full_network_with_explicit_unix_socket_paths()
         network_sandbox_policy: NetworkSandboxPolicy::Enabled,
         sandbox_policy_cwd: cwd.path(),
         enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
         network: None,
         extra_allow_unix_sockets: &extra_allow_unix_sockets,
-    });
+    })
+    .unwrap();
     let policy = seatbelt_policy_arg(&args);
 
     assert!(
@@ -869,7 +927,8 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
         &cwd,
         /*enforce_managed_network*/ false,
         /*network*/ None,
-    );
+    )
+    .unwrap();
 
     let policy_text = seatbelt_policy_arg(&args);
     assert!(
@@ -1008,7 +1067,8 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
         &cwd,
         /*enforce_managed_network*/ false,
         /*network*/ None,
-    );
+    )
+    .unwrap();
     let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
         .args(&write_hooks_file_args)
         .current_dir(&cwd)
@@ -1044,7 +1104,8 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
         &cwd,
         /*enforce_managed_network*/ false,
         /*network*/ None,
-    );
+    )
+    .unwrap();
     let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
         .args(&write_allowed_file_args)
         .current_dir(&cwd)
@@ -1108,7 +1169,8 @@ fn create_seatbelt_args_block_first_time_dot_codex_creation_with_metadata_name_r
         repo_root.as_path(),
         /*enforce_managed_network*/ false,
         /*network*/ None,
-    );
+    )
+    .unwrap();
 
     let policy_text = seatbelt_policy_arg(&args);
     assert!(
@@ -1160,7 +1222,8 @@ fn create_seatbelt_args_with_read_only_git_pointer_file() {
         &cwd,
         /*enforce_managed_network*/ false,
         /*network*/ None,
-    );
+    )
+    .unwrap();
 
     let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
         .args(&args)
@@ -1196,7 +1259,8 @@ fn create_seatbelt_args_with_read_only_git_pointer_file() {
         &cwd,
         /*enforce_managed_network*/ false,
         /*network*/ None,
-    );
+    )
+    .unwrap();
     let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
         .args(&gitdir_args)
         .current_dir(&cwd)
@@ -1259,7 +1323,8 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
         vulnerable_root.as_path(),
         /*enforce_managed_network*/ false,
         /*network*/ None,
-    );
+    )
+    .unwrap();
 
     let slash_tmp = PathBuf::from("/tmp")
         .canonicalize()
@@ -1312,13 +1377,13 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
         args.contains(&expected_dot_codex),
         "missing {expected_dot_codex}: {args:#?}"
     );
-    let unexpected_dot_agents = format!(
-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
+    let expected_dot_agents = format!(
+        "-DWRITABLE_ROOT_0_EXCLUDED_2={}",
         dot_agents_canonical.to_string_lossy()
     );
     assert!(
-        !args.contains(&unexpected_dot_agents),
-        "missing .agents should be handled by regex rather than materialized as a path param: {args:#?}"
+        args.contains(&expected_dot_agents),
+        "missing {expected_dot_agents}: {args:#?}"
     );
     let expected_slash_tmp = format!("-DWRITABLE_ROOT_1={}", slash_tmp.to_string_lossy());
     assert!(

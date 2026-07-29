@@ -43,7 +43,7 @@
           "\"status\":\"skipped\"",
           "\"skip_reason\":\"no_applicable_provider\"",
           "\"changed_file_count\":1",
-          "\"command\":[\"/usr/bin/true\"]",
+          "\"command\":[]",
           "\"command_truncated\":false",
           "\"output_truncated\":false"
         ]

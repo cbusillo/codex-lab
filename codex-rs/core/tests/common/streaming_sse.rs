@@ -44,26 +44,6 @@ impl StreamingSseServer {
         }
     }
 
-    pub async fn assert_request_count_stays(&self, count: usize, duration: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + duration;
-        loop {
-            let notified = self.request_notify.notified();
-            let request_count = self.requests.lock().await.len();
-            assert_eq!(
-                request_count, count,
-                "unexpected streaming SSE request count"
-            );
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return;
-            }
-            let remaining = deadline.saturating_duration_since(now);
-            if tokio::time::timeout(remaining, notified).await.is_err() {
-                return;
-            }
-        }
-    }
-
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(());
         let _ = self.task.await;
@@ -304,8 +284,10 @@ fn unix_ms_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_http_client::ClientRouteClass;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
     use pretty_assertions::assert_eq;
-    use reqwest::StatusCode;
     use tokio::net::TcpStream;
     use tokio::time::Duration;
     use tokio::time::timeout;
@@ -627,13 +609,16 @@ data: {"type":"response.completed","response":{"id":"resp-1"}}
             "stream": true
         });
 
-        let resp = reqwest::Client::new()
+        let client = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+            .build_client(&url, ClientRouteClass::Other)
+            .expect("build HTTP client");
+        let resp = client
             .post(url)
             .json(&payload)
             .send()
             .await
             .expect("send request");
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status().as_u16(), 200);
 
         let bytes = resp.bytes().await.expect("read response body");
         assert_eq!(bytes, response_body.as_bytes());

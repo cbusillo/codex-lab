@@ -1,14 +1,15 @@
 use clap::Parser;
+use codex_app_server::AppServerCodeModeHostArgs;
 use codex_app_server::AppServerRuntimeOptions;
 use codex_app_server::AppServerTransport;
 use codex_app_server::AppServerWebsocketAuthArgs;
 use codex_app_server::PluginStartupTasks;
+#[cfg(debug_assertions)]
+use codex_app_server::install_test_keyring_store_from_env;
 use codex_app_server::run_main_with_transport_options;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_config::LoaderOverrides;
-#[cfg(debug_assertions)]
-use codex_keyring_store::tests::install_persisted_default_test_keyring_store;
 use codex_protocol::protocol::SessionSource;
 use codex_utils_cli::CliConfigOverrides;
 use std::path::PathBuf;
@@ -17,14 +18,15 @@ use std::path::PathBuf;
 // managed config file without writing to /etc.
 const MANAGED_CONFIG_PATH_ENV_VAR: &str = "CODEX_APP_SERVER_MANAGED_CONFIG_PATH";
 const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
-#[cfg(debug_assertions)]
-const TEST_KEYRING_DIR_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_KEYRING_DIR";
 
 #[derive(Debug, Parser)]
 #[command(version)]
 struct AppServerArgs {
     #[command(flatten)]
     config_overrides: CliConfigOverrides,
+
+    #[command(flatten)]
+    code_mode_host: AppServerCodeModeHostArgs,
 
     /// Transport endpoint URL. Supported values: `stdio://` (default),
     /// `unix://`, `unix://PATH`, `ws://IP:PORT`, `off`.
@@ -63,15 +65,17 @@ struct AppServerArgs {
     #[arg(long = "use-test-keyring-store", hide = true)]
     use_test_keyring_store: bool,
 
-    /// Enable remote control for this app-server process.
+    /// Enable remote control for this app-server process without changing persistence.
     #[arg(long = "remote-control", hide = true)]
     remote_control: bool,
 }
 
 fn main() -> anyhow::Result<()> {
-    arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
+    let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
+    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         let AppServerArgs {
             config_overrides,
+            code_mode_host,
             listen,
             session_source,
             auth,
@@ -91,24 +95,24 @@ fn main() -> anyhow::Result<()> {
         };
         let transport = listen;
         let auth = auth.try_into_settings()?;
-        let mut runtime_options = AppServerRuntimeOptions::default();
+        let mut runtime_options = AppServerRuntimeOptions {
+            code_mode_host_transport: code_mode_host.into(),
+            ..Default::default()
+        };
         #[cfg(debug_assertions)]
         if use_test_keyring_store {
-            let test_keyring_dir = std::env::var_os(TEST_KEYRING_DIR_ENV_VAR).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{TEST_KEYRING_DIR_ENV_VAR} must be set when --use-test-keyring-store is used"
-                )
-            })?;
-            anyhow::ensure!(
-                install_persisted_default_test_keyring_store(&PathBuf::from(test_keyring_dir)),
-                "test keyring store was already configured"
-            );
+            install_test_keyring_store_from_env()?;
         }
         #[cfg(debug_assertions)]
         if disable_plugin_startup_tasks_for_tests {
             runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;
         }
-        runtime_options.remote_control_enabled = remote_control;
+        runtime_options.remote_control_startup_mode =
+            match (remote_control, remote_control_disabled) {
+                (true, _) => codex_app_server::RemoteControlStartupMode::EnabledEphemeral,
+                (false, true) => codex_app_server::RemoteControlStartupMode::DisabledEphemeral,
+                (false, false) => codex_app_server::RemoteControlStartupMode::ResolvePersisted,
+            };
 
         run_main_with_transport_options(
             arg0_paths,

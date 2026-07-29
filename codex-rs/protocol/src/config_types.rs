@@ -95,7 +95,7 @@ pub enum SandboxMode {
     DangerFullAccess,
 }
 
-/// Validated plain profile-v2 name used to select `$CODEX_LAB_HOME/<name>.config.toml`.
+/// Validated plain profile-v2 name used to select `$CODEX_HOME/<name>.config.toml`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileV2Name(String);
 
@@ -199,6 +199,16 @@ pub enum ShellEnvironmentPolicyInherit {
     None,
 }
 
+/// Assigns a shell environment variable pattern to the include-only or exclude
+/// set. Includes do not re-add variables removed by another exclude pattern.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export_to = "v2/")]
+pub enum ShellEnvironmentPolicyFilter {
+    Include,
+    Exclude,
+}
+
 pub type EnvironmentVariablePattern = WildMatchPattern<'*', '?'>;
 
 /// Deriving the `env` based on this policy works as follows:
@@ -273,6 +283,16 @@ pub enum WindowsSandboxLevel {
     Elevated,
 }
 
+/// Controls whether a Windows sandbox launch reconciles persistent proxy settings or preserves
+/// the settings established by another launch.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowsSandboxProxySettingsMode {
+    #[default]
+    Reconcile,
+    Preserve,
+}
+
 #[derive(
     Debug,
     Serialize,
@@ -296,15 +316,49 @@ pub enum Personality {
     Pragmatic,
 }
 
+/// Controls the effective multi-agent delegation instructions for a turn. `custom` means the
+/// configured mode hint defines the policy instead of a built-in policy.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Display, JsonSchema, TS, Default)]
+#[serde(rename_all = "camelCase", from = "MultiAgentModeWire")]
+#[ts(rename_all = "camelCase")]
+#[strum(serialize_all = "camelCase")]
+pub enum MultiAgentMode {
+    Custom(String),
+    #[default]
+    ExplicitRequestOnly,
+    Proactive,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum MultiAgentModeWire {
+    None,
+    Custom(String),
+    ExplicitRequestOnly,
+    Proactive,
+}
+
+impl From<MultiAgentModeWire> for MultiAgentMode {
+    fn from(value: MultiAgentModeWire) -> Self {
+        match value {
+            MultiAgentModeWire::None => Self::Custom(String::new()),
+            MultiAgentModeWire::Custom(hint_text) => Self::Custom(hint_text),
+            MultiAgentModeWire::ExplicitRequestOnly => Self::ExplicitRequestOnly,
+            MultiAgentModeWire::Proactive => Self::Proactive,
+        }
+    }
+}
+
 #[derive(
     Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS, Default,
 )]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum WebSearchMode {
     Disabled,
     #[default]
     Cached,
+    Indexed,
     Live,
 }
 

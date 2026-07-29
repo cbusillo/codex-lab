@@ -1,3 +1,0 @@
-interface:
-  display_name: "Breaking Change Review"
-  short_description: "Find compatibility and integration breaks"

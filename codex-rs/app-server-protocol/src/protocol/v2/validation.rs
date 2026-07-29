@@ -38,16 +38,13 @@ v2_enum_from_core!(
 pub struct ProjectValidationCompletedNotification {
     pub thread_id: String,
     pub turn_id: String,
+    pub item_id: Option<String>,
     pub command: Vec<String>,
     pub command_truncated: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub cwd: Option<AbsolutePathBuf>,
     pub status: ProjectValidationStatus,
     pub skip_reason: Option<ProjectValidationSkipReason>,
     pub changed_file_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub exit_code: Option<i32>,
     pub output: String,
     pub output_truncated: bool,

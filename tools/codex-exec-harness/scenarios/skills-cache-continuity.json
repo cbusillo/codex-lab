@@ -1,6 +1,6 @@
 {
   "name": "skills-cache-continuity",
-  "model": "gpt-5.1-codex",
+  "model": "gpt-5.6-sol",
   "turns": [
     {
       "prompt": "Reply with exactly: first. FIRST_CACHE_CONTINUITY_TURN_MARKER. This asks for cache continuity mandatory trigger checks, delegated cache continuity routing, and local model mechanics."

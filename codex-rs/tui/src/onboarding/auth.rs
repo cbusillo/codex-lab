@@ -10,13 +10,13 @@
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
 use codex_app_server_protocol::AccountUpdatedNotification;
-#[cfg(test)]
-use codex_app_server_protocol::AuthMode as AppServerAuthMode;
+use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_login::read_openai_api_key_from_env;
+use codex_protocol::auth::AuthMode;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -874,7 +874,9 @@ impl AuthModeWidget {
                 .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                     request_id: onboarding_request_id(),
                     params: LoginAccountParams::Chatgpt {
+                        app_brand: None,
                         codex_streamlined_login: false,
+                        use_hosted_login_success_page: false,
                         preserve_existing_account: false,
                     },
                 })
@@ -946,7 +948,17 @@ impl AuthModeWidget {
     pub(crate) fn on_account_updated(&mut self, notification: AccountUpdatedNotification) {
         self.login_status = notification
             .auth_mode
-            .map(LoginStatus::AuthMode)
+            .map(|auth_mode| {
+                LoginStatus::AuthMode(match auth_mode {
+                    ApiAuthMode::ApiKey => AuthMode::ApiKey,
+                    ApiAuthMode::Chatgpt => AuthMode::Chatgpt,
+                    ApiAuthMode::ChatgptAuthTokens => AuthMode::ChatgptAuthTokens,
+                    ApiAuthMode::Headers => AuthMode::Headers,
+                    ApiAuthMode::AgentIdentity => AuthMode::AgentIdentity,
+                    ApiAuthMode::PersonalAccessToken => AuthMode::PersonalAccessToken,
+                    ApiAuthMode::BedrockApiKey => AuthMode::BedrockApiKey,
+                })
+            })
             .unwrap_or(LoginStatus::NotAuthenticated);
     }
 }
@@ -1015,10 +1027,26 @@ mod tests {
     use codex_arg0::Arg0DispatchPaths;
     use codex_cloud_config::cloud_config_bundle_loader_for_storage;
     use codex_config::types::AuthCredentialsStoreMode;
+    use codex_login::AuthKeyringBackendKind;
 
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    const PRODUCTION_LENGTH_AUTH_URL: &str = concat!(
+        "https://auth.openai.com/oauth/authorize?",
+        "response_type=code&",
+        "client_id=app_EMoamEEZ73f0CkXaXp7hrann&",
+        "redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&",
+        "scope=openid%20profile%20email%20offline_access%20",
+        "api.connectors.read%20api.connectors.invoke&",
+        "code_challenge=1YM3Z8QbrLbdt9C3eX3j7UQ4GmFRmKz4OeVYwD6s5xA&",
+        "code_challenge_method=S256&",
+        "id_token_add_organizations=true&",
+        "codex_cli_simplified_flow=true&",
+        "state=8cHjQ4nVx2Yp7Lm9Rk3Wf6Ta1Bs5Du0Ei4Go7Nz2PqM&",
+        "originator=codex_cli_rs"
+    );
 
     async fn widget_forced_chatgpt() -> (AuthModeWidget, TempDir) {
         let codex_home = TempDir::new().unwrap();
@@ -1028,6 +1056,7 @@ mod tests {
             .build()
             .await
             .unwrap();
+        let auth_route_config = config.auth_route_config();
         let client = InProcessAppServerClient::start(InProcessClientStartArgs {
             arg0_paths: Arg0DispatchPaths::default(),
             config: Arc::new(config),
@@ -1039,7 +1068,9 @@ mod tests {
                 codex_home_path.clone(),
                 /*enable_codex_api_key_env*/ false,
                 AuthCredentialsStoreMode::File,
+                AuthKeyringBackendKind::default(),
                 "https://chatgpt.com/backend-api/".to_string(),
+                auth_route_config,
             )
             .await,
             feedback: codex_feedback::CodexFeedback::new(),
@@ -1056,6 +1087,7 @@ mod tests {
             client_name: "test".to_string(),
             client_version: "test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
         })
@@ -1110,10 +1142,7 @@ mod tests {
 
     #[tokio::test]
     async fn existing_non_oauth_chatgpt_login_counts_as_signed_in() {
-        for auth_mode in [
-            AppServerAuthMode::ChatgptAuthTokens,
-            AppServerAuthMode::PersonalAccessToken,
-        ] {
+        for auth_mode in [AuthMode::ChatgptAuthTokens, AuthMode::PersonalAccessToken] {
             let (mut widget, _tmp) = widget_forced_chatgpt().await;
             widget.login_status = LoginStatus::AuthMode(auth_mode);
 
@@ -1187,24 +1216,42 @@ mod tests {
     }
 
     #[test]
-    fn continue_in_browser_renders_osc8_hyperlink() {
+    fn continue_in_browser_preserves_long_link_and_footer_at_narrow_width() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (widget, _tmp) = runtime.block_on(widget_forced_chatgpt());
-        let url = "https://auth.example.com/login?state=abc123";
+        widget.set_animations_suppressed(/*suppressed*/ true);
         *widget.sign_in_state.write().unwrap() =
             SignInState::ChatGptContinueInBrowser(ContinueInBrowserState {
                 login_id: "login-1".to_string(),
-                auth_url: url.to_string(),
+                auth_url: PRODUCTION_LENGTH_AUTH_URL.to_string(),
             });
 
-        // Render into a narrow buffer so the URL wraps across multiple rows.
-        let area = Rect::new(0, 0, 30, 20);
+        let width = 44;
+        let height = 30;
+        let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         widget.render_continue_in_browser(area, &mut buf);
 
-        // Every character of the URL should be present as an OSC 8 cell.
-        let found = collect_osc8_chars(&buf, area, url);
-        assert_eq!(found, url, "OSC 8 hyperlink should cover the full URL");
+        let found = collect_osc8_chars(&buf, area, PRODUCTION_LENGTH_AUTH_URL);
+        assert_eq!(
+            found, PRODUCTION_LENGTH_AUTH_URL,
+            "OSC 8 hyperlink should cover the full URL"
+        );
+
+        let mut terminal = crate::custom_terminal::Terminal::with_options(
+            crate::test_backend::VT100Backend::new(width, height),
+        )
+        .expect("terminal");
+        terminal.set_viewport_area(area);
+
+        terminal
+            .draw(|frame| widget.render_continue_in_browser(area, frame.buffer_mut()))
+            .expect("draw");
+
+        let contents = terminal.backend().to_string();
+        insta::assert_snapshot!("continue_in_browser_narrow_long_url", contents);
+        assert!(contents.contains("On a remote or headless machine?"));
+        assert!(contents.contains("Press esc to cancel"));
     }
 
     #[test]

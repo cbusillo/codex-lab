@@ -26,7 +26,6 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::mount_compact_user_history_with_summary_once;
 use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
@@ -55,6 +54,8 @@ use wiremock::matchers::path_regex;
 const CONTROL_STORED_ACCOUNT_ID: &str = "stored-0-control";
 const CONTROL_CHATGPT_ACCOUNT_ID: &str = "account_id";
 const CONTROL_AUTHORIZATION: &str = "Bearer Access Token";
+const CODEX_APPS_MCP_PATH: &str = "/api/codex/ps/mcp";
+const CODEX_APPS_MCP_PATH_REGEX: &str = "^/api/codex/ps/mcp/?$";
 const CONTROL_CONNECTOR_NAME: &str = "Control Calendar";
 const CONTROL_NAMESPACE: &str = "mcp__codex_apps__control_calendar";
 const CONTROL_TOOL_MARKER: &str = "CONTROL_ACCOUNT_ONLY_TOOL";
@@ -240,7 +241,7 @@ fn write_accounts(home: &TempDir) -> anyhow::Result<Accounts> {
     let accounts = vec![
         StoredAccount {
             id: CONTROL_STORED_ACCOUNT_ID.to_string(),
-            mode: codex_app_server_protocol::AuthMode::Chatgpt,
+            mode: codex_protocol::auth::AuthMode::Chatgpt,
             label: Some("Control".to_string()),
             openai_api_key: None,
             tokens: Some(fake_chatgpt_token_data(CONTROL_CHATGPT_ACCOUNT_ID)),
@@ -250,7 +251,7 @@ fn write_accounts(home: &TempDir) -> anyhow::Result<Accounts> {
         },
         StoredAccount {
             id: EXECUTION_STORED_ACCOUNT_ID.to_string(),
-            mode: codex_app_server_protocol::AuthMode::Chatgpt,
+            mode: codex_protocol::auth::AuthMode::Chatgpt,
             label: Some("Execution".to_string()),
             openai_api_key: None,
             tokens: Some(fake_chatgpt_token_data(EXECUTION_CHATGPT_ACCOUNT_ID)),
@@ -293,7 +294,7 @@ async fn mount_account_apps(
     execution_tools_enabled: bool,
 ) {
     Mock::given(method("POST"))
-        .and(path_regex("^/api/codex/apps/?$"))
+        .and(path_regex(CODEX_APPS_MCP_PATH_REGEX))
         .respond_with(AccountAppsResponder {
             execution_authorizations,
             control_tools_enabled,
@@ -395,14 +396,15 @@ default_tools_approval_mode = "approve"
     .expect("apps config should parse");
     config.config_layer_stack = config
         .config_layer_stack
-        .with_user_config(&user_config_path, user_config);
+        .with_user_config(&user_config_path, user_config)
+        .expect("apps config layer should validate");
 }
 
 fn apps_authorizations(requests: &[Request]) -> Vec<String> {
     requests
         .iter()
         .filter(|request| {
-            request.method.as_str() == "POST" && request.url.path() == "/api/codex/apps"
+            request.method.as_str() == "POST" && request.url.path() == CODEX_APPS_MCP_PATH
         })
         .filter_map(|request| {
             request
@@ -436,7 +438,7 @@ fn apps_tool_call_authorizations(requests: &[Request]) -> Vec<String> {
         .iter()
         .filter(|request| {
             request.method.as_str() == "POST"
-                && request.url.path() == "/api/codex/apps"
+                && request.url.path() == CODEX_APPS_MCP_PATH
                 && request_body_json(request)
                     .and_then(|body| {
                         body.get("method")
@@ -968,7 +970,6 @@ async fn api_key_transition_never_sends_the_raw_key_to_apps() -> anyhow::Result<
     fixture
         .codex
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: "use my calendar app".to_string(),
                 text_elements: Vec::new(),
@@ -998,14 +999,16 @@ async fn api_key_transition_never_sends_the_raw_key_to_apps() -> anyhow::Result<
     codex_login::save_auth(
         home.path(),
         &AuthDotJson {
-            auth_mode: Some(codex_app_server_protocol::AuthMode::ApiKey),
+            auth_mode: Some(codex_protocol::auth::AuthMode::ApiKey),
             openai_api_key: Some(raw_api_key.to_string()),
             tokens: None,
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
         AuthCredentialsStoreMode::File,
+        codex_login::AuthKeyringBackendKind::default(),
     )?;
     codex_login::set_active_account_id(
         home.path(),
@@ -1043,7 +1046,7 @@ async fn api_key_transition_never_sends_the_raw_key_to_apps() -> anyhow::Result<
     let received_requests = server.received_requests().await.unwrap_or_default();
     let apps_requests = received_requests
         .iter()
-        .filter(|request| request.url.path() == "/api/codex/apps")
+        .filter(|request| request.url.path() == CODEX_APPS_MCP_PATH)
         .collect::<Vec<_>>();
     assert!(!apps_requests.is_empty());
     assert!(apps_requests.iter().all(|request| {
@@ -1052,13 +1055,6 @@ async fn api_key_transition_never_sends_the_raw_key_to_apps() -> anyhow::Result<
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             != Some(api_key_authorization.as_str())
-    }));
-    assert!(apps_requests.iter().any(|request| {
-        request
-            .headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .is_none()
     }));
 
     Ok(())
@@ -1086,6 +1082,11 @@ async fn legacy_resume_compaction_and_fork_preserve_incremental_apps_context() -
             sse(vec![
                 ev_response_created("resp-source"),
                 ev_completed("resp-source"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-compact"),
+                ev_assistant_message("msg-compact", "legacy apps compacted"),
+                ev_completed("resp-compact"),
             ]),
             sse(vec![
                 ev_response_created("resp-resume"),
@@ -1165,14 +1166,12 @@ async fn legacy_resume_compaction_and_fork_preserve_incremental_apps_context() -
     let resumed = resumed_builder
         .resume(&server, home.clone(), rollout_path.clone())
         .await?;
-    let compact_mock =
-        mount_compact_user_history_with_summary_once(&server, "legacy apps compacted").await;
     resumed.codex.submit(Op::Compact).await?;
     wait_for_event(&resumed.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    let compact_request = compact_mock.single_request();
+    let compact_request = response_mock.requests()[1].clone();
     let compact_developer_text = compact_request.message_input_texts("developer").join("\n");
     assert_eq!(
         compact_developer_text
@@ -1202,7 +1201,6 @@ async fn legacy_resume_compaction_and_fork_preserve_incremental_apps_context() -
         .await?;
     forked
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: "forked turn".to_string(),
                 text_elements: Vec::new(),
@@ -1216,22 +1214,25 @@ async fn legacy_resume_compaction_and_fork_preserve_incremental_apps_context() -
     wait_for_event(&forked, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
     let requests = response_mock.requests();
-    assert_eq!(requests.len(), 3);
-    let resumed_developer_text = requests[1].message_input_texts("developer").join("\n");
+    assert_eq!(requests.len(), 4);
+    let resumed_developer_text = requests[2].message_input_texts("developer").join("\n");
     assert_eq!(
         resumed_developer_text
             .matches("<apps_instructions>")
             .count(),
         1
     );
-    let forked_developer_text = requests[2].message_input_texts("developer").join("\n");
+    let forked_developer_text = requests[3].message_input_texts("developer").join("\n");
     assert_eq!(
         forked_developer_text.matches("<apps_instructions>").count(),
         1
     );
-    assert!(forked_developer_text.contains("<apps_update>"));
+    assert!(
+        forked_developer_text.contains("<apps_update>"),
+        "forked developer context did not mark Apps unavailable: {forked_developer_text}"
+    );
     assert!(forked_developer_text.contains("state: unavailable"));
-    assert_request_has_no_apps_tools(&requests[2]);
+    assert_request_has_no_apps_tools(&requests[3]);
 
     resumed.codex.shutdown_and_wait().await?;
     forked.shutdown_and_wait().await?;

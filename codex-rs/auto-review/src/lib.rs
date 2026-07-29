@@ -92,7 +92,7 @@ impl AutoReviewStatusCount {
             "{}/{}/{}/{}",
             source_label(&self.source),
             status_label(&self.status),
-            freshness_label(&self.freshness),
+            freshness_label(self.freshness),
             target,
         )
     }
@@ -305,7 +305,7 @@ fn status_count_order_key(
     (
         source_label(&count.source),
         status_label(&count.status),
-        freshness_label(&count.freshness),
+        freshness_label(count.freshness),
         if count.target_matches {
             "target_current"
         } else {
@@ -337,7 +337,7 @@ fn status_label(status: &AutoReviewRunStatus) -> &'static str {
     }
 }
 
-fn freshness_label(freshness: &AutoReviewFreshness) -> &'static str {
+fn freshness_label(freshness: AutoReviewFreshness) -> &'static str {
     match freshness {
         AutoReviewFreshness::Current => "current",
         AutoReviewFreshness::Stale => "stale",
@@ -372,19 +372,15 @@ impl AutoReviewStore {
         validate_run(run)?;
         let mut index = self.load_index_for_write()?;
         index.upsert(run.clone());
-        let index = self.merged_compacted_index(index, run.run_id.as_str())?;
-        self.save_run_metadata_index(&index)?;
-        let path = self.save_index(index.clone())?;
-        if let Err(err) = self.prune_run_metadata_except(&index) {
+        let (index, evicted_run_ids) = self.merged_compacted_index(index, run.run_id.as_str())?;
+        self.persist_run_metadata(&index, run.run_id.as_str())?;
+        let path = self.save_index(index)?;
+        if !evicted_run_ids.is_empty()
+            && let Err(err) = self.prune_evicted_runs(&evicted_run_ids)
+        {
             tracing::warn!(
                 error = %err,
-                "failed to prune stale auto review run metadata"
-            );
-        }
-        if let Err(err) = self.prune_run_states_except(&index) {
-            tracing::warn!(
-                error = %err,
-                "failed to prune stale auto review run states"
+                "failed to prune evicted auto review run files"
             );
         }
         Ok(path)
@@ -394,14 +390,14 @@ impl AutoReviewStore {
         &self,
         mut index: AutoReviewRunsIndex,
         preferred_run_id: &str,
-    ) -> Result<AutoReviewRunsIndex> {
+    ) -> Result<(AutoReviewRunsIndex, Vec<String>)> {
         let runs_path = self.runs_path();
         if runs_path.exists() {
             let latest = load_runs_index_file(&runs_path)?;
             index.merge_latest_from_disk(latest, preferred_run_id);
         }
-        index.compact_to_preserving(DEFAULT_MAX_RUNS, preferred_run_id);
-        Ok(index)
+        let evicted_run_ids = index.compact_to_preserving(DEFAULT_MAX_RUNS, preferred_run_id);
+        Ok((index, evicted_run_ids))
     }
 
     fn save_index(&self, index: AutoReviewRunsIndex) -> Result<PathBuf> {
@@ -581,7 +577,7 @@ impl AutoReviewStore {
     pub fn save_run_state(&self, state: &AutoReviewRunState) -> Result<PathBuf> {
         let _guard = AUTO_REVIEW_RUN_STATE_WRITE_LOCK
             .lock()
-            .unwrap_or_else(|err| err.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.save_run_state_unlocked(state)
     }
 
@@ -592,7 +588,7 @@ impl AutoReviewStore {
         validate_safe_id(run_id).context("auto review run_id")?;
         let _guard = AUTO_REVIEW_RUN_STATE_WRITE_LOCK
             .lock()
-            .unwrap_or_else(|err| err.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self
             .load_run_state_unlocked(run_id)?
             .unwrap_or_else(|| AutoReviewRunState::new(run_id));
@@ -701,7 +697,7 @@ impl AutoReviewStore {
         for run in self.load_metadata_runs() {
             index.upsert(run);
         }
-        index.compact_to_preserving(DEFAULT_MAX_RUNS, "");
+        let _evicted_run_ids = index.compact_to_preserving(DEFAULT_MAX_RUNS, "");
         index.validate()?;
         Ok(index)
     }
@@ -756,90 +752,48 @@ impl AutoReviewStore {
         Ok(())
     }
 
-    fn save_run_metadata_index(&self, index: &AutoReviewRunsIndex) -> Result<()> {
+    /// Persists the run that changed and backfills sidecars for any indexed run whose
+    /// metadata file is missing, so corrupt-index recovery still sees every retained run
+    /// without rewriting the whole index on every save.
+    fn persist_run_metadata(
+        &self,
+        index: &AutoReviewRunsIndex,
+        changed_run_id: &str,
+    ) -> Result<()> {
+        let existing_run_ids = self.existing_metadata_run_ids();
         for run in &index.runs {
-            self.save_run_metadata(run)?;
+            if run.run_id == changed_run_id || !existing_run_ids.contains(&run.run_id) {
+                self.save_run_metadata(run)?;
+            }
         }
         Ok(())
     }
 
-    fn prune_run_metadata_except(&self, index: &AutoReviewRunsIndex) -> Result<()> {
+    fn existing_metadata_run_ids(&self) -> BTreeSet<String> {
         let metadata_dir = self.root.join(RUN_METADATA_DIR);
-        if !metadata_dir.exists() {
-            return Ok(());
-        }
-        let retained_run_ids = index
-            .runs
-            .iter()
-            .map(|run| run.run_id.as_str())
-            .collect::<BTreeSet<_>>();
-        let entries = std::fs::read_dir(&metadata_dir).with_context(|| {
-            format!(
-                "failed to read auto review run metadata directory {}",
-                metadata_dir.display()
-            )
-        })?;
-        for entry in entries {
-            let entry = entry.with_context(|| {
-                format!(
-                    "failed to read auto review run metadata directory {}",
-                    metadata_dir.display()
-                )
-            })?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if validate_safe_id(run_id).is_ok() && !retained_run_ids.contains(run_id) {
-                std::fs::remove_file(&path).with_context(|| {
-                    format!(
-                        "failed to remove auto review run metadata {}",
-                        path.display()
-                    )
-                })?;
-            }
-        }
-        Ok(())
+        let Ok(entries) = std::fs::read_dir(&metadata_dir) else {
+            return BTreeSet::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    return None;
+                }
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_string)
+            })
+            .collect()
     }
 
-    fn prune_run_states_except(&self, index: &AutoReviewRunsIndex) -> Result<()> {
-        let states_dir = self.root.join(RUN_STATES_DIR);
-        if !states_dir.exists() {
-            return Ok(());
-        }
-        let retained_run_ids = index
-            .runs
-            .iter()
-            .map(|run| run.run_id.as_str())
-            .collect::<BTreeSet<_>>();
-        let entries = std::fs::read_dir(&states_dir).with_context(|| {
-            format!(
-                "failed to read auto review run states directory {}",
-                states_dir.display()
-            )
-        })?;
-        for entry in entries {
-            let entry = entry.with_context(|| {
-                format!(
-                    "failed to read auto review run states directory {}",
-                    states_dir.display()
-                )
-            })?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if validate_safe_id(run_id).is_ok() && !retained_run_ids.contains(run_id) {
-                std::fs::remove_file(&path).with_context(|| {
-                    format!("failed to remove auto review run state {}", path.display())
-                })?;
-            }
+    fn prune_evicted_runs(&self, evicted_run_ids: &[String]) -> Result<()> {
+        for run_id in evicted_run_ids {
+            remove_file_if_exists(&self.run_metadata_path(run_id)?)
+                .with_context(|| format!("failed to remove auto review run metadata {run_id}"))?;
+            remove_file_if_exists(&self.run_state_path(run_id)?)
+                .with_context(|| format!("failed to remove auto review run state {run_id}"))?;
         }
         Ok(())
     }
@@ -898,6 +852,14 @@ impl AutoReviewStore {
             .with_context(|| format!("failed to read auto review output {run_id}"))?;
         serde_json::from_str(&json)
             .with_context(|| format!("failed to parse auto review output {run_id}"))
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
@@ -973,9 +935,10 @@ impl AutoReviewRunsIndex {
         self.runs = by_id.into_values().collect();
     }
 
-    fn compact_to_preserving(&mut self, max_runs: usize, preferred_run_id: &str) {
+    /// Compacts to `max_runs`, returning the run ids dropped from the index.
+    fn compact_to_preserving(&mut self, max_runs: usize, preferred_run_id: &str) -> Vec<String> {
         if self.runs.len() <= max_runs {
-            return;
+            return Vec::new();
         }
         let preferred_run = self
             .runs
@@ -985,15 +948,24 @@ impl AutoReviewRunsIndex {
         self.runs.sort_by(|left, right| {
             auto_review_run_sort_key(right).cmp(&auto_review_run_sort_key(left))
         });
-        self.runs.truncate(max_runs);
+        let mut evicted_run_ids = self
+            .runs
+            .split_off(max_runs)
+            .into_iter()
+            .map(|run| run.run_id)
+            .collect::<Vec<_>>();
         if let Some(preferred_run) = preferred_run
             && !self.runs.iter().any(|run| run.run_id == preferred_run_id)
         {
-            let _evicted = self.runs.pop();
+            if let Some(displaced) = self.runs.pop() {
+                evicted_run_ids.push(displaced.run_id);
+            }
             self.runs.push(preferred_run);
         }
+        evicted_run_ids.retain(|run_id| run_id != preferred_run_id);
         self.runs
             .sort_by(|left, right| left.run_id.cmp(&right.run_id));
+        evicted_run_ids
     }
 }
 
@@ -1523,7 +1495,7 @@ impl AutoReviewFindingDigest {
             })
             .unwrap_or_else(|| "unknown location".to_string());
         let location = truncate_utf8(&location, SUMMARY_MAX_FIELD_BYTES);
-        let finding_id = truncate_utf8(&self.finding_id, 80);
+        let finding_id = truncate_utf8(&self.finding_id, /*max_bytes*/ 80);
         format!("[P{priority}] {finding_id}: {title} ({location})")
     }
 }

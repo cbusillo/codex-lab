@@ -1,3 +1,0 @@
-interface:
-  display_name: "Remote Tests"
-  short_description: "Run Codex tests through a remote executor"

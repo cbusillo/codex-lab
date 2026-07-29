@@ -8,7 +8,7 @@
       ],
       "type": "string"
     },
-    "ReviewStartTarget": {
+    "ReviewTarget": {
       "oneOf": [
         {
           "description": "Review the working tree: staged, unstaged, and untracked files.",
@@ -17,14 +17,35 @@
               "enum": [
                 "uncommittedChanges"
               ],
-              "title": "UncommittedChangesReviewStartTargetType",
+              "title": "UncommittedChangesReviewTargetType",
               "type": "string"
             }
           },
           "required": [
             "type"
           ],
-          "title": "UncommittedChangesReviewStartTarget",
+          "title": "UncommittedChangesReviewTarget",
+          "type": "object"
+        },
+        {
+          "description": "Review the changes made by a completed turn.",
+          "properties": {
+            "fingerprint": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "currentTurnDiff"
+              ],
+              "title": "CurrentTurnDiffReviewTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "fingerprint",
+            "type"
+          ],
+          "title": "CurrentTurnDiffReviewTarget",
           "type": "object"
         },
         {
@@ -37,7 +58,7 @@
               "enum": [
                 "baseBranch"
               ],
-              "title": "BaseBranchReviewStartTargetType",
+              "title": "BaseBranchReviewTargetType",
               "type": "string"
             }
           },
@@ -45,7 +66,7 @@
             "branch",
             "type"
           ],
-          "title": "BaseBranchReviewStartTarget",
+          "title": "BaseBranchReviewTarget",
           "type": "object"
         },
         {
@@ -65,7 +86,7 @@
               "enum": [
                 "commit"
               ],
-              "title": "CommitReviewStartTargetType",
+              "title": "CommitReviewTargetType",
               "type": "string"
             }
           },
@@ -73,7 +94,7 @@
             "sha",
             "type"
           ],
-          "title": "CommitReviewStartTarget",
+          "title": "CommitReviewTarget",
           "type": "object"
         },
         {
@@ -86,7 +107,7 @@
               "enum": [
                 "custom"
               ],
-              "title": "CustomReviewStartTargetType",
+              "title": "CustomReviewTargetType",
               "type": "string"
             }
           },
@@ -94,7 +115,7 @@
             "instructions",
             "type"
           ],
-          "title": "CustomReviewStartTarget",
+          "title": "CustomReviewTarget",
           "type": "object"
         }
       ]
@@ -114,7 +135,7 @@
       "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`)."
     },
     "target": {
-      "$ref": "#/definitions/ReviewStartTarget"
+      "$ref": "#/definitions/ReviewTarget"
     },
     "threadId": {
       "type": "string"

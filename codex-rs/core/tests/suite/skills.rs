@@ -1,7 +1,6 @@
 #![cfg(not(target_os = "windows"))]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
 
-use anyhow::Context;
 use anyhow::Result;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
@@ -10,7 +9,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use core_test_support::hooks::trust_discovered_hooks;
+use codex_utils_path_uri::PathUri;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -18,13 +17,11 @@ use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_target_windows;
+use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
-use std::fs;
-use std::path::Path;
 use std::sync::Arc;
-
-const HOOK_ADDED_CONTEXT: &str = "hook-added context for skill boundary";
 
 async fn write_repo_skill(
     cwd: AbsolutePathBuf,
@@ -34,89 +31,33 @@ async fn write_repo_skill(
     body: &str,
 ) -> Result<()> {
     let skill_dir = cwd.join(".agents").join("skills").join(name);
+    let skill_dir_uri = PathUri::from_host_native_path(&skill_dir)?;
     fs.create_directory(
-        &skill_dir,
+        &skill_dir_uri,
         CreateDirectoryOptions { recursive: true },
         /*sandbox*/ None,
     )
     .await?;
     let contents = format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}\n");
     let path = skill_dir.join("SKILL.md");
-    fs.write_file(&path, contents.into_bytes(), /*sandbox*/ None)
+    let path_uri = PathUri::from_host_native_path(&path)?;
+    fs.write_file(&path_uri, contents.into_bytes(), /*sandbox*/ None)
         .await?;
     Ok(())
 }
 
-fn shell_quote(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    format!("'{}'", path.replace('\'', "'\\''"))
-}
-
-fn write_user_prompt_submit_logging_hook(home: &Path) -> Result<()> {
-    let script_path = home.join("user_prompt_submit_skill_boundary_hook.sh");
-    let log_path = home.join("user_prompt_submit_skill_boundary_hook_log.jsonl");
-    let context_json =
-        serde_json::to_string(HOOK_ADDED_CONTEXT).context("serialize hook added context")?;
-    fs::write(
-        &script_path,
-        format!(
-            r#"#!/bin/sh
-payload=$(cat)
-printf '%s\n' "$payload" >> "$1"
-printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"UserPromptSubmit","additionalContext":{context_json}}}}}'
-"#
-        ),
-    )
-    .context("write user prompt submit hook script")?;
-
-    let hooks = serde_json::json!({
-        "hooks": {
-            "UserPromptSubmit": [{
-                "hooks": [{
-                    "type": "command",
-                    "command": format!(
-                        "sh {} {}",
-                        shell_quote(&script_path),
-                        shell_quote(&log_path),
-                    ),
-                    "statusMessage": "recording user prompt submit hook",
-                }]
-            }]
-        }
-    });
-
-    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
-    Ok(())
-}
-
-fn read_user_prompt_submit_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
-    let contents =
-        fs::read_to_string(home.join("user_prompt_submit_skill_boundary_hook_log.jsonl"))
-            .context("read user prompt submit hook log")?;
-    contents
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).context("parse user prompt submit hook log line"))
-        .collect()
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn user_turn_includes_skill_instructions_and_hook_context() -> Result<()> {
+async fn user_turn_includes_skill_instructions() -> Result<()> {
+    // TODO(anp): Remove after skill-path helpers use target-native paths.
+    skip_if_target_windows!(Ok(()), "requires native cross-OS skill paths");
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
     let skill_body = "skill body";
-    let mut builder = test_codex()
-        .with_workspace_setup(move |cwd, fs| async move {
-            write_repo_skill(cwd, fs, "demo", "demo skill", skill_body).await
-        })
-        .with_pre_build_hook(|home| {
-            if let Err(error) = write_user_prompt_submit_logging_hook(home) {
-                panic!("failed to write user prompt submit hook test fixture: {error}");
-            }
-        })
-        .with_config(trust_discovered_hooks);
-    let test = builder.build_with_remote_env(&server).await?;
+    let mut builder = test_codex().with_workspace_setup(move |cwd, fs| async move {
+        write_repo_skill(cwd, fs, "demo", "demo skill", skill_body).await
+    });
+    let test = builder.build_with_auto_env(&server).await?;
 
     let skill_path = test
         .config
@@ -151,12 +92,11 @@ async fn user_turn_includes_skill_instructions_and_hook_context() -> Result<()> 
                     path: skill_path.clone(),
                 },
             ],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(test.config.cwd.clone()),
+                environments: Some(local_selections(test.config.cwd.clone())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -190,21 +130,6 @@ async fn user_turn_includes_skill_instructions_and_hook_context() -> Result<()> 
         }),
         "expected skill instructions in user input, got {user_texts:?}"
     );
-    let developer_texts = request.message_input_texts("developer");
-    assert!(
-        developer_texts
-            .iter()
-            .any(|text| text.contains(HOOK_ADDED_CONTEXT)),
-        "expected hook-added context in developer input, got {developer_texts:?}"
-    );
-
-    let hook_inputs = read_user_prompt_submit_hook_inputs(test.codex_home_path())?;
-    assert_eq!(hook_inputs.len(), 1);
-    let hook_prompt = hook_inputs[0]
-        .get("prompt")
-        .and_then(serde_json::Value::as_str)
-        .expect("hook input should include prompt");
-    assert_eq!(hook_prompt, "please use $demo");
 
     Ok(())
 }

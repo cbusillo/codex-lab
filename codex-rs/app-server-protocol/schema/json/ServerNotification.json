@@ -5,66 +5,6 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
-    "Account": {
-      "oneOf": [
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "apiKey"
-              ],
-              "title": "ApiKeyAccountType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "ApiKeyAccount",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "email": {
-              "type": "string"
-            },
-            "planType": {
-              "$ref": "#/definitions/PlanType"
-            },
-            "type": {
-              "enum": [
-                "chatgpt"
-              ],
-              "title": "ChatgptAccountType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "email",
-            "planType",
-            "type"
-          ],
-          "title": "ChatgptAccount",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "amazonBedrock"
-              ],
-              "title": "AmazonBedrockAccountType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "AmazonBedrockAccount",
-          "type": "object"
-        }
-      ]
-    },
     "AccountLoginCompletedNotification": {
       "properties": {
         "error": {
@@ -102,16 +42,6 @@
     },
     "AccountUpdatedNotification": {
       "properties": {
-        "account": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Account"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "authMode": {
           "anyOf": [
             {
@@ -177,7 +107,7 @@
         "read": {
           "description": "This will be removed in favor of `entries`.",
           "items": {
-            "$ref": "#/definitions/AbsolutePathBuf"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": [
             "array",
@@ -187,7 +117,7 @@
         "write": {
           "description": "This will be removed in favor of `entries`.",
           "items": {
-            "$ref": "#/definitions/AbsolutePathBuf"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": [
             "array",
@@ -311,6 +241,24 @@
             "null"
           ]
         },
+        "iconAssets": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "iconDarkAssets": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },
@@ -402,12 +350,6 @@
         "firstPartyRequiresInstall": {
           "type": [
             "boolean",
-            "null"
-          ]
-        },
-        "firstPartyType": {
-          "type": [
-            "string",
             "null"
           ]
         },
@@ -520,7 +462,6 @@
         {
           "enum": [
             "untrusted",
-            "on-failure",
             "on-request",
             "never"
           ],
@@ -590,6 +531,13 @@
           "type": "string"
         },
         {
+          "description": "Backend auth supplied as request headers.",
+          "enum": [
+            "headers"
+          ],
+          "type": "string"
+        },
+        {
           "description": "Programmatic Codex auth backed by a registered Agent Identity.",
           "enum": [
             "agentIdentity"
@@ -600,6 +548,13 @@
           "description": "Programmatic Codex auth backed by a personal access token.",
           "enum": [
             "personalAccessToken"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Amazon Bedrock bearer token managed by Codex.",
+          "enum": [
+            "bedrockApiKey"
           ],
           "type": "string"
         }
@@ -678,6 +633,7 @@
         {
           "enum": [
             "contextWindowExceeded",
+            "sessionBudgetExceeded",
             "usageLimitExceeded",
             "serverOverloaded",
             "cyberPolicy",
@@ -1208,6 +1164,26 @@
           ],
           "title": "InputImageDynamicToolCallOutputContentItem",
           "type": "object"
+        },
+        {
+          "properties": {
+            "audioUrl": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "inputAudio"
+              ],
+              "title": "InputAudioDynamicToolCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "audioUrl",
+            "type"
+          ],
+          "title": "InputAudioDynamicToolCallOutputContentItem",
+          "type": "object"
         }
       ]
     },
@@ -1218,6 +1194,21 @@
         "failed"
       ],
       "type": "string"
+    },
+    "EnvironmentConnectionNotification": {
+      "properties": {
+        "environmentId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "environmentId",
+        "threadId"
+      ],
+      "type": "object"
     },
     "ErrorNotification": {
       "properties": {
@@ -1243,7 +1234,152 @@
       "type": "object"
     },
     "ExternalAgentConfigImportCompletedNotification": {
+      "properties": {
+        "importId": {
+          "type": "string"
+        },
+        "itemTypeResults": {
+          "items": {
+            "$ref": "#/definitions/ExternalAgentConfigImportTypeResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "importId",
+        "itemTypeResults"
+      ],
       "type": "object"
+    },
+    "ExternalAgentConfigImportItemTypeFailure": {
+      "properties": {
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failureStage": {
+          "type": "string"
+        },
+        "itemType": {
+          "$ref": "#/definitions/ExternalAgentConfigMigrationItemType"
+        },
+        "message": {
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subErrorType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "failureStage",
+        "itemType",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentConfigImportItemTypeSuccess": {
+      "properties": {
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemType": {
+          "$ref": "#/definitions/ExternalAgentConfigMigrationItemType"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "itemType"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentConfigImportProgressNotification": {
+      "properties": {
+        "importId": {
+          "type": "string"
+        },
+        "itemTypeResults": {
+          "items": {
+            "$ref": "#/definitions/ExternalAgentConfigImportTypeResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "importId",
+        "itemTypeResults"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentConfigImportTypeResult": {
+      "properties": {
+        "failures": {
+          "items": {
+            "$ref": "#/definitions/ExternalAgentConfigImportItemTypeFailure"
+          },
+          "type": "array"
+        },
+        "itemType": {
+          "$ref": "#/definitions/ExternalAgentConfigMigrationItemType"
+        },
+        "successes": {
+          "items": {
+            "$ref": "#/definitions/ExternalAgentConfigImportItemTypeSuccess"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "failures",
+        "itemType",
+        "successes"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentConfigMigrationItemType": {
+      "enum": [
+        "AGENTS_MD",
+        "CONFIG",
+        "SKILLS",
+        "PLUGINS",
+        "MCP_SERVER_CONFIG",
+        "SUBAGENTS",
+        "HOOKS",
+        "COMMANDS",
+        "MEMORY",
+        "SESSIONS"
+      ],
+      "type": "string"
     },
     "FileChangeOutputDeltaNotification": {
       "description": "Deprecated legacy notification for `apply_patch` textual output.\n\nThe server no longer emits this notification.",
@@ -1308,7 +1444,7 @@
         {
           "properties": {
             "path": {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -1423,9 +1559,13 @@
               "type": "string"
             },
             "subpath": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -1477,9 +1617,13 @@
               "type": "string"
             },
             "subpath": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -1953,6 +2097,7 @@
         "preCompact",
         "postCompact",
         "sessionStart",
+        "sessionEnd",
         "userPromptSubmit",
         "subagentStart",
         "subagentStop",
@@ -2302,6 +2447,9 @@
       ],
       "type": "object"
     },
+    "LegacyAppPathString": {
+      "type": "string"
+    },
     "McpServerOauthLoginCompletedNotification": {
       "properties": {
         "error": {
@@ -2315,6 +2463,12 @@
         },
         "success": {
           "type": "boolean"
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2322,6 +2476,12 @@
         "success"
       ],
       "type": "object"
+    },
+    "McpServerStartupFailureReason": {
+      "enum": [
+        "reauthenticationRequired"
+      ],
+      "type": "string"
     },
     "McpServerStartupState": {
       "enum": [
@@ -2340,16 +2500,67 @@
             "null"
           ]
         },
+        "failureReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpServerStartupFailureReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "name": {
           "type": "string"
         },
         "status": {
           "$ref": "#/definitions/McpServerStartupState"
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "name",
         "status"
+      ],
+      "type": "object"
+    },
+    "McpToolCallAppContext": {
+      "properties": {
+        "actionName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "appName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectorId": {
+          "type": "string"
+        },
+        "linkId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resourceUri": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connectorId"
       ],
       "type": "object"
     },
@@ -2517,6 +2728,49 @@
       ],
       "type": "object"
     },
+    "ModelSafetyBufferingUpdatedNotification": {
+      "properties": {
+        "fasterModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "showBufferingUi": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "useCases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "model",
+        "reasons",
+        "showBufferingUi",
+        "threadId",
+        "turnId",
+        "useCases"
+      ],
+      "type": "object"
+    },
     "ModelVerification": {
       "enum": [
         "trustedAccessForCyber"
@@ -2544,6 +2798,31 @@
         "verifications"
       ],
       "type": "object"
+    },
+    "MultiAgentMode": {
+      "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
+      "oneOf": [
+        {
+          "enum": [
+            "explicitRequestOnly",
+            "proactive"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "custom"
+          ],
+          "title": "CustomMultiAgentMode",
+          "type": "object"
+        }
+      ]
     },
     "NetworkAccess": {
       "enum": [
@@ -2677,6 +2956,7 @@
         "team",
         "self_serve_business_usage_based",
         "business",
+        "ent26",
         "enterprise_cbp_usage_based",
         "enterprise",
         "edu",
@@ -2813,6 +3093,12 @@
           "format": "int32",
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "itemId": {
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -2960,6 +3246,13 @@
               "type": "null"
             }
           ]
+        },
+        "spendControlReached": {
+          "description": "Backend-reported spend-control state. `None` is unavailable, not a sparse-update recovery.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -2993,7 +3286,8 @@
     "RealtimeConversationVersion": {
       "enum": [
         "v1",
-        "v2"
+        "v2",
+        "v3"
       ],
       "type": "string"
     },
@@ -3779,10 +4073,16 @@
             }
           ],
           "default": "legacy",
-          "description": "Persisted history contract selected when this thread was created."
+          "description": "Persisted thread history contract selected when this thread was created.\n\nThis field is part of the published stable `Thread` surface; keep it non-experimental so existing clients continue to receive it."
         },
         "id": {
+          "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
+        },
+        "isPinned": {
+          "default": false,
+          "description": "Whether the thread has been pinned by the user.",
+          "type": "boolean"
         },
         "modelProvider": {
           "description": "Model provider used for this thread (for example, 'openai').",
@@ -3812,6 +4112,14 @@
         "preview": {
           "description": "Usually the first user message in the thread, if available.",
           "type": "string"
+        },
+        "recencyAt": {
+          "description": "Unix timestamp (in seconds) used for thread recency ordering.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "sessionId": {
           "description": "Session id shared by threads that belong to the same session tree.",
@@ -3912,6 +4220,21 @@
       "required": [
         "threadId"
       ],
+      "type": "object"
+    },
+    "ThreadDeletedNotification": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadExtra": {
+      "description": "Extra app-server data for a thread.",
       "type": "object"
     },
     "ThreadGoal": {
@@ -4203,7 +4526,7 @@
             "cwd": {
               "allOf": [
                 {
-                  "$ref": "#/definitions/AbsolutePathBuf"
+                  "$ref": "#/definitions/LegacyAppPathString"
                 }
               ],
               "description": "The command's working directory."
@@ -4227,8 +4550,24 @@
             "id": {
               "type": "string"
             },
+            "pluginId": {
+              "default": null,
+              "description": "Trusted first-party plugin id when this command resolves to one plugin script.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "processId": {
               "description": "Identifier for the underlying PTY process (when available).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scriptPath": {
+              "default": null,
+              "description": "Safe plugin-relative path when this command resolves to one plugin script.",
               "type": [
                 "string",
                 "null"
@@ -4297,6 +4636,16 @@
         },
         {
           "properties": {
+            "appContext": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/McpToolCallAppContext"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "arguments": true,
             "durationMs": {
               "description": "The duration of the MCP tool call in milliseconds.",
@@ -4320,6 +4669,7 @@
               "type": "string"
             },
             "mcpAppResourceUri": {
+              "description": "Deprecated: use `appContext.resourceUri` instead.",
               "type": [
                 "string",
                 "null"
@@ -4390,6 +4740,8 @@
               ]
             },
             "error": {
+              "default": null,
+              "description": "Failure detail persisted with the call, when the tool reported one.",
               "type": [
                 "string",
                 "null"
@@ -4569,6 +4921,15 @@
             "query": {
               "type": "string"
             },
+            "results": {
+              "default": null,
+              "description": "Structured search results returned out-of-band by standalone web search.\n\nThese stay as opaque JSON at the extension/app-server boundary so new result fields and result types can pass through without a Codex release.",
+              "items": true,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "webSearch"
@@ -4591,7 +4952,7 @@
               "type": "string"
             },
             "path": {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -4610,6 +4971,7 @@
           "type": "object"
         },
         {
+          "description": "Display item emitted by the interruptible `clock.sleep` tool.",
           "properties": {
             "durationMs": {
               "format": "uint64",
@@ -5129,11 +5491,6 @@
       "type": "object"
     },
     "ThreadSource": {
-      "enum": [
-        "user",
-        "subagent",
-        "memory_consolidation"
-      ],
       "type": "string"
     },
     "ThreadStartedNotification": {
@@ -5291,6 +5648,11 @@
     },
     "TokenUsageBreakdown": {
       "properties": {
+        "cacheWriteInputTokens": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
         "cachedInputTokens": {
           "format": "int64",
           "type": "integer"
@@ -5351,6 +5713,7 @@
           "description": "Only populated when the Turn's status is failed."
         },
         "id": {
+          "description": "Identifier for this turn. Codex-generated turn IDs are UUIDv7.",
           "type": "string"
         },
         "items": {
@@ -5658,6 +6021,46 @@
             "type"
           ],
           "title": "LocalImageUserInput",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "audio"
+              ],
+              "title": "AudioUserInputType",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ],
+          "title": "AudioUserInput",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "localAudio"
+              ],
+              "title": "LocalAudioUserInputType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ],
+          "title": "LocalAudioUserInput",
           "type": "object"
         },
         {
@@ -5970,6 +6373,26 @@
       "properties": {
         "method": {
           "enum": [
+            "thread/deleted"
+          ],
+          "title": "Thread/deletedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadDeletedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/deletedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
             "thread/unarchived"
           ],
           "title": "Thread/unarchivedNotificationMethod",
@@ -6090,6 +6513,46 @@
       "properties": {
         "method": {
           "enum": [
+            "thread/environment/connected"
+          ],
+          "title": "Thread/environment/connectedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/EnvironmentConnectionNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/environment/connectedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/environment/disconnected"
+          ],
+          "title": "Thread/environment/disconnectedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/EnvironmentConnectionNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/environment/disconnectedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
             "thread/settings/updated"
           ],
           "title": "Thread/settings/updatedNotificationMethod",
@@ -6150,26 +6613,6 @@
       "properties": {
         "method": {
           "enum": [
-            "review/backgroundStatus/changed"
-          ],
-          "title": "Review/backgroundStatus/changedNotificationMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/BackgroundAutoReviewStatusChangedNotification"
-        }
-      },
-      "required": [
-        "method",
-        "params"
-      ],
-      "title": "Review/backgroundStatus/changedNotification",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "method": {
-          "enum": [
             "validation/completed"
           ],
           "title": "Validation/completedNotificationMethod",
@@ -6184,6 +6627,26 @@
         "params"
       ],
       "title": "Validation/completedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "review/backgroundStatus/changed"
+          ],
+          "title": "Review/backgroundStatus/changedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/BackgroundAutoReviewStatusChangedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Review/backgroundStatus/changedNotification",
       "type": "object"
     },
     {
@@ -6715,6 +7178,26 @@
       "properties": {
         "method": {
           "enum": [
+            "externalAgentConfig/import/progress"
+          ],
+          "title": "ExternalAgentConfig/import/progressNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ExternalAgentConfigImportProgressNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "ExternalAgentConfig/import/progressNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
             "externalAgentConfig/import/completed"
           ],
           "title": "ExternalAgentConfig/import/completedNotificationMethod",
@@ -6890,6 +7373,26 @@
         "params"
       ],
       "title": "Turn/moderationMetadataNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "model/safetyBuffering/updated"
+          ],
+          "title": "Model/safetyBuffering/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ModelSafetyBufferingUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Model/safetyBuffering/updatedNotification",
       "type": "object"
     },
     {
@@ -7234,5 +7737,12 @@
       "type": "object"
     }
   ],
+  "properties": {
+    "emittedAtMs": {
+      "description": "Unix timestamp (in milliseconds) when app-server emitted this notification.",
+      "format": "int64",
+      "type": "integer"
+    }
+  },
   "title": "ServerNotification"
 }

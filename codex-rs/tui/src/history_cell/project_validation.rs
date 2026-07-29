@@ -5,40 +5,52 @@ use codex_app_server_protocol::ProjectValidationCompletedNotification;
 use codex_app_server_protocol::ProjectValidationSkipReason;
 use codex_app_server_protocol::ProjectValidationStatus;
 
+pub(crate) struct ProjectValidationCellData<'a> {
+    pub status: ProjectValidationStatus,
+    pub skip_reason: Option<ProjectValidationSkipReason>,
+    pub changed_file_count: Option<u32>,
+    pub command: &'a [String],
+    pub command_truncated: bool,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub output_truncated: bool,
+}
+
 pub(crate) fn new_project_validation_notification_cell(
     notification: &ProjectValidationCompletedNotification,
 ) -> PlainHistoryCell {
-    new_project_validation_cell(
-        notification.status,
-        notification.skip_reason,
-        notification.changed_file_count,
-        &notification.command,
-        notification.command_truncated,
-        notification.exit_code,
-        notification.duration_ms,
-        notification.output_truncated,
-    )
+    new_project_validation_cell(ProjectValidationCellData {
+        status: notification.status,
+        skip_reason: notification.skip_reason,
+        changed_file_count: notification.changed_file_count,
+        command: &notification.command,
+        command_truncated: notification.command_truncated,
+        exit_code: notification.exit_code,
+        duration_ms: notification.duration_ms,
+        output_truncated: notification.output_truncated,
+    })
 }
 
-pub(crate) fn new_project_validation_cell(
-    status: ProjectValidationStatus,
-    skip_reason: Option<ProjectValidationSkipReason>,
-    changed_file_count: Option<u32>,
-    command: &[String],
-    command_truncated: bool,
-    exit_code: Option<i32>,
-    duration_ms: u64,
-    output_truncated: bool,
-) -> PlainHistoryCell {
+pub(crate) fn new_project_validation_cell(data: ProjectValidationCellData<'_>) -> PlainHistoryCell {
+    let ProjectValidationCellData {
+        status,
+        skip_reason,
+        changed_file_count,
+        command,
+        command_truncated,
+        exit_code,
+        duration_ms,
+        output_truncated,
+    } = data;
     let (symbol, state) = match status {
         ProjectValidationStatus::Passed => ("✔ ".green(), "passed".bold()),
         ProjectValidationStatus::ActionableFailure => ("✗ ".red(), "failed".bold()),
         ProjectValidationStatus::ConfigurationError => ("✗ ".red(), "configuration error".bold()),
-        ProjectValidationStatus::TimedOut => ("✗ ".yellow(), "timed out".bold()),
+        ProjectValidationStatus::TimedOut => ("✗ ".red(), "timed out".bold()),
         ProjectValidationStatus::InfrastructureFailure => {
             ("✗ ".red(), "infrastructure failure".bold())
         }
-        ProjectValidationStatus::Cancelled => ("○ ".yellow(), "cancelled".bold()),
+        ProjectValidationStatus::Cancelled => ("○ ".dim(), "cancelled".bold()),
         ProjectValidationStatus::Skipped => ("○ ".dim(), "skipped".bold()),
     };
     let mut spans = vec![symbol, "Automatic Validation ".into(), state];
@@ -60,7 +72,7 @@ pub(crate) fn new_project_validation_cell(
     }
     if command_truncated {
         spans.push(" · ".dim());
-        spans.push("command truncated".yellow());
+        spans.push("command truncated".dim());
     }
     if duration_ms > 0 {
         spans.push(" · ".dim());
@@ -68,7 +80,7 @@ pub(crate) fn new_project_validation_cell(
     }
     if output_truncated {
         spans.push(" · ".dim());
-        spans.push("output truncated".yellow());
+        spans.push("output truncated".dim());
     }
     PlainHistoryCell::new(vec![Line::from(spans)])
 }

@@ -3,6 +3,7 @@ use codex_core::parse_turn_item;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::plaintext_agent_message_content;
 use codex_tools::retain_tail_from_last_n_user_messages;
 use codex_tools::truncate_assistant_output_text_to_token_budget;
 
@@ -29,14 +30,33 @@ fn push_visible_message(messages: &mut Vec<ResponseItem>, item: &ResponseItem) {
     match item {
         ResponseItem::Message { role, .. } if role == ASSISTANT_ROLE => {
             let mut message = item.clone();
-            message.clear_id();
+            message.set_id(/*new_id*/ None);
             messages.push(message);
+        }
+        ResponseItem::AgentMessage {
+            author,
+            content,
+            internal_chat_message_metadata_passthrough: metadata,
+            ..
+        } => {
+            if let Some(text) = plaintext_agent_message_content(content) {
+                messages.push(ResponseItem::Message {
+                    id: None,
+                    role: ASSISTANT_ROLE.to_string(),
+                    content: vec![ContentItem::OutputText {
+                        text: format!("Agent message from {author}:\n{text}"),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: metadata.clone(),
+                });
+            }
         }
         ResponseItem::Message {
             id: _,
             role,
             content,
             phase,
+            internal_chat_message_metadata_passthrough: metadata,
         } if role == USER_ROLE
             && matches!(parse_turn_item(item), Some(TurnItem::UserMessage(_))) =>
         {
@@ -51,6 +71,7 @@ fn push_visible_message(messages: &mut Vec<ResponseItem>, item: &ResponseItem) {
                     role: role.clone(),
                     content,
                     phase: phase.clone(),
+                    internal_chat_message_metadata_passthrough: metadata.clone(),
                 });
             }
         }
@@ -61,6 +82,7 @@ fn push_visible_message(messages: &mut Vec<ResponseItem>, item: &ResponseItem) {
 #[cfg(test)]
 mod tests {
     use codex_api::SearchInput;
+    use codex_protocol::ResponseItemId;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
     use pretty_assertions::assert_eq;
@@ -83,17 +105,19 @@ mod tests {
                 }
             }],
             phase: None,
+            internal_chat_message_metadata_passthrough: None,
         }
     }
 
     #[test]
     fn keeps_current_user_and_previous_visible_turn() {
         let mut previous_user = message(USER_ROLE, "previous user");
-        previous_user.set_id("msg_previous_user".to_string());
+        previous_user.set_id(Some(ResponseItemId::with_suffix("msg", "previous_user")));
         let mut previous_assistant = message(ASSISTANT_ROLE, "previous assistant");
-        previous_assistant.set_id("msg_previous_assistant".to_string());
-        let mut current_user = message(USER_ROLE, "current user");
-        current_user.set_id("msg_current_user".to_string());
+        previous_assistant.set_id(Some(ResponseItemId::with_suffix(
+            "msg",
+            "previous_assistant",
+        )));
         let items = vec![
             message("system", "system"),
             message(USER_ROLE, "old user"),
@@ -105,10 +129,11 @@ mod tests {
                 namespace: None,
                 arguments: "{}".to_string(),
                 call_id: "call-1".to_string(),
+                internal_chat_message_metadata_passthrough: None,
             },
             previous_assistant,
             message("developer", "developer"),
-            current_user,
+            message(USER_ROLE, "current user"),
             message(ASSISTANT_ROLE, "current commentary"),
         ];
 
@@ -137,6 +162,7 @@ mod tests {
                 },
             ],
             phase: None,
+            internal_chat_message_metadata_passthrough: None,
         };
         let items = vec![
             previous_user,

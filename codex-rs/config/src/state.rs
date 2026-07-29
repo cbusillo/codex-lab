@@ -1,15 +1,18 @@
+use crate::CONFIG_TOML_FILE;
 use crate::config_requirements::ConfigRequirements;
 use crate::config_requirements::ConfigRequirementsToml;
+use crate::format_config_layer_source;
 
 use super::fingerprint::record_origins;
 use super::fingerprint::version_for_toml;
 use super::key_aliases::normalized_with_key_aliases;
 use super::merge::merge_toml_values;
 use crate::CloudConfigBundleLoader;
+use crate::ConfigLayer;
+use crate::ConfigLayerMetadata;
+use crate::ConfigLayerSource;
 use crate::ProfileV2Name;
-use codex_app_server_protocol::ConfigLayer;
-use codex_app_server_protocol::ConfigLayerMetadata;
-use codex_app_server_protocol::ConfigLayerSource;
+use crate::shell_environment_policy::validate_shell_environment_policy_filter_config;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -73,14 +76,18 @@ impl LoaderOverrides {
         }
     }
 
-    /// Returns overrides with host MDM disabled and managed config loaded from `managed_config_path`.
+    /// Returns overrides with host MDM disabled and managed config loaded from
+    /// `managed_config_path`. System requirements are loaded from a sibling
+    /// `requirements.toml` fixture.
     ///
     /// This is intended for tests that supply an explicit managed config fixture.
     pub fn with_managed_config_path_for_tests(managed_config_path: PathBuf) -> Self {
+        let system_requirements_path = managed_config_path.with_file_name("requirements.toml");
         Self {
             user_config_path: None,
             user_config_profile: None,
             managed_config_path: Some(managed_config_path),
+            system_requirements_path: Some(system_requirements_path),
             ..Self::without_managed_config_for_tests()
         }
     }
@@ -271,6 +278,7 @@ impl ConfigLayerStack {
         requirements: ConfigRequirements,
         requirements_toml: ConfigRequirementsToml,
     ) -> std::io::Result<Self> {
+        validate_enabled_config_layers(&layers)?;
         let user_layer_index = verify_layer_ordering(&layers)?;
         Ok(Self {
             layers,
@@ -372,7 +380,11 @@ impl ConfigLayerStack {
     /// based on precedence rules. When the stack has both base and profile-v2
     /// user layers, this updates only the layer whose file matches
     /// `config_toml`.
-    pub fn with_user_config(&self, config_toml: &AbsolutePathBuf, user_config: TomlValue) -> Self {
+    pub fn with_user_config(
+        &self,
+        config_toml: &AbsolutePathBuf,
+        user_config: TomlValue,
+    ) -> std::io::Result<Self> {
         let profile = self.layers.iter().find_map(|layer| match &layer.name {
             ConfigLayerSource::User { file, profile } if file == config_toml => profile
                 .as_deref()
@@ -387,7 +399,7 @@ impl ConfigLayerStack {
         config_toml: &AbsolutePathBuf,
         profile: Option<&ProfileV2Name>,
         user_config: TomlValue,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let user_layer = ConfigLayerEntry::new(
             ConfigLayerSource::User {
                 file: config_toml.clone(),
@@ -395,6 +407,7 @@ impl ConfigLayerStack {
             },
             user_config,
         );
+        validate_enabled_config_layers(std::slice::from_ref(&user_layer))?;
 
         let mut layers = self.layers.clone();
         if let Some(index) = layers.iter().position(|layer| {
@@ -419,7 +432,7 @@ impl ConfigLayerStack {
                 None
             }
         });
-        Self {
+        Ok(Self {
             layers,
             user_layer_index,
             requirements: self.requirements.clone(),
@@ -427,7 +440,7 @@ impl ConfigLayerStack {
             ignore_user_and_project_exec_policy_rules: self
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
-        }
+        })
     }
 
     /// Returns a new stack with the user layer copied from `other`, preserving
@@ -533,6 +546,22 @@ impl ConfigLayerStack {
         }
         layers
     }
+}
+
+/// Validates before merging so mixed forms and malformed filter entries cannot be normalized away.
+pub(crate) fn validate_enabled_config_layers(layers: &[ConfigLayerEntry]) -> std::io::Result<()> {
+    for layer in layers.iter().filter(|layer| !layer.is_disabled()) {
+        validate_shell_environment_policy_filter_config(&layer.config).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid shell environment policy in {}: {error}",
+                    format_config_layer_source(&layer.name, CONFIG_TOML_FILE)
+                ),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Ensures precedence ordering of config layers is correct. Returns the index

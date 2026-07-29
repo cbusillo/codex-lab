@@ -125,3 +125,17 @@ collapsed = true"#;
 
     assert_eq!(error, None);
 }
+
+#[test]
+fn strict_config_accepts_removed_compatibility_keys() {
+    let path = Path::new("/tmp/config.toml");
+    let contents = r#"
+model_supports_reasoning_summaries = true
+
+[features]
+child_agents_md = true"#;
+
+    let error = config_error_from_ignored_toml_fields::<ConfigToml>(path, contents);
+
+    assert_eq!(error, None);
+}

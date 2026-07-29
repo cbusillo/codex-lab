@@ -126,6 +126,7 @@ impl EventProcessorWithJsonOutput {
         Usage {
             input_tokens: usage.total.input_tokens,
             cached_input_tokens: usage.total.cached_input_tokens,
+            cache_write_input_tokens: usage.total.cache_write_input_tokens,
             output_tokens: usage.total.output_tokens,
             reasoning_output_tokens: usage.total.reasoning_output_tokens,
         }
@@ -298,16 +299,12 @@ impl EventProcessorWithJsonOutput {
                     },
                 }),
             }),
-            ThreadItem::WebSearch {
-                id: raw_id,
-                query,
-                action,
-            } => Some(ExecThreadItem {
+            ThreadItem::WebSearch(item) => Some(ExecThreadItem {
                 id: make_id(),
                 details: ThreadItemDetails::WebSearch(WebSearchItem {
-                    id: raw_id,
-                    query,
-                    action: match action {
+                    id: item.id,
+                    query: item.query,
+                    action: match item.action {
                         Some(action) => serde_json::from_value(
                             serde_json::to_value(action).unwrap_or_else(|_| json!("other")),
                         )
@@ -435,6 +432,11 @@ impl EventProcessorWithJsonOutput {
                 }));
                 CodexStatus::Running
             }
+            ServerNotification::Warning(notification) => {
+                let warning = self.collect_warning(notification.message);
+                events.extend(warning.events);
+                warning.status
+            }
             ServerNotification::Error(notification) => {
                 let message = match notification.error.additional_details {
                     Some(details) if !details.is_empty() => {
@@ -468,6 +470,7 @@ impl EventProcessorWithJsonOutput {
             ServerNotification::ProjectValidationCompleted(notification) => {
                 events.push(ThreadEvent::ProjectValidationCompleted(
                     ProjectValidationCompletedEvent {
+                        item_id: notification.item_id,
                         command: notification.command,
                         command_truncated: notification.command_truncated,
                         cwd: notification

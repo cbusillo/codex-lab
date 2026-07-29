@@ -5,6 +5,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_rollout::RolloutPersistenceTelemetry;
+use codex_rollout::measure_and_filter_rollout_items;
 use codex_rollout::persisted_rollout_items;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -35,6 +37,7 @@ pub struct LiveThread {
     history_mode: ThreadHistoryMode,
     thread_store: Arc<dyn ThreadStore>,
     metadata_sync: Arc<Mutex<ThreadMetadataSync>>,
+    persistence_telemetry: RolloutPersistenceTelemetry,
 }
 
 /// Owns a live thread while session initialization is still fallible.
@@ -100,18 +103,56 @@ impl LiveThread {
             history_mode,
             thread_store,
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+            persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
         })
+    }
+
+    /// Create a child thread with inherited model context already durable.
+    ///
+    /// The boundary belongs in session metadata before the copied prefix is written so history
+    /// projection can distinguish inherited context from the child's own records immediately.
+    pub async fn create_with_inherited_model_context(
+        thread_store: Arc<dyn ThreadStore>,
+        mut params: CreateThreadParams,
+        inherited_model_context: &[RolloutItem],
+    ) -> ThreadStoreResult<Self> {
+        let persisted_prefix_item_count =
+            persisted_rollout_items(inherited_model_context, params.history_mode).len();
+        params.subagent_history_start_ordinal = Some(
+            u64::try_from(persisted_prefix_item_count)
+                .map_err(|_| ThreadStoreError::Internal {
+                    message: "inherited model context is too large".to_string(),
+                })?
+                .checked_add(1)
+                .ok_or_else(|| ThreadStoreError::Internal {
+                    message: "inherited model context is too large".to_string(),
+                })?,
+        );
+        let live_thread = Self::create(thread_store, params).await?;
+        if let Err(err) = live_thread
+            .persist_appended_items(inherited_model_context)
+            .await
+        {
+            if let Err(discard_err) = live_thread.discard().await {
+                warn!(
+                    "failed to discard thread persistence after inherited context append failed: {discard_err}"
+                );
+            }
+            return Err(err);
+        }
+        Ok(live_thread)
     }
 
     pub async fn resume(
         thread_store: Arc<dyn ThreadStore>,
-        mut params: ResumeThreadParams,
+        history_mode: ThreadHistoryMode,
+        params: ResumeThreadParams,
     ) -> ThreadStoreResult<Self> {
         let thread_id = params.thread_id;
-        let history_mode = params.metadata.history_mode;
         let should_load_history = params.history.is_none();
         let include_archived = params.include_archived;
-        thread_store.resume_thread(params.clone()).await?;
+        let mut metadata_sync = ThreadMetadataSync::for_resume(&params);
+        thread_store.resume_thread(params).await?;
         if should_load_history {
             match thread_store
                 .load_history(LoadThreadHistoryParams {
@@ -120,62 +161,83 @@ impl LiveThread {
                 })
                 .await
             {
-                Ok(history) => params.history = Some(history.items),
+                Ok(history) => metadata_sync.record_resume_history(&history.items),
                 Err(err) => {
-                    let _ = thread_store.discard_thread(thread_id).await;
+                    if let Err(discard_err) = thread_store.discard_thread(thread_id).await {
+                        warn!(
+                            "failed to discard thread persistence after resume history load failed: {discard_err}"
+                        );
+                    }
                     return Err(err);
                 }
             }
         }
-        let metadata_sync = ThreadMetadataSync::for_resume(&params);
         Ok(Self {
             thread_id,
             history_mode,
             thread_store,
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+            persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
         })
     }
 
-    pub async fn append_items(&self, items: &[RolloutItem]) -> ThreadStoreResult<()> {
-        let persisted_items = persisted_rollout_items(items, self.history_mode);
-        if persisted_items.is_empty() {
+    #[tracing::instrument(
+        level = "trace",
+        skip_all,
+        fields(item_count = raw_items.len())
+    )]
+    pub async fn append_items(&self, raw_items: &[RolloutItem]) -> ThreadStoreResult<()> {
+        let items = self.persist_appended_items(raw_items).await?;
+        if items.is_empty() {
             return Ok(());
         }
-        self.thread_store
-            .append_items(AppendThreadItemsParams {
-                thread_id: self.thread_id,
-                items: persisted_items.clone(),
-            })
-            .await?;
         let update = self
             .metadata_sync
             .lock()
             .await
-            .observe_appended_items(persisted_items.as_slice());
+            .observe_appended_items(items.as_slice());
         if let Some(update) = update {
-            let thread_store = Arc::clone(&self.thread_store);
-            let metadata_sync = Arc::clone(&self.metadata_sync);
-            let thread_id = self.thread_id;
-            tokio::spawn(async move {
-                thread_store
-                    .update_thread_metadata(UpdateThreadMetadataParams {
-                        thread_id,
-                        patch: update.patch.clone(),
-                        include_archived: true,
-                    })
-                    .await?;
-                metadata_sync
-                    .lock()
-                    .await
-                    .mark_pending_update_applied(&update);
-                ThreadStoreResult::Ok(())
-            })
-            .await
-            .map_err(|err| ThreadStoreError::Internal {
-                message: format!("thread metadata update task failed: {err}"),
-            })??;
+            self.thread_store
+                .update_thread_metadata(UpdateThreadMetadataParams {
+                    thread_id: self.thread_id,
+                    patch: update.patch.clone(),
+                    include_archived: true,
+                })
+                .await?;
+            self.metadata_sync
+                .lock()
+                .await
+                .mark_pending_update_applied(&update);
         }
         Ok(())
+    }
+
+    async fn persist_appended_items(
+        &self,
+        raw_items: &[RolloutItem],
+    ) -> ThreadStoreResult<Vec<RolloutItem>> {
+        // Empty appends are intentionally ignored rather than represented as zero-sized batches.
+        if raw_items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (items, measurement) = if self.persistence_telemetry.is_enabled() {
+            let (items, measurement) =
+                measure_and_filter_rollout_items(raw_items, self.history_mode);
+            (items, Some(measurement))
+        } else {
+            (persisted_rollout_items(raw_items, self.history_mode), None)
+        };
+        self.thread_store
+            .append_items(AppendThreadItemsParams {
+                thread_id: self.thread_id,
+                items: raw_items.to_vec(),
+            })
+            .await?;
+        if let Some(measurement) = measurement.as_ref() {
+            self.persistence_telemetry
+                .record_batch(raw_items, measurement);
+        }
+        Ok(items)
     }
 
     pub async fn persist(&self) -> ThreadStoreResult<()> {

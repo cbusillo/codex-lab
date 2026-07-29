@@ -4,6 +4,11 @@
 //! from JSONL rollouts and mirrors it into a local SQLite database. Backfill
 //! orchestration and rollout scanning live in `codex-core`.
 
+const _: () = assert!(
+    libsqlite3_sys::SQLITE_VERSION_NUMBER >= 3_051_003,
+    "bundled SQLite must include the WAL-reset corruption fix",
+);
+
 mod audit;
 mod extract;
 pub mod log_db;
@@ -11,8 +16,8 @@ mod migrations;
 mod model;
 mod paths;
 mod runtime;
+mod sqlite;
 mod telemetry;
-mod thread_history;
 
 pub use model::LogEntry;
 pub use model::LogQuery;
@@ -20,25 +25,15 @@ pub use model::LogRow;
 pub use model::Phase2JobClaimOutcome;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;
+pub use sqlite::SqliteConfig;
 
 pub use audit::ThreadStateAuditRow;
 pub use audit::read_thread_state_audit_rows;
-pub use extract::ThreadMetadataProjection;
-pub use extract::ThreadResumeModelSettings;
-pub use extract::ThreadResumeReasoningEffort;
 /// Low-level storage engine: useful for focused tests.
 ///
 /// Most consumers should prefer [`StateRuntime`].
-pub use extract::apply_rollout_items_to_metadata;
-pub use extract::extract_thread_resume_model_settings;
+pub use extract::apply_rollout_item;
 pub use extract::rollout_item_affects_thread_metadata;
-pub use model::AgentJob;
-pub use model::AgentJobCreateParams;
-pub use model::AgentJobItem;
-pub use model::AgentJobItemCreateParams;
-pub use model::AgentJobItemStatus;
-pub use model::AgentJobProgress;
-pub use model::AgentJobStatus;
 pub use model::Anchor;
 pub use model::BackfillState;
 pub use model::BackfillStats;
@@ -55,52 +50,36 @@ pub use model::ThreadGoal;
 pub use model::ThreadGoalStatus;
 pub use model::ThreadMetadata;
 pub use model::ThreadMetadataBuilder;
+pub use model::ThreadRelationFilter;
 pub use model::ThreadsPage;
+pub use runtime::ExternalAgentConfigImportDetailsRecord;
+pub use runtime::ExternalAgentConfigImportFailureRecord;
+pub use runtime::ExternalAgentConfigImportHistoryRecord;
+pub use runtime::ExternalAgentConfigImportSuccessRecord;
 pub use runtime::GoalAccountingMode;
 pub use runtime::GoalAccountingOutcome;
 pub use runtime::GoalStore;
 pub use runtime::GoalUpdate;
 pub use runtime::MemoryStore;
 pub use runtime::RemoteControlEnrollmentRecord;
-pub use runtime::RuntimeDbPath;
+pub use runtime::RuntimeDbBackup;
 pub use runtime::ThreadFilterOptions;
-pub use runtime::goals_db_filename;
-pub use runtime::goals_db_path;
-pub use runtime::logs_db_filename;
-pub use runtime::logs_db_path;
-pub use runtime::memories_db_filename;
-pub use runtime::memories_db_path;
-pub use runtime::runtime_db_paths;
+pub use runtime::backup_runtime_db_for_fresh_start;
+pub use runtime::is_sqlite_corruption_error;
+pub use runtime::open_thread_history_db;
+pub use runtime::runtime_db_path_for_corruption_error;
+pub use runtime::sqlite_error_detail_is_corruption;
+pub use runtime::sqlite_error_detail_is_lock;
 pub use runtime::sqlite_integrity_check;
-pub use runtime::state_db_filename;
-pub use runtime::state_db_path;
+pub use sqlite::RuntimeDbPath;
 pub use telemetry::DbTelemetry;
 pub use telemetry::DbTelemetryHandle;
 pub use telemetry::install_process_db_telemetry;
 pub use telemetry::record_backfill_gate;
 pub use telemetry::record_fallback;
-pub use thread_history::ThreadHistoryCheckpoint;
-pub use thread_history::ThreadHistoryCheckpointUpdate;
-pub use thread_history::ThreadHistoryItemUpsert;
-pub use thread_history::ThreadHistoryMutation;
-pub use thread_history::ThreadHistoryProjectionStatus;
-pub use thread_history::ThreadHistoryRepository;
-pub use thread_history::ThreadHistorySource;
-pub use thread_history::ThreadHistorySuffix;
-pub use thread_history::ThreadHistoryTurnStatus;
-pub use thread_history::ThreadHistoryTurnTarget;
-pub use thread_history::ThreadHistoryTurnUpsert;
-pub use thread_history::thread_history_db_filename;
-pub use thread_history::thread_history_db_path;
 
 /// Environment variable for overriding the SQLite state database home directory.
 pub const SQLITE_HOME_ENV: &str = "CODEX_SQLITE_HOME";
-
-pub const LOGS_DB_FILENAME: &str = "logs_2.sqlite";
-pub const GOALS_DB_FILENAME: &str = "goals_1.sqlite";
-pub const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
-pub const STATE_DB_FILENAME: &str = "state_5.sqlite";
-pub const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
 
 /// Errors encountered during DB operations. Tags: [stage]
 pub const DB_ERROR_METRIC: &str = "codex.db.error";

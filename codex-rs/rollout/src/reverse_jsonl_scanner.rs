@@ -8,14 +8,16 @@ use serde::de::DeserializeOwned;
 const READ_CHUNK_SIZE: usize = 8 * 1024;
 
 #[derive(Debug)]
-pub(crate) enum ScanOutcome<T> {
+pub enum ScanOutcome<T> {
+    /// The record was valid JSON and deserialized as the requested type.
     Parsed(T),
+    /// The record was not valid JSON for the requested type.
     #[allow(dead_code)]
     Rejected(serde_json::Error),
 }
 
 /// Read-only scanner for newline-delimited JSON records, starting from the end.
-pub(crate) struct ReverseJsonlScanner<R> {
+pub struct ReverseJsonlScanner<R> {
     reader: R,
     next_chunk_end: u64,
     chunk_position: usize,
@@ -27,11 +29,26 @@ impl<R> ReverseJsonlScanner<R>
 where
     R: Read + Seek,
 {
-    pub(crate) fn new(mut reader: R) -> io::Result<Self> {
+    pub fn new(mut reader: R) -> io::Result<Self> {
         let next_chunk_end = reader.seek(SeekFrom::End(0))?;
+        Self::new_at(reader, next_chunk_end)
+    }
+
+    /// Creates a reverse scanner whose logical end is the given byte offset.
+    ///
+    /// This lets callers scan a frozen JSONL prefix without reading records appended after that
+    /// prefix was captured.
+    pub fn new_at(mut reader: R, end_byte_offset: u64) -> io::Result<Self> {
+        let file_len = reader.seek(SeekFrom::End(0))?;
+        if end_byte_offset > file_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reverse JSONL scan end is past the file",
+            ));
+        }
         Ok(Self {
             reader,
-            next_chunk_end,
+            next_chunk_end: end_byte_offset,
             chunk_position: 0,
             chunk: vec![0; READ_CHUNK_SIZE],
             record_reversed: Vec::new(),
@@ -42,7 +59,7 @@ where
     ///
     /// I/O failures are returned as [`Err`]. Invalid JSON records are returned as
     /// [`ScanOutcome::Rejected`], and the scanner remains usable.
-    pub(crate) fn scan_next<T>(&mut self) -> io::Result<Option<ScanOutcome<T>>>
+    pub fn scan_next<T>(&mut self) -> io::Result<Option<ScanOutcome<T>>>
     where
         T: DeserializeOwned,
     {

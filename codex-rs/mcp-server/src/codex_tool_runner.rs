@@ -11,6 +11,7 @@ use crate::outgoing_message::OutgoingNotificationMeta;
 use crate::patch_approval::handle_patch_approval_request;
 use codex_core::CodexThread;
 use codex_core::NewThread;
+use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::config::Config as CodexConfig;
 use codex_protocol::ThreadId;
@@ -66,7 +67,10 @@ pub async fn run_codex_tool_session(
         thread_id,
         thread,
         session_configured,
-    } = match thread_manager.start_thread(config.clone()).await {
+    } = match thread_manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+    {
         Ok(res) => res,
         Err(e) => {
             let result = CallToolResult::error(vec![Content::text(format!(
@@ -103,7 +107,6 @@ pub async fn run_codex_tool_session(
     let submission = Submission {
         id: sub_id.clone(),
         op: Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: initial_prompt.clone(),
                 // MCP tool prompts are plain text with no UI element ranges.
@@ -155,7 +158,6 @@ pub async fn run_codex_tool_session_reply(
         .insert(request_id.clone(), thread_id);
     if let Err(e) = thread
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: prompt,
                 // MCP tool prompts are plain text with no UI element ranges.
@@ -222,10 +224,13 @@ async fn run_codex_tool_session_inner(
                         let approval_id = ev.effective_approval_id();
                         let ExecApprovalRequestEvent {
                             turn_id: _,
+                            environment_id: _,
                             started_at_ms: _,
                             command,
                             cwd,
                             call_id,
+                            plugin_id: _,
+                            script_path: _,
                             approval_id: _,
                             reason: _,
                             proposed_execpolicy_amendment: _,
@@ -267,6 +272,7 @@ async fn run_codex_tool_session_inner(
                     EventMsg::Warning(_)
                     | EventMsg::GuardianWarning(_)
                     | EventMsg::ModelVerification(_)
+                    | EventMsg::SafetyBuffering(_)
                     | EventMsg::TurnModerationMetadata(_) => {
                         continue;
                     }
@@ -333,6 +339,8 @@ async fn run_codex_tool_session_inner(
                     EventMsg::AgentReasoningRawContent(_)
                     | EventMsg::TurnStarted(_)
                     | EventMsg::ThreadSettingsApplied(_)
+                    | EventMsg::EnvironmentConnected(_)
+                    | EventMsg::EnvironmentDisconnected(_)
                     | EventMsg::TokenCount(_)
                     | EventMsg::AgentReasoning(_)
                     | EventMsg::AgentReasoningSectionBreak(_)
@@ -358,6 +366,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::ImageGenerationEnd(_)
                     | EventMsg::ViewImageToolCall(_)
                     | EventMsg::RawResponseItem(_)
+                    | EventMsg::RawResponseCompleted(_)
                     | EventMsg::EnteredReviewMode(_)
                     | EventMsg::BackgroundAutoReviewStatus(_)
                     | EventMsg::ProjectValidationCompleted(_)
@@ -386,6 +395,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::CollabCloseEnd(_)
                     | EventMsg::CollabResumeBegin(_)
                     | EventMsg::CollabResumeEnd(_)
+                    | EventMsg::SubAgentActivity(_)
                     | EventMsg::RealtimeConversationStarted(_)
                     | EventMsg::RealtimeConversationSdp(_)
                     | EventMsg::RealtimeConversationRealtime(_)

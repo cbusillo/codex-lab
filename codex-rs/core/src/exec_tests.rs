@@ -273,6 +273,7 @@ async fn exec_full_buffer_capture_ignores_expiration() -> Result<()> {
             capture_policy: ExecCapturePolicy::FullBuffer,
             env,
             network: None,
+            network_environment_id: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: false,
@@ -309,6 +310,7 @@ async fn exec_full_buffer_capture_keeps_io_drain_timeout_when_descendant_holds_p
                 capture_policy: ExecCapturePolicy::FullBuffer,
                 env: std::env::vars().collect(),
                 network: None,
+                network_environment_id: None,
                 sandbox_permissions: SandboxPermissions::UseDefault,
                 windows_sandbox_level: WindowsSandboxLevel::Disabled,
                 windows_sandbox_private_desktop: false,
@@ -356,6 +358,7 @@ async fn process_exec_tool_call_preserves_full_buffer_capture_policy() -> Result
             capture_policy: ExecCapturePolicy::FullBuffer,
             env: std::env::vars().collect(),
             network: None,
+            network_environment_id: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: false,
@@ -438,6 +441,7 @@ fn windows_restricted_token_rejects_managed_root_write_profiles() {
                 value: codex_protocol::permissions::FileSystemSpecialPath::Root,
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -509,6 +513,7 @@ fn windows_elevated_allows_split_restricted_read_policies() {
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path { path: docs },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -540,6 +545,7 @@ fn windows_restricted_token_rejects_split_only_filesystem_policies() {
                 ),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path {
@@ -547,6 +553,7 @@ fn windows_restricted_token_rejects_split_only_filesystem_policies() {
                     .expect("absolute docs"),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -579,6 +586,7 @@ fn windows_restricted_token_rejects_root_write_read_only_carveouts() {
                 value: codex_protocol::permissions::FileSystemSpecialPath::Root,
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path {
@@ -586,6 +594,7 @@ fn windows_restricted_token_rejects_root_write_read_only_carveouts() {
                     .expect("absolute docs"),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -621,6 +630,7 @@ fn windows_restricted_token_supports_full_read_split_write_read_carveouts() {
                 value: codex_protocol::permissions::FileSystemSpecialPath::Root,
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Special {
@@ -629,10 +639,12 @@ fn windows_restricted_token_supports_full_read_split_write_read_carveouts() {
                 ),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path { path: docs.clone() },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -676,6 +688,7 @@ fn windows_restricted_token_rejects_unreadable_split_carveouts() {
                 value: codex_protocol::permissions::FileSystemSpecialPath::Root,
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Special {
@@ -684,10 +697,12 @@ fn windows_restricted_token_rejects_unreadable_split_carveouts() {
                 ),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path { path: blocked },
             access: codex_protocol::permissions::FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -722,6 +737,7 @@ fn windows_elevated_supports_split_restricted_read_roots() {
                     .expect("absolute docs"),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -758,6 +774,7 @@ fn windows_elevated_supports_split_write_read_carveouts() {
                 value: codex_protocol::permissions::FileSystemSpecialPath::Root,
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Special {
@@ -766,6 +783,7 @@ fn windows_elevated_supports_split_write_read_carveouts() {
                 ),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path {
@@ -773,6 +791,7 @@ fn windows_elevated_supports_split_write_read_carveouts() {
                     .expect("absolute docs"),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -800,6 +819,52 @@ fn windows_elevated_supports_split_write_read_carveouts() {
     );
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_workspace_defaults_do_not_hide_explicit_metadata_carveouts() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let cwd = temp_dir.path().canonicalize().expect("canonical cwd").abs();
+
+    let default_profile = PermissionProfile::workspace_write();
+    let default_overrides = resolve_windows_elevated_filesystem_overrides(
+        SandboxType::WindowsRestrictedToken,
+        &default_profile,
+        &cwd,
+        /*use_windows_elevated_backend*/ true,
+    )
+    .expect("resolve workspace defaults");
+    assert!(
+        default_overrides.is_none_or(|overrides| overrides.additional_deny_write_paths.is_empty())
+    );
+
+    for name in codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES {
+        let (mut explicit_policy, network_policy) = default_profile.to_runtime_permissions();
+        explicit_policy
+            .entries
+            .push(codex_protocol::permissions::FileSystemSandboxEntry {
+                path: codex_protocol::permissions::FileSystemPath::Special {
+                    value: codex_protocol::permissions::FileSystemSpecialPath::project_roots(Some(
+                        (*name).into(),
+                    )),
+                },
+                access: codex_protocol::permissions::FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            });
+        let explicit_profile =
+            PermissionProfile::from_runtime_permissions(&explicit_policy, network_policy);
+
+        let overrides = resolve_windows_elevated_filesystem_overrides(
+            SandboxType::WindowsRestrictedToken,
+            &explicit_profile,
+            &cwd,
+            /*use_windows_elevated_backend*/ true,
+        )
+        .expect("resolve explicit metadata carveout")
+        .expect("explicit metadata carveout needs an override");
+        assert_eq!(overrides.additional_deny_write_paths, vec![cwd.join(name)]);
+    }
+}
+
 #[test]
 fn windows_elevated_supports_unreadable_split_carveouts() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
@@ -812,6 +877,7 @@ fn windows_elevated_supports_unreadable_split_carveouts() {
                 value: codex_protocol::permissions::FileSystemSpecialPath::Root,
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Special {
@@ -820,6 +886,7 @@ fn windows_elevated_supports_unreadable_split_carveouts() {
                 ),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path {
@@ -827,6 +894,7 @@ fn windows_elevated_supports_unreadable_split_carveouts() {
                     .expect("absolute blocked"),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -871,6 +939,7 @@ fn windows_elevated_supports_unreadable_globs() {
                 value: codex_protocol::permissions::FileSystemSpecialPath::Root,
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Special {
@@ -879,12 +948,14 @@ fn windows_elevated_supports_unreadable_globs() {
                 ),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::GlobPattern {
                 pattern: "**/*.env".to_string(),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -924,6 +995,7 @@ fn windows_elevated_rejects_reopened_writable_descendants() {
                 value: codex_protocol::permissions::FileSystemSpecialPath::Root,
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Special {
@@ -932,6 +1004,7 @@ fn windows_elevated_rejects_reopened_writable_descendants() {
                 ),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path {
@@ -939,6 +1012,7 @@ fn windows_elevated_rejects_reopened_writable_descendants() {
                     .expect("absolute docs"),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         codex_protocol::permissions::FileSystemSandboxEntry {
             path: codex_protocol::permissions::FileSystemPath::Path {
@@ -946,6 +1020,7 @@ fn windows_elevated_rejects_reopened_writable_descendants() {
                     .expect("absolute nested"),
             },
             access: codex_protocol::permissions::FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
     ]);
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -998,6 +1073,7 @@ fn build_exec_request_preserves_windows_workspace_roots() -> Result<()> {
             capture_policy: ExecCapturePolicy::ShellTool,
             env: HashMap::new(),
             network: None,
+            network_environment_id: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: false,
@@ -1052,6 +1128,7 @@ async fn kill_child_process_group_kills_grandchildren_on_timeout() -> Result<()>
         capture_policy: ExecCapturePolicy::ShellTool,
         env,
         network: None,
+        network_environment_id: None,
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
         windows_sandbox_private_desktop: false,
@@ -1107,6 +1184,7 @@ async fn process_exec_tool_call_respects_cancellation_token() -> Result<()> {
         capture_policy: ExecCapturePolicy::ShellTool,
         env,
         network: None,
+        network_environment_id: None,
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
         windows_sandbox_private_desktop: false,
@@ -1190,6 +1268,7 @@ while :; do sleep 1; done"#
         capture_policy: ExecCapturePolicy::ShellTool,
         env,
         network: None,
+        network_environment_id: None,
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
         windows_sandbox_private_desktop: false,

@@ -1,6 +1,6 @@
 //! Persistence layer for the global, append-only *message history* file.
 //!
-//! The history is stored at `~/.codex-lab/history.jsonl` with **one JSON object per
+//! The history is stored at `~/.codex/history.jsonl` with **one JSON object per
 //! line** so that it can be efficiently appended to and parsed with standard
 //! JSON-Lines tooling. Each record has the following schema:
 //!
@@ -37,12 +37,18 @@ use tokio::io::AsyncReadExt;
 use codex_config::types::History;
 use codex_config::types::HistoryPersistence;
 
+mod batch;
+pub use batch::HistoryBatch;
+pub use batch::HistoryBatchCursor;
+pub use batch::HistoryBatchEntry;
+pub use batch::lookup_batch;
+
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-/// Filename that stores the message history inside `~/.codex-lab`.
+/// Filename that stores the message history inside `~/.codex`.
 const HISTORY_FILENAME: &str = "history.jsonl";
 const HISTORY_READ_BUFFER_SIZE: usize = 8192;
 
@@ -112,7 +118,7 @@ pub async fn append_entry(
 
     // TODO: check `text` for sensitive patterns
 
-    // Resolve `~/.codex-lab/history.jsonl` and ensure the parent directory exists.
+    // Resolve `~/.codex/history.jsonl` and ensure the parent directory exists.
     let path = history_filepath(config);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -433,5 +439,8 @@ fn log_identity(_metadata: &std::fs::Metadata) -> Option<u64> {
     None
 }
 
+#[cfg(test)]
+#[path = "batch_tests.rs"]
+mod batch_tests;
 #[cfg(test)]
 mod tests;

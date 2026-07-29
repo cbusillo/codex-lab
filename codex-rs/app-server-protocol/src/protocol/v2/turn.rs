@@ -4,6 +4,7 @@ use super::SandboxPolicy;
 use super::Turn;
 use codex_experimental_api_macros::ExperimentalApi;
 use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ImageDetail;
@@ -14,6 +15,7 @@ use codex_protocol::user_input::ByteRange as CoreByteRange;
 use codex_protocol::user_input::TextElement as CoreTextElement;
 use codex_protocol::user_input::UserInput as CoreUserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -38,7 +40,10 @@ pub enum TurnStatus {
 #[ts(export_to = "v2/")]
 pub struct TurnEnvironmentParams {
     pub environment_id: String,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
+    /// Environment-native runtime workspace roots. Omitted defaults to `cwd`.
+    #[ts(optional = nullable)]
+    pub runtime_workspace_roots: Option<Vec<LegacyAppPathString>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -68,7 +73,13 @@ pub struct TurnStartParams {
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,
-    /// Optional turn-scoped Responses API client metadata.
+    /// Optional metadata to enrich Codex's ResponsesAPI turn metadata.
+    ///
+    /// Entries are flattened into the JSON string sent as
+    /// `client_metadata["x-codex-turn-metadata"]` on ResponsesAPI HTTP and websocket requests.
+    ///
+    /// They are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys
+    /// such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.
     #[experimental("turn/start.responsesapiClientMetadata")]
     #[ts(optional = nullable)]
     pub responsesapi_client_metadata: Option<HashMap<String, String>>,
@@ -76,7 +87,7 @@ pub struct TurnStartParams {
     #[experimental("turn/start.additionalContext")]
     #[ts(optional = nullable)]
     pub additional_context: Option<HashMap<String, AdditionalContextEntry>>,
-    /// Optional turn-scoped environments.
+    /// Optional environments for this turn and subsequent turns.
     ///
     /// Omitted uses the thread sticky environments. Empty disables
     /// environment access for this turn. Non-empty selects the first
@@ -142,6 +153,11 @@ pub struct TurnStartParams {
     #[experimental("turn/start.collaborationMode")]
     #[ts(optional = nullable)]
     pub collaboration_mode: Option<CollaborationMode>,
+
+    /// @deprecated Ignored. Use `effort: "ultra"` for proactive multi-agent behavior.
+    #[experimental("turn/start.multiAgentMode")]
+    #[ts(optional = nullable)]
+    pub multi_agent_mode: Option<MultiAgentMode>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -161,7 +177,13 @@ pub struct TurnSteerParams {
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,
-    /// Optional turn-scoped Responses API client metadata.
+    /// Optional metadata to enrich Codex's ResponsesAPI turn metadata.
+    ///
+    /// Entries are flattened into the JSON string sent as
+    /// `client_metadata["x-codex-turn-metadata"]` on ResponsesAPI HTTP and websocket requests.
+    ///
+    /// They are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys
+    /// such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.
     #[experimental("turn/steer.responsesapiClientMetadata")]
     #[ts(optional = nullable)]
     pub responsesapi_client_metadata: Option<HashMap<String, String>>,
@@ -286,6 +308,12 @@ pub enum UserInput {
         detail: Option<ImageDetail>,
         path: PathBuf,
     },
+    Audio {
+        url: String,
+    },
+    LocalAudio {
+        path: PathBuf,
+    },
     Skill {
         name: String,
         path: PathBuf,
@@ -311,6 +339,8 @@ impl UserInput {
                 detail,
             },
             UserInput::LocalImage { path, detail } => CoreUserInput::LocalImage { path, detail },
+            UserInput::Audio { url } => CoreUserInput::Audio { audio_url: url },
+            UserInput::LocalAudio { path } => CoreUserInput::LocalAudio { path },
             UserInput::Skill { name, path } => CoreUserInput::Skill { name, path },
             UserInput::Mention { name, path } => CoreUserInput::Mention { name, path },
         }
@@ -332,6 +362,8 @@ impl From<CoreUserInput> for UserInput {
                 detail,
             },
             CoreUserInput::LocalImage { path, detail } => UserInput::LocalImage { path, detail },
+            CoreUserInput::Audio { audio_url } => UserInput::Audio { url: audio_url },
+            CoreUserInput::LocalAudio { path } => UserInput::LocalAudio { path },
             CoreUserInput::Skill { name, path } => UserInput::Skill { name, path },
             CoreUserInput::Mention { name, path } => UserInput::Mention { name, path },
             _ => unreachable!("unsupported user input variant"),
@@ -345,6 +377,8 @@ impl UserInput {
             UserInput::Text { text, .. } => text.chars().count(),
             UserInput::Image { .. }
             | UserInput::LocalImage { .. }
+            | UserInput::Audio { .. }
+            | UserInput::LocalAudio { .. }
             | UserInput::Skill { .. }
             | UserInput::Mention { .. } => 0,
         }

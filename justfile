@@ -6,6 +6,7 @@ set windows-shell := ["python", "-c", 'import os, runpy; runpy.run_path(os.envir
 
 rust_min_stack := "8388608" # 8 MiB
 python := if os_family() == "windows" { "python" } else { "python3" }
+
 # Display help
 help:
     just -l
@@ -14,12 +15,6 @@ help:
 alias c := codex
 codex *args:
     cargo run --bin codex -- {args}
-
-# Install a local `codex-lab` launcher for dogfooding this checkout.
-[no-cd]
-[unix]
-install-codex-lab-dev *args:
-    {{ justfile_directory() }}/scripts/local/install-codex-lab-dev.sh {args}
 
 # `codex exec`
 exec *args:
@@ -36,19 +31,18 @@ tui-with-exec-server *args:
 file-search *args:
     cargo run --bin codex-file-search -- {args}
 
-# Build the CLI and run the app-server test client
-[unix]
-app-server-test-client *args:
-    cargo build -p codex-cli
-    codex_bin="${CARGO_TARGET_DIR:-./target}/debug/codex"; cargo run -p codex-app-server-test-client -- --codex-bin "$codex_bin" {args}
+# Run the standalone code-mode host from source.
+code-mode-host *args:
+    cargo run --bin codex-code-mode-host -- {args}
 
-[windows]
+# Build the CLI and run the app-server test client
 app-server-test-client *args:
     cargo build -p codex-cli
-    $codex_bin = Join-Path ($env:CARGO_TARGET_DIR ?? ".\\target") "debug\\codex.exe"; cargo run -p codex-app-server-test-client -- --codex-bin $codex_bin @($args | Select-Object -Skip 1)
+    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
 
 # Build the local Codex CLI and run every exec harness scenario.
 [no-cd]
+[unix]
 exec-harness-test:
     eval "$({{ justfile_directory() }}/scripts/local/exec-harness-env.sh)" && \
       cargo_manifest="{{ justfile_directory() }}/codex-rs/Cargo.toml" && \
@@ -63,35 +57,19 @@ exec-harness-test:
       fi && \
       {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin "$codex_bin" --output-root "$CODEX_EXEC_HARNESS_OUTPUT_ROOT" --report-json "$CODEX_EXEC_HARNESS_REPORT_JSON"
 
+# Remove rebuildable local build and harness artifacts. Defaults to a dry run.
 [no-cd]
+[unix]
 local-cleanup-space *args:
     {{ justfile_directory() }}/scripts/local/cleanup-space.sh {args}
 
-[no-cd]
-local-cargo-env:
-    {{ justfile_directory() }}/scripts/local/cargo-build-env.sh
-
-[no-cd]
-[unix]
-local-artifact-setup *args:
-    {{ justfile_directory() }}/scripts/local/setup-artifacts.sh {args}
-
-[no-cd]
-[unix]
-local-artifact-env *args:
-    {{ justfile_directory() }}/scripts/local/artifact-env.sh {args}
-
-[no-cd]
-local-speed-status:
-    {{ justfile_directory() }}/scripts/local/speed-status.sh
-
-# Format the justfile, Rust, Python SDK code, and Python scripts.
+# Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
 fmt:
-    {{ python }} ../scripts/format.py
+    @{{ python }} ../scripts/format.py
 
 # Check formatting without modifying files.
 fmt-check:
-    {{ python }} ../scripts/format.py --check
+    @{{ python }} ../scripts/format.py --check
 
 fix *args:
     cargo clippy --fix --tests --allow-dirty {args}
@@ -124,21 +102,17 @@ install:
 # there should be no need to add `--all-features`.
 [unix]
 test *args:
-    RUST_MIN_STACK={{ rust_min_stack }} cargo nextest run --no-fail-fast "$@"
+    RUST_MIN_STACK={{ rust_min_stack }} NEXTEST_PROFILE=local cargo nextest run --no-fail-fast "$@"
 
 [windows]
 test *args:
-    $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; cargo nextest run --no-fail-fast @($args | Select-Object -Skip 1)
+    $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @($args | Select-Object -Skip 1)
 
 # Run from the repository root so scripts that resolve paths from `cwd` see
 # the same layout they use in GitHub Actions.
 [no-cd]
 test-github-scripts:
     {{ python }} -m unittest discover -s {{ justfile_directory() }}/.github/scripts -p 'test_*.py'
-
-[no-cd]
-test-local-scripts:
-    {{ python }} -m unittest discover -s {{ justfile_directory() }}/scripts/local -p 'test_*.py'
 
 # Run explicit workspace benchmark targets.
 bench *args:
@@ -147,6 +121,19 @@ bench *args:
 # Run benchmark targets once to ensure they start successfully.
 bench-smoke:
     just bench -- --test
+
+# Run Bazel-backed end-to-end macrobenchmarks with optimized binaries.
+bench-e2e:
+    # Keep measured binaries comparable to production-style optimized builds.
+    bazel test --compilation_mode=opt --cache_test_results=no --test_output=streamed //codex-rs:e2e-benchmarks
+
+# Run Bazel-backed end-to-end macrobenchmarks once per case with release-like
+# Rust cfg paths but fastbuild codegen.
+bench-e2e-smoke:
+    # Avoid optimizer cost because smoke runs only check that benchmarks work.
+    # Compile target Rust code through the same release-only cfg paths as opt.
+    # Compile exec-platform Rust tools through those release-only cfg paths too.
+    bazel test --compilation_mode=fastbuild --@rules_rust//rust/settings:extra_rustc_flag=-Cdebug-assertions=no --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cdebug-assertions=no --cache_test_results=no --test_output=streamed --test_arg=--test //codex-rs:e2e-benchmarks
 
 # Build and run Codex from source using Bazel.
 # On Unix, use `[no-cd]` and `--run_under="cd $PWD &&"` to ensure Bazel runs
@@ -159,6 +146,16 @@ bazel-codex *args:
 [windows]
 bazel-codex *args:
     bazel run //codex-rs/cli:codex --run_under='cd /d "{{ invocation_directory_native() }}" &&' -- @($args | Select-Object -Skip 1)
+
+# Build and run the standalone code-mode host from source using Bazel.
+[no-cd]
+[unix]
+bazel-code-mode-host *args:
+    bazel run //codex-rs/code-mode-host:codex-code-mode-host --run_under="cd $PWD &&" -- "$@"
+
+[windows]
+bazel-code-mode-host *args:
+    bazel run //codex-rs/code-mode-host:codex-code-mode-host --run_under='cd /d "{{ invocation_directory_native() }}" &&' -- @($args | Select-Object -Skip 1)
 
 [no-cd]
 bazel-lock-update:

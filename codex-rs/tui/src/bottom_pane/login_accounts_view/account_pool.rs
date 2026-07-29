@@ -1,7 +1,8 @@
-use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthDotJson;
 use codex_login::StoredAccount;
+use codex_protocol::auth::AuthMode;
 
 use super::AccountRow;
 
@@ -48,12 +49,18 @@ pub(super) fn current_auth_account_row(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> AccountRow {
     let mode = auth.resolved_mode();
-    let label = auth.account_email().unwrap_or_else(|| match mode {
-        AuthMode::ApiKey => "API key".to_string(),
-        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT".to_string(),
-        AuthMode::AgentIdentity => "Agent identity".to_string(),
-        AuthMode::PersonalAccessToken => "Personal access token".to_string(),
-    });
+    let label = auth
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.id_token.email.clone())
+        .unwrap_or_else(|| match mode {
+            AuthMode::ApiKey => "API key".to_string(),
+            AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT".to_string(),
+            AuthMode::Headers => "Request headers".to_string(),
+            AuthMode::AgentIdentity => "Agent identity".to_string(),
+            AuthMode::PersonalAccessToken => "Personal access token".to_string(),
+            AuthMode::BedrockApiKey => "Bedrock API key".to_string(),
+        });
     let storage = match auth_credentials_store_mode {
         AuthCredentialsStoreMode::Keyring => "keyring",
         AuthCredentialsStoreMode::Auto => "auto storage",
@@ -64,7 +71,7 @@ pub(super) fn current_auth_account_row(
         id: CURRENT_AUTH_ACCOUNT_ID.to_string(),
         label,
         detail: Some(format!("{storage} - not in switching pool")),
-        mode,
+        mode: auth_mode_to_api(mode),
         is_active: true,
         is_pooled: false,
     }
@@ -98,6 +105,21 @@ pub(super) fn account_matches_auth(account: &StoredAccount, auth: &AuthDotJson) 
                 .or(auth_tokens.id_token.chatgpt_account_id.as_deref());
             account_id.is_some() && account_id == auth_account_id
         }
-        AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => false,
+        AuthMode::Headers
+        | AuthMode::AgentIdentity
+        | AuthMode::PersonalAccessToken
+        | AuthMode::BedrockApiKey => false,
+    }
+}
+
+pub(super) fn auth_mode_to_api(mode: AuthMode) -> ApiAuthMode {
+    match mode {
+        AuthMode::ApiKey => ApiAuthMode::ApiKey,
+        AuthMode::Chatgpt => ApiAuthMode::Chatgpt,
+        AuthMode::ChatgptAuthTokens => ApiAuthMode::ChatgptAuthTokens,
+        AuthMode::Headers => ApiAuthMode::Headers,
+        AuthMode::AgentIdentity => ApiAuthMode::AgentIdentity,
+        AuthMode::PersonalAccessToken => ApiAuthMode::PersonalAccessToken,
+        AuthMode::BedrockApiKey => ApiAuthMode::BedrockApiKey,
     }
 }

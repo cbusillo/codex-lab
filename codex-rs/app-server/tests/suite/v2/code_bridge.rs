@@ -54,7 +54,9 @@ async fn code_bridge_status_read_reports_missing_descriptor() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut app_server = initialized_app_server(&codex_home).await?;
 
-    let request_id = app_server.send_code_bridge_status_read_request().await?;
+    let request_id = app_server
+        .send_raw_request("codeBridge/status/read", /*params*/ None)
+        .await?;
     let received: CodeBridgeStatusReadResponse = response_for(&mut app_server, request_id).await?;
 
     assert_eq!(received.status, CodeBridgeAvailability::Unavailable);
@@ -75,7 +77,9 @@ async fn code_bridge_status_read_reports_running_service() -> Result<()> {
             .await?;
     let mut app_server = initialized_app_server(&codex_home).await?;
 
-    let request_id = app_server.send_code_bridge_status_read_request().await?;
+    let request_id = app_server
+        .send_raw_request("codeBridge/status/read", /*params*/ None)
+        .await?;
     let received: CodeBridgeStatusReadResponse = response_for(&mut app_server, request_id).await?;
 
     assert_eq!(received.status, CodeBridgeAvailability::Available);
@@ -136,10 +140,15 @@ async fn code_bridge_status_read_reports_workspace_metadata_bridge() -> Result<(
             break;
         }
     });
-    let mut app_server = TestAppServer::new_with_cwd(codex_home.path(), &nested).await?;
-    timeout(DEFAULT_TIMEOUT, app_server.initialize()).await??;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_cwd(&nested)
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
 
-    let request_id = app_server.send_code_bridge_status_read_request().await?;
+    let request_id = app_server
+        .send_raw_request("codeBridge/status/read", /*params*/ None)
+        .await?;
     let received: CodeBridgeStatusReadResponse = response_for(&mut app_server, request_id).await?;
 
     assert_eq!(received.status, CodeBridgeAvailability::Available);
@@ -441,9 +450,10 @@ async fn client_status(
 }
 
 async fn initialized_app_server(codex_home: &TempDir) -> Result<TestAppServer> {
-    let mut app_server = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_TIMEOUT, app_server.initialize()).await??;
-    Ok(app_server)
+    TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await
 }
 
 async fn jsonrpc_response<T: DeserializeOwned>(
@@ -479,7 +489,7 @@ async fn producer_session(
             test_metadata("producer"),
         )
         .await?;
-    let events = client.events(&producer, 0).await?;
+    let events = client.events(&producer, /*last_event_id*/ 0).await?;
     Ok((producer, events))
 }
 

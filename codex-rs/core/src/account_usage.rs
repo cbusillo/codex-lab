@@ -168,6 +168,7 @@ where
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&path)?;
     file.lock_exclusive()?;
     let mut data = read_locked_usage_file(&mut file, account_id)?;
@@ -202,7 +203,7 @@ pub fn record_rate_limit_snapshot(
     record_rate_limit_snapshot_with_plan(
         codex_home,
         account_id,
-        snapshot.plan_type.clone(),
+        snapshot.plan_type,
         snapshot,
         observed_at,
     )
@@ -364,6 +365,7 @@ mod tests {
             secondary: None,
             credits: None,
             individual_limit: None,
+            spend_control_reached: None,
             plan_type: Some(PlanType::Plus),
             rate_limit_reached_type: None,
         }
@@ -378,7 +380,7 @@ mod tests {
         record_rate_limit_snapshot(
             temp.path(),
             "acct/one",
-            snapshot(reset_at_seconds, 42.0),
+            snapshot(reset_at_seconds, /*used_percent*/ 42.0),
             now,
         )
         .expect("record snapshot");
@@ -396,8 +398,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
         let reset_at = now + Duration::hours(2);
-        record_rate_limit_snapshot(temp.path(), "acct", snapshot(3600, 1.0), now)
-            .expect("record snapshot");
+        record_rate_limit_snapshot(
+            temp.path(),
+            "acct",
+            snapshot(/*resets_in_seconds*/ 3600, /*used_percent*/ 1.0),
+            now,
+        )
+        .expect("record snapshot");
         record_usage_limit_hint(
             temp.path(),
             "acct",
@@ -451,6 +458,7 @@ mod tests {
                 secondary: None,
                 credits: None,
                 individual_limit: None,
+                spend_control_reached: None,
                 plan_type: Some(PlanType::Plus),
                 rate_limit_reached_type: None,
             },

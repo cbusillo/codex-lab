@@ -9,4 +9,4 @@ import type { ProjectValidationStatus } from "./ProjectValidationStatus";
  * One completed project-validation command execution. An actionable first execution may be
  * followed by one bounded correction cycle and a second completion notification.
  */
-export type ProjectValidationCompletedNotification = { threadId: string, turnId: string, command: Array<string>, commandTruncated: boolean, cwd?: AbsolutePathBuf, status: ProjectValidationStatus, skipReason: ProjectValidationSkipReason | null, changedFileCount: number | null, exitCode?: number, output: string, outputTruncated: boolean, durationMs: bigint, };
+export type ProjectValidationCompletedNotification = { threadId: string, turnId: string, itemId: string | null, command: Array<string>, commandTruncated: boolean, cwd: AbsolutePathBuf | null, status: ProjectValidationStatus, skipReason: ProjectValidationSkipReason | null, changedFileCount: number | null, exitCode: number | null, output: string, outputTruncated: boolean, durationMs: bigint, };

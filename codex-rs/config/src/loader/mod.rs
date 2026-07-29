@@ -7,6 +7,7 @@ mod tests;
 use self::layer_io::LoadedConfigLayers;
 use crate::CONFIG_TOML_FILE;
 use crate::CloudConfigBundleLayers;
+use crate::ConfigLayerSource;
 use crate::ProfileV2Name;
 use crate::RequirementsLayerEntry;
 use crate::compose_requirements;
@@ -22,16 +23,17 @@ use crate::merge::merge_toml_values;
 use crate::overrides::build_cli_overrides_layer;
 use crate::project_root_markers::default_project_root_markers;
 use crate::project_root_markers::project_root_markers_from_config;
+use crate::shell_environment_policy::ShellEnvironmentPolicyFilterConfigToml;
 use crate::state::ConfigLayerEntry;
 use crate::state::ConfigLayerStack;
 use crate::state::ConfigLoadOptions;
 use crate::state::LoaderOverrides;
+use crate::state::validate_enabled_config_layers;
 use crate::strict_config::config_error_from_ignored_toml_value_fields;
 use crate::strict_config::ignored_toml_value_field;
 use crate::strict_config::unknown_feature_toml_value_field;
 use crate::thread_config::ThreadConfigContext;
 use crate::thread_config::ThreadConfigLoader;
-use codex_app_server_protocol::ConfigLayerSource;
 use codex_file_system::ExecutorFileSystem;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -40,6 +42,7 @@ use codex_protocol::config_types::TrustLevel;
 use codex_protocol::protocol::AskForApproval;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
+use codex_utils_path_uri::PathUri;
 use dunce::canonicalize as normalize_path;
 use serde::Deserialize;
 use std::io;
@@ -67,6 +70,7 @@ const PROJECT_LOCAL_CONFIG_DENYLIST: &[&str] = &[
     "notify",
     "profile",
     "profiles",
+    "experimental_realtime_webrtc_call_base_url",
     "experimental_realtime_ws_base_url",
     "otel",
 ];
@@ -95,8 +99,8 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - system    `/etc/codex/config.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\config.toml` (Windows)
 /// - cloud     enterprise-managed cloud config bundle fragments
-/// - user      `${CODEX_LAB_HOME}/config.toml`
-/// - profile   `${CODEX_LAB_HOME}/<name>.config.toml`, when selected
+/// - user      `${CODEX_HOME}/config.toml`
+/// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
 /// - tree      parent directories up to root looking for `./.codex/config.toml` (loaded but disabled when untrusted)
 /// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
@@ -153,12 +157,14 @@ pub async fn load_config_layers_state(
 
         #[cfg(target_os = "macos")]
         {
+            let managed_preferences_base_dir = AbsolutePathBuf::from_absolute_path(codex_home)?;
             managed_preferences_requirements_layer = macos::load_managed_admin_requirements_layer(
                 overrides
                     .macos_managed_config_requirements_base64
                     .as_deref(),
             )
-            .await?;
+            .await?
+            .map(|layer| layer.with_base_dir(managed_preferences_base_dir));
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -406,6 +412,21 @@ pub async fn load_config_layers_state(
         ));
     }
 
+    if let Err(err) = validate_enabled_config_layers(&layers) {
+        if let Some(config_error) = typed_first_layer_config_error_from_entries::<
+            ShellEnvironmentPolicyFilterConfigToml,
+        >(&layers, CONFIG_TOML_FILE)
+        .await
+        {
+            return Err(io_error_from_config_error(
+                io::ErrorKind::InvalidData,
+                config_error,
+                /*source*/ None,
+            ));
+        }
+        return Err(err);
+    }
+
     let config_layer_stack = ConfigLayerStack::new(
         layers,
         config_requirements_toml.clone().try_into()?,
@@ -471,7 +492,8 @@ async fn load_config_toml_for_required_layer(
     strict_config: bool,
     create_entry: impl FnOnce(TomlValue) -> ConfigLayerEntry,
 ) -> io::Result<ConfigLayerEntry> {
-    let toml_value = match fs.read_file_text(toml_file, /*sandbox*/ None).await {
+    let toml_file_uri = PathUri::from_abs_path(toml_file);
+    let toml_value = match fs.read_file_text(&toml_file_uri, /*sandbox*/ None).await {
         Ok(contents) => {
             let config_parent = toml_file.as_path().parent().ok_or_else(|| {
                 io::Error::new(
@@ -566,8 +588,9 @@ pub async fn load_requirements_toml(
     fs: &dyn ExecutorFileSystem,
     requirements_toml_file: &AbsolutePathBuf,
 ) -> io::Result<Option<RequirementsLayerEntry>> {
+    let requirements_toml_file_uri = PathUri::from_abs_path(requirements_toml_file);
     match fs
-        .read_file_text(requirements_toml_file, /*sandbox*/ None)
+        .read_file_text(&requirements_toml_file_uri, /*sandbox*/ None)
         .await
     {
         Ok(contents) => {
@@ -941,6 +964,11 @@ fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
             ignored_keys.push((*key).to_string());
         }
     }
+    if let Some(features) = table.get_mut("features").and_then(TomlValue::as_table_mut)
+        && features.remove("respect_system_proxy").is_some()
+    {
+        ignored_keys.push("features.respect_system_proxy".to_string());
+    }
     if let Some(validation) = table
         .get_mut("validation")
         .and_then(TomlValue::as_table_mut)
@@ -956,15 +984,6 @@ fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
             && shellcheck.remove("command").is_some()
         {
             ignored_keys.push("validation.providers.shellcheck.command".to_string());
-        }
-        if let Some(cargo) = validation
-            .get_mut("providers")
-            .and_then(TomlValue::as_table_mut)
-            .and_then(|providers| providers.get_mut("cargo"))
-            .and_then(TomlValue::as_table_mut)
-            && cargo.remove("command").is_some()
-        {
-            ignored_keys.push("validation.providers.cargo.command".to_string());
         }
     }
 
@@ -1161,8 +1180,9 @@ async fn find_project_root(
     for ancestor in cwd.ancestors() {
         for marker in project_root_markers {
             let marker_path = ancestor.join(marker);
+            let marker_path_uri = PathUri::from_abs_path(&marker_path);
             if fs
-                .get_metadata(&marker_path, /*sandbox*/ None)
+                .get_metadata(&marker_path_uri, /*sandbox*/ None)
                 .await
                 .is_ok()
             {
@@ -1177,14 +1197,20 @@ async fn find_git_checkout_root(
     fs: &dyn ExecutorFileSystem,
     cwd: &AbsolutePathBuf,
 ) -> Option<AbsolutePathBuf> {
-    let base = match fs.get_metadata(cwd, /*sandbox*/ None).await {
+    let cwd_uri = PathUri::from_abs_path(cwd);
+    let base = match fs.get_metadata(&cwd_uri, /*sandbox*/ None).await {
         Ok(metadata) if metadata.is_directory => cwd.clone(),
         _ => cwd.parent()?,
     };
 
     for dir in base.ancestors() {
         let dot_git = dir.join(".git");
-        if fs.get_metadata(&dot_git, /*sandbox*/ None).await.is_ok() {
+        let dot_git_uri = PathUri::from_abs_path(&dot_git);
+        if fs
+            .get_metadata(&dot_git_uri, /*sandbox*/ None)
+            .await
+            .is_ok()
+        {
             return Some(dir);
         }
     }
@@ -1232,8 +1258,9 @@ async fn load_project_layers(
     let mut startup_warnings = Vec::new();
     for dir in dirs {
         let dot_codex_abs = dir.join(".codex");
+        let dot_codex_uri = PathUri::from_abs_path(&dot_codex_abs);
         if !fs
-            .get_metadata(&dot_codex_abs, /*sandbox*/ None)
+            .get_metadata(&dot_codex_uri, /*sandbox*/ None)
             .await
             .map(|metadata| metadata.is_directory)
             .unwrap_or(false)
@@ -1250,7 +1277,8 @@ async fn load_project_layers(
             continue;
         }
         let config_file = dot_codex_abs.join(CONFIG_TOML_FILE);
-        match fs.read_file_text(&config_file, /*sandbox*/ None).await {
+        let config_file_uri = PathUri::from_abs_path(&config_file);
+        match fs.read_file_text(&config_file_uri, /*sandbox*/ None).await {
             Ok(contents) => {
                 let config: TomlValue = match toml::from_str(&contents) {
                     Ok(config) => config,
@@ -1353,8 +1381,9 @@ async fn merge_root_checkout_project_hooks(
         return Ok(config);
     };
     let hooks_config_file = hooks_config_folder.join(CONFIG_TOML_FILE);
+    let hooks_config_file_uri = PathUri::from_abs_path(&hooks_config_file);
     let root_config = match fs
-        .read_file_text(&hooks_config_file, /*sandbox*/ None)
+        .read_file_text(&hooks_config_file_uri, /*sandbox*/ None)
         .await
     {
         Ok(contents) => {

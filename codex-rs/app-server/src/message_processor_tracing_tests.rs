@@ -237,7 +237,6 @@ async fn build_test_processor(
         AuthManager::shared_from_config(config.as_ref(), /*enable_codex_api_key_env*/ false).await;
     let config_manager = ConfigManager::new(
         config.codex_home.to_path_buf(),
-        config.auth_home.to_path_buf(),
         Vec::new(),
         LoaderOverrides::default(),
         /*strict_config*/ false,
@@ -266,6 +265,7 @@ async fn build_test_processor(
         session_provenance: None,
         auth_manager,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        code_mode_session_provider: None,
         rpc_transport: AppServerRpcTransport::Stdio,
         remote_control_handle: None,
         plugin_startup_tasks: crate::PluginStartupTasks::Start,
@@ -277,7 +277,10 @@ fn run_current_thread_test_with_stack<F>(name: &str, future: F) -> Result<()>
 where
     F: Future<Output = Result<()>> + Send + 'static,
 {
-    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
+    // Debug builds on Windows use noticeably more stack per frame than on Unix,
+    // and 4 MiB overflows while driving a full `thread/start` through the message
+    // processor. Match the production tokio worker stack size instead.
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
     let handle = std::thread::Builder::new()
         .name(name.to_string())
@@ -479,7 +482,7 @@ async fn read_thread_started_notification(
                     continue;
                 };
                 if matches!(
-                    notification,
+                    notification.notification,
                     codex_app_server_protocol::ServerNotification::ThreadStarted(_)
                 ) {
                     return;
@@ -492,7 +495,7 @@ async fn read_thread_started_notification(
                     continue;
                 };
                 if matches!(
-                    notification,
+                    notification.notification,
                     codex_app_server_protocol::ServerNotification::ThreadStarted(_)
                 ) {
                     return;
@@ -675,6 +678,7 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
                     personality: None,
                     output_schema: None,
                     collaboration_mode: None,
+                    multi_agent_mode: None,
                 },
             },
             Some(remote_trace),

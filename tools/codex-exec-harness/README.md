@@ -9,12 +9,51 @@ there is no fake GitHub, and no local-model fallback logic.
 Multi-turn scenarios are supported only through explicit `turns` fixtures that
 resume the captured Codex thread id.
 
+## Restored proof set
+
+Anchor merge `9d2eea2238` took the upstream tree, so this harness disappeared
+from the #428 candidate along with the behavior it proves. Restored scenarios
+now cover project validation, Background Review, provider routing, external
+integration, and the skill-routing/context contracts audited in #83:
+
+| Contract surface     | Scenario                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| Project validation   | `auto-validation-project-command-failure.json`, `auto-validation-shellcheck-provider.json`, `auto-validation-cargo-provider.json`, `auto-validation-no-applicable-provider.json`, `auto-validation-bounded-apply-patch-feedback.json` |
+| Background Review    | `background-review-same-turn-commit.json`                                             |
+| Provider routing     | `provider-routing-high-risk-external.json`, `provider-preflight-diagnostics.json`, opt-in `provider-routing-live-claude-antigravity.json` |
+| External integration | `third-party-agent-current-binary-lifecycle.json`, opt-in `third-party-agent-live-copilot.json` |
+| Model-facing tools   | `external-tools-model-facing-contract.json`                                           |
+| Agent capability     | `agent-capability-self-report.json`                                                   |
+| Model request shape  | `gpt-5-6-luna-low-request-shape.json`                                                 |
+| Local provider       | `local-provider-config.json`                                                          |
+| Token accounting     | `token-usage-report.json`                                                             |
+| Live validation      | opt-in `jetbrains-inspection-false-green-proof.json`                                  |
+| Skill routing        | `skills-guidance-binding-triggers.json`, `skills-cache-continuity.json`                |
+| Context continuity   | `project-doc-skill-dedup.json`, `multi-turn-resume.json`                              |
+
+Every harness path recorded in `upstream/convergence-guard.json` is restored.
+If a future refresh removes one, it must restore the path with its runtime
+contract or add an explicit evidence-backed waiver; stale waivers fail the
+guard.
+
+Aggregate reports include every scenario file, explicitly listing opt-in live
+scenarios under `skipped_scenarios` rather than silently omitting them from the
+deterministic scenario count.
+
 ## Run
 
 Run the full harness suite against a freshly built local Codex binary:
 
 ```sh
 just exec-harness-test
+```
+
+Inspect rebuildable local disk usage without deleting anything, then apply the
+same bounded cleanup when needed:
+
+```sh
+just local-cleanup-space
+just local-cleanup-space --apply
 ```
 
 On Linux, this recipe also builds and stages the bundled
@@ -40,7 +79,7 @@ Run one scenario against an existing binary:
 
 ```sh
 python3 tools/codex-exec-harness/harness.py \
-  tools/codex-exec-harness/scenarios/skills-guidance-binding-triggers.json \
+  tools/codex-exec-harness/scenarios/provider-routing-high-risk-external.json \
   --codex-bin codex-rs/target/debug/codex
 ```
 
@@ -103,48 +142,6 @@ locally authenticated external provider. It intentionally gives spawned
 commands access to the caller's home directory, so it must remain excluded from
 `run_all.py` and CI.
 
-## Generated Odoo Workspaces
-
-`odoo_workspace.py` is the bounded consumer for a devkit-generated non-Git
-workspace. It does not parse `workspace.lock.toml` or Odoo markers. Instead it
-runs the provider-owned command below and fails closed unless the returned
-schema, guidance, source materialization, reserved override, and edit roots are
-all current:
-
-```sh
-uv --directory /path/to/odoo-devkit run platform workspace status \
-  --manifest /path/to/tenant/workspace.toml --check
-```
-
-Launch an exact Codex Lab candidate in editable mode:
-
-```sh
-python3 tools/codex-exec-harness/odoo_workspace.py \
-  --devkit /path/to/odoo-devkit \
-  --manifest /path/to/tenant/workspace.toml \
-  --codex-bin /absolute/path/to/codex-lab \
-  --source-repo /path/to/codex-lab \
-  --mode exec \
-  --access editable \
-  --prompt 'Inspect the generated workspace.' \
-  --evidence-file /path/to/evidence.json
-```
-
-Editable mode selects the built-in workspace-write sandbox and passes each
-status-declared editable linked path through repeatable `--workspace-root`.
-Those exact roots replace the implicit launch CWD, leaving the generated root
-and managed checkouts read-only. Passing the same paths through legacy
-`--add-dir` would also make the launch CWD writable, so the bounded adapter
-intentionally does not combine the two mechanisms. `--access read-only` uses
-the built-in read-only sandbox. Both modes require current candidate provenance
-from `scripts/local/codex_lab_provenance.py`; prompt text is hashed and redacted
-from evidence.
-
-`generated-odoo-workspace-consumption.json` is the deterministic exact-candidate
-proof. It keeps the root non-Git, loads the canonical root guide, permits writes
-through tenant/devkit links, and proves managed, generated-root, and outside
-writes remain denied.
-
 ## Auto-Validation Characterization
 
 Issue #284's first auto-validation contract is documented in
@@ -164,45 +161,22 @@ points to a deterministic fake ShellCheck command; the default suite verifies
 changed-file selection, fixed argv, one bounded correction cycle, and the final
 passing rerun.
 
-`auto-validation-cargo-provider.json` proves issue #372's bounded Rust
-provider. A trusted external Cargo executable verifies nearest-target
-selection, fixed JSON argv, compact compiler diagnostics, one correction
-fragment, and the final passing rerun.
-
-`auto-validation-no-applicable-provider.json` proves issue #371's previously
-silent Rust-only path now emits one bounded typed `skipped` disposition with
-the changed-file count and `no_applicable_provider` reason.
-
-`gpt-5-6-luna-low-request-shape.json` is the deterministic catalog smoke test
-for the lowest-cost GPT-5.6 variant. It proves the local binary sends
-`gpt-5.6-luna` with low reasoning effort without making a paid model call.
-
-`agent-capability-self-report.json` protects capability questions from generic
-harness answers. With agent metadata explicitly enabled, it proves GPT-5.6 Sol
-receives the configured third-party roles, model overrides, concurrency limit,
-and self-report guidance without adding that catalog to every default session.
-
 `third-party-agent-current-binary-lifecycle.json` provides the deterministic
-current-binary gate for issue #312. It configures a fixture external-command
-agent, then proves native spawn, parent-visible completion output, terminal
-status listing, and close cleanup without using a paid provider or inherited
-credentials.
+current-binary gate for issue #312 and the file-backed handoff proof for #83.
+It configures a fixture external-command agent, then proves native spawn,
+bounded parent-visible completion output, full first/last-marker recovery from
+a large workspace context file, terminal status listing, and V2 interrupt
+cleanup without using a paid provider or inherited credentials.
 
 `provider-routing-high-risk-external.json` proves issue #370's significance-aware
 automatic routing with a deterministic external-command fixture.
-`provider-preflight-diagnostics.json` proves generic external-command preflight
-plus parent-visible provider provenance, classified runtime authentication
-failure, elapsed runtime, and cleanup. Provider-specific authentication probes
-are deterministic Rust tests; `provider-routing-live-claude-antigravity.json`
-is the opt-in current-binary companion that exercises authenticated Claude and
-Antigravity CLIs.
 
-`third-party-agent-live-copilot.json` is the opt-in real-provider companion. It
-keeps the parent model deterministic through the fake Responses API, runs
-GitHub Copilot read-only, and is excluded from `run_all.py` so CI never consumes
-a provider account or depends on local CLI authentication. When Copilot relies
-on GitHub CLI authentication, export `GH_TOKEN="$(gh auth token)"` for the
-harness process so the spawned provider receives the credential.
+`external-tools-model-facing-contract.json` proves that the in-process browser
+and Code Bridge handlers are present in the model request and return bounded,
+deterministic status responses without requiring Chrome or a live bridge.
+
+`background-review-same-turn-commit.json` proves durable Background Review
+target and currentness metadata for a commit made inside the same turn.
 
 ## Auto Review Proof Loop
 

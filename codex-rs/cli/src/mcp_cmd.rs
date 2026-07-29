@@ -18,7 +18,10 @@ use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_global_mcp_servers;
 use codex_core_plugins::PluginsManager;
+use codex_exec_server::EnvironmentManager;
+use codex_login::AuthManager;
 use codex_mcp::McpOAuthLoginSupport;
+use codex_mcp::McpRuntimeContext;
 use codex_mcp::ResolvedMcpOAuthScopes;
 use codex_mcp::compute_auth_statuses;
 use codex_mcp::discover_supported_scopes;
@@ -211,6 +214,7 @@ async fn perform_oauth_login_retry_without_scopes(
     name: &str,
     url: &str,
     store_mode: codex_config::types::OAuthCredentialsStoreMode,
+    keyring_backend_kind: codex_config::types::AuthKeyringBackendKind,
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
     resolved_scopes: &ResolvedMcpOAuthScopes,
@@ -223,6 +227,7 @@ async fn perform_oauth_login_retry_without_scopes(
         name,
         url,
         store_mode,
+        keyring_backend_kind,
         http_headers.clone(),
         env_http_headers.clone(),
         &resolved_scopes.scopes,
@@ -240,6 +245,7 @@ async fn perform_oauth_login_retry_without_scopes(
                 name,
                 url,
                 store_mode,
+                keyring_backend_kind,
                 http_headers,
                 env_http_headers,
                 &[],
@@ -341,6 +347,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
     };
 
     let new_entry = McpServerConfig {
+        auth: Default::default(),
         transport: transport.clone(),
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
@@ -384,6 +391,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
                 &name,
                 &oauth_config.url,
                 config.mcp_oauth_credentials_store_mode,
+                config.auth_keyring_backend_kind(),
                 oauth_config.http_headers,
                 oauth_config.env_http_headers,
                 &resolved_scopes,
@@ -478,6 +486,7 @@ async fn run_login(config_overrides: &CliConfigOverrides, login_args: LoginArgs)
         &name,
         &url,
         config.mcp_oauth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
         http_headers,
         env_http_headers,
         &resolved_scopes,
@@ -514,7 +523,12 @@ async fn run_logout(config_overrides: &CliConfigOverrides, logout_args: LogoutAr
         _ => bail!("OAuth logout is only supported for streamable_http transports."),
     };
 
-    match delete_oauth_tokens(&name, &url, config.mcp_oauth_credentials_store_mode) {
+    match delete_oauth_tokens(
+        &name,
+        &url,
+        config.mcp_oauth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    ) {
         Ok(true) => println!("Removed OAuth credentials for '{name}'."),
         Ok(false) => println!("No OAuth credentials stored for '{name}'."),
         Err(err) => return Err(anyhow!("failed to delete OAuth credentials: {err}")),
@@ -533,15 +547,25 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
     let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(
         config.codex_home.to_path_buf(),
     )));
+    let auth_manager =
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true).await;
+    let auth = auth_manager.auth().await;
     let mcp_servers = mcp_manager.configured_servers(&config).await;
-    let effective_mcp_servers = mcp_manager.effective_servers(&config, /*auth*/ None).await;
+    let effective_mcp_servers = mcp_manager.effective_servers(&config, auth.as_ref()).await;
 
     let mut entries: Vec<_> = mcp_servers.iter().collect();
     entries.sort_by_key(|(name, _)| *name);
     let auth_statuses = compute_auth_statuses(
         effective_mcp_servers.iter(),
         config.mcp_oauth_credentials_store_mode,
-        /*auth*/ None,
+        config.auth_keyring_backend_kind(),
+        auth.as_ref(),
+        &McpRuntimeContext::new(
+            Arc::new(EnvironmentManager::without_environments(
+                config.http_client_factory(),
+            )),
+            config.cwd.to_path_buf(),
+        ),
     )
     .await;
 
@@ -551,7 +575,7 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
             .map(|(name, cfg)| {
                 let auth_status = auth_statuses
                     .get(name.as_str())
-                    .map(|entry| entry.auth_status)
+                    .map(|entry| McpAuthStatus::from(entry.auth_state))
                     .unwrap_or(McpAuthStatus::Unsupported);
                 let transport = match &cfg.transport {
                     McpServerTransportConfig::Stdio {
@@ -629,13 +653,13 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
                 let env_display = format_env_display(env.as_ref(), env_vars);
                 let cwd_display = cwd
                     .as_ref()
-                    .map(|path| path.display().to_string())
+                    .map(ToString::to_string)
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "-".to_string());
                 let status = format_mcp_status(cfg);
                 let auth_status = auth_statuses
                     .get(name.as_str())
-                    .map(|entry| entry.auth_status)
+                    .map(|entry| McpAuthStatus::from(entry.auth_state))
                     .unwrap_or(McpAuthStatus::Unsupported)
                     .to_string();
                 stdio_rows.push([
@@ -656,7 +680,7 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
                 let status = format_mcp_status(cfg);
                 let auth_status = auth_statuses
                     .get(name.as_str())
-                    .map(|entry| entry.auth_status)
+                    .map(|entry| McpAuthStatus::from(entry.auth_state))
                     .unwrap_or(McpAuthStatus::Unsupported)
                     .to_string();
                 let bearer_token_display =
@@ -886,7 +910,7 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
             println!("  args: {args_display}");
             let cwd_display = cwd
                 .as_ref()
-                .map(|path| path.display().to_string())
+                .map(ToString::to_string)
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "-".to_string());
             println!("  cwd: {cwd_display}");
@@ -941,6 +965,7 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
         let approval_mode = match approval_mode {
             AppToolApproval::Auto => "auto",
             AppToolApproval::Prompt => "prompt",
+            AppToolApproval::Writes => "writes",
             AppToolApproval::Approve => "approve",
         };
         println!("  default_tools_approval_mode: {approval_mode}");

@@ -27,7 +27,7 @@ use codex_app_server_protocol::McpServerElicitationRequestResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
-use codex_app_server_protocol::ReviewStartTarget as ApiReviewStartTarget;
+use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread as AppServerThread;
@@ -62,14 +62,18 @@ use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
+use codex_core::config::ConfigTomlLoadResult;
 use codex_core::config::find_codex_home;
-use codex_core::config::load_config_as_toml_with_cli_and_load_options;
+use codex_core::config::load_config_toml_with_layer_stack;
+use codex_core::config::resolve_bootstrap_auth_keyring_backend_kind;
+use codex_core::config::resolve_bootstrap_auth_route_config;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config::resolve_profile_v2_config_path;
 use codex_core::find_thread_meta_by_name_str;
 use codex_core::format_exec_policy_error_with_source;
 use codex_core::path_utils;
 use codex_feedback::CodexFeedback;
+use codex_git_utils::diff_fingerprint;
 use codex_git_utils::get_git_repo_root;
 use codex_login::AuthConfig;
 use codex_login::default_client::set_default_client_residency_requirement;
@@ -94,7 +98,6 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
@@ -142,6 +145,7 @@ pub use exec_events::TurnStartedEvent;
 pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
@@ -152,7 +156,6 @@ use std::time::Duration;
 use supports_color::Stream;
 use tokio::sync::mpsc;
 use tracing::Instrument;
-use tracing::debug;
 use tracing::error;
 use tracing::field;
 use tracing::info;
@@ -167,7 +170,118 @@ use crate::event_processor::EventProcessor;
 
 const DEFAULT_ANALYTICS_ENABLED: bool = true;
 const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
-const BACKGROUND_REVIEW_SCHEDULE_GRACE: Duration = Duration::from_secs(2);
+const BACKGROUND_REVIEW_SCHEDULE_GRACE: Duration = Duration::from_secs(/*secs*/ 10);
+const BACKGROUND_REVIEW_COMPLETION_SLACK: Duration = Duration::from_secs(/*secs*/ 30);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackgroundReviewDeadlineKind {
+    Schedule,
+    Completion,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BackgroundReviewDeadline {
+    at: tokio::time::Instant,
+    kind: BackgroundReviewDeadlineKind,
+}
+
+#[derive(Default)]
+struct BackgroundReviewWaitState {
+    active_run_ids: HashSet<String>,
+    completed_for_turn: bool,
+    turn_review_fingerprint: Option<String>,
+    waiting: bool,
+    deadline: Option<BackgroundReviewDeadline>,
+}
+
+impl BackgroundReviewWaitState {
+    fn record_turn_diff(&mut self, diff: &str) {
+        self.turn_review_fingerprint = diff_fingerprint(diff);
+    }
+
+    fn begin_wait(&mut self, now: tokio::time::Instant, completion_grace: Duration) -> bool {
+        if self.completed_for_turn
+            || (self.turn_review_fingerprint.is_none() && self.active_run_ids.is_empty())
+        {
+            return false;
+        }
+
+        self.waiting = true;
+        self.deadline = Some(if self.active_run_ids.is_empty() {
+            BackgroundReviewDeadline {
+                at: now + BACKGROUND_REVIEW_SCHEDULE_GRACE,
+                kind: BackgroundReviewDeadlineKind::Schedule,
+            }
+        } else {
+            BackgroundReviewDeadline {
+                at: now + completion_grace,
+                kind: BackgroundReviewDeadlineKind::Completion,
+            }
+        });
+        true
+    }
+
+    fn record_status(
+        &mut self,
+        target: &ApiReviewTarget,
+        run_id: &str,
+        status: &codex_app_server_protocol::BackgroundAutoReviewStatus,
+        now: tokio::time::Instant,
+        completion_grace: Duration,
+    ) {
+        if !background_review_target_matches_turn(target, self.turn_review_fingerprint.as_deref()) {
+            return;
+        }
+
+        match status {
+            codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Running => {
+                self.active_run_ids.insert(run_id.to_string());
+                if self.waiting
+                    && !matches!(
+                        self.deadline,
+                        Some(BackgroundReviewDeadline {
+                            kind: BackgroundReviewDeadlineKind::Completion,
+                            ..
+                        })
+                    )
+                {
+                    self.deadline = Some(BackgroundReviewDeadline {
+                        at: now + completion_grace,
+                        kind: BackgroundReviewDeadlineKind::Completion,
+                    });
+                }
+            }
+            codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => {
+                let observed_run = self.active_run_ids.remove(run_id);
+                let resolves_without_active_run = matches!(
+                    status,
+                    codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped
+                );
+                if (observed_run || resolves_without_active_run) && self.active_run_ids.is_empty() {
+                    self.completed_for_turn = true;
+                    self.deadline = None;
+                }
+            }
+        }
+    }
+
+    fn should_shutdown(&self) -> bool {
+        self.waiting && self.completed_for_turn && self.active_run_ids.is_empty()
+    }
+
+    fn is_waiting(&self) -> bool {
+        self.waiting
+    }
+
+    fn deadline(&self) -> Option<BackgroundReviewDeadline> {
+        self.deadline
+    }
+}
 
 enum InitialOperation {
     UserTurn {
@@ -212,6 +326,7 @@ struct ExecRunArgs {
     state_db: Option<StateDbHandle>,
     command: Option<ExecCommand>,
     config: Config,
+    resume_approvals_reviewer_override: Option<codex_app_server_protocol::ApprovalsReviewer>,
     dangerously_bypass_approvals_and_sandbox: bool,
     exec_span: tracing::Span,
     images: Vec<PathBuf>,
@@ -365,7 +480,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         ..Default::default()
     };
 
-    let bootstrap_config_toml = load_config_toml_or_exit(
+    let bootstrap_config = load_bootstrap_config_or_exit(
         &codex_home,
         Some(&config_cwd),
         cli_kv_overrides.clone(),
@@ -374,11 +489,20 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         CloudConfigBundleLoader::default(),
     )
     .await;
+    let bootstrap_config_toml = &bootstrap_config.config_toml;
 
     let chatgpt_base_url = bootstrap_config_toml
         .chatgpt_base_url
         .clone()
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
+    let auth_route_config = resolve_bootstrap_auth_route_config(
+        bootstrap_config_toml,
+        bootstrap_config
+            .config_layer_stack
+            .requirements()
+            .feature_requirements
+            .as_ref(),
+    )?;
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
         auth_home.clone(),
@@ -386,7 +510,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         bootstrap_config_toml
             .cli_auth_credentials_store
             .unwrap_or_default(),
+        resolve_bootstrap_auth_keyring_backend_kind(&bootstrap_config)?,
         chatgpt_base_url,
+        auth_route_config,
     )
     .await;
     let run_cli_overrides = cli_kv_overrides.clone();
@@ -394,12 +520,12 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let run_cloud_config_bundle = cloud_config_bundle.clone();
 
     let model_provider = if oss {
-        let config_toml_with_cloud_config;
+        let bootstrap_config_with_cloud_config;
         let config_toml_for_oss = if oss_provider.is_none() {
             // The first load intentionally skips cloud config so we can read
             // auth/base-url settings needed to fetch the bundle. If OSS mode
             // needs a default provider from config, reload with the bundle.
-            config_toml_with_cloud_config = load_config_toml_or_exit(
+            bootstrap_config_with_cloud_config = load_bootstrap_config_or_exit(
                 &codex_home,
                 Some(&config_cwd),
                 cli_kv_overrides.clone(),
@@ -408,9 +534,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
                 cloud_config_bundle.clone(),
             )
             .await;
-            &config_toml_with_cloud_config
+            &bootstrap_config_with_cloud_config.config_toml
         } else {
-            &bootstrap_config_toml
+            bootstrap_config_toml
         };
 
         let resolved = resolve_oss_provider(oss_provider.as_deref(), config_toml_for_oss);
@@ -485,6 +611,10 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         build_config,
     )
     .await?;
+    let resume_approvals_reviewer_override = cli_kv_overrides
+        .iter()
+        .any(|(key, _)| key == "approvals_reviewer")
+        .then(|| config.approvals_reviewer.into());
 
     #[allow(clippy::print_stderr)]
     match check_execpolicy_for_warnings(&config.config_layer_stack).await {
@@ -500,12 +630,15 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
 
     set_default_client_residency_requirement(config.enforce_residency.value());
 
+    let auth_route_config = config.auth_route_config();
     if let Err(err) = enforce_login_restrictions(&AuthConfig {
         codex_home: config.auth_home.to_path_buf(),
         auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+        keyring_backend_kind: config.auth_keyring_backend_kind(),
         forced_login_method: config.forced_login_method,
         forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
         chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
+        auth_route_config,
     })
     .await
     {
@@ -564,10 +697,15 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     )?;
     let state_db = codex_core::init_state_db(&config).await;
     let environment_manager = if run_loader_overrides.ignore_user_config {
-        EnvironmentManager::from_env(Some(local_runtime_paths)).await?
-    } else {
-        EnvironmentManager::from_codex_home(config.codex_home.clone(), Some(local_runtime_paths))
+        EnvironmentManager::from_env(Some(local_runtime_paths), config.http_client_factory())
             .await?
+    } else {
+        EnvironmentManager::from_codex_home(
+            config.codex_home.clone(),
+            Some(local_runtime_paths),
+            config.http_client_factory(),
+        )
+        .await?
     };
     let in_process_start_args = InProcessClientStartArgs {
         arg0_paths,
@@ -587,6 +725,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         client_name: "codex_exec".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
         experimental_api: true,
+        mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     };
@@ -595,6 +734,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         state_db,
         command,
         config,
+        resume_approvals_reviewer_override,
         dangerously_bypass_approvals_and_sandbox,
         exec_span: exec_span.clone(),
         images,
@@ -647,15 +787,15 @@ where
 }
 
 #[allow(clippy::print_stderr)]
-async fn load_config_toml_or_exit(
+async fn load_bootstrap_config_or_exit(
     codex_home: &Path,
     cwd: Option<&AbsolutePathBuf>,
     cli_kv_overrides: Vec<(String, codex_config::TomlValue)>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
     cloud_config_bundle: CloudConfigBundleLoader,
-) -> codex_config::config_toml::ConfigToml {
-    match load_config_as_toml_with_cli_and_load_options(
+) -> ConfigTomlLoadResult {
+    match load_config_toml_with_layer_stack(
         codex_home,
         cwd,
         cli_kv_overrides,
@@ -692,6 +832,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         state_db,
         command,
         config,
+        resume_approvals_reviewer_override,
         dangerously_bypass_approvals_and_sandbox,
         exec_span,
         images,
@@ -823,7 +964,11 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 &client,
                 ClientRequest::ThreadResume {
                     request_id: request_ids.next(),
-                    params: thread_resume_params_from_config(&config, thread_id),
+                    params: thread_resume_params_from_config(
+                        &config,
+                        thread_id,
+                        resume_approvals_reviewer_override,
+                    ),
                 },
                 "thread/resume",
             )
@@ -922,6 +1067,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         personality: None,
                         output_schema,
                         collaboration_mode: None,
+                        multi_agent_mode: None,
                     },
                 },
                 "turn/start",
@@ -965,18 +1111,29 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // exit with a non-zero status for automation-friendly signaling.
     let mut error_seen = false;
     let mut interrupt_channel_open = true;
-    let mut active_background_review_run_ids = HashSet::new();
-    let mut completed_turn_waiting_for_background_review = false;
-    let mut turn_has_reviewable_diff = false;
-    let mut background_review_schedule_deadline = None;
+    let mut background_review_wait = BackgroundReviewWaitState::default();
+    let background_review_completion_grace =
+        Duration::from_millis(config.background_auto_review_budget.max_elapsed_ms)
+            .saturating_add(BACKGROUND_REVIEW_COMPLETION_SLACK);
     let primary_thread_id_for_requests = primary_thread_id.to_string();
     loop {
-        let mut background_review_schedule_grace_elapsed = false;
         let server_event = tokio::select! {
             maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
                 if maybe_interrupt.is_none() {
                     interrupt_channel_open = false;
                     continue;
+                }
+                if background_review_wait.is_waiting() {
+                    if let Err(err) = request_shutdown(
+                        &client,
+                        &mut request_ids,
+                        &primary_thread_id_for_requests,
+                    )
+                    .await
+                    {
+                        warn!("thread/unsubscribe failed during shutdown: {err}");
+                    }
+                    break;
                 }
                 if let Err(err) = send_request_with_response::<TurnInterruptResponse>(
                     &client,
@@ -996,23 +1153,25 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 continue;
             }
             maybe_event = client.next_event() => maybe_event,
-            _ = wait_for_background_review_schedule_deadline(
-                background_review_schedule_deadline
-            ), if background_review_schedule_deadline.is_some() => {
-                background_review_schedule_grace_elapsed = true;
-                None
+            deadline_kind = wait_for_background_review_deadline(
+                background_review_wait.deadline()
+            ), if background_review_wait.deadline().is_some() => {
+                let Some(deadline_kind) = deadline_kind else {
+                    continue;
+                };
+                event_processor.process_warning(background_review_deadline_warning(deadline_kind));
+                if let Err(err) = request_shutdown(
+                    &client,
+                    &mut request_ids,
+                    &primary_thread_id_for_requests,
+                )
+                .await
+                {
+                    warn!("thread/unsubscribe failed during shutdown: {err}");
+                }
+                break;
             }
         };
-
-        if background_review_schedule_grace_elapsed {
-            debug!("background review did not schedule before exec grace period elapsed");
-            if let Err(err) =
-                request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests).await
-            {
-                warn!("thread/unsubscribe failed during shutdown: {err}");
-            }
-            break;
-        }
 
         let Some(server_event) = server_event else {
             break;
@@ -1027,7 +1186,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     && payload.thread_id == primary_thread_id_for_requests
                     && payload.turn_id == task_id
                 {
-                    turn_has_reviewable_diff = !payload.diff.trim().is_empty();
+                    background_review_wait.record_turn_diff(&payload.diff);
                 }
                 let completed_primary_turn = matches!(
                     &notification,
@@ -1037,18 +1196,18 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                             && payload.turn.status
                                 == codex_app_server_protocol::TurnStatus::Completed
                 );
-                let completed_background_review = match &notification {
-                    ServerNotification::BackgroundAutoReviewStatusChanged(payload)
-                        if payload.thread_id == primary_thread_id_for_requests =>
-                    {
-                        record_background_auto_review_status(
-                            &mut active_background_review_run_ids,
-                            &payload.run_id,
-                            &payload.status,
-                        )
-                    }
-                    _ => false,
-                };
+                if let ServerNotification::BackgroundAutoReviewStatusChanged(payload) =
+                    &notification
+                    && payload.thread_id == primary_thread_id_for_requests
+                {
+                    background_review_wait.record_status(
+                        &payload.review_target,
+                        &payload.run_id,
+                        &payload.status,
+                        tokio::time::Instant::now(),
+                        background_review_completion_grace,
+                    );
+                }
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
                         && payload.turn_id == task_id
@@ -1068,32 +1227,28 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     error_seen = true;
                 }
 
-                maybe_backfill_turn_completed_items(
-                    config.ephemeral,
-                    &client,
-                    &mut request_ids,
-                    &mut notification,
-                )
-                .await;
-
                 if should_process_notification(
                     &notification,
                     &primary_thread_id_for_requests,
                     &task_id,
                 ) {
+                    maybe_backfill_turn_completed_items(
+                        config.ephemeral,
+                        &client,
+                        &mut request_ids,
+                        &mut notification,
+                    )
+                    .await;
+
                     match event_processor.process_server_notification(notification) {
                         CodexStatus::Running => {}
                         CodexStatus::InitiateShutdown => {
                             if completed_primary_turn
-                                && (turn_has_reviewable_diff
-                                    || !active_background_review_run_ids.is_empty())
+                                && background_review_wait.begin_wait(
+                                    tokio::time::Instant::now(),
+                                    background_review_completion_grace,
+                                )
                             {
-                                completed_turn_waiting_for_background_review = true;
-                                background_review_schedule_deadline =
-                                    active_background_review_run_ids.is_empty().then(|| {
-                                        tokio::time::Instant::now()
-                                            + BACKGROUND_REVIEW_SCHEDULE_GRACE
-                                    });
                                 continue;
                             }
                             if let Err(err) = request_shutdown(
@@ -1109,13 +1264,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         }
                     }
                 }
-                if !completed_background_review && !active_background_review_run_ids.is_empty() {
-                    background_review_schedule_deadline = None;
-                }
-                if completed_background_review
-                    && completed_turn_waiting_for_background_review
-                    && active_background_review_run_ids.is_empty()
-                {
+                if background_review_wait.should_shutdown() {
                     if let Err(err) =
                         request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests)
                             .await
@@ -1129,6 +1278,15 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 let message = lagged_event_warning_message(skipped);
                 warn!("{message}");
                 event_processor.process_warning(message);
+                if background_review_wait.is_waiting() {
+                    if let Err(err) =
+                        request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests)
+                            .await
+                    {
+                        warn!("thread/unsubscribe failed during shutdown: {err}");
+                    }
+                    break;
+                }
             }
         }
     }
@@ -1158,17 +1316,21 @@ fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
         cwd: Some(config.cwd.to_string_lossy().to_string()),
         runtime_workspace_roots: Some(config.workspace_roots.clone()),
         approval_policy: Some(config.permissions.approval_policy.value().into()),
-        approvals_reviewer: approvals_reviewer_override_from_config(config),
+        approvals_reviewer: Some(config.approvals_reviewer.into()),
         sandbox: sandbox.flatten(),
         permissions,
-        config: None,
+        config: thread_config_overrides_from_config(config),
         ephemeral: Some(config.ephemeral),
         thread_source: Some(ThreadSource::User),
         ..ThreadStartParams::default()
     }
 }
 
-fn thread_resume_params_from_config(config: &Config, thread_id: String) -> ThreadResumeParams {
+fn thread_resume_params_from_config(
+    config: &Config,
+    thread_id: String,
+    approvals_reviewer_override: Option<codex_app_server_protocol::ApprovalsReviewer>,
+) -> ThreadResumeParams {
     let permissions = permissions_selection_from_config(config);
     let sandbox = permissions.is_none().then(|| {
         sandbox_mode_from_permission_profile(
@@ -1183,12 +1345,18 @@ fn thread_resume_params_from_config(config: &Config, thread_id: String) -> Threa
         cwd: Some(config.cwd.to_string_lossy().to_string()),
         runtime_workspace_roots: Some(config.workspace_roots.clone()),
         approval_policy: Some(config.permissions.approval_policy.value().into()),
-        approvals_reviewer: approvals_reviewer_override_from_config(config),
+        approvals_reviewer: approvals_reviewer_override,
         sandbox: sandbox.flatten(),
         permissions,
-        config: None,
+        config: thread_config_overrides_from_config(config),
         ..ThreadResumeParams::default()
     }
+}
+
+fn thread_config_overrides_from_config(config: &Config) -> Option<HashMap<String, Value>> {
+    config
+        .bypass_hook_trust
+        .then(|| HashMap::from([("bypass_hook_trust".to_string(), Value::Bool(true))]))
 }
 
 fn permissions_selection_from_config(config: &Config) -> Option<String> {
@@ -1227,12 +1395,6 @@ fn sandbox_mode_from_permission_profile(
     }
 }
 
-fn approvals_reviewer_override_from_config(
-    config: &Config,
-) -> Option<codex_app_server_protocol::ApprovalsReviewer> {
-    Some(config.approvals_reviewer.into())
-}
-
 async fn send_request_with_response<T>(
     client: &InProcessAppServerClient,
     request: ClientRequest,
@@ -1258,7 +1420,7 @@ fn session_configured_from_thread_start_response(
         &response.thread.session_id,
         &response.thread.id,
         response.thread.parent_thread_id.as_deref(),
-        response.thread.thread_source.map(Into::into),
+        response.thread.thread_source.clone().map(Into::into),
         response.thread.name.clone(),
         response.thread.path.clone(),
         response.model.clone(),
@@ -1281,7 +1443,7 @@ fn session_configured_from_thread_resume_response(
         &response.thread.session_id,
         &response.thread.id,
         response.thread.parent_thread_id.as_deref(),
-        response.thread.thread_source.map(Into::into),
+        response.thread.thread_source.clone().map(Into::into),
         response.thread.name.clone(),
         response.thread.path.clone(),
         response.model.clone(),
@@ -1296,15 +1458,15 @@ fn session_configured_from_thread_resume_response(
     )
 }
 
-fn review_target_to_api(target: ReviewTarget) -> ApiReviewStartTarget {
+fn review_target_to_api(target: ReviewTarget) -> ApiReviewTarget {
     match target {
-        ReviewTarget::UncommittedChanges => ApiReviewStartTarget::UncommittedChanges,
+        ReviewTarget::UncommittedChanges => ApiReviewTarget::UncommittedChanges,
         ReviewTarget::CurrentTurnDiff { .. } => {
             unreachable!("current-turn diff reviews are background status targets only")
         }
-        ReviewTarget::BaseBranch { branch } => ApiReviewStartTarget::BaseBranch { branch },
-        ReviewTarget::Commit { sha, title } => ApiReviewStartTarget::Commit { sha, title },
-        ReviewTarget::Custom { instructions } => ApiReviewStartTarget::Custom { instructions },
+        ReviewTarget::BaseBranch { branch } => ApiReviewTarget::BaseBranch { branch },
+        ReviewTarget::Commit { sha, title } => ApiReviewTarget::Commit { sha, title },
+        ReviewTarget::Custom { instructions } => ApiReviewTarget::Custom { instructions },
     }
 }
 
@@ -1345,6 +1507,9 @@ fn session_configured_from_thread_response(
         parent_thread_id,
         thread_source,
         thread_name,
+        // The app-server thread response does not expose the persisted history
+        // contract, so legacy consumers see the defaulted value here.
+        history_mode: codex_protocol::protocol::ThreadHistoryMode::default(),
         model,
         model_provider_id,
         service_tier,
@@ -1357,7 +1522,6 @@ fn session_configured_from_thread_response(
         initial_messages: None,
         network_proxy: None,
         rollout_path,
-        history_mode: ThreadHistoryMode::Legacy,
     })
 }
 
@@ -1365,32 +1529,41 @@ fn lagged_event_warning_message(skipped: usize) -> String {
     format!("in-process app-server event stream lagged; dropped {skipped} events")
 }
 
-async fn wait_for_background_review_schedule_deadline(deadline: Option<tokio::time::Instant>) {
+async fn wait_for_background_review_deadline(
+    deadline: Option<BackgroundReviewDeadline>,
+) -> Option<BackgroundReviewDeadlineKind> {
     if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
+        tokio::time::sleep_until(deadline.at).await;
+        Some(deadline.kind)
+    } else {
+        None
     }
 }
 
-fn record_background_auto_review_status(
-    active_run_ids: &mut HashSet<String>,
-    run_id: &str,
-    status: &codex_app_server_protocol::BackgroundAutoReviewStatus,
-) -> bool {
-    match status {
-        codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Running => {
-            active_run_ids.insert(run_id.to_string());
-            false
+fn background_review_deadline_warning(kind: BackgroundReviewDeadlineKind) -> String {
+    match kind {
+        BackgroundReviewDeadlineKind::Schedule => {
+            "Background Review did not schedule before the bounded exec grace period elapsed; exiting without waiting for it."
+                .to_string()
         }
-        codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => {
-            active_run_ids.remove(run_id);
-            true
+        BackgroundReviewDeadlineKind::Completion => {
+            "Background Review did not reach a terminal status within its configured execution budget; exiting."
+                .to_string()
         }
     }
+}
+
+fn background_review_target_matches_turn(
+    target: &ApiReviewTarget,
+    turn_review_fingerprint: Option<&str>,
+) -> bool {
+    matches!(
+        (target, turn_review_fingerprint),
+        (
+            ApiReviewTarget::CurrentTurnDiff { fingerprint },
+            Some(turn_review_fingerprint)
+        ) if fingerprint == turn_review_fingerprint
+    )
 }
 
 fn should_process_notification(
@@ -1400,6 +1573,11 @@ fn should_process_notification(
 ) -> bool {
     match notification {
         ServerNotification::ConfigWarning(_) | ServerNotification::DeprecationNotice(_) => true,
+        // TODO(anp) resolve duplicate startup warnings
+        ServerNotification::Warning(notification) => notification
+            .thread_id
+            .as_deref()
+            .is_none_or(|candidate| candidate == thread_id),
         ServerNotification::Error(notification) => {
             notification.thread_id == thread_id && notification.turn_id == turn_id
         }
@@ -1504,7 +1682,7 @@ fn should_backfill_turn_completed_items(
         return false;
     };
 
-    !thread_ephemeral && payload.turn.items.is_empty()
+    !thread_ephemeral && payload.turn.items_view != codex_app_server_protocol::TurnItemsView::Full
 }
 
 fn turn_items_for_thread(
@@ -1553,7 +1731,7 @@ async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
             continue;
         };
         if let RolloutItem::TurnContext(item) = rollout_line.item {
-            return Some(item.cwd);
+            return Some(item.cwd.into_path_buf());
         }
     }
     None
@@ -1586,10 +1764,13 @@ async fn resolve_resume_thread_id(
                         model_providers: model_providers.clone(),
                         source_kinds: Some(all_thread_source_kinds()),
                         archived: Some(false),
+                        is_pinned: None,
+                        descendant_of_thread_id: None,
+                        parent_thread_id: None,
+                        ancestor_thread_id: None,
                         cwd: None,
                         use_state_db_only: false,
                         search_term: None,
-                        descendant_of_thread_id: None,
                     },
                 },
                 "thread/list",
@@ -1652,10 +1833,13 @@ async fn resolve_resume_thread_id(
                     model_providers: model_providers.clone(),
                     source_kinds: Some(all_thread_source_kinds()),
                     archived: Some(false),
+                    is_pinned: None,
+                    descendant_of_thread_id: None,
+                    parent_thread_id: None,
+                    ancestor_thread_id: None,
                     cwd: None,
                     use_state_db_only: false,
                     search_term: Some(session_id.to_string()),
-                    descendant_of_thread_id: None,
                 },
             },
             "thread/list",
@@ -1844,6 +2028,15 @@ async fn handle_server_request(
                 request_id,
                 &method,
                 "attestation generation is not supported in exec mode".to_string(),
+            )
+            .await
+        }
+        ServerRequest::CurrentTimeRead { request_id, .. } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                "external current time is not supported in exec mode".to_string(),
             )
             .await
         }

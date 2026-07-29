@@ -16,6 +16,7 @@ use codex_api::SharedAuthProvider;
 use codex_exec_server::ExecServerError;
 use codex_exec_server::HttpClient;
 use codex_exec_server::HttpHeader;
+use codex_exec_server::HttpRedirectPolicy;
 use codex_exec_server::HttpRequestParams;
 use codex_exec_server::HttpResponseBodyStream;
 use futures::StreamExt;
@@ -28,6 +29,8 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use rmcp::model::ClientJsonRpcMessage;
+use rmcp::model::ClientNotification;
+use rmcp::model::ConstString;
 use rmcp::model::JsonRpcMessage;
 use rmcp::model::ServerJsonRpcMessage;
 use rmcp::transport::streamable_http_client::AuthRequiredError;
@@ -133,6 +136,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
                 headers: protocol_headers(&headers),
                 body: Some(body.into()),
                 timeout_ms: None,
+                redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "buffered-request".to_string(),
                 stream_response: true,
             })
@@ -185,6 +189,25 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
 
         let content_type = response_header(&response.headers, CONTENT_TYPE);
         let session_id = response_header(&response.headers, HEADER_SESSION_ID);
+        if !status_is_success(response.status) {
+            let body = collect_body(&mut body_stream).await?;
+            if !retryable_post_response_status(mcp_method.as_deref(), response.status)
+                && content_type
+                    .as_deref()
+                    .is_some_and(|content_type| content_type.starts_with(JSON_MIME_TYPE))
+                && let Some(message) = parse_json_rpc_error(&body)
+            {
+                return Ok(StreamableHttpPostResponse::Json(message, session_id));
+            }
+            return Err(StreamableHttpError::UnexpectedServerResponse(
+                format!(
+                    "HTTP {}: {}",
+                    response.status,
+                    body_preview(String::from_utf8_lossy(&body).to_string())
+                )
+                .into(),
+            ));
+        }
         match content_type.as_deref() {
             Some(content_type) if content_type.starts_with(EVENT_STREAM_MIME_TYPE) => {
                 let event_stream = sse_stream_from_body(body_stream);
@@ -240,6 +263,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
                 headers: protocol_headers(&headers),
                 body: None,
                 timeout_ms: None,
+                redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "buffered-request".to_string(),
                 stream_response: false,
             })
@@ -309,6 +333,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
                 headers: protocol_headers(&headers),
                 body: None,
                 timeout_ms: None,
+                redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "buffered-request".to_string(),
                 stream_response: true,
             })
@@ -380,7 +405,26 @@ fn client_jsonrpc_message_fields(
             Some(request.id.to_string()),
         ),
         JsonRpcMessage::Response(response) => (None, Some(response.id.to_string())),
-        JsonRpcMessage::Notification(_) => (None, None),
+        JsonRpcMessage::Notification(notification) => {
+            let method = match &notification.notification {
+                ClientNotification::CancelledNotification(notification) => {
+                    notification.method.as_str()
+                }
+                ClientNotification::ProgressNotification(notification) => {
+                    notification.method.as_str()
+                }
+                ClientNotification::InitializedNotification(notification) => {
+                    notification.method.as_str()
+                }
+                ClientNotification::RootsListChangedNotification(notification) => {
+                    notification.method.as_str()
+                }
+                ClientNotification::CustomNotification(notification) => {
+                    notification.method.as_str()
+                }
+            };
+            (Some(method.to_string()), None)
+        }
         JsonRpcMessage::Error(error) => (None, error.id.as_ref().map(ToString::to_string)),
     }
 }
@@ -461,6 +505,36 @@ fn response_header(headers: &[HttpHeader], name: impl AsRef<str>) -> Option<Stri
 
 fn status_is_success(status: u16) -> bool {
     StatusCode::from_u16(status).is_ok_and(|status| status.is_success())
+}
+
+fn retryable_post_response_status(mcp_method: Option<&str>, status: u16) -> bool {
+    let Ok(status) = StatusCode::from_u16(status) else {
+        return false;
+    };
+    is_retryable_http_status(status)
+        && matches!(
+            mcp_method,
+            Some("initialize" | "notifications/initialized" | "tools/list")
+        )
+}
+
+fn is_retryable_http_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+fn parse_json_rpc_error(body: &[u8]) -> Option<ServerJsonRpcMessage> {
+    match serde_json::from_slice::<ServerJsonRpcMessage>(body) {
+        Ok(message @ JsonRpcMessage::Error(_)) => Some(message),
+        _ => None,
+    }
 }
 
 async fn collect_body(

@@ -21,13 +21,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 use toml::Value as TomlValue;
+use tracing::instrument;
 use tracing::warn;
 
 /// Shared app-server entry point for loading effective Codex configuration.
 #[derive(Clone)]
 pub(crate) struct ConfigManager {
     codex_home: PathBuf,
-    auth_home: PathBuf,
     cli_overrides: Arc<RwLock<Vec<(String, TomlValue)>>>,
     runtime_feature_enablement: Arc<RwLock<BTreeMap<String, bool>>>,
     loader_overrides: LoaderOverrides,
@@ -40,7 +40,6 @@ pub(crate) struct ConfigManager {
 impl ConfigManager {
     pub(crate) fn new(
         codex_home: PathBuf,
-        auth_home: PathBuf,
         cli_overrides: Vec<(String, TomlValue)>,
         loader_overrides: LoaderOverrides,
         strict_config: bool,
@@ -50,7 +49,6 @@ impl ConfigManager {
     ) -> Self {
         Self {
             codex_home,
-            auth_home,
             cli_overrides: Arc::new(RwLock::new(cli_overrides)),
             runtime_feature_enablement: Arc::new(RwLock::new(BTreeMap::new())),
             loader_overrides,
@@ -97,9 +95,14 @@ impl ConfigManager {
         &self,
         auth_manager: Arc<AuthManager>,
         chatgpt_base_url: String,
+        http_client_factory: codex_http_client::HttpClientFactory,
     ) {
-        let loader =
-            cloud_config_bundle_loader(auth_manager, chatgpt_base_url, self.codex_home.clone());
+        let loader = cloud_config_bundle_loader(
+            auth_manager,
+            chatgpt_base_url,
+            self.codex_home.clone(),
+            http_client_factory,
+        );
         if let Ok(mut guard) = self.cloud_config_bundle.write() {
             *guard = loader;
         } else {
@@ -171,7 +174,6 @@ impl ConfigManager {
             self.current_cli_overrides(),
         )
         .await?;
-        config.auth_home = AbsolutePathBuf::from_absolute_path(self.auth_home.clone())?;
         if self.loader_overrides.user_config_path.is_some()
             || self.loader_overrides.user_config_profile.is_some()
         {
@@ -180,7 +182,7 @@ impl ConfigManager {
                 &user_config_path,
                 self.loader_overrides.user_config_profile.as_ref(),
                 TomlValue::Table(toml::map::Map::new()),
-            );
+            )?;
         }
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
@@ -216,6 +218,7 @@ impl ConfigManager {
         .await
     }
 
+    #[instrument(level = "trace", skip_all)]
     pub(crate) async fn load_with_cli_overrides(
         &self,
         cli_overrides: &[(String, TomlValue)],
@@ -244,7 +247,6 @@ impl ConfigManager {
 
         let mut config = codex_core::config::ConfigBuilder::default()
             .codex_home(self.codex_home.clone())
-            .auth_home(self.auth_home.clone())
             .cli_overrides(merged_cli_overrides)
             .loader_overrides(self.loader_overrides.clone())
             .strict_config(self.strict_config)
@@ -311,7 +313,6 @@ impl ConfigManager {
         cloud_config_bundle: CloudConfigBundleLoader,
     ) -> Self {
         Self::new(
-            codex_home.clone(),
             codex_home,
             cli_overrides,
             loader_overrides,

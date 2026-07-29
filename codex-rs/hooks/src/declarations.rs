@@ -23,17 +23,23 @@ pub fn plugin_hook_declarations(hook_sources: &[PluginHookSource]) -> Vec<Plugin
             let mut seen_keys = HashSet::new();
             for (group_index, group) in groups.iter().enumerate() {
                 for (handler_index, handler) in group.hooks.iter().enumerate() {
-                    let key = crate::hook_key(
+                    let requested_key = crate::hook_key(
                         &key_source,
                         event_name,
                         group_index,
                         handler_index,
                         hook_handler_id(handler),
                     );
-                    let key = if seen_keys.insert(key.clone()) {
-                        key
+                    let key = if seen_keys.insert(requested_key.clone()) {
+                        requested_key
                     } else {
-                        crate::hook_key(&key_source, event_name, group_index, handler_index, None)
+                        crate::hook_key(
+                            &key_source,
+                            event_name,
+                            group_index,
+                            handler_index,
+                            /*id*/ None,
+                        )
                     };
                     declarations.push(PluginHookDeclaration { key, event_name });
                 }
@@ -48,16 +54,14 @@ pub(crate) fn plugin_hook_key_source(plugin_id: &str, source_relative_path: &str
     format!("{plugin_id}:{source_relative_path}")
 }
 
+/// The declared hook id, but only for handlers that discovery will actually
+/// register. Skipped handlers must not claim an id-based key that a later
+/// runnable handler with the same id would then be denied.
 pub(crate) fn hook_handler_id(handler: &codex_config::HookHandlerConfig) -> Option<&str> {
     match handler {
-        codex_config::HookHandlerConfig::Command {
-            id,
-            command,
-            r#async,
-            ..
-        } => (!r#async && !command.trim().is_empty())
-            .then_some(id.as_deref())
-            .flatten(),
+        codex_config::HookHandlerConfig::Command { id, command, .. } => {
+            id.as_deref().filter(|_| !command.trim().is_empty())
+        }
         codex_config::HookHandlerConfig::Prompt {} | codex_config::HookHandlerConfig::Agent {} => {
             None
         }
@@ -92,12 +96,13 @@ mod tests {
                     hooks: vec![
                         HookHandlerConfig::Prompt {},
                         HookHandlerConfig::Command {
-                            id: Some("shell-check".to_string()),
+                            id: None,
                             command: "echo hi".to_string(),
                             command_windows: None,
                             timeout_sec: None,
                             r#async: false,
                             status_message: None,
+                            additional_context_limit: None,
                         },
                     ],
                 }],
@@ -117,7 +122,7 @@ mod tests {
                     event_name: HookEventName::PreToolUse,
                 },
                 PluginHookDeclaration {
-                    key: "demo@test:hooks/hooks.json:pre_tool_use:#shell-check".to_string(),
+                    key: "demo@test:hooks/hooks.json:pre_tool_use:0:1".to_string(),
                     event_name: HookEventName::PreToolUse,
                 },
                 PluginHookDeclaration {

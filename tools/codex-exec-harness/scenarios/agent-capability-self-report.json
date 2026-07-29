@@ -26,13 +26,12 @@
       },
       {
         "request": 0,
-        "scope": "tools",
+        "scope": "input",
         "contains_all": [
-          "generic harness assumptions",
-          "antigravity",
-          "claude-opus-4.8",
-          "code-gpt-5.6-luna",
-          "max_concurrent_threads_per_session = 4",
+          "eligible installed third-party agent",
+          "task_kind",
+          "task_size",
+          "agent_type",
           "Task name for the new agent",
           "Optional number of turns to fork"
         ]

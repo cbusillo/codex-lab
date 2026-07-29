@@ -60,14 +60,6 @@ pub(crate) async fn write_hook_trusts(
     trust_updates: Vec<HookTrustUpdate>,
 ) -> Result<ConfigWriteResponse> {
     let request_id = RequestId::String(format!("hooks-config-write-{}", Uuid::new_v4()));
-    let params = hook_trust_config_write_params(trust_updates);
-    request_handle
-        .request_typed(ClientRequest::ConfigBatchWrite { request_id, params })
-        .await
-        .wrap_err("config/batchWrite failed while updating hook trust in TUI")
-}
-
-fn hook_trust_config_write_params(trust_updates: Vec<HookTrustUpdate>) -> ConfigBatchWriteParams {
     let value = serde_json::Value::Object(
         trust_updates
             .into_iter()
@@ -81,16 +73,22 @@ fn hook_trust_config_write_params(trust_updates: Vec<HookTrustUpdate>) -> Config
             })
             .collect(),
     );
-    ConfigBatchWriteParams {
-        edits: vec![codex_app_server_protocol::ConfigEdit {
-            key_path: "hooks.state".to_string(),
-            value,
-            merge_strategy: MergeStrategy::Upsert,
-        }],
-        file_path: None,
-        expected_version: None,
-        reload_user_config: true,
-    }
+    request_handle
+        .request_typed(ClientRequest::ConfigBatchWrite {
+            request_id,
+            params: ConfigBatchWriteParams {
+                edits: vec![codex_app_server_protocol::ConfigEdit {
+                    key_path: "hooks.state".to_string(),
+                    value,
+                    merge_strategy: MergeStrategy::Upsert,
+                }],
+                file_path: None,
+                expected_version: None,
+                reload_user_config: true,
+            },
+        })
+        .await
+        .wrap_err("config/batchWrite failed while updating hook trust in TUI")
 }
 
 pub(crate) async fn write_hook_trust(
@@ -100,6 +98,3 @@ pub(crate) async fn write_hook_trust(
 ) -> Result<ConfigWriteResponse> {
     write_hook_trusts(request_handle, vec![HookTrustUpdate { key, current_hash }]).await
 }
-#[cfg(test)]
-#[path = "hooks_rpc_tests.rs"]
-mod tests;

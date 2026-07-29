@@ -5,6 +5,7 @@ use codex_protocol::protocol::APPS_INSTRUCTIONS_CLOSE_TAG;
 use codex_protocol::protocol::APPS_INSTRUCTIONS_OPEN_TAG;
 
 use super::*;
+use crate::connectors;
 use crate::context::APPS_UPDATE_CLOSE_TAG;
 use crate::context::APPS_UPDATE_OPEN_TAG;
 use crate::context::AppsAvailability;
@@ -39,12 +40,6 @@ impl AppsContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.availability.replace(availability) {
-            None if availability == AppsAvailability::Available => {
-                AppsContextChange::InitializeAvailable
-            }
-            Some(AppsAvailability::Unavailable) if availability == AppsAvailability::Available => {
-                AppsContextChange::BecameAvailable
-            }
             Some(AppsAvailability::Available) if availability == AppsAvailability::Unavailable => {
                 AppsContextChange::BecameUnavailable
             }
@@ -59,17 +54,6 @@ impl AppsContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .availability = apps_availability_from_items(items);
-    }
-
-    fn current_instructions(&self) -> Option<ResponseItem> {
-        matches!(
-            self.state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .availability,
-            Some(AppsAvailability::Available)
-        )
-        .then(|| ContextualUserFragment::into(AppsInstructions))
     }
 
     fn mcp_cache_identity_matches(&self, current: &ExecutionAccountCacheIdentity) -> bool {
@@ -91,8 +75,6 @@ impl AppsContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppsContextChange {
     None,
-    InitializeAvailable,
-    BecameAvailable,
     BecameUnavailable,
 }
 
@@ -100,10 +82,6 @@ impl AppsContextChange {
     fn into_response_item(self) -> Option<ResponseItem> {
         match self {
             Self::None => None,
-            Self::InitializeAvailable => Some(ContextualUserFragment::into(AppsInstructions)),
-            Self::BecameAvailable => Some(ContextualUserFragment::into(
-                AppsAvailabilityUpdate::new(AppsAvailability::Available),
-            )),
             Self::BecameUnavailable => Some(ContextualUserFragment::into(
                 AppsAvailabilityUpdate::new(AppsAvailability::Unavailable),
             )),
@@ -112,17 +90,12 @@ impl AppsContextChange {
 }
 
 impl Session {
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "MCP app context rendering reads through the session-owned manager guard"
-    )]
     async fn refresh_apps_context(&self, turn_context: &TurnContext) -> AppsContextChange {
         let availability =
             if turn_context.config.include_apps_instructions && turn_context.apps_enabled() {
-                let mcp_connection_manager = self.services.mcp_connection_manager.read().await;
                 let accessible_and_enabled_connectors =
-                    connectors::list_accessible_and_enabled_connectors_from_manager(
-                        &mcp_connection_manager,
+                    connectors::list_accessible_and_enabled_connectors_from_runtime(
+                        self.services.mcp_runtime.as_ref(),
                         &turn_context.config,
                     )
                     .await;
@@ -150,22 +123,14 @@ impl Session {
         &self,
         turn_context: &TurnContext,
     ) -> ContextManager {
+        let history = self.clone_history().await;
+        self.apps_context.update_from_history(history.raw_items());
         if let Some(item) = self.refresh_apps_context_item(turn_context).await {
             self.record_conversation_items(turn_context, std::slice::from_ref(&item))
                 .await;
+            return self.clone_history().await;
         }
-        self.clone_history().await
-    }
-
-    pub(crate) async fn build_compaction_initial_context(
-        &self,
-        turn_context: &TurnContext,
-    ) -> Vec<ResponseItem> {
-        let mut initial_context = self.build_initial_context(turn_context).await;
-        if let Some(apps_instructions) = self.apps_context.current_instructions() {
-            initial_context.push(apps_instructions);
-        }
-        initial_context
+        history
     }
 
     pub(crate) async fn ensure_mcp_manager_for_execution_account(

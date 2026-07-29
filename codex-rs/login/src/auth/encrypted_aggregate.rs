@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthKeyringBackendKind;
 use codex_keyring_store::KeyringStore;
 use codex_secrets::LocalSecretsNamespace;
 use codex_secrets::SecretMutation;
@@ -74,6 +75,13 @@ pub(crate) enum PreparedMigration {
     Prepared(LoginAggregateV1),
 }
 
+pub(crate) const fn is_encrypted_aggregate_enabled(mode: AuthCredentialsStoreMode) -> bool {
+    matches!(
+        mode,
+        AuthCredentialsStoreMode::Keyring | AuthCredentialsStoreMode::Auto
+    )
+}
+
 /// Validates any existing encrypted shadow without attempting activation or mutation.
 pub(crate) fn validate_encrypted_aggregate_for_read(
     codex_home: &Path,
@@ -98,13 +106,33 @@ pub(crate) fn validate_encrypted_aggregate_for_read(
 /// Activate the verified encrypted shadow when the current legacy sources form
 /// a consistent aggregate.
 ///
-/// Activation and trusted legacy mutations share the same secrets lock. A
+/// Activation and trusted legacy mutations share the aggregate secrets lock. A
 /// pre-existing aggregate remains strict, while a first activation is deferred
 /// when the legacy sources cannot yet form a consistent snapshot.
+///
+/// Tests pin the Direct keyring backend so activation reads back the same
+/// records the `*_with_keyring_store` seeding helpers write. The platform
+/// default is Secrets on Windows, which would look at a different backend than
+/// the fixtures populated.
+#[cfg(test)]
 pub(crate) fn activate_encrypted_aggregate(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
+) -> io::Result<PreparedMigration> {
+    activate_encrypted_aggregate_with_keyring_backend(
+        codex_home,
+        mode,
+        keyring_store,
+        AuthKeyringBackendKind::Direct,
+    )
+}
+
+pub(crate) fn activate_encrypted_aggregate_with_keyring_backend(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_store: Arc<dyn KeyringStore>,
+    keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<PreparedMigration> {
     if mode == AuthCredentialsStoreMode::Ephemeral {
         return Ok(PreparedMigration::Nothing);
@@ -117,7 +145,12 @@ pub(crate) fn activate_encrypted_aggregate(
     let mutation_result = manager.mutate(&SecretScope::Global, &name, |current| {
         let mutation = if let Some(current) = current {
             let existing = parse_document(current)?;
-            let candidate = match read_legacy_document(codex_home, mode, keyring_store.clone()) {
+            let candidate = match read_legacy_document(
+                codex_home,
+                mode,
+                keyring_store.clone(),
+                keyring_backend_kind,
+            ) {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => {
                     activation = Some(PreparedMigration::Nothing);
@@ -137,8 +170,12 @@ pub(crate) fn activate_encrypted_aggregate(
             SecretMutation::Keep
         } else {
             initial_activation = true;
-            let candidate = match assemble_legacy_document(codex_home, mode, keyring_store.clone())
-            {
+            let candidate = match assemble_legacy_document(
+                codex_home,
+                mode,
+                keyring_store.clone(),
+                keyring_backend_kind,
+            ) {
                 Ok(candidate) => candidate,
                 Err(_) => {
                     activation = Some(PreparedMigration::Deferred);
@@ -245,8 +282,9 @@ fn read_legacy_document(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
+    keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<Option<LoginAggregateV1>> {
-    let document = assemble_legacy_document(codex_home, mode, keyring_store)?;
+    let document = assemble_legacy_document(codex_home, mode, keyring_store, keyring_backend_kind)?;
     if let Some(document) = document.as_ref() {
         validate_active_account(document)?;
     }
@@ -257,9 +295,10 @@ fn assemble_legacy_document(
     codex_home: &Path,
     mode: AuthCredentialsStoreMode,
     keyring_store: Arc<dyn KeyringStore>,
+    keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<Option<LoginAggregateV1>> {
     let (active_auth, active_auth_source) =
-        load_auth_for_migration(codex_home, mode, keyring_store)?;
+        load_auth_for_migration(codex_home, mode, keyring_store, keyring_backend_kind)?;
     let (accounts, catalog_present) = read_accounts_file_for_migration(codex_home)?;
     if active_auth.is_none() && !catalog_present {
         return Ok(None);
@@ -285,7 +324,7 @@ fn secrets_manager(codex_home: &Path, keyring_store: Arc<dyn KeyringStore>) -> S
         codex_home.to_path_buf(),
         SecretsBackendKind::Local,
         keyring_store,
-        LocalSecretsNamespace::CodexAuth,
+        LocalSecretsNamespace::LoginAggregate,
     )
 }
 

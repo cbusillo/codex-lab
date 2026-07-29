@@ -3,8 +3,8 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::render::renderable::Renderable;
 use codex_app_server_protocol::ToolRequestUserInputParams;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use crossterm::event::KeyEvent;
+use std::time::Instant;
 
 use super::CancellationEvent;
 
@@ -56,14 +56,9 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
-    /// Active login id for the add-account view while it is waiting on browser auth.
+    /// Account id currently being added by a login flow, when applicable.
     fn active_login_add_account_id(&self) -> Option<&str> {
         None
-    }
-
-    /// Refresh a skill toggle row while a skills management view is active.
-    fn update_skill_enabled(&mut self, _path: &AbsolutePathBuf, _enabled: bool) -> bool {
-        false
     }
 
     /// Handle Ctrl-C while this view is active.
@@ -74,6 +69,11 @@ pub(crate) trait BottomPaneView: Renderable {
     /// Return true if Esc should be routed through `handle_key_event` instead
     /// of the `on_ctrl_c` cancellation path.
     fn prefer_esc_to_handle_key_event(&self) -> bool {
+        false
+    }
+
+    /// Return true when this key event will interrupt the active agent turn.
+    fn will_interrupt_turn_on_key_event(&self, _key_event: KeyEvent) -> bool {
         false
     }
 
@@ -96,6 +96,14 @@ pub(crate) trait BottomPaneView: Renderable {
     /// When `true`, the bottom pane will schedule a short delayed redraw to
     /// give the burst time window a chance to flush.
     fn is_in_paste_burst(&self) -> bool {
+        false
+    }
+
+    /// Process time-based state immediately before rendering.
+    ///
+    /// Return true when state changed and the bottom pane should redraw or
+    /// complete the active view.
+    fn pre_draw_tick(&mut self, _now: Instant) -> bool {
         false
     }
 

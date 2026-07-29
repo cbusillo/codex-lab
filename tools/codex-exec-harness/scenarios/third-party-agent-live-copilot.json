@@ -7,7 +7,7 @@
   "skip_run_all": true,
   "model": "gpt-5.6-sol",
   "sandbox": "read-only",
-  "prompt": "Spawn the github-copilot agent as task live_copilot, wait for it, list its terminal status, close it, and finish.",
+  "prompt": "Spawn the github-copilot agent as task live_copilot, wait for it, list its terminal status, interrupt it for cleanup, and finish.",
   "files": {
     "README.md": "# Third-party agent live smoke fixture\n"
   },
@@ -22,7 +22,8 @@
               "type": "function_call",
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Reply with exactly LIVE_EXTERNAL_AGENT_OK. Do not inspect or change files.\",\"task_name\":\"live_copilot\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"github-copilot\",\"fork_turns\":\"none\"}",
-              "call_id": "call-live-copilot-spawn"
+              "call_id": "call-live-copilot-spawn",
+              "namespace": "collaboration"
             }
           }
         ]
@@ -35,7 +36,8 @@
               "type": "function_call",
               "name": "wait_agent",
               "arguments": "{\"timeout_ms\":120000}",
-              "call_id": "call-live-copilot-wait"
+              "call_id": "call-live-copilot-wait",
+              "namespace": "collaboration"
             }
           }
         ]
@@ -48,20 +50,22 @@
               "type": "function_call",
               "name": "list_agents",
               "arguments": "{}",
-              "call_id": "call-live-copilot-list"
+              "call_id": "call-live-copilot-list",
+              "namespace": "collaboration"
             }
           }
         ]
       },
       {
-        "response_id": "resp-live-copilot-close",
+        "response_id": "resp-live-copilot-interrupt",
         "events": [
           {
             "item": {
               "type": "function_call",
-              "name": "close_agent",
+              "name": "interrupt_agent",
               "arguments": "{\"target\":\"live_copilot\"}",
-              "call_id": "call-live-copilot-close"
+              "call_id": "call-live-copilot-interrupt",
+              "namespace": "collaboration"
             }
           }
         ]
@@ -95,8 +99,12 @@
     "responses": [
       {
         "request": 0,
-        "scope": "tools",
-        "contains_all": ["github-copilot", "spawn_agent"]
+        "scope": "input",
+        "contains_all": [
+          "github-copilot",
+          "spawn_agent",
+          "agent_type"
+        ]
       }
     ],
     "tool_outputs": [
@@ -120,7 +128,7 @@
       },
       {
         "request": 4,
-        "call_id": "call-live-copilot-close",
+        "call_id": "call-live-copilot-interrupt",
         "contains": "\"previous_status\":{\"completed\":\"LIVE_EXTERNAL_AGENT_OK"
       }
     ]

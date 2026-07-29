@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::trace;
 
+#[cfg(debug_assertions)]
+pub const TEST_KEYRING_DIR_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_KEYRING_DIR";
+
 #[derive(Debug)]
 pub enum CredentialStoreError {
     Other(KeyringError),
@@ -53,7 +56,7 @@ pub trait KeyringStore: Debug + Send + Sync {
 static DEFAULT_KEYRING_STORE_OVERRIDE: OnceLock<Arc<dyn KeyringStore>> = OnceLock::new();
 
 #[cfg(debug_assertions)]
-pub fn set_default_keyring_store_for_tests(keyring_store: Arc<dyn KeyringStore>) -> bool {
+fn set_default_keyring_store_for_tests(keyring_store: Arc<dyn KeyringStore>) -> bool {
     DEFAULT_KEYRING_STORE_OVERRIDE.set(keyring_store).is_ok()
 }
 
@@ -269,52 +272,45 @@ pub mod tests {
     }
 
     #[cfg(debug_assertions)]
-    static SHARED_TEST_KEYRING_ROOT: OnceLock<PathBuf> = OnceLock::new();
+    static SHARED_TEST_KEYRING_ROOT: OnceLock<SharedTestKeyringRoot> = OnceLock::new();
+
+    #[cfg(debug_assertions)]
+    struct SharedTestKeyringRoot {
+        path: PathBuf,
+        owned: bool,
+    }
 
     #[cfg(debug_assertions)]
     #[derive(Debug)]
     pub struct HermeticTestKeyringStore {
-        fallback: MockKeyringStore,
-        persisted_root: Option<PathBuf>,
+        root: PathBuf,
         next_temp_file_id: AtomicU64,
-    }
-
-    #[cfg(debug_assertions)]
-    impl Default for HermeticTestKeyringStore {
-        fn default() -> Self {
-            Self {
-                fallback: MockKeyringStore::default(),
-                persisted_root: None,
-                next_temp_file_id: AtomicU64::new(0),
-            }
-        }
     }
 
     #[cfg(debug_assertions)]
     impl HermeticTestKeyringStore {
         pub fn persisted(root: PathBuf) -> Self {
             Self {
-                persisted_root: Some(root),
-                ..Self::default()
+                root,
+                next_temp_file_id: AtomicU64::new(0),
             }
         }
 
-        fn entry_path(&self, service: &str, account: &str) -> Option<PathBuf> {
-            self.persisted_root.as_ref().map(|root| {
-                root.join(encoded_path_component(service))
-                    .join(encoded_path_component(account))
-            })
+        fn entry_path(&self, service: &str, account: &str) -> PathBuf {
+            self.root
+                .join(encoded_path_component(service))
+                .join(encoded_path_component(account))
         }
+    }
 
-        fn load_value(
+    #[cfg(debug_assertions)]
+    impl KeyringStore for HermeticTestKeyringStore {
+        fn load(
             &self,
             service: &str,
             account: &str,
         ) -> Result<Option<String>, CredentialStoreError> {
-            let Some(path) = self.entry_path(service, account) else {
-                return self.fallback.load(service, account);
-            };
-            match std::fs::read(path) {
+            match std::fs::read(self.entry_path(service, account)) {
                 Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|error| {
                     CredentialStoreError::new(KeyringError::BadEncoding(error.into_bytes()))
                 }),
@@ -323,33 +319,35 @@ pub mod tests {
             }
         }
 
-        fn save_value(
+        fn save(
             &self,
             service: &str,
             account: &str,
             value: &str,
         ) -> Result<(), CredentialStoreError> {
-            let Some(path) = self.entry_path(service, account) else {
-                return self.fallback.save(service, account, value);
-            };
-            if let Some(root) = self.persisted_root.as_deref() {
-                secure_directory(root)?;
-            }
+            secure_directory(&self.root)?;
+            let path = self.entry_path(service, account);
             let parent = path.parent().ok_or_else(|| {
                 file_store_error(std::io::Error::other("test keyring path has no parent"))
             })?;
             secure_directory(parent)?;
-            let temp_file_id = self.next_temp_file_id.fetch_add(1, Ordering::Relaxed);
             let process_id = std::process::id();
             let encoded_account = encoded_path_component(account);
-            let temp_path = parent.join(format!(
-                ".{process_id}.{temp_file_id}.{encoded_account}.tmp"
-            ));
-            let mut open_options = OpenOptions::new();
-            open_options.create_new(true).write(true);
-            #[cfg(unix)]
-            open_options.mode(0o600);
-            let mut temp_file = open_options.open(&temp_path).map_err(file_store_error)?;
+            let (temp_path, mut temp_file) = loop {
+                let temp_file_id = self.next_temp_file_id.fetch_add(1, Ordering::Relaxed);
+                let temp_path = parent.join(format!(
+                    ".{process_id}.{temp_file_id}.{encoded_account}.tmp"
+                ));
+                let mut open_options = OpenOptions::new();
+                open_options.create_new(true).write(true);
+                #[cfg(unix)]
+                open_options.mode(0o600);
+                match open_options.open(&temp_path) {
+                    Ok(temp_file) => break (temp_path, temp_file),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(file_store_error(error)),
+                }
+            };
             temp_file
                 .write_all(value.as_bytes())
                 .map_err(file_store_error)?;
@@ -362,39 +360,12 @@ pub mod tests {
             Ok(())
         }
 
-        fn delete_value(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-            let Some(path) = self.entry_path(service, account) else {
-                return self.fallback.delete(service, account);
-            };
-            match std::fs::remove_file(path) {
+        fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
+            match std::fs::remove_file(self.entry_path(service, account)) {
                 Ok(()) => Ok(true),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 Err(error) => Err(file_store_error(error)),
             }
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    impl KeyringStore for HermeticTestKeyringStore {
-        fn load(
-            &self,
-            service: &str,
-            account: &str,
-        ) -> Result<Option<String>, CredentialStoreError> {
-            self.load_value(service, account)
-        }
-
-        fn save(
-            &self,
-            service: &str,
-            account: &str,
-            value: &str,
-        ) -> Result<(), CredentialStoreError> {
-            self.save_value(service, account, value)
-        }
-
-        fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-            self.delete_value(service, account)
         }
     }
 
@@ -491,6 +462,11 @@ pub mod tests {
     pub fn shared_test_keyring_root() -> &'static Path {
         SHARED_TEST_KEYRING_ROOT
             .get_or_init(|| {
+                if let Some(path) = std::env::var_os(super::TEST_KEYRING_DIR_ENV_VAR) {
+                    let path = PathBuf::from(path);
+                    secure_directory(&path).expect("open shared app-server test keyring root");
+                    return SharedTestKeyringRoot { path, owned: false };
+                }
                 let process_id = std::process::id();
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -509,15 +485,32 @@ pub mod tests {
                 }
                 #[cfg(not(unix))]
                 std::fs::create_dir(&root).expect("create shared app-server test keyring root");
-                root
+                SharedTestKeyringRoot {
+                    path: root,
+                    owned: true,
+                }
             })
+            .path
             .as_path()
     }
 
     #[cfg(debug_assertions)]
-    pub fn install_persisted_default_test_keyring_store(root: &Path) -> bool {
-        super::set_default_keyring_store_for_tests(Arc::new(HermeticTestKeyringStore::persisted(
-            root.to_path_buf(),
+    pub fn remove_shared_test_keyring_root() -> std::io::Result<()> {
+        if let Some(root) = SHARED_TEST_KEYRING_ROOT.get()
+            && root.owned
+        {
+            std::fs::remove_dir_all(&root.path)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn install_persisted_default_test_keyring_store(
+        root: &Path,
+    ) -> Result<bool, CredentialStoreError> {
+        secure_directory(root)?;
+        Ok(super::set_default_keyring_store_for_tests(Arc::new(
+            HermeticTestKeyringStore::persisted(root.to_path_buf()),
         )))
     }
 }

@@ -1,5 +1,4 @@
 use anyhow::Context;
-use codex_core::test_support::without_generated_response_item_ids;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::PermissionProfile;
@@ -17,8 +16,11 @@ use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::responses::strip_metadata;
+use core_test_support::responses::strip_response_item_id;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -60,19 +62,6 @@ fn extract_image_url(item: &ResponseItem) -> Option<String> {
         }),
         _ => None,
     }
-}
-
-fn assert_generated_message_id(item: &ResponseItem) {
-    let Some(item_id) = item.id() else {
-        panic!("persisted message id");
-    };
-    let Some(uuid) = item_id
-        .strip_prefix("msg_")
-        .and_then(|id| uuid::Uuid::parse_str(id).ok())
-    else {
-        panic!("message UUIDv7 id");
-    };
-    assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
 }
 
 async fn read_rollout_text(path: &Path) -> anyhow::Result<String> {
@@ -139,12 +128,11 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
                     text_elements: Vec::new(),
                 },
             ],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(cwd.abs()),
+                environments: Some(local_selections(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -169,7 +157,6 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
     let rollout_text = read_rollout_text(&rollout_path).await?;
     let actual = find_user_message_with_image(&rollout_text)
         .expect("expected user message with input image in rollout");
-    assert_generated_message_id(&actual);
 
     let image_url = extract_image_url(&actual).expect("expected image url in rollout");
     let expected = ResponseItem::Message {
@@ -193,9 +180,10 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
             },
         ],
         phase: None,
+        internal_chat_message_metadata_passthrough: None,
     };
 
-    assert_eq!(without_generated_response_item_ids(&[actual]), [expected]);
+    assert_eq!(strip_response_item_id(strip_metadata(actual)), expected);
 
     Ok(())
 }
@@ -214,7 +202,7 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
         ..
     } = test_codex().build(&server).await?;
 
-    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=".to_string();
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string();
 
     let response = sse(vec![
         ev_response_created("resp-1"),
@@ -239,12 +227,11 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
                     text_elements: Vec::new(),
                 },
             ],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(cwd.abs()),
+                environments: Some(local_selections(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -269,7 +256,6 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
     let rollout_text = read_rollout_text(&rollout_path).await?;
     let actual = find_user_message_with_image(&rollout_text)
         .expect("expected user message with input image in rollout");
-    assert_generated_message_id(&actual);
 
     let image_url = extract_image_url(&actual).expect("expected image url in rollout");
     let expected = ResponseItem::Message {
@@ -285,9 +271,10 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
             },
         ],
         phase: None,
+        internal_chat_message_metadata_passthrough: None,
     };
 
-    assert_eq!(without_generated_response_item_ids(&[actual]), [expected]);
+    assert_eq!(strip_response_item_id(strip_metadata(actual)), expected);
 
     Ok(())
 }

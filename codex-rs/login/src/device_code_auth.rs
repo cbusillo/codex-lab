@@ -1,7 +1,9 @@
 use codex_browser::BrowserConfig;
 use codex_browser::BrowserManager;
-use reqwest::StatusCode;
-use reqwest::header::HeaderMap;
+use codex_browser::global;
+use codex_http_client::HttpClient;
+use http::HeaderMap;
+use http::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::Deserializer;
@@ -10,9 +12,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::auth::LoginAccountCatalogPolicy;
+use crate::default_client::create_raw_auth_client;
 use crate::pkce::PkceCodes;
 use crate::server::ServerOptions;
-use codex_client::build_reqwest_client_with_custom_ca;
 use std::io;
 
 const ANSI_BLUE: &str = "\x1b[94m";
@@ -64,7 +66,7 @@ struct CodeSuccessResp {
 
 /// Request the user code and polling interval.
 async fn request_user_code(
-    client: &reqwest::Client,
+    client: &HttpClient,
     auth_base_url: &str,
     base_url: &str,
     client_id: &str,
@@ -148,6 +150,15 @@ async fn request_user_code_via_browser(
     base_url: &str,
     client_id: &str,
 ) -> std::io::Result<UserCodeResp> {
+    if let Some(manager) = global::get_browser_manager().await {
+        return request_user_code_via_browser_with_manager(
+            &manager,
+            base_url,
+            client_id,
+            Duration::from_secs(4),
+        )
+        .await;
+    }
     let manager = BrowserManager::new(BrowserConfig {
         enabled: true,
         headless: true,
@@ -178,8 +189,6 @@ async fn request_user_code_via_browser_with_manager(
         .map_err(|_| std::io::Error::other("browser navigation timed out"))?
         .map_err(|err| std::io::Error::other(format!("browser navigation failed: {err}")))?;
 
-    // Give browser-managed challenge scripts a bounded window to set cookies
-    // before retrying the device-code API request from that browser context.
     tokio::time::sleep(settle_delay).await;
 
     let api_url = format!("{issuer}/api/accounts/deviceauth/usercode");
@@ -245,7 +254,7 @@ async fn request_user_code_via_browser_with_manager(
 
 /// Poll token endpoint until a code is issued or timeout occurs.
 async fn poll_for_token(
-    client: &reqwest::Client,
+    client: &HttpClient,
     auth_base_url: &str,
     device_auth_id: &str,
     user_code: &str,
@@ -293,20 +302,27 @@ async fn poll_for_token(
     }
 }
 
-fn print_device_code_prompt(verification_url: &str, code: &str) {
+fn device_code_prompt(verification_url: &str, code: &str) -> String {
     let version = env!("CARGO_PKG_VERSION");
-    println!(
+    format!(
         "\nWelcome to Codex [v{ANSI_GRAY}{version}{ANSI_RESET}]\n{ANSI_GRAY}OpenAI's command-line coding agent{ANSI_RESET}\n\
 \nFollow these steps to sign in with ChatGPT using device code authorization:\n\
 \n1. Open this link in your browser and sign in to your account\n   {ANSI_BLUE}{verification_url}{ANSI_RESET}\n\
 \n2. Enter this one-time code {ANSI_GRAY}(expires in 15 minutes){ANSI_RESET}\n   {ANSI_BLUE}{code}{ANSI_RESET}\n\
-\n{ANSI_GRAY}Device codes are a common phishing target. Never share this code.{ANSI_RESET}\n",
-    );
+\n{ANSI_GRAY}Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.{ANSI_RESET}\n",
+    )
+}
+
+fn print_device_code_prompt(verification_url: &str, code: &str) {
+    let prompt = device_code_prompt(verification_url, code);
+    println!("{prompt}");
 }
 
 pub async fn request_device_code(opts: &ServerOptions) -> std::io::Result<DeviceCode> {
-    let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let base_url = opts.issuer.trim_end_matches('/');
+    // The route selected for the issuer is reused for all device-auth endpoint paths; the endpoint
+    // paths are not resolved separately.
+    let client = create_raw_auth_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
     let uc = request_user_code(&client, &api_base_url, base_url, &opts.client_id).await?;
 
@@ -349,8 +365,8 @@ async fn complete_device_code_login_with_catalog_policy(
     device_code: DeviceCode,
     account_catalog_policy: LoginAccountCatalogPolicy,
 ) -> std::io::Result<()> {
-    let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let base_url = opts.issuer.trim_end_matches('/');
+    let client = create_raw_auth_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
 
     let code_resp = poll_for_token(
@@ -374,6 +390,7 @@ async fn complete_device_code_login_with_catalog_policy(
         &redirect_uri,
         &pkce,
         &code_resp.authorization_code,
+        &opts.auth_route_config,
     )
     .await
     .map_err(|err| std::io::Error::other(format!("device code exchange failed: {err}")))?;
@@ -385,27 +402,26 @@ async fn complete_device_code_login_with_catalog_policy(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
     }
 
+    let tokens = crate::server::PersistedLoginTokens::from_exchanged(/*api_key*/ None, tokens);
     match account_catalog_policy {
         LoginAccountCatalogPolicy::Mirror => {
             crate::server::persist_tokens_async(
                 &opts.codex_home,
-                /*api_key*/ None,
-                tokens.id_token,
-                tokens.access_token,
-                tokens.refresh_token,
+                tokens,
                 opts.cli_auth_credentials_store_mode,
                 opts.previous_auth_handling,
+                opts.auth_keyring_backend_kind,
+                opts.auth_route_config.clone(),
             )
             .await
         }
         LoginAccountCatalogPolicy::Isolated => {
             crate::server::persist_profile_tokens_async(
                 &opts.codex_home,
-                /*api_key*/ None,
-                tokens.id_token,
-                tokens.access_token,
-                tokens.refresh_token,
+                tokens,
                 opts.cli_auth_credentials_store_mode,
+                opts.auth_keyring_backend_kind,
+                opts.auth_route_config.clone(),
             )
             .await
         }

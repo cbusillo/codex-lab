@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthKeyringBackendKind;
 
 use super::storage::AuthDotJson;
 use super::storage::AuthStorageBackend;
@@ -11,18 +12,21 @@ use super::storage::AuthStorageBackend;
 pub(super) struct CatalogAccountStorage {
     codex_home: PathBuf,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
     catalog_id: String,
 }
 
 impl CatalogAccountStorage {
-    pub(super) fn new(
+    pub(super) fn create_backend(
         codex_home: PathBuf,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
+        keyring_backend_kind: AuthKeyringBackendKind,
         catalog_id: String,
     ) -> Arc<dyn AuthStorageBackend> {
         Arc::new(Self {
             codex_home,
             auth_credentials_store_mode,
+            keyring_backend_kind,
             catalog_id,
         })
     }
@@ -76,6 +80,7 @@ impl AuthStorageBackend for CatalogAccountStorage {
         crate::auth_accounts::compare_and_swap_catalog_account_auth(
             &self.codex_home,
             self.auth_credentials_store_mode,
+            self.keyring_backend_kind,
             &self.catalog_id,
             expected,
             replacement,

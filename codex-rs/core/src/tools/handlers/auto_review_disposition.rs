@@ -42,7 +42,6 @@ enum AutoReviewDispositionAction {
     Obsolete,
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for AutoReviewDispositionHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(AUTO_REVIEW_DISPOSITION_TOOL_NAME)
@@ -52,7 +51,13 @@ impl ToolExecutor<ToolInvocation> for AutoReviewDispositionHandler {
         create_auto_review_disposition_tool()
     }
 
-    async fn handle(
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl AutoReviewDispositionHandler {
+    async fn handle_call(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
@@ -67,9 +72,9 @@ impl ToolExecutor<ToolInvocation> for AutoReviewDispositionHandler {
         };
         let args: AutoReviewDispositionArgs = parse_arguments(&arguments)?;
         let active_review_target = ReviewTarget::UncommittedChanges;
-        let cwd = turn
-            .environments
-            .single_local_environment_cwd()
+        let selected_cwd = turn.environments.single_local_environment_cwd();
+        let cwd = selected_cwd
+            .as_ref()
             .map(std::convert::AsRef::as_ref)
             .unwrap_or_else(|| turn.config.cwd.as_ref());
         let active_target =
@@ -196,7 +201,7 @@ fn serialize_bounded_repair_response(mut response: Value) -> Result<String, Func
     let mut lower = 0;
     let mut upper = boundaries.len().saturating_sub(1);
     while lower < upper {
-        let middle = (lower + upper + 1) / 2;
+        let middle = (lower + upper).div_ceil(2);
         let end = boundaries[middle];
         set_repair_detail_content(
             &mut response,

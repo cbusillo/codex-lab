@@ -35,7 +35,12 @@ pub fn best_color(target: (u8, u8, u8)) -> Color {
     best_color_for_color_level(target, effective_stdout_color_level())
 }
 
-fn effective_stdout_color_level() -> StdoutColorLevel {
+/// Returns the closest color to the target color for a known terminal color level.
+pub fn best_color_for_level(target: (u8, u8, u8), color_level: StdoutColorLevel) -> Color {
+    best_color_for_color_level(target, color_level)
+}
+
+pub(crate) fn effective_stdout_color_level() -> StdoutColorLevel {
     stdout_color_level_for_terminal(
         stdout_color_level(),
         terminal_info().name,

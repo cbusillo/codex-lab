@@ -8,18 +8,17 @@ pub(crate) mod compression;
 pub(crate) mod config;
 pub(crate) mod list;
 pub(crate) mod metadata;
+mod model_context;
 mod ordinal;
+mod persistence_metrics;
 pub(crate) mod policy;
 pub(crate) mod recorder;
 mod reverse_jsonl_scanner;
+mod rollout_reference_index;
 pub(crate) mod search;
 pub(crate) mod session_index;
 mod sqlite_metrics;
 pub mod state_db;
-
-pub(crate) mod default_client {
-    pub use codex_login::default_client::*;
-}
 
 pub(crate) use codex_protocol::protocol;
 
@@ -40,6 +39,13 @@ pub use compression::existing_rollout_path;
 pub use compression::open_rollout_line_reader;
 pub use compression::plain_rollout_path;
 pub use compression::spawn_rollout_compression_worker;
+
+/// Materializes a compressed rollout as plain JSONL before another rollout references it.
+pub async fn materialize_rollout_for_reference(
+    path: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    compression::materialize_rollout_for_append(path).await
+}
 pub use config::Config;
 pub use config::RolloutConfig;
 pub use config::RolloutConfigView;
@@ -62,12 +68,20 @@ pub use list::read_session_meta_line;
 pub use list::read_thread_item_from_rollout;
 pub use list::rollout_date_parts;
 pub use metadata::builder_from_items;
+pub use model_context::ModelContextScan;
+pub use model_context::ModelContextScanProgress;
+pub use persistence_metrics::RolloutPersistenceBatchMeasurement;
+pub use persistence_metrics::RolloutPersistenceTelemetry;
+pub use persistence_metrics::measure_and_filter_rollout_items;
 pub use policy::is_persisted_rollout_item;
 pub use policy::persisted_rollout_items;
 pub use policy::should_persist_response_item_for_memories;
 pub use recorder::RolloutRecorder;
 pub use recorder::RolloutRecorderParams;
 pub use recorder::append_rollout_item_to_path;
+pub use reverse_jsonl_scanner::ReverseJsonlScanner;
+pub use reverse_jsonl_scanner::ScanOutcome;
+pub use rollout_reference_index::RolloutReferenceIndex;
 pub use search::first_rollout_content_match_snippet;
 pub use search::search_rollout_matches;
 pub use search::search_rollout_paths;
@@ -75,6 +89,7 @@ pub use session_index::append_thread_name;
 pub use session_index::find_thread_meta_by_name_str;
 pub use session_index::find_thread_name_by_id;
 pub use session_index::find_thread_names_by_ids;
+pub use session_index::remove_thread_name_entries;
 pub use state_db::StateDbHandle;
 pub use state_db::sqlite_telemetry_recorder;
 

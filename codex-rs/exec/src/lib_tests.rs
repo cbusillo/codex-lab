@@ -23,11 +23,6 @@ fn test_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync {
     tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer))
 }
 
-#[test]
-fn exec_defaults_analytics_to_enabled() {
-    assert_eq!(DEFAULT_ANALYTICS_ENABLED, true);
-}
-
 #[derive(Clone)]
 struct TestLogWriter {
     buffer: Arc<Mutex<Vec<u8>>>,
@@ -267,6 +262,144 @@ fn lagged_event_warning_message_is_explicit() {
     );
 }
 
+#[test]
+fn background_review_target_matches_only_the_completed_turn_diff() {
+    let matching = ApiReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:matching".to_string(),
+    };
+    let stale = ApiReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:stale".to_string(),
+    };
+
+    assert!(background_review_target_matches_turn(
+        &matching,
+        Some("sha256:matching")
+    ));
+    assert!(!background_review_target_matches_turn(
+        &stale,
+        Some("sha256:matching")
+    ));
+    assert!(!background_review_target_matches_turn(&matching, None));
+}
+
+#[test]
+fn background_review_wait_rearms_for_completion_and_stops_on_terminal_status() {
+    let diff = "diff --git a/file b/file\n+changed\n";
+    let fingerprint = diff_fingerprint(diff).expect("reviewable diff fingerprint");
+    let target = ApiReviewTarget::CurrentTurnDiff { fingerprint };
+    let completion_grace = Duration::from_secs(/*secs*/ 300);
+    let now = tokio::time::Instant::now();
+    let mut wait = BackgroundReviewWaitState::default();
+    wait.record_turn_diff(diff);
+
+    assert!(wait.begin_wait(now, completion_grace));
+    assert_eq!(
+        wait.deadline().map(|deadline| deadline.kind),
+        Some(BackgroundReviewDeadlineKind::Schedule)
+    );
+    wait.record_status(
+        &target,
+        "run-1",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Pending,
+        now,
+        completion_grace,
+    );
+    assert_eq!(
+        wait.deadline().map(|deadline| deadline.kind),
+        Some(BackgroundReviewDeadlineKind::Completion)
+    );
+    wait.record_status(
+        &target,
+        "run-1",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Running,
+        now + Duration::from_secs(/*secs*/ 1),
+        completion_grace,
+    );
+    let completion_deadline = wait.deadline().expect("completion deadline").at;
+    wait.record_status(
+        &target,
+        "run-1",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Completed,
+        now + Duration::from_secs(/*secs*/ 2),
+        completion_grace,
+    );
+
+    assert!(completion_deadline <= now + completion_grace);
+    assert!(wait.should_shutdown());
+    assert!(wait.deadline().is_none());
+}
+
+#[test]
+fn background_review_wait_accepts_skipped_without_pending() {
+    let diff = "diff --git a/file b/file\n+changed\n";
+    let fingerprint = diff_fingerprint(diff).expect("reviewable diff fingerprint");
+    let target = ApiReviewTarget::CurrentTurnDiff { fingerprint };
+    let now = tokio::time::Instant::now();
+    let mut wait = BackgroundReviewWaitState::default();
+    wait.record_turn_diff(diff);
+    wait.record_status(
+        &target,
+        "run-1",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped,
+        now,
+        Duration::from_secs(/*secs*/ 300),
+    );
+
+    assert!(!wait.begin_wait(now, Duration::from_secs(/*secs*/ 300)));
+}
+
+#[test]
+fn background_review_wait_ignores_unobserved_terminal_run() {
+    let diff = "diff --git a/file b/file\n+changed\n";
+    let fingerprint = diff_fingerprint(diff).expect("reviewable diff fingerprint");
+    let target = ApiReviewTarget::CurrentTurnDiff { fingerprint };
+    let now = tokio::time::Instant::now();
+    let mut wait = BackgroundReviewWaitState::default();
+    wait.record_turn_diff(diff);
+    wait.record_status(
+        &target,
+        "stale-run",
+        &codex_app_server_protocol::BackgroundAutoReviewStatus::Completed,
+        now,
+        Duration::from_secs(/*secs*/ 300),
+    );
+
+    assert!(wait.begin_wait(now, Duration::from_secs(/*secs*/ 300)));
+    assert_eq!(
+        wait.deadline().map(|deadline| deadline.kind),
+        Some(BackgroundReviewDeadlineKind::Schedule)
+    );
+}
+
+#[test]
+fn runtime_warnings_are_filtered_to_the_primary_thread() {
+    let primary_thread_id = "thread-1";
+    let turn_id = "turn-1";
+    let outcomes = [
+        codex_app_server_protocol::WarningNotification {
+            thread_id: None,
+            message: "global warning".to_string(),
+        },
+        codex_app_server_protocol::WarningNotification {
+            thread_id: Some(primary_thread_id.to_string()),
+            message: "primary warning".to_string(),
+        },
+        codex_app_server_protocol::WarningNotification {
+            thread_id: Some("thread-2".to_string()),
+            message: "other warning".to_string(),
+        },
+    ]
+    .map(|warning| {
+        should_process_notification(
+            &ServerNotification::Warning(warning),
+            primary_thread_id,
+            turn_id,
+        )
+    });
+
+    assert_eq!(outcomes, [true, true, false]);
+}
+
 #[tokio::test]
 async fn resume_lookup_model_providers_filters_only_last_lookup() {
     let codex_home = tempdir().expect("create temp codex home");
@@ -305,19 +438,25 @@ async fn resume_lookup_model_providers_filters_only_last_lookup() {
 fn turn_items_for_thread_returns_matching_turn_items() {
     let thread = AppServerThread {
         id: "thread-1".to_string(),
+        extra: None,
         session_id: "thread-1".to_string(),
         forked_from_id: None,
         parent_thread_id: None,
         preview: String::new(),
         ephemeral: false,
+        is_pinned: false,
+        history_mode: Default::default(),
         model_provider: "openai".to_string(),
         created_at: 0,
         updated_at: 0,
+        recency_at: Some(0),
         status: codex_app_server_protocol::ThreadStatus::Idle,
         path: None,
         cwd: test_path_buf("/tmp/project").abs(),
         cli_version: "0.0.0-test".to_string(),
         source: codex_app_server_protocol::SessionSource::Exec,
+        session_provenance: None,
+        can_accept_direct_input: None,
         thread_source: None,
         agent_nickname: None,
         agent_role: None,
@@ -368,13 +507,13 @@ fn turn_items_for_thread_returns_matching_turn_items() {
 }
 
 #[test]
-fn should_backfill_turn_completed_items_skips_ephemeral_threads() {
+fn should_backfill_turn_completed_items_backfills_persisted_summaries_only() {
     let notification =
         ServerNotification::TurnCompleted(codex_app_server_protocol::TurnCompletedNotification {
             thread_id: "thread-1".to_string(),
             turn: codex_app_server_protocol::Turn {
                 id: "turn-1".to_string(),
-                items_view: codex_app_server_protocol::TurnItemsView::Full,
+                items_view: codex_app_server_protocol::TurnItemsView::Summary,
                 items: Vec::new(),
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,
@@ -386,6 +525,10 @@ fn should_backfill_turn_completed_items_skips_ephemeral_threads() {
 
     assert!(!should_backfill_turn_completed_items(
         /*thread_ephemeral*/ true,
+        &notification
+    ));
+    assert!(should_backfill_turn_completed_items(
+        /*thread_ephemeral*/ false,
         &notification
     ));
 }
@@ -455,6 +598,39 @@ async fn thread_start_params_include_review_policy_when_auto_review_is_enabled()
 
     assert_eq!(
         params.approvals_reviewer,
+        Some(codex_app_server_protocol::ApprovalsReviewer::AutoReview)
+    );
+}
+
+#[tokio::test]
+async fn thread_resume_params_only_include_explicit_review_policy_override() {
+    let codex_home = tempdir().expect("create temp codex home");
+    let cwd = tempdir().expect("create temp cwd");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+            ..Default::default()
+        })
+        .fallback_cwd(Some(cwd.path().to_path_buf()))
+        .build()
+        .await
+        .expect("build config with guardian review policy");
+
+    let params_without_override = thread_resume_params_from_config(
+        &config,
+        "thread-id".to_string(),
+        /*approvals_reviewer_override*/ None,
+    );
+    let params_with_override = thread_resume_params_from_config(
+        &config,
+        "thread-id".to_string(),
+        Some(codex_app_server_protocol::ApprovalsReviewer::AutoReview),
+    );
+
+    assert_eq!(params_without_override.approvals_reviewer, None);
+    assert_eq!(
+        params_with_override.approvals_reviewer,
         Some(codex_app_server_protocol::ApprovalsReviewer::AutoReview)
     );
 }
@@ -564,6 +740,36 @@ async fn thread_start_params_include_user_thread_source() {
     );
 }
 
+#[tokio::test]
+async fn thread_lifecycle_params_preserve_hook_trust_bypass() {
+    let codex_home = tempdir().expect("create temp codex home");
+    let cwd = tempdir().expect("create temp cwd");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            bypass_hook_trust: Some(true),
+            ..Default::default()
+        })
+        .fallback_cwd(Some(cwd.path().to_path_buf()))
+        .build()
+        .await
+        .expect("build config with hook trust bypass");
+    let expected_config = Some(HashMap::from([(
+        "bypass_hook_trust".to_string(),
+        serde_json::Value::Bool(true),
+    )]));
+
+    let start_params = thread_start_params_from_config(&config);
+    let resume_params = thread_resume_params_from_config(
+        &config,
+        "thread-id".to_string(),
+        /*approvals_reviewer_override*/ None,
+    );
+
+    assert_eq!(start_params.config, expected_config);
+    assert_eq!(resume_params.config, expected_config);
+}
+
 #[test]
 fn active_profile_selection_uses_profile_id_only() {
     let selection = permission_profile_id_from_active_profile(ActivePermissionProfile::new(
@@ -590,7 +796,11 @@ async fn thread_lifecycle_params_include_legacy_sandbox_when_no_active_profile()
         .expect("build config with legacy sandbox override");
 
     let start_params = thread_start_params_from_config(&config);
-    let resume_params = thread_resume_params_from_config(&config, "thread-id".to_string());
+    let resume_params = thread_resume_params_from_config(
+        &config,
+        "thread-id".to_string(),
+        /*approvals_reviewer_override*/ None,
+    );
 
     assert_eq!(config.permissions.active_permission_profile(), None);
     assert_eq!(
@@ -697,19 +907,25 @@ fn sample_thread_start_response() -> ThreadStartResponse {
     ThreadStartResponse {
         thread: codex_app_server_protocol::Thread {
             id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
+            extra: None,
             session_id: "67e55044-10b1-426f-9247-bb680e5fe0c7".to_string(),
             forked_from_id: None,
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
+            is_pinned: false,
+            history_mode: Default::default(),
             model_provider: "openai".to_string(),
             created_at: 0,
             updated_at: 0,
+            recency_at: Some(0),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: Some(PathBuf::from("/tmp/rollout.jsonl")),
             cwd: test_path_buf("/tmp").abs(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Cli,
+            session_provenance: None,
+            can_accept_direct_input: None,
             thread_source: Some(codex_app_server_protocol::ThreadSource::User),
             agent_nickname: None,
             agent_role: None,
@@ -733,5 +949,6 @@ fn sample_thread_start_response() -> ThreadStartResponse {
         },
         active_permission_profile: None,
         reasoning_effort: None,
+        multi_agent_mode: Default::default(),
     }
 }

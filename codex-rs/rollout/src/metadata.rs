@@ -14,6 +14,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_state::BackfillState;
 use codex_state::BackfillStats;
 use codex_state::BackfillStatus;
@@ -22,7 +23,7 @@ use codex_state::DB_METRIC_BACKFILL;
 use codex_state::DB_METRIC_BACKFILL_DURATION_MS;
 use codex_state::ExtractionOutcome;
 use codex_state::ThreadMetadataBuilder;
-use codex_state::apply_rollout_items_to_metadata;
+use codex_state::apply_rollout_item;
 use std::path::Path;
 use std::path::PathBuf;
 use tracing::info;
@@ -45,11 +46,11 @@ pub(crate) fn builder_from_session_meta(
         created_at,
         session_meta.meta.source.clone(),
     );
+    builder.history_mode = session_meta.meta.history_mode;
     builder.model_provider = session_meta.meta.model_provider.clone();
     builder.agent_nickname = session_meta.meta.agent_nickname.clone();
     builder.agent_role = session_meta.meta.agent_role.clone();
     builder.agent_path = session_meta.meta.agent_path.clone();
-    builder.history_mode = session_meta.meta.history_mode;
     builder.cwd = session_meta.meta.cwd.clone();
     builder.cli_version = Some(session_meta.meta.cli_version.clone());
     builder.sandbox_policy = SandboxPolicy::new_read_only_policy();
@@ -69,8 +70,11 @@ pub fn builder_from_items(
     if let Some(session_meta) = items.iter().find_map(|item| match item {
         RolloutItem::SessionMeta(meta_line) => Some(meta_line),
         RolloutItem::ResponseItem(_)
+        | RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
+        | RolloutItem::WorldState(_)
         | RolloutItem::EventMsg(_) => None,
     }) && let Some(builder) = builder_from_session_meta(session_meta, rollout_path)
     {
@@ -110,17 +114,23 @@ pub async fn extract_metadata_from_rollout(
         )
     })?;
     let mut metadata = builder.build(default_provider);
-    apply_rollout_items_to_metadata(&mut metadata, items.as_slice(), default_provider);
+    for item in &items {
+        apply_rollout_item(&mut metadata, item, default_provider);
+    }
     if let Some(updated_at) = file_modified_time_utc(rollout_path).await {
         metadata.updated_at = updated_at;
+        metadata.recency_at = updated_at;
     }
     Ok(ExtractionOutcome {
         metadata,
         memory_mode: items.iter().rev().find_map(|item| match item {
             RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
             RolloutItem::ResponseItem(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
             | RolloutItem::EventMsg(_) => None,
         }),
         parse_errors,
@@ -256,9 +266,14 @@ pub(crate) async fn backfill_sessions_with_lease(
                     let mut metadata = outcome.metadata;
                     metadata.cwd = normalize_cwd_for_state_db(&metadata.cwd);
                     let memory_mode = outcome.memory_mode.unwrap_or_else(|| "enabled".to_string());
-                    if let Ok(Some(existing_metadata)) = runtime.get_thread(metadata.id).await {
-                        metadata.prefer_existing_git_info(&existing_metadata);
-                        metadata.prefer_existing_explicit_title(&existing_metadata);
+                    let existing_metadata = runtime.get_thread(metadata.id).await.ok().flatten();
+                    // Paginated metadata updates are SQLite-only. Use the rollout mode to seed a
+                    // missing row, then keep the value from SQLite.
+                    let restore_memory_mode_from_rollout = existing_metadata.is_none()
+                        || matches!(metadata.history_mode, ThreadHistoryMode::Legacy);
+                    if let Some(existing_metadata) = existing_metadata.as_ref() {
+                        metadata.prefer_existing_git_info(existing_metadata);
+                        metadata.prefer_existing_explicit_title(existing_metadata);
                     }
                     if rollout.archived && metadata.archived_at.is_none() {
                         let fallback_archived_at = metadata.updated_at;
@@ -270,9 +285,10 @@ pub(crate) async fn backfill_sessions_with_lease(
                         stats.failed = stats.failed.saturating_add(1);
                         warn!("failed to upsert rollout {}: {err}", rollout.path.display());
                     } else {
-                        if let Err(err) = runtime
-                            .set_thread_memory_mode(metadata.id, memory_mode.as_str())
-                            .await
+                        if restore_memory_mode_from_rollout
+                            && let Err(err) = runtime
+                                .set_thread_memory_mode(metadata.id, memory_mode.as_str())
+                                .await
                         {
                             stats.failed = stats.failed.saturating_add(1);
                             warn!(

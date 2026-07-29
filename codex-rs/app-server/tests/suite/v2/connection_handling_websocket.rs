@@ -3,13 +3,15 @@ use anyhow::Result;
 use anyhow::bail;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
-use app_test_support::USE_TEST_KEYRING_STORE_ARG;
+#[cfg(debug_assertions)]
+use app_test_support::configure_test_keyring_for_tokio_command;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_app_server_protocol::ClientInfo;
+use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -24,8 +26,8 @@ use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_config::types::AuthCredentialsStoreMode;
-#[cfg(debug_assertions)]
-use codex_keyring_store::tests::shared_test_keyring_root;
+use codex_core::config::set_project_trust_level;
+use codex_protocol::config_types::TrustLevel;
 use futures::SinkExt;
 use futures::StreamExt;
 use hmac::Hmac;
@@ -178,6 +180,106 @@ async fn websocket_transport_routes_per_connection_handshake_and_responses() -> 
 }
 
 #[tokio::test]
+async fn thread_start_routes_project_exec_policy_warning_to_requester() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+
+    let project = TempDir::new()?;
+    std::fs::create_dir(project.path().join(".git"))?;
+    let rules_dir = project.path().join(".codex/rules");
+    std::fs::create_dir_all(&rules_dir)?;
+    let rules_path = rules_dir.join("broken.rules");
+    std::fs::write(&rules_path, "prefix_rule(")?;
+    set_project_trust_level(codex_home.path(), project.path(), TrustLevel::Trusted)?;
+
+    let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
+    let mut requester = connect_websocket(bind_addr).await?;
+    let mut other_client = connect_websocket(bind_addr).await?;
+
+    send_initialize_request(&mut requester, /*id*/ 1, "requester").await?;
+    read_response_for_id(&mut requester, /*id*/ 1).await?;
+    send_initialize_request(&mut other_client, /*id*/ 2, "other_client").await?;
+    read_response_for_id(&mut other_client, /*id*/ 2).await?;
+
+    send_request(
+        &mut requester,
+        "thread/start",
+        /*id*/ 3,
+        Some(serde_json::to_value(ThreadStartParams {
+            cwd: Some(project.path().display().to_string()),
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })?),
+    )
+    .await?;
+
+    let target_id = RequestId::Integer(3);
+    let warning_summary = "Error parsing rules; custom rules not applied.";
+    let is_exec_policy_warning = |notification: &JSONRPCNotification| {
+        notification.method == "configWarning"
+            && notification
+                .params
+                .as_ref()
+                .and_then(|params| params.get("summary"))
+                .and_then(serde_json::Value::as_str)
+                == Some(warning_summary)
+    };
+    let mut response = None;
+    let mut warning = None;
+    while response.is_none() || warning.is_none() {
+        match read_jsonrpc_message(&mut requester).await? {
+            JSONRPCMessage::Response(candidate) if candidate.id == target_id => {
+                response = Some(candidate);
+            }
+            JSONRPCMessage::Notification(candidate) if is_exec_policy_warning(&candidate) => {
+                warning = Some(candidate);
+            }
+            _ => {}
+        }
+    }
+
+    let _: ThreadStartResponse = to_response(response.context("missing thread/start response")?)?;
+    let warning: ConfigWarningNotification = serde_json::from_value(
+        warning
+            .context("missing exec-policy configWarning")?
+            .params
+            .context("configWarning should include params")?,
+    )?;
+    assert_eq!(
+        warning
+            .path
+            .as_deref()
+            .map(Path::new)
+            .and_then(Path::file_name),
+        Some(std::ffi::OsStr::new("broken.rules"))
+    );
+
+    match timeout(Duration::from_millis(250), async {
+        loop {
+            let message = read_jsonrpc_message(&mut other_client).await?;
+            if let JSONRPCMessage::Notification(notification) = message
+                && is_exec_policy_warning(&notification)
+            {
+                return Ok::<_, anyhow::Error>(notification);
+            }
+        }
+    })
+    .await
+    {
+        Ok(Ok(_)) => bail!("exec-policy configWarning leaked to another connection"),
+        Ok(Err(err)) => return Err(err),
+        Err(_) => {}
+    }
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn websocket_reinitialize_is_not_blocked_by_disconnected_client_rpc() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let workspace_server = MockServer::start().await;
@@ -233,6 +335,7 @@ async fn websocket_reinitialize_is_not_blocked_by_disconnected_client_rpc() -> R
         Some(serde_json::to_value(PluginListParams {
             cwds: None,
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::Local]),
+            force_refetch: false,
         })?),
     )
     .await?;
@@ -560,18 +663,14 @@ async fn spawn_websocket_server_with_args_and_logs(
     cmd.arg("--listen")
         .arg(listen_url)
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
-        .arg(USE_TEST_KEYRING_STORE_ARG)
-        .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("CODEX_LAB_HOME", codex_home)
         .env("RUST_LOG", rust_log);
     #[cfg(debug_assertions)]
-    cmd.env(
-        "CODEX_APP_SERVER_TEST_KEYRING_DIR",
-        shared_test_keyring_root(),
-    );
+    configure_test_keyring_for_tokio_command(&mut cmd, &codex_home.join("app-server-test-keyring"));
+    cmd.args(extra_args);
     let mut process = cmd
         .kill_on_drop(true)
         .spawn()
@@ -722,18 +821,14 @@ async fn run_websocket_server_to_completion_with_args(
     cmd.arg("--listen")
         .arg(listen_url)
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
-        .arg(USE_TEST_KEYRING_STORE_ARG)
-        .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("CODEX_LAB_HOME", codex_home)
         .env("RUST_LOG", "warn");
     #[cfg(debug_assertions)]
-    cmd.env(
-        "CODEX_APP_SERVER_TEST_KEYRING_DIR",
-        shared_test_keyring_root(),
-    );
+    configure_test_keyring_for_tokio_command(&mut cmd, &codex_home.join("app-server-test-keyring"));
+    cmd.args(extra_args);
     timeout(DEFAULT_READ_TIMEOUT, cmd.output())
         .await
         .context("timed out waiting for websocket app-server to exit")?
@@ -908,7 +1003,7 @@ pub(super) async fn send_request(
     send_jsonrpc(stream, message).await
 }
 
-async fn send_jsonrpc(stream: &mut WsClient, message: JSONRPCMessage) -> Result<()> {
+pub(super) async fn send_jsonrpc(stream: &mut WsClient, message: JSONRPCMessage) -> Result<()> {
     let payload = serde_json::to_string(&message)?;
     stream
         .send(WebSocketMessage::Text(payload.into()))

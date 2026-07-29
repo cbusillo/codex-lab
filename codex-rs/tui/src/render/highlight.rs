@@ -2,14 +2,15 @@
 //!
 //! Wraps [syntect] with the [two_face] grammar and theme bundles to provide
 //! ~250-language syntax highlighting and 32 bundled color themes.  The module
-//! owns four process-global singletons:
+//! owns five process-global singletons:
 //!
 //! | Singleton | Type | Purpose |
 //! |---|---|---|
 //! | `SYNTAX_SET` | `OnceLock<SyntaxSet>` | Grammar database, immutable after init |
 //! | `THEME` | `OnceLock<RwLock<Theme>>` | Active color theme, swappable at runtime |
+//! | `THEME_REVISION` | `AtomicU64` | Invalidates rendered-content caches after theme swaps |
 //! | `THEME_OVERRIDE` | `OnceLock<Option<String>>` | Persisted user preference (write-once) |
-//! | `CODEX_LAB_HOME` | `OnceLock<Option<PathBuf>>` | Root for custom `.tmTheme` discovery |
+//! | `CODEX_HOME` | `OnceLock<Option<PathBuf>>` | Root for custom `.tmTheme` discovery |
 //!
 //! **Lifecycle:** call [`set_theme_override`] once at startup (after the final
 //! config is resolved) to persist the user preference and seed the `THEME`
@@ -17,9 +18,10 @@
 //! swap/snapshot the theme for live preview.  All highlighting functions read
 //! the theme via `theme_lock()`.
 //!
-//! **Guardrails:** inputs exceeding 512 KB or 10 000 lines are rejected early
-//! (returns `None`) to prevent pathological CPU/memory usage.  Callers must
-//! fall back to plain unstyled text.
+//! **Guardrails:** inputs exceeding 512 KB or 10 000 lines, or containing an
+//! individual line longer than 4 KiB, are rejected early (returns `None`) to
+//! prevent pathological CPU/memory usage.  Callers must fall back to plain
+//! unstyled text.
 
 use ratatui::style::Color as RtColor;
 use ratatui::style::Modifier;
@@ -30,6 +32,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::Color as SyntectColor;
 use syntect::highlighting::FontStyle;
@@ -47,6 +51,7 @@ use two_face::theme::EmbeddedThemeName;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<RwLock<Theme>> = OnceLock::new();
+static THEME_REVISION: AtomicU64 = AtomicU64::new(0);
 static THEME_OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
 static CODEX_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
 
@@ -106,7 +111,7 @@ pub(crate) fn validate_theme_name(name: Option<&str>, codex_home: Option<&Path>)
     let name = name?;
     let custom_theme_path_display = codex_home
         .map(|home| custom_theme_path(name, home).display().to_string())
-        .unwrap_or_else(|| format!("$CODEX_LAB_HOME/themes/{name}.tmTheme"));
+        .unwrap_or_else(|| format!("$CODEX_HOME/themes/{name}.tmTheme"));
     // Bundled themes always resolve.
     if parse_theme_name(name).is_some() {
         return None;
@@ -211,7 +216,7 @@ fn resolve_theme_with_override(name: Option<&str>, codex_home: Option<&Path>) ->
         if let Some(theme_name) = parse_theme_name(name) {
             return ts.get(theme_name).clone();
         }
-        // 2. Try loading {CODEX_LAB_HOME}/themes/{name}.tmTheme from disk.
+        // 2. Try loading {CODEX_HOME}/themes/{name}.tmTheme from disk.
         if let Some(home) = codex_home
             && let Some(theme) = load_custom_theme(name, home)
         {
@@ -237,13 +242,19 @@ fn theme_lock() -> &'static RwLock<Theme> {
     THEME.get_or_init(|| RwLock::new(build_default_theme()))
 }
 
-/// Swap the active syntax theme at runtime (for live preview).
+/// Swap the active syntax theme at runtime and invalidate rendered-content caches.
 pub(crate) fn set_syntax_theme(theme: Theme) {
     let mut guard = match theme_lock().write() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     *guard = theme;
+    THEME_REVISION.fetch_add(1, Ordering::Release);
+}
+
+/// Return the revision of the active syntax theme for rendered-content caches.
+pub(crate) fn syntax_theme_revision() -> u64 {
+    THEME_REVISION.load(Ordering::Acquire)
 }
 
 /// Clone the current syntax theme (e.g. to save for cancel-restore).
@@ -352,7 +363,7 @@ pub(crate) fn resolve_theme_by_name(name: &str, codex_home: Option<&Path>) -> Op
 }
 
 /// A theme available in the picker, either bundled or loaded from a custom
-/// `.tmTheme` file under `{CODEX_LAB_HOME}/themes/`.
+/// `.tmTheme` file under `{CODEX_HOME}/themes/`.
 pub(crate) struct ThemeEntry {
     /// Kebab-case identifier used for config persistence and theme resolution.
     pub name: String,
@@ -526,8 +537,12 @@ fn find_syntax(lang: &str) -> Option<&'static SyntaxReference> {
     let ss = syntax_set();
 
     // Aliases that two-face does not resolve on its own.
-    let patched = match lang {
+    let normalized = lang.to_ascii_lowercase();
+    let patched = match normalized.as_str() {
         "csharp" | "c-sharp" => "c#",
+        // CUDA source (.cu) and header (.cuh) files use C++ highlighting as a fallback.
+        "cu" | "cuh" => "cpp",
+        "cppm" | "cxxm" | "ixx" => "cpp",
         "golang" => "go",
         "python3" => "python",
         "shell" => "bash",
@@ -567,6 +582,9 @@ const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 /// Skip highlighting for inputs with more than 10,000 lines.
 const MAX_HIGHLIGHT_LINES: usize = 10_000;
 
+/// Skip highlighting when an individual line is longer than 4 KiB.
+pub(crate) const MAX_HIGHLIGHT_LINE_BYTES: usize = 4 * 1024;
+
 /// Check whether an input exceeds the safe highlighting limits.
 ///
 /// Callers that highlight content in a loop (e.g. per diff-line) should
@@ -597,7 +615,12 @@ fn highlight_to_line_spans_with_theme(
     // Bail out early for oversized inputs to avoid excessive resource usage.
     // Count actual lines (not newline bytes) to avoid an off-by-one when
     // the input does not end with a newline.
-    if code.len() > MAX_HIGHLIGHT_BYTES || code.lines().count() > MAX_HIGHLIGHT_LINES {
+    if code.len() > MAX_HIGHLIGHT_BYTES
+        || code.lines().count() > MAX_HIGHLIGHT_LINES
+        || code
+            .lines()
+            .any(|line| line.len() > MAX_HIGHLIGHT_LINE_BYTES)
+    {
         return None;
     }
 
@@ -1126,6 +1149,18 @@ mod tests {
     }
 
     #[test]
+    fn long_single_line_bash_skips_highlighting_and_preserves_text() {
+        let token = "eHh4".repeat(MAX_HIGHLIGHT_LINE_BYTES / 4 + 1);
+        let code = format!("printf %s {token} | base64 -d >/dev/null");
+
+        assert!(highlight_code_to_styled_spans(&code, "bash").is_none());
+        assert_eq!(
+            highlight_code_to_lines(&code, "bash"),
+            vec![Line::from(code)]
+        );
+    }
+
+    #[test]
     fn highlight_many_lines_falls_back() {
         // Input exceeding MAX_HIGHLIGHT_LINES should return None.
         let many_lines = "let x = 1;\n".repeat(MAX_HIGHLIGHT_LINES + 1);
@@ -1203,7 +1238,10 @@ mod tests {
             );
         }
         // Patched aliases that two-face cannot resolve on its own.
-        for alias in ["csharp", "c-sharp", "golang", "python3", "shell"] {
+        for alias in [
+            "csharp", "c-sharp", "cu", "cuh", "cppm", "CPPM", "cxxm", "CxXm", "ixx", "IXX",
+            "golang", "python3", "shell",
+        ] {
             assert!(
                 find_syntax(alias).is_some(),
                 "find_syntax({alias:?}) returned None — patched alias broken"

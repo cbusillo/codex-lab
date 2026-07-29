@@ -8,7 +8,6 @@ portable placeholder, `{args}`, for forwarding variadic recipe arguments.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -20,23 +19,6 @@ POWERSHELL_ARGS = "@($args | Select-Object -Skip 1)"
 POWERSHELL_STDERR_NULL = "2>$null; exit $LASTEXITCODE"
 SH_ARGS = '"$@"'
 SH_STDERR_NULL = "2>/dev/null"
-CARGO_ENV_RECIPES = {
-    "app-server-test-client",
-    "bench",
-    "bench-smoke",
-    "clippy",
-    "codex",
-    "exec",
-    "file-search",
-    "fix",
-    "install",
-    "log",
-    "mcp-server-run",
-    "test",
-    "write-app-server-schema",
-    "write-config-schema",
-    "write-hooks-schema",
-}
 
 
 def main() -> int:
@@ -57,18 +39,7 @@ def main() -> int:
 def run_sh(command: str, recipe_name: str, recipe_args: list[str]) -> int:
     command = command.replace(ARGS_TOKEN, SH_ARGS)
     command = command.replace(STDERR_NULL_TOKEN, SH_STDERR_NULL)
-    if recipe_name in CARGO_ENV_RECIPES:
-        command = (
-            f'cargo_env="$("{repo_root()}/scripts/local/cargo-build-env.sh")" || exit\n'
-            'eval "$cargo_env"\n'
-            "unset cargo_env\n"
-            f"{command}"
-        )
     os.execvp("sh", ["sh", "-cu", command, recipe_name, *recipe_args])
-
-
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def run_powershell(command: str, recipe_name: str, recipe_args: list[str]) -> int:

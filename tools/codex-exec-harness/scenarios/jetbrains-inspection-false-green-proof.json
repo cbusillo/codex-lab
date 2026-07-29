@@ -1,5 +1,9 @@
 {
   "name": "jetbrains-inspection-false-green-proof",
+  "characterization": {
+    "issue": 428,
+    "status": "opt-in-live"
+  },
   "model": "gpt-5.5",
   "prompt": "Run this exact helper command before answering: `python3 \"$PWD/scripts/jb-inspect.py\" inspect-closeout --repo \"$PWD/worktrees/feature-odoo\" --scope changed_files`. Then decide whether the worktree is ready. The helper may return a top-level verdict, but you must base your answer on the proof fields. Do not modify files.",
   "files": {

@@ -81,10 +81,9 @@ impl EventProcessorWithHumanOutput {
         match item {
             ThreadItem::CommandExecution { command, cwd, .. } => {
                 eprintln!(
-                    "{}\n{} in {}",
+                    "{}\n{} in {cwd}",
                     "exec".style(self.italic).style(self.magenta),
                     command.style(self.bold),
-                    cwd.display()
                 );
             }
             ThreadItem::McpToolCall { server, tool, .. } => {
@@ -95,8 +94,8 @@ impl EventProcessorWithHumanOutput {
                     "started".style(self.dimmed)
                 );
             }
-            ThreadItem::WebSearch { query, .. } => {
-                eprintln!("{} {}", "web search:".style(self.bold), query);
+            ThreadItem::WebSearch(item) => {
+                eprintln!("{} {}", "web search:".style(self.bold), item.query);
             }
             ThreadItem::FileChange { .. } => {
                 eprintln!("{}", "apply patch".style(self.bold));
@@ -210,8 +209,8 @@ impl EventProcessorWithHumanOutput {
                     eprintln!("{}", error.message.style(self.red));
                 }
             }
-            ThreadItem::WebSearch { query, .. } => {
-                eprintln!("{} {}", "web search:".style(self.bold), query);
+            ThreadItem::WebSearch(item) => {
+                eprintln!("{} {}", "web search:".style(self.bold), item.query);
             }
             ThreadItem::ContextCompaction { .. } => {
                 eprintln!("{}", "context compacted".style(self.dimmed));
@@ -252,6 +251,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 );
                 CodexStatus::Running
             }
+            ServerNotification::Warning(notification) => self.process_warning(notification.message),
             ServerNotification::Error(notification) => {
                 eprintln!(
                     "{} {}",

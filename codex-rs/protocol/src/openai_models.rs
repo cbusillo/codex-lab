@@ -21,7 +21,7 @@ use serde::de::DeserializeOwned;
 use serde::de::Error;
 use strum_macros::Display;
 use strum_macros::EnumIter;
-use tracing::warn;
+use tracing::trace;
 use ts_rs::TS;
 
 use crate::config_types::Personality;
@@ -157,6 +157,8 @@ pub enum InputModality {
     Text,
     /// Image attachments included in user turns.
     Image,
+    /// Audio attachments included in user turns.
+    Audio,
 }
 
 /// Backward-compatible default when `input_modalities` is omitted on the wire.
@@ -230,6 +232,11 @@ pub struct ModelPreset {
     pub upgrade: Option<ModelUpgrade>,
     /// Whether this preset should appear in the picker UI.
     pub show_in_picker: bool,
+    /// Multi-agent backend selected when this model starts a new thread.
+    #[serde(default, skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub multi_agent_version: Option<MultiAgentVersion>,
     /// Availability NUX shown when this preset becomes accessible to the user.
     pub availability_nux: Option<ModelAvailabilityNux>,
     /// whether this model is supported in the api
@@ -349,6 +356,15 @@ const fn default_effective_context_window_percent() -> i64 {
     95
 }
 
+const fn default_true() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// Model metadata returned by the Codex backend `/models` endpoint.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct ModelInfo {
@@ -373,7 +389,11 @@ pub struct ModelInfo {
     pub base_instructions: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_messages: Option<ModelMessages>,
-    pub supports_reasoning_summaries: bool,
+    #[serde(default)]
+    pub include_skills_usage_instructions: bool,
+    /// Whether the model accepts the Responses API `reasoning.summary` parameter.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub supports_reasoning_summary_parameter: bool,
     #[serde(default)]
     pub default_reasoning_summary: ReasoningSummary,
     pub support_verbosity: bool,
@@ -395,6 +415,9 @@ pub struct ModelInfo {
     /// context window when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_token_limit: Option<i64>,
+    /// Opaque identifier for compaction-compatible model configurations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comp_hash: Option<String>,
     /// Percentage of the context window considered usable for inputs, after
     /// reserving headroom for system prompts, tool overhead, and model output.
     #[serde(default = "default_effective_context_window_percent")]
@@ -461,14 +484,17 @@ impl ModelInfo {
                 .get_personality_message(personality)
                 .unwrap_or_default();
             template.replace(PERSONALITY_PLACEHOLDER, personality_message.as_str())
-        } else if let Some(personality) = personality {
-            warn!(
-                model = %self.slug,
-                %personality,
-                "Model personality requested but model_messages is missing, falling back to base instructions."
-            );
-            self.base_instructions.clone()
         } else {
+            match personality {
+                Some(personality @ (Personality::Friendly | Personality::Pragmatic)) => {
+                    trace!(
+                        model = %self.slug,
+                        %personality,
+                        "Model personality requested but model_messages is missing, falling back to base instructions."
+                    );
+                }
+                Some(Personality::None) | None => {}
+            }
             self.base_instructions.clone()
         }
     }
@@ -480,6 +506,30 @@ impl ModelInfo {
 pub struct ModelMessages {
     pub instructions_template: Option<String>,
     pub instructions_variables: Option<ModelInstructionsVariables>,
+    pub approvals: Option<ApprovalMessages>,
+    pub auto_review: Option<AutoReviewMessages>,
+    pub permissions: Option<PermissionMessages>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct ApprovalMessages {
+    pub on_request: Option<String>,
+    pub on_request_auto_review: Option<String>,
+    pub never: Option<String>,
+    pub unless_trusted: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct AutoReviewMessages {
+    pub policy: Option<String>,
+    pub policy_template: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct PermissionMessages {
+    pub danger_full_access: Option<String>,
+    pub workspace_write: Option<String>,
+    pub read_only: Option<String>,
 }
 
 impl ModelMessages {
@@ -580,6 +630,7 @@ impl From<ModelInfo> for ModelPreset {
                 migration_markdown: Some(upgrade.migration_markdown.clone()),
             }),
             show_in_picker: info.visibility == ModelVisibility::List,
+            multi_agent_version: info.multi_agent_version,
             availability_nux: info.availability_nux,
             supported_in_api: info.supported_in_api,
             input_modalities: info.input_modalities,
@@ -665,7 +716,8 @@ mod tests {
             upgrade: None,
             base_instructions: "base".to_string(),
             model_messages: spec,
-            supports_reasoning_summaries: false,
+            include_skills_usage_instructions: false,
+            supports_reasoning_summary_parameter: true,
             default_reasoning_summary: ReasoningSummary::Auto,
             support_verbosity: false,
             default_verbosity: None,
@@ -677,6 +729,7 @@ mod tests {
             context_window: None,
             max_context_window: None,
             auto_compact_token_limit: None,
+            comp_hash: None,
             effective_context_window_percent: 95,
             experimental_supported_tools: vec![],
             input_modalities: default_input_modalities(),
@@ -698,27 +751,133 @@ mod tests {
     }
 
     #[test]
+    fn model_messages_deserialize_without_approvals() {
+        let messages: ModelMessages =
+            from_str(r#"{"instructions_template":null,"instructions_variables":null}"#)
+                .expect("model messages should deserialize");
+
+        assert_eq!(messages.approvals, None);
+        assert_eq!(messages.permissions, None);
+    }
+
+    #[test]
+    fn approval_messages_preserve_missing_and_empty_values() {
+        let messages: ModelMessages = from_str(
+            r#"{
+                "instructions_template": null,
+                "instructions_variables": null,
+                "approvals": {
+                    "on_request": "",
+                    "never": ""
+                }
+            }"#,
+        )
+        .expect("approval messages should deserialize");
+
+        assert_eq!(
+            messages.approvals,
+            Some(ApprovalMessages {
+                on_request: Some(String::new()),
+                on_request_auto_review: None,
+                never: Some(String::new()),
+                unless_trusted: None,
+            })
+        );
+    }
+
+    #[test]
+    fn auto_review_messages_preserve_missing_and_empty_template_values() {
+        let missing_template: ModelMessages = from_str(
+            r#"{
+                "instructions_template": null,
+                "instructions_variables": null,
+                "auto_review": {
+                    "policy": "policy"
+                }
+            }"#,
+        )
+        .expect("auto-review messages should deserialize without a policy template");
+        let empty_template: ModelMessages = from_str(
+            r#"{
+                "instructions_template": null,
+                "instructions_variables": null,
+                "auto_review": {
+                    "policy": "policy",
+                    "policy_template": ""
+                }
+            }"#,
+        )
+        .expect("auto-review messages should deserialize with an empty policy template");
+
+        assert_eq!(
+            missing_template.auto_review,
+            Some(AutoReviewMessages {
+                policy: Some("policy".to_string()),
+                policy_template: None,
+            })
+        );
+        assert_eq!(
+            empty_template.auto_review,
+            Some(AutoReviewMessages {
+                policy: Some("policy".to_string()),
+                policy_template: Some(String::new()),
+            })
+        );
+    }
+
+    #[test]
+    fn permission_messages_preserve_missing_and_empty_values() {
+        let messages: ModelMessages = from_str(
+            r#"{
+                "instructions_template": null,
+                "instructions_variables": null,
+                "permissions": {
+                    "workspace_write": ""
+                }
+            }"#,
+        )
+        .expect("permission messages should deserialize");
+
+        assert_eq!(
+            messages.permissions,
+            Some(PermissionMessages {
+                danger_full_access: None,
+                workspace_write: Some(String::new()),
+                read_only: None,
+            })
+        );
+    }
+
+    #[test]
     fn reasoning_effort_accepts_known_and_custom_values() {
         let custom = ReasoningEffort::Custom("future".to_string());
         let deserialized = from_str::<ReasoningEffort>(r#""future""#)
             .expect("custom reasoning effort should deserialize");
         let serialized = to_string(&custom).expect("custom reasoning effort should serialize");
+        let serialized_max = to_string(&ReasoningEffort::Max).expect("Max should serialize");
+        let serialized_ultra = to_string(&ReasoningEffort::Ultra).expect("Ultra should serialize");
 
         assert_eq!(
             (
                 "high".parse(),
                 "max".parse(),
                 "ultra".parse(),
+                "future".parse(),
                 deserialized,
                 serialized,
+                serialized_max,
+                serialized_ultra,
                 custom.to_string(),
             ),
             (
                 Ok(ReasoningEffort::High),
                 Ok(ReasoningEffort::Max),
                 Ok(ReasoningEffort::Ultra),
+                Ok(custom.clone()),
                 custom,
                 r#""future""#.to_string(),
+                r#""max""#.to_string(),
+                r#""ultra""#.to_string(),
                 "future".to_string(),
             )
         );
@@ -760,6 +919,9 @@ mod tests {
         let model = test_model(Some(ModelMessages {
             instructions_template: Some("Hello {{ personality }}".to_string()),
             instructions_variables: Some(personality_variables()),
+            approvals: None,
+            auto_review: None,
+            permissions: None,
         }));
 
         let instructions = model.get_model_instructions(Some(Personality::Friendly));
@@ -776,6 +938,9 @@ mod tests {
                 personality_friendly: Some("friendly".to_string()),
                 personality_pragmatic: None,
             }),
+            approvals: None,
+            auto_review: None,
+            permissions: None,
         }));
         assert_eq!(
             model.get_model_instructions(Some(Personality::Friendly)),
@@ -801,6 +966,9 @@ mod tests {
                 personality_friendly: None,
                 personality_pragmatic: None,
             }),
+            approvals: None,
+            auto_review: None,
+            permissions: None,
         }));
         assert_eq!(
             model_no_personality.get_model_instructions(Some(Personality::Friendly)),
@@ -829,6 +997,9 @@ mod tests {
                 personality_friendly: None,
                 personality_pragmatic: None,
             }),
+            approvals: None,
+            auto_review: None,
+            permissions: None,
         }));
 
         let instructions = model.get_model_instructions(Some(Personality::Friendly));
@@ -924,7 +1095,6 @@ mod tests {
             "upgrade": null,
             "base_instructions": "base",
             "model_messages": null,
-            "supports_reasoning_summaries": false,
             "default_reasoning_summary": "auto",
             "support_verbosity": false,
             "default_verbosity": null,
@@ -938,16 +1108,22 @@ mod tests {
             "context_window": null,
             "auto_compact_token_limit": null,
             "effective_context_window_percent": 95,
-            "experimental_supported_tools": [],
-            "input_modalities": ["text", "image"]
+            "experimental_supported_tools": []
         }))
         .expect("deserialize model info");
 
         assert_eq!(model.availability_nux, None);
+        assert_eq!(
+            model.input_modalities,
+            vec![InputModality::Text, InputModality::Image]
+        );
+        assert!(!model.include_skills_usage_instructions);
+        assert!(model.supports_reasoning_summary_parameter);
         assert!(!model.supports_image_detail_original);
         assert_eq!(model.web_search_tool_type, WebSearchToolType::Text);
         assert!(!model.supports_search_tool);
         assert!(!model.use_responses_lite);
+        assert_eq!(model.comp_hash, None);
         assert_eq!(model.auto_review_model_override, None);
         assert_eq!(model.tool_mode, None);
     }

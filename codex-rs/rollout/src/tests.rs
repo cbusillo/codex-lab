@@ -1,6 +1,7 @@
 #![allow(warnings, clippy::all)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use codex_utils_absolute_path::test_support::PathExt;
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
@@ -29,12 +30,9 @@ use crate::list::read_head_for_summary;
 use crate::rollout_date_parts;
 use anyhow::Result;
 use codex_protocol::ThreadId;
-use codex_protocol::items::TurnItem;
-use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
@@ -44,9 +42,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::ThreadGoalUpdatedEvent;
-use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::UserMessageEvent;
-use codex_protocol::user_input::UserInput;
 
 const NO_SOURCE_FILTER: &[SessionSource] = &[];
 const TEST_PROVIDER: &str = "test-provider";
@@ -68,9 +64,12 @@ async fn insert_state_db_thread(
     rollout_path: &Path,
     archived: bool,
 ) -> crate::state_db::StateDbHandle {
-    let runtime = codex_state::StateRuntime::init(home.to_path_buf(), TEST_PROVIDER.to_string())
-        .await
-        .expect("state db should initialize");
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.abs()),
+        TEST_PROVIDER.to_string(),
+    )
+    .await
+    .expect("state db should initialize");
     runtime
         .mark_backfill_complete(/*last_watermark*/ None)
         .await
@@ -136,6 +135,41 @@ async fn find_thread_path_falls_back_when_db_path_is_stale() {
 }
 
 #[tokio::test]
+async fn read_thread_item_from_rollout_rejects_unknown_canonical_history_mode() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let uuid = Uuid::from_u128(303);
+    let ts = "2025-01-03T12-00-00";
+    write_session_file(
+        home,
+        ts,
+        uuid,
+        /*num_records*/ 1,
+        Some(SessionSource::Cli),
+    )
+    .unwrap();
+    let path = home.join(format!("sessions/2025/01/03/rollout-{ts}-{uuid}.jsonl"));
+    let contents = fs::read_to_string(&path).unwrap();
+    let mut lines = contents.lines();
+    let mut canonical_meta: serde_json::Value =
+        serde_json::from_str(lines.next().expect("canonical session meta")).unwrap();
+    canonical_meta["payload"]["history_mode"] = serde_json::json!("future");
+    let user_event = lines.next().expect("user event");
+    let mut source_meta = canonical_meta.clone();
+    let source_uuid = Uuid::from_u128(304);
+    source_meta["payload"]["session_id"] = serde_json::json!(source_uuid);
+    source_meta["payload"]["id"] = serde_json::json!(source_uuid);
+    source_meta["payload"]["history_mode"] = serde_json::json!("legacy");
+    fs::write(
+        &path,
+        format!("{canonical_meta}\n{user_event}\n{source_meta}\n"),
+    )
+    .unwrap();
+
+    assert_eq!(crate::list::read_thread_item_from_rollout(path).await, None);
+}
+
+#[tokio::test]
 async fn find_thread_path_falls_back_when_db_path_points_to_another_thread() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -198,9 +232,12 @@ async fn find_thread_path_repairs_missing_db_row_after_filesystem_fallback() {
     let fs_rollout_path = home.join(format!("sessions/2025/01/03/rollout-{ts}-{uuid}.jsonl"));
 
     // Create an empty state DB so lookup takes the DB-first path and then falls back to files.
-    let runtime = codex_state::StateRuntime::init(home.to_path_buf(), TEST_PROVIDER.to_string())
-        .await
-        .expect("state db should initialize");
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.abs()),
+        TEST_PROVIDER.to_string(),
+    )
+    .await
+    .expect("state db should initialize");
     runtime
         .mark_backfill_complete(/*last_watermark*/ None)
         .await
@@ -251,9 +288,12 @@ async fn assert_state_db_rollout_path(
     thread_id: ThreadId,
     expected_path: Option<&Path>,
 ) {
-    let runtime = codex_state::StateRuntime::init(home.to_path_buf(), TEST_PROVIDER.to_string())
-        .await
-        .expect("state db should initialize");
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.abs()),
+        TEST_PROVIDER.to_string(),
+    )
+    .await
+    .expect("state db should initialize");
     let path = runtime
         .find_rollout_path_by_id(thread_id, Some(false))
         .await
@@ -303,6 +343,7 @@ fn write_session_file_with_provider(
     let mut file = File::create(file_path)?;
 
     let mut payload = serde_json::json!({
+        "session_id": uuid,
         "id": uuid,
         "timestamp": ts_str,
         "cwd": ".",
@@ -376,6 +417,7 @@ fn write_goal_started_session_file(
         "timestamp": ts_str,
         "type": "session_meta",
         "payload": {
+            "session_id": uuid,
             "id": uuid,
             "timestamp": ts_str,
             "cwd": ".",
@@ -457,6 +499,7 @@ fn write_session_file_with_delayed_user_event(
             Uuid::from_u128(100 + i as u128)
         };
         let payload = serde_json::json!({
+            "session_id": uuid,
             "id": id,
             "timestamp": ts_str,
             "cwd": ".",
@@ -489,28 +532,9 @@ fn write_session_file_with_meta_payload(
     root: &Path,
     ts_str: &str,
     uuid: Uuid,
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
 ) -> std::io::Result<()> {
-    write_session_file_with_meta_payload_and_event(
-        root,
-        ts_str,
-        uuid,
-        payload,
-        serde_json::json!({
-            "type": "user_message",
-            "message": "Hello from user",
-            "kind": "plain",
-        }),
-    )
-}
-
-fn write_session_file_with_meta_payload_and_event(
-    root: &Path,
-    ts_str: &str,
-    uuid: Uuid,
-    payload: serde_json::Value,
-    event_payload: serde_json::Value,
-) -> std::io::Result<()> {
+    payload["session_id"] = serde_json::json!(uuid);
     let format: &[FormatItem] =
         format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]");
     let dt = PrimitiveDateTime::parse(ts_str, format)
@@ -534,12 +558,12 @@ fn write_session_file_with_meta_payload_and_event(
     });
     writeln!(file, "{meta}")?;
 
-    let event = serde_json::json!({
+    let user_event = serde_json::json!({
         "timestamp": ts_str,
         "type": "event_msg",
-        "payload": event_payload,
+        "payload": {"type": "user_message", "message": "Hello from user", "kind": "plain"}
     });
-    writeln!(file, "{event}")?;
+    writeln!(file, "{user_event}")?;
 
     let times = FileTimes::new().set_modified(dt.into());
     file.set_times(times)?;
@@ -627,18 +651,21 @@ async fn test_list_conversations_latest_first() {
                 thread_id: Some(thread_id_from_uuid(u3)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some("2025-01-03T12-00-00".into()),
+                recency_at: updated_times.first().cloned().flatten(),
                 updated_at: updated_times.first().cloned().flatten(),
             },
             ThreadItem {
@@ -646,18 +673,21 @@ async fn test_list_conversations_latest_first() {
                 thread_id: Some(thread_id_from_uuid(u2)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some("2025-01-02T12-00-00".into()),
+                recency_at: updated_times.get(1).cloned().flatten(),
                 updated_at: updated_times.get(1).cloned().flatten(),
             },
             ThreadItem {
@@ -665,18 +695,21 @@ async fn test_list_conversations_latest_first() {
                 thread_id: Some(thread_id_from_uuid(u1)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some("2025-01-01T12-00-00".into()),
+                recency_at: updated_times.get(2).cloned().flatten(),
                 updated_at: updated_times.get(2).cloned().flatten(),
             },
         ],
@@ -777,18 +810,21 @@ async fn test_pagination_cursor() {
                 thread_id: Some(thread_id_from_uuid(u5)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some("2025-03-05T09-00-00".into()),
+                recency_at: updated_page1.first().cloned().flatten(),
                 updated_at: updated_page1.first().cloned().flatten(),
             },
             ThreadItem {
@@ -796,18 +832,21 @@ async fn test_pagination_cursor() {
                 thread_id: Some(thread_id_from_uuid(u4)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some("2025-03-04T09-00-00".into()),
+                recency_at: updated_page1.get(1).cloned().flatten(),
                 updated_at: updated_page1.get(1).cloned().flatten(),
             },
         ],
@@ -851,18 +890,21 @@ async fn test_pagination_cursor() {
                 thread_id: Some(thread_id_from_uuid(u3)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some("2025-03-03T09-00-00".into()),
+                recency_at: updated_page2.first().cloned().flatten(),
                 updated_at: updated_page2.first().cloned().flatten(),
             },
             ThreadItem {
@@ -870,18 +912,21 @@ async fn test_pagination_cursor() {
                 thread_id: Some(thread_id_from_uuid(u2)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some("2025-03-02T09-00-00".into()),
+                recency_at: updated_page2.get(1).cloned().flatten(),
                 updated_at: updated_page2.get(1).cloned().flatten(),
             },
         ],
@@ -917,18 +962,21 @@ async fn test_pagination_cursor() {
             thread_id: Some(thread_id_from_uuid(u1)),
             first_user_message: Some("Hello from user".to_string()),
             preview: Some("Hello from user".to_string()),
+            is_pinned: false,
             cwd: Some(Path::new(".").to_path_buf()),
             git_branch: None,
             git_sha: None,
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
             session_provenance: None,
+            history_mode: Default::default(),
             parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
             model_provider: Some(TEST_PROVIDER.to_string()),
             cli_version: Some("test_version".to_string()),
             created_at: Some("2025-03-01T09-00-00".into()),
+            recency_at: updated_page3.first().cloned().flatten(),
             updated_at: updated_page3.first().cloned().flatten(),
         }],
         next_cursor: None,
@@ -1023,6 +1071,43 @@ async fn test_list_threads_preserves_session_provenance() {
 }
 
 #[tokio::test]
+async fn test_list_threads_omits_session_provenance_for_legacy_rollouts() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+
+    let uuid = Uuid::from_u128(102);
+    let ts = "2025-05-04T10-30-00";
+    let payload = serde_json::json!({
+        "id": uuid,
+        "timestamp": ts,
+        "cwd": ".",
+        "originator": "test_originator",
+        "cli_version": "test_version",
+        "source": "vscode",
+        "model_provider": TEST_PROVIDER,
+        "base_instructions": null,
+    });
+    write_session_file_with_meta_payload(home, ts, uuid, payload).unwrap();
+
+    let provider_filter = provider_vec(&[TEST_PROVIDER]);
+    let page = get_threads(
+        home,
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        Some(provider_filter.as_slice()),
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].session_provenance, None);
+}
+
+#[tokio::test]
 async fn test_list_threads_uses_goal_objective_as_preview() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -1100,63 +1185,6 @@ async fn test_goal_first_thread_reads_later_user_message() {
 }
 
 #[tokio::test]
-async fn test_paginated_thread_reads_completed_user_message() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path();
-    let uuid = Uuid::from_u128(102);
-    let thread_id = thread_id_from_uuid(uuid);
-    write_session_file_with_meta_payload_and_event(
-        home,
-        "2025-05-02T10-30-00",
-        uuid,
-        serde_json::json!({
-            "id": uuid,
-            "timestamp": "2025-05-02T10-30-00",
-            "cwd": ".",
-            "originator": "test_originator",
-            "cli_version": "test_version",
-            "source": "vscode",
-            "model_provider": TEST_PROVIDER,
-            "history_mode": "paginated",
-        }),
-        serde_json::to_value(EventMsg::ItemCompleted(ItemCompletedEvent {
-            thread_id,
-            turn_id: "turn-1".to_string(),
-            item: TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
-                text: "paginated user request".to_string(),
-                text_elements: Vec::new(),
-            }])),
-            completed_at_ms: 0,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let provider_filter = provider_vec(&[TEST_PROVIDER]);
-    let page = get_threads(
-        home,
-        /*page_size*/ 10,
-        /*cursor*/ None,
-        ThreadSortKey::CreatedAt,
-        INTERACTIVE_SESSION_SOURCES.as_slice(),
-        Some(provider_filter.as_slice()),
-        /*cwd_filters*/ None,
-        TEST_PROVIDER,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(page.items.len(), 1);
-    let item = &page.items[0];
-    assert_eq!(item.thread_id, Some(thread_id));
-    assert_eq!(item.preview.as_deref(), Some("paginated user request"));
-    assert_eq!(
-        item.first_user_message.as_deref(),
-        Some("paginated user request")
-    );
-}
-
-#[tokio::test]
 async fn test_get_thread_contents() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -1202,18 +1230,21 @@ async fn test_get_thread_contents() {
             thread_id: Some(thread_id_from_uuid(uuid)),
             first_user_message: Some("Hello from user".to_string()),
             preview: Some("Hello from user".to_string()),
+            is_pinned: false,
             cwd: Some(Path::new(".").to_path_buf()),
             git_branch: None,
             git_sha: None,
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
             session_provenance: None,
+            history_mode: Default::default(),
             parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
             model_provider: Some(TEST_PROVIDER.to_string()),
             cli_version: Some("test_version".to_string()),
             created_at: Some(ts.into()),
+            recency_at: page.items[0].updated_at.clone(),
             updated_at: page.items[0].updated_at.clone(),
         }],
         next_cursor: None,
@@ -1227,6 +1258,7 @@ async fn test_get_thread_contents() {
         "timestamp": ts,
         "type": "session_meta",
         "payload": {
+            "session_id": uuid,
             "id": uuid,
             "timestamp": ts,
             "cwd": ".",
@@ -1416,18 +1448,21 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
                 originator: "test_originator".into(),
                 cli_version: "test_version".into(),
                 source: SessionSource::VSCode,
-                thread_source: None,
                 session_provenance: None,
+                thread_source: None,
                 agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some("test-provider".into()),
                 base_instructions: None,
                 dynamic_tools: None,
+                selected_capability_roots: Vec::new(),
                 memory_mode: None,
+                history_mode: Default::default(),
+                history_base: None,
+                subagent_history_start_ordinal: None,
                 multi_agent_version: None,
                 context_window: None,
-                history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
             },
             git: None,
         }),
@@ -1460,6 +1495,7 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
                     text: format!("reply-{idx}"),
                 }],
                 phase: None,
+                internal_chat_message_metadata_passthrough: None,
             }),
         };
         writeln!(file, "{}", serde_json::to_string(&response_line)?)?;
@@ -1564,18 +1600,21 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
                 thread_id: Some(thread_id_from_uuid(u3)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some(ts.to_string()),
+                recency_at: updated_page1.first().cloned().flatten(),
                 updated_at: updated_page1.first().cloned().flatten(),
             },
             ThreadItem {
@@ -1583,18 +1622,21 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
                 thread_id: Some(thread_id_from_uuid(u2)),
                 first_user_message: Some("Hello from user".to_string()),
                 preview: Some("Hello from user".to_string()),
+                is_pinned: false,
                 cwd: Some(Path::new(".").to_path_buf()),
                 git_branch: None,
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 session_provenance: None,
+                history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
                 model_provider: Some(TEST_PROVIDER.to_string()),
                 cli_version: Some("test_version".to_string()),
                 created_at: Some(ts.to_string()),
+                recency_at: updated_page1.get(1).cloned().flatten(),
                 updated_at: updated_page1.get(1).cloned().flatten(),
             },
         ],

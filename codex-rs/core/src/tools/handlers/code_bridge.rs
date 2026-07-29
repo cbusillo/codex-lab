@@ -15,6 +15,7 @@ use codex_code_bridge_client::CodeBridgeSession;
 use codex_code_bridge_client::ControlRequest;
 use codex_code_bridge_client::ScreenshotRequest;
 use codex_code_bridge_protocol::BridgePayload;
+use codex_code_bridge_protocol::BridgeServiceStatus;
 use codex_code_bridge_protocol::CapabilitySet;
 use codex_code_bridge_protocol::ClientMetadata;
 use codex_code_bridge_protocol::ClientRole;
@@ -26,6 +27,9 @@ use codex_code_bridge_protocol::ErrorCode;
 use codex_code_bridge_protocol::ErrorMessage;
 use codex_code_bridge_protocol::MAX_CONTROL_TIMEOUT_MS;
 use codex_code_bridge_protocol::MAX_EVENT_TEXT_BYTES;
+use codex_code_bridge_protocol::MAX_SCREENSHOT_BYTES;
+use codex_code_bridge_protocol::MAX_SCREENSHOT_HEIGHT;
+use codex_code_bridge_protocol::MAX_SCREENSHOT_WIDTH;
 use codex_code_bridge_protocol::ScreenshotMediaType;
 use codex_code_bridge_protocol::ScreenshotPayload;
 use codex_code_bridge_protocol::ScreenshotResponseMessage;
@@ -51,7 +55,35 @@ const CONTROL_RESPONSE_GRACE_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_CONTROL_TIMEOUT_MS: u64 = MAX_CONTROL_TIMEOUT_MS;
 const MAX_CODE_BRIDGE_ID_BYTES: usize = 256;
 const MAX_MODEL_VISIBLE_CONTROL_FIELD_BYTES: usize = 1024;
-const MAX_MODEL_VISIBLE_IMAGE_BASE64_BYTES: usize = 2048;
+/// Hard cap for every error string the bridge can surface to the model. Bridge peers are
+/// untrusted, so `ErrorMessage.message` (and anything derived from a peer payload) must be
+/// bounded before it reaches the tool output.
+const MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES: usize = 1024;
+/// Hard cap for the encoded image a screenshot may inline into model-visible tool output.
+///
+/// Protocol validation already rejects screenshots whose base64 string exceeds
+/// `MAX_SCREENSHOT_BYTES` (2 MiB), so any cap at or above that value is dead code. This cap is
+/// deliberately well under it: 1 MiB of base64 is 768 KiB of encoded image, which is far more
+/// than a real screenshot needs while keeping a single tool result from dominating a request.
+const MAX_MODEL_VISIBLE_IMAGE_BASE64_BYTES: usize = 1024 * 1024;
+/// Patch edge length used by the vision token model.
+/// See https://platform.openai.com/docs/guides/images-vision#calculating-costs.
+const IMAGE_PATCH_SIZE: u32 = 32;
+/// Hard cap on the 32px patch count of an inlined screenshot.
+///
+/// Image token cost scales with patch count, and protocol validation only bounds screenshots at
+/// 4096x4096 (16,384 patches) — over the 10K-token ceiling a single model-visible item is allowed
+/// to occupy. 9,000 patches keeps the image under that ceiling while still admitting a 4K
+/// (3840x2160, 8,160 patch) display capture.
+const MAX_MODEL_VISIBLE_IMAGE_PATCHES: u64 = 9_000;
+// Both image caps must bind strictly inside protocol validation. A cap at or above the protocol
+// limit is unreachable, which is exactly how the previous screenshot cap became dead code.
+const _: () = assert!(MAX_MODEL_VISIBLE_IMAGE_BASE64_BYTES < MAX_SCREENSHOT_BYTES);
+const _: () = assert!(
+    (MAX_SCREENSHOT_WIDTH.div_ceil(IMAGE_PATCH_SIZE) as u64)
+        * (MAX_SCREENSHOT_HEIGHT.div_ceil(IMAGE_PATCH_SIZE) as u64)
+        > MAX_MODEL_VISIBLE_IMAGE_PATCHES
+);
 const TRUNCATED_FIELD_NOTICE: &str = " [truncated by code_bridge]";
 static NEXT_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -90,7 +122,6 @@ enum CodeBridgeAction {
     Javascript,
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for CodeBridgeHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(CODE_BRIDGE_TOOL_NAME)
@@ -100,10 +131,15 @@ impl ToolExecutor<ToolInvocation> for CodeBridgeHandler {
         create_code_bridge_tool()
     }
 
-    async fn handle(
-        &self,
-        invocation: ToolInvocation,
-    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(handle_invocation(invocation))
+    }
+}
+
+async fn handle_invocation(
+    invocation: ToolInvocation,
+) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+    {
         let ToolInvocation { turn, payload, .. } = invocation;
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
@@ -155,17 +191,30 @@ async fn handle_code_bridge(args: CodeBridgeArgs, descriptor_path: PathBuf) -> C
     }
 }
 
-async fn status_response(descriptor_path: &PathBuf) -> CodeBridgeResult {
+async fn status_response(descriptor_path: &Path) -> CodeBridgeResult {
     let Ok(client) = client_from_descriptor(descriptor_path) else {
         return unavailable_response(descriptor_path);
     };
     match client.status().await {
         Ok(status) => CodeBridgeResult::text(json!({
             "status": "available",
-            "service": status,
+            "service": model_visible_service_status(&status),
         })),
         Err(err) => error_response("unavailable", format!("Code Bridge status failed: {err}")),
     }
+}
+
+/// Re-render the bridge service status with every free-form field bounded. `protocol_version` is
+/// echoed from the bridge service over HTTP and never passes through envelope validation, so it
+/// cannot be serialized straight into model-visible output.
+fn model_visible_service_status(status: &BridgeServiceStatus) -> Value {
+    json!({
+        "protocolVersion": model_visible_id(&status.protocol_version),
+        "connectedProducerCount": status.connected_producer_count,
+        "connectedSubscriberCount": status.connected_subscriber_count,
+        "uptimeMs": status.uptime_ms,
+        "lastEventTimeUnixMs": status.last_event_time_unix_ms,
+    })
 }
 
 fn subscribe_response(args: CodeBridgeArgs) -> CodeBridgeResult {
@@ -176,7 +225,7 @@ fn subscribe_response(args: CodeBridgeArgs) -> CodeBridgeResult {
     }))
 }
 
-async fn screenshot_response(args: CodeBridgeArgs, descriptor_path: &PathBuf) -> CodeBridgeResult {
+async fn screenshot_response(args: CodeBridgeArgs, descriptor_path: &Path) -> CodeBridgeResult {
     let target_client_id = match required_target_client_id(args.target_client_id) {
         Ok(target_client_id) => target_client_id,
         Err(message) => return error_response("failed", message),
@@ -220,7 +269,7 @@ async fn screenshot_response(args: CodeBridgeArgs, descriptor_path: &PathBuf) ->
     }
 }
 
-async fn javascript_response(args: CodeBridgeArgs, descriptor_path: &PathBuf) -> CodeBridgeResult {
+async fn javascript_response(args: CodeBridgeArgs, descriptor_path: &Path) -> CodeBridgeResult {
     let target_client_id = match required_target_client_id(args.target_client_id) {
         Ok(target_client_id) => target_client_id,
         Err(message) => return error_response("failed", message),
@@ -270,7 +319,7 @@ async fn javascript_response(args: CodeBridgeArgs, descriptor_path: &PathBuf) ->
 }
 
 async fn control_session(
-    descriptor_path: &PathBuf,
+    descriptor_path: &Path,
     client_id_prefix: &str,
     capabilities: CapabilitySet,
 ) -> Result<(CodeBridgeClient, CodeBridgeSession, CodeBridgeEventStream), CodeBridgeClientError> {
@@ -287,7 +336,7 @@ async fn control_session(
             },
         )
         .await?;
-    let events = client.events(&session, 0).await?;
+    let events = client.events(&session, /*last_event_id*/ 0).await?;
     Ok((client, session, events))
 }
 
@@ -370,10 +419,31 @@ fn timeout_error(request_id: &str) -> ErrorMessage {
 fn expect_ack(payload: BridgePayload) -> Result<(), CodeBridgeClientError> {
     match payload {
         BridgePayload::Ack(_) => Ok(()),
-        BridgePayload::Error(error) => Err(CodeBridgeClientError::HelloRejected(error.message)),
+        BridgePayload::Error(error) => Err(CodeBridgeClientError::HelloRejected(
+            model_visible_error_text(&error.message),
+        )),
         other => Err(CodeBridgeClientError::HelloRejected(format!(
-            "unexpected Code Bridge response payload {other:?}"
+            "unexpected Code Bridge response payload kind: {}",
+            bridge_payload_kind(&other)
         ))),
+    }
+}
+
+/// Bounded, non-`Debug` label for a bridge payload. Payload bodies can carry megabytes of
+/// screenshot base64, so only the variant name is ever model-visible.
+fn bridge_payload_kind(payload: &BridgePayload) -> &'static str {
+    match payload {
+        BridgePayload::Hello(_) => "hello",
+        BridgePayload::HelloResponse(_) => "helloResponse",
+        BridgePayload::Heartbeat(_) => "heartbeat",
+        BridgePayload::Event(_) => "event",
+        BridgePayload::Subscribe(_) => "subscribe",
+        BridgePayload::Ack(_) => "ack",
+        BridgePayload::Error(_) => "error",
+        BridgePayload::ScreenshotRequest(_) => "screenshotRequest",
+        BridgePayload::ScreenshotResponse(_) => "screenshotResponse",
+        BridgePayload::ControlRequest(_) => "controlRequest",
+        BridgePayload::ControlResponse(_) => "controlResponse",
     }
 }
 
@@ -386,10 +456,10 @@ fn map_screenshot_response(response: ScreenshotResponseMessage) -> CodeBridgeRes
     CodeBridgeResult {
         response: json!({
         "status": map_control_status(response.status),
-        "requestId": response.request_id,
-        "respondingClientId": response.responding_client_id,
+        "requestId": model_visible_id(&response.request_id),
+        "respondingClientId": model_visible_id(&response.responding_client_id),
         "screenshot": screenshot,
-        "error": response.error,
+        "error": model_visible_error(response.error),
         }),
         image,
     }
@@ -403,11 +473,11 @@ fn map_control_response(response: ControlResponseMessage) -> CodeBridgeResult {
         .map(|result| model_visible_json_result(result, MAX_MODEL_VISIBLE_CONTROL_FIELD_BYTES));
     CodeBridgeResult::text(json!({
         "status": map_control_status(response.status),
-        "requestId": response.request_id,
-        "respondingClientId": response.responding_client_id,
+        "requestId": model_visible_id(&response.request_id),
+        "respondingClientId": model_visible_id(&response.responding_client_id),
         "summary": summary,
         "result": result,
-        "error": response.error,
+        "error": model_visible_error(response.error),
     }))
 }
 
@@ -420,7 +490,7 @@ fn map_control_status(status: ControlStatus) -> &'static str {
     }
 }
 
-fn unavailable_response(_descriptor_path: &PathBuf) -> CodeBridgeResult {
+fn unavailable_response(_descriptor_path: &Path) -> CodeBridgeResult {
     CodeBridgeResult::text(json!({
         "status": "unavailable",
         "message": "Code Bridge descriptor is unavailable for this workspace.",
@@ -431,32 +501,56 @@ fn error_response(status: &str, message: String) -> CodeBridgeResult {
     CodeBridgeResult::text(json!({
         "status": status,
         "error": {
-            "message": message,
+            "message": model_visible_error_text(&message),
         },
     }))
+}
+
+fn model_visible_error(error: Option<ErrorMessage>) -> Option<Value> {
+    error.map(|error| {
+        json!({
+            "code": error.code,
+            "message": model_visible_error_text(&error.message),
+        })
+    })
+}
+
+fn model_visible_error_text(message: &str) -> String {
+    truncate_model_visible_text(message, MAX_MODEL_VISIBLE_ERROR_MESSAGE_BYTES).into_owned()
+}
+
+/// Bound a peer-supplied identifier (client id, request id, protocol version). These are all
+/// expected to be short, but nothing on the wire enforces that.
+fn model_visible_id(value: &str) -> String {
+    truncate_model_visible_text(value, MAX_CODE_BRIDGE_ID_BYTES).into_owned()
 }
 
 fn split_screenshot_payload(payload: ScreenshotPayload) -> (Value, Option<ScreenshotToolImage>) {
     let media_type = payload.media_type;
     let base64_len = payload.data_base64.len();
-    let (image, omitted) = if base64_len <= MAX_MODEL_VISIBLE_IMAGE_BASE64_BYTES {
-        (
-            Some(ScreenshotToolImage {
-                media_type,
-                data_base64: payload.data_base64,
-            }),
-            None,
-        )
+    // Base64 cannot be trimmed to fit without producing an image the model cannot decode, so an
+    // over-budget screenshot is omitted entirely and only its metadata stays model-visible.
+    let omitted = if base64_len > MAX_MODEL_VISIBLE_IMAGE_BASE64_BYTES {
+        Some(json!({
+            "reason": "screenshot image exceeded the model-visible inline size limit",
+            "base64Bytes": base64_len,
+            "maxBase64Bytes": MAX_MODEL_VISIBLE_IMAGE_BASE64_BYTES,
+        }))
     } else {
-        (
-            None,
-            Some(json!({
-                "reason": "screenshot image exceeded the model-visible inline size limit",
-                "base64Bytes": base64_len,
-                "maxBase64Bytes": MAX_MODEL_VISIBLE_IMAGE_BASE64_BYTES,
-            })),
-        )
+        image_patch_count(payload.width, payload.height)
+            .filter(|patches| *patches > MAX_MODEL_VISIBLE_IMAGE_PATCHES)
+            .map(|patches| {
+                json!({
+                    "reason": "screenshot image exceeded the model-visible inline token limit",
+                    "patches": patches,
+                    "maxPatches": MAX_MODEL_VISIBLE_IMAGE_PATCHES,
+                })
+            })
     };
+    let image = omitted.is_none().then_some(ScreenshotToolImage {
+        media_type,
+        data_base64: payload.data_base64,
+    });
     (
         json!({
             "width": payload.width,
@@ -466,6 +560,15 @@ fn split_screenshot_payload(payload: ScreenshotPayload) -> (Value, Option<Screen
         }),
         image,
     )
+}
+
+/// Number of 32px vision patches a screenshot of these dimensions occupies, or `None` when the
+/// payload declares a degenerate size that carries no image.
+fn image_patch_count(width: u32, height: u32) -> Option<u64> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(u64::from(width.div_ceil(IMAGE_PATCH_SIZE)) * u64::from(height.div_ceil(IMAGE_PATCH_SIZE)))
 }
 
 fn media_type_name(media_type: ScreenshotMediaType) -> &'static str {

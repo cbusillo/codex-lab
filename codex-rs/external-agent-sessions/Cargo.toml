@@ -8,18 +8,10 @@ license.workspace = true
 doctest = false
 name = "codex_external_agent_sessions"
 path = "src/lib.rs"
+test = false
 
 [lints]
 workspace = true
 
 [dependencies]
-chrono = { workspace = true }
-codex-protocol = { workspace = true }
-codex-utils-output-truncation = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
-
-[dev-dependencies]
-codex-app-server-protocol = { workspace = true }
-tempfile = { workspace = true }
+codex-external-agent-migration = { workspace = true }

@@ -36,6 +36,7 @@ use tokio::time::timeout;
 
 const FIXTURE_HTML: &str = include_str!("fixtures/live_browser_witness.html");
 const BROWSER_CLIENT_ID: &str = "live-browser-witness";
+type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[tokio::test]
 #[ignore = "requires opening the printed URL in a real browser"]
@@ -48,8 +49,8 @@ async fn live_browser_witness_round_trips_events_screenshot_and_control() {
         .await
         .expect("start Code Bridge service");
 
-    let descriptor = descriptor_from_path(service.descriptor_path());
-    let fixture = LiveBrowserFixture::start(&descriptor);
+    let descriptor = descriptor_from_path(service.descriptor_path()).expect("descriptor");
+    let fixture = LiveBrowserFixture::start(&descriptor).expect("start fixture server");
     eprintln!(
         "Open this URL in a real browser to run the Code Bridge live browser witness:\n{}",
         fixture.url()
@@ -91,7 +92,10 @@ async fn live_browser_witness_round_trips_events_screenshot_and_control() {
         )
         .await
         .expect("subscribe");
-    let mut events = client.events(&subscriber, 0).await.expect("events");
+    let mut events = client
+        .events(&subscriber, /*last_event_id*/ 0)
+        .await
+        .expect("events");
 
     let pageview = next_message(&mut events, "pageview").await;
     assert!(matches!(
@@ -140,7 +144,7 @@ async fn live_browser_witness_round_trips_events_screenshot_and_control() {
         panic!("expected screenshot response");
     };
     assert_eq!(request_id, "live-browser-shot-1");
-    let screenshot_bytes = assert_nonblank_png(&screenshot);
+    let screenshot_bytes = assert_nonblank_png(&screenshot).expect("validate screenshot");
 
     let screenshot_event = next_message(&mut events, "screenshot event").await;
     let control_cursor = screenshot_event.sequence;
@@ -201,27 +205,23 @@ async fn next_message(
         .unwrap_or_else(|error| panic!("failed waiting for {label}: {error}"))
 }
 
-fn assert_nonblank_png(screenshot: &ScreenshotPayload) -> usize {
+fn assert_nonblank_png(screenshot: &ScreenshotPayload) -> TestResult<usize> {
     assert_eq!(screenshot.media_type, ScreenshotMediaType::Png);
-    let bytes = BASE64_STANDARD
-        .decode(screenshot.data_base64.as_bytes())
-        .expect("decode screenshot");
-    let image = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
-        .expect("parse screenshot")
-        .to_rgba8();
+    let bytes = BASE64_STANDARD.decode(screenshot.data_base64.as_bytes())?;
+    let image = image::load_from_memory_with_format(&bytes, ImageFormat::Png)?.to_rgba8();
     assert_eq!(image.width(), screenshot.width);
     assert_eq!(image.height(), screenshot.height);
     let first = image
         .pixels()
         .next()
-        .expect("screenshot has at least one pixel");
+        .ok_or_else(|| std::io::Error::other("screenshot has no pixels"))?;
     assert!(image.pixels().any(|pixel| pixel != first));
-    bytes.len()
+    Ok(bytes.len())
 }
 
-fn descriptor_from_path(path: &std::path::Path) -> BridgeDescriptor {
-    let raw = std::fs::read(path).expect("read descriptor");
-    serde_json::from_slice(&raw).expect("parse descriptor")
+fn descriptor_from_path(path: &std::path::Path) -> TestResult<BridgeDescriptor> {
+    let raw = std::fs::read(path)?;
+    Ok(serde_json::from_slice(&raw)?)
 }
 
 struct LiveBrowserFixture {
@@ -230,12 +230,9 @@ struct LiveBrowserFixture {
 }
 
 impl LiveBrowserFixture {
-    fn start(descriptor: &BridgeDescriptor) -> Self {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind fixture server");
-        let url = format!(
-            "http://127.0.0.1:{}/",
-            listener.local_addr().expect("fixture addr").port()
-        );
+    fn start(descriptor: &BridgeDescriptor) -> std::io::Result<Self> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let url = format!("http://127.0.0.1:{}/", listener.local_addr()?.port());
         let descriptor = Arc::new(descriptor.clone());
         let thread_descriptor = Arc::clone(&descriptor);
         let thread = thread::spawn(move || {
@@ -246,10 +243,10 @@ impl LiveBrowserFixture {
                 }
             }
         });
-        Self {
+        Ok(Self {
             url,
             _thread: thread,
-        }
+        })
     }
 
     fn url(&self) -> String {

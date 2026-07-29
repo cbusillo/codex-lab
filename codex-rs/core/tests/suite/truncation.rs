@@ -1,5 +1,5 @@
 #![cfg(not(target_os = "windows"))]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
 
 use anyhow::Context;
 use anyhow::Result;
@@ -22,6 +22,7 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::stdio_server_bin;
+use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
@@ -382,6 +383,7 @@ async fn mcp_tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> 
         servers.insert(
             server_name.to_string(),
             codex_config::types::McpServerConfig {
+                auth: Default::default(),
                 transport: codex_config::types::McpServerTransportConfig::Stdio {
                     command: rmcp_test_server_bin,
                     args: Vec::new(),
@@ -473,13 +475,14 @@ async fn mcp_image_output_preserves_image_and_no_text_summary() -> Result<()> {
     let rmcp_test_server_bin = stdio_server_bin()?;
 
     // 1x1 PNG data URL
-    let openai_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/ee9bQAAAABJRU5ErkJggg==";
+    let openai_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
     let mut builder = test_codex().with_config(move |config| {
         let mut servers = config.mcp_servers.get().clone();
         servers.insert(
             server_name.to_string(),
             McpServerConfig {
+                auth: Default::default(),
                 transport: McpServerTransportConfig::Stdio {
                     command: rmcp_test_server_bin,
                     args: Vec::new(),
@@ -524,12 +527,11 @@ async fn mcp_image_output_preserves_image_and_no_text_summary() -> Result<()> {
                 text: "call the rmcp image tool".into(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(fixture.cwd.abs()),
+                environments: Some(local_selections(fixture.cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile: Some(permission_profile),
@@ -773,6 +775,7 @@ async fn mcp_tool_call_output_not_truncated_with_custom_limit() -> Result<()> {
         servers.insert(
             server_name.to_string(),
             codex_config::types::McpServerConfig {
+                auth: Default::default(),
                 transport: codex_config::types::McpServerTransportConfig::Stdio {
                     command: rmcp_test_server_bin,
                     args: Vec::new(),

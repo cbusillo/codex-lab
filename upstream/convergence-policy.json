@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "openai/codex",
+    "remote": "openai",
+    "branch": "main",
+    "allowedFetchUrls": [
+      "https://github.com/openai/codex.git",
+      "git@github.com:openai/codex.git"
+    ]
+  },
+  "contractsPath": "upstream/convergence-contracts.md",
+  "evidenceRoot": "upstream/openai-codex",
+  "planIssue": "https://github.com/cbusillo/codex-lab/issues/428"
+}

@@ -1,13 +1,13 @@
 use super::*;
 use crate::agent::next_thread_spawn_depth;
+use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::multi_agents_spec::create_resume_agent_tool;
-use crate::turn_timing::now_unix_timestamp_ms;
 use codex_tools::ToolSpec;
 use std::sync::Arc;
 
 pub(crate) struct Handler;
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for Handler {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, "resume_agent")
@@ -24,11 +24,8 @@ impl ToolExecutor<ToolInvocation> for Handler {
         )
     }
 
-    async fn handle(
-        &self,
-        invocation: ToolInvocation,
-    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        handle_resume_agent(invocation).await.map(boxed_tool_output)
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async move { handle_resume_agent(invocation).await.map(boxed_tool_output) })
     }
 }
 
@@ -61,17 +58,24 @@ async fn handle_resume_agent(
     }
 
     session
-        .send_event(
+        .emit_turn_item_started(
             &turn,
-            CollabResumeBeginEvent {
-                call_id: call_id.clone(),
-                started_at_ms: now_unix_timestamp_ms(),
+            &TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                id: call_id.clone(),
+                tool: CollabAgentTool::ResumeAgent,
+                status: CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: session.thread_id,
-                receiver_thread_id,
-                receiver_agent_nickname: receiver_agent.agent_nickname.clone(),
-                receiver_agent_role: receiver_agent.agent_role.clone(),
-            }
-            .into(),
+                receiver_thread_ids: vec![receiver_thread_id],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: receiver_thread_id,
+                    agent_nickname: receiver_agent.agent_nickname.clone(),
+                    agent_role: receiver_agent.agent_role.clone(),
+                }],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: Default::default(),
+            }),
         )
         .await;
 
@@ -117,18 +121,24 @@ async fn handle_resume_agent(
         (receiver_agent, None)
     };
     session
-        .send_event(
+        .emit_turn_item_completed(
             &turn,
-            CollabResumeEndEvent {
-                call_id,
-                completed_at_ms: now_unix_timestamp_ms(),
+            TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                id: call_id,
+                tool: CollabAgentTool::ResumeAgent,
+                status: collab_tool_call_status(&status, Some(receiver_thread_id)),
                 sender_thread_id: session.thread_id(),
-                receiver_thread_id,
-                receiver_agent_nickname: receiver_agent.agent_nickname,
-                receiver_agent_role: receiver_agent.agent_role,
-                status: status.clone(),
-            }
-            .into(),
+                receiver_thread_ids: vec![receiver_thread_id],
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: receiver_thread_id,
+                    agent_nickname: receiver_agent.agent_nickname,
+                    agent_role: receiver_agent.agent_role,
+                }],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: [(receiver_thread_id, status.clone())].into_iter().collect(),
+            }),
         )
         .await;
 
@@ -138,7 +148,9 @@ async fn handle_resume_agent(
     turn.session_telemetry
         .counter("codex.multi_agent.resume", /*inc*/ 1, &[]);
 
-    Ok(ResumeAgentResult { status })
+    Ok(ResumeAgentResult {
+        status: crate::session_prefix::bounded_status(&status),
+    })
 }
 
 impl CoreToolRuntime for Handler {

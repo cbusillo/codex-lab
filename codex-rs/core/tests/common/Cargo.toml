@@ -20,6 +20,7 @@ codex-config = { workspace = true }
 codex-core = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-exec-server = { workspace = true }
+codex-home = { workspace = true }
 codex-features = { workspace = true }
 codex-hooks = { workspace = true }
 codex-login = { workspace = true }
@@ -28,6 +29,7 @@ codex-models-manager = { workspace = true }
 codex-protocol = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
+codex-utils-path-uri = { workspace = true }
 ctor = { workspace = true }
 futures = { workspace = true }
 notify = { workspace = true }
@@ -37,7 +39,7 @@ regex-lite = { workspace = true }
 serde_json = { workspace = true }
 similar = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["net", "time"] }
+tokio = { workspace = true, features = ["net", "test-util", "time"] }
 tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -48,5 +50,5 @@ shlex = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
+codex-http-client = { workspace = true }
 pretty_assertions = { workspace = true }
-reqwest = { workspace = true }

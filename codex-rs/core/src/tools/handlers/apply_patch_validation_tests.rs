@@ -2,9 +2,10 @@ use super::*;
 use codex_apply_patch::AppliedPatchChange;
 use codex_apply_patch::AppliedPatchFileChange;
 use codex_config::ValidationGroups;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use pretty_assertions::assert_eq;
-use std::path::PathBuf;
 
 fn functional_validation() -> ValidationConfig {
     ValidationConfig {
@@ -16,9 +17,9 @@ fn functional_validation() -> ValidationConfig {
     }
 }
 
-fn added_file(path: PathBuf, content: &str) -> AppliedPatchChange {
+fn added_file(path: AbsolutePathBuf, content: &str) -> AppliedPatchChange {
     AppliedPatchChange {
-        path,
+        path: PathUri::from_abs_path(&path),
         change: AppliedPatchFileChange::Add {
             content: content.to_string(),
             overwritten_content: None,
@@ -30,9 +31,62 @@ fn finding(tool: &str, file: &str, message: String) -> Value {
     json!({"tool": tool, "file": file, "msg": message})
 }
 
+#[test]
+fn outside_workspace_findings_fall_back_to_bounded_basename() {
+    let cwd = std::env::temp_dir().join("validation-workspace").abs();
+    let outside = std::env::temp_dir()
+        .join("validation-outside")
+        .join("invalid.json")
+        .abs();
+    let changes = vec![added_file(outside, "{ invalid")];
+    let (_, parsed) = rendered_summary(&changes, &cwd);
+
+    assert_eq!(parsed["validation"]["issues"][0]["file"], "invalid.json");
+}
+
+#[test]
+fn text_truncation_is_explicit_and_utf8_safe() {
+    let truncated = truncate_utf8(&"🙂".repeat(MAX_MESSAGE_BYTES), MAX_MESSAGE_BYTES);
+
+    assert!(truncated.len() <= MAX_MESSAGE_BYTES);
+    assert!(truncated.ends_with(TRUNCATION_MARKER));
+}
+
+#[test]
+fn yaml_alias_expansion_hits_the_parser_repetition_limit() {
+    let cwd = std::env::temp_dir()
+        .join("validation-yaml-alias-limit")
+        .abs();
+    let yaml = r#"
+a: &a ~
+b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
+c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]
+d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]
+e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]
+f: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e]
+g: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f]
+h: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g]
+i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
+"#;
+    let changes = vec![added_file(cwd.join("aliases.yaml"), yaml)];
+    let (_, parsed) = rendered_summary(&changes, &cwd);
+    let issue = &parsed["validation"]["issues"][0];
+
+    assert_eq!(issue["tool"], "yaml-parse");
+    assert!(
+        issue["msg"]
+            .as_str()
+            .is_some_and(|message| message.contains("repetition limit exceeded"))
+    );
+}
+
 fn rendered_summary(changes: &[AppliedPatchChange], cwd: &AbsolutePathBuf) -> (String, Value) {
-    let summary = render_validation_summary(changes, &functional_validation(), cwd)
-        .expect("structural files should produce a summary");
+    let summary = render_validation_summary(
+        changes,
+        &functional_validation(),
+        &PathUri::from_abs_path(cwd),
+    )
+    .expect("structural files should produce a summary");
     let parsed = serde_json::from_str(&summary).expect("summary should be valid JSON");
     (summary, parsed)
 }
@@ -74,9 +128,9 @@ fn structural_parsers_report_checks_and_findings() {
     let invalid_toml = "value =";
     let invalid_yaml = "value: [";
     let changes = vec![
-        added_file(cwd.join("valid.json").to_path_buf(), "{}"),
-        added_file(cwd.join("invalid.toml").to_path_buf(), invalid_toml),
-        added_file(cwd.join("invalid.yaml").to_path_buf(), invalid_yaml),
+        added_file(cwd.join("valid.json"), "{}"),
+        added_file(cwd.join("invalid.toml"), invalid_toml),
+        added_file(cwd.join("invalid.yaml"), invalid_yaml),
     ];
     let toml_message = format!(
         "invalid TOML: {}",
@@ -106,12 +160,7 @@ fn invalid_json_findings_are_deterministic_and_bounded() {
     let cwd = std::env::temp_dir().join("validation-bounded").abs();
     let changes = (1..=13)
         .rev()
-        .map(|index| {
-            added_file(
-                cwd.join(format!("bad-{index:02}.json")).to_path_buf(),
-                "{ invalid",
-            )
-        })
+        .map(|index| added_file(cwd.join(format!("bad-{index:02}.json")), "{ invalid"))
         .collect::<Vec<_>>();
     let message = format!(
         "invalid JSON: {}",
@@ -136,12 +185,7 @@ fn validation_summary_respects_byte_budget() {
     let long_name = "x".repeat(1_000);
     let long_content = format!("{} =", "long_key".repeat(300));
     let changes = (1..=12)
-        .map(|index| {
-            added_file(
-                cwd.join(format!("{long_name}-{index}.toml")).to_path_buf(),
-                &long_content,
-            )
-        })
+        .map(|index| added_file(cwd.join(format!("{long_name}-{index}.toml")), &long_content))
         .collect::<Vec<_>>();
     let (summary, parsed) = rendered_summary(&changes, &cwd);
 
@@ -159,7 +203,7 @@ fn validation_summary_respects_byte_budget() {
 fn oversized_structural_file_reports_skipped_validation() {
     let cwd = std::env::temp_dir().join("validation-file-limit").abs();
     let changes = vec![added_file(
-        cwd.join("large.json").to_path_buf(),
+        cwd.join("large.json"),
         &"x".repeat(MAX_FILE_INPUT_BYTES + 1),
     )];
 
@@ -176,12 +220,7 @@ fn total_input_limit_reports_skipped_file() {
     let cwd = std::env::temp_dir().join("validation-total-limit").abs();
     let valid_json = format!("\"{}\"", "x".repeat(MAX_FILE_INPUT_BYTES - 2));
     let changes = (1..=5)
-        .map(|index| {
-            added_file(
-                cwd.join(format!("large-{index}.json")).to_path_buf(),
-                &valid_json,
-            )
-        })
+        .map(|index| added_file(cwd.join(format!("large-{index}.json")), &valid_json))
         .collect::<Vec<_>>();
 
     assert_skipped(

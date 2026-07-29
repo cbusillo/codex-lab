@@ -20,8 +20,8 @@ pub(crate) fn new_auto_review_status_cell(
         BackgroundAutoReviewStatus::Running => ("○ ".cyan(), "running".bold()),
         BackgroundAutoReviewStatus::Completed => ("✔ ".green(), "completed".bold()),
         BackgroundAutoReviewStatus::Failed => ("✗ ".red(), "failed".bold()),
-        BackgroundAutoReviewStatus::Cancelled => ("✗ ".yellow(), "cancelled".bold()),
-        BackgroundAutoReviewStatus::Superseded => ("○ ".yellow(), "superseded".bold()),
+        BackgroundAutoReviewStatus::Cancelled => ("✗ ".dim(), "cancelled".bold()),
+        BackgroundAutoReviewStatus::Superseded => ("○ ".dim(), "superseded".bold()),
         BackgroundAutoReviewStatus::Skipped => ("○ ".dim(), "skipped".bold()),
     };
     let mut spans = vec![
@@ -73,12 +73,12 @@ fn push_current_summary_lines(lines: &mut Vec<Line<'static>>, summary: &AutoRevi
             ("✔ ".green(), finding_count_label(summary.rendered_findings))
         }
         BackgroundAutoReviewStatus::Completed => (
-            "! ".yellow(),
+            "! ".magenta(),
             finding_count_label(summary.rendered_findings),
         ),
         BackgroundAutoReviewStatus::Failed => ("✗ ".red(), "failed".to_string()),
-        BackgroundAutoReviewStatus::Cancelled => ("✗ ".yellow(), "cancelled".to_string()),
-        BackgroundAutoReviewStatus::Superseded => ("○ ".yellow(), "superseded".to_string()),
+        BackgroundAutoReviewStatus::Cancelled => ("✗ ".dim(), "cancelled".to_string()),
+        BackgroundAutoReviewStatus::Superseded => ("○ ".dim(), "superseded".to_string()),
         BackgroundAutoReviewStatus::Skipped => ("○ ".dim(), "skipped".to_string()),
         BackgroundAutoReviewStatus::Pending => ("○ ".cyan(), "queued".to_string()),
         BackgroundAutoReviewStatus::Running => ("○ ".cyan(), "running".to_string()),
@@ -100,10 +100,10 @@ fn push_no_current_summary_lines(
 ) {
     if let Some(latest) = response.latest.as_ref() {
         lines.push(Line::from(vec![
-            "○ ".yellow(),
+            "○ ".dim(),
             "Background Review has no current findings".bold(),
             " · latest ".dim(),
-            Span::from(freshness_label(latest.freshness)).yellow(),
+            Span::from(freshness_label(latest.freshness)).dim(),
             " · ".dim(),
             Span::from(latest.run_id.clone()).dim(),
         ]));
@@ -155,7 +155,7 @@ fn push_summary_metadata(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRun
     }
     if let Some(record) = summary.finding_disposition.as_ref() {
         spans.push(" · ".dim());
-        spans.push(Span::from(disposition_label(record.disposition)).yellow());
+        spans.push(Span::from(disposition_label(record.disposition)).magenta());
     }
     if let Some(reason) = summary.terminal_reason {
         spans.push(" · ".dim());

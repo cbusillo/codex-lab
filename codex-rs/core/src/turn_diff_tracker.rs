@@ -1,41 +1,62 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::Path;
-use std::path::PathBuf;
+use std::time::Duration;
 
 use sha1::digest::Output;
 
 use codex_apply_patch::AppliedPatchChange;
 use codex_apply_patch::AppliedPatchDelta;
 use codex_apply_patch::AppliedPatchFileChange;
+use codex_utils_path_uri::PathUri;
 
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 const DEV_NULL: &str = "/dev/null";
 const REGULAR_FILE_MODE: &str = "100644";
+// Normal edits finish well within 100 ms; pathological inputs fall back to a coarse,
+// content-exact diff without stalling tool completion.
+const DIFF_TIMEOUT: Duration = Duration::from_millis(100);
+
+struct TrackedContent {
+    content: String,
+    revision: u64,
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct TrackedPath {
     environment_id: String,
-    path: PathBuf,
+    path: PathUri,
 }
 
 impl TrackedPath {
-    fn new(environment_id: &str, path: &Path) -> Self {
+    fn new(environment_id: &str, path: &PathUri) -> Self {
         Self {
             environment_id: environment_id.to_string(),
-            path: path.to_path_buf(),
+            path: path.clone(),
         }
     }
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct DiffCacheKey {
+    left_path: TrackedPath,
+    left_revision: Option<u64>,
+    right_path: TrackedPath,
+    right_revision: Option<u64>,
 }
 
 /// Tracks the net text diff for the current turn from committed apply_patch
 /// mutations, without rereading the workspace filesystem.
 pub struct TurnDiffTracker {
     valid: bool,
-    display_roots_by_environment: HashMap<String, PathBuf>,
-    baseline_by_path: HashMap<TrackedPath, String>,
-    current_by_path: HashMap<TrackedPath, String>,
+    display_roots_by_environment: HashMap<String, PathUri>,
+    baseline_by_path: HashMap<TrackedPath, TrackedContent>,
+    current_by_path: HashMap<TrackedPath, TrackedContent>,
     origin_by_current_path: HashMap<TrackedPath, TrackedPath>,
+    next_revision: u64,
+    rendered_diffs: HashMap<DiffCacheKey, Option<String>>,
+    unified_diff: Option<String>,
+    #[cfg(test)]
+    rendered_diff_count: std::cell::Cell<usize>,
 }
 
 impl Default for TurnDiffTracker {
@@ -46,6 +67,11 @@ impl Default for TurnDiffTracker {
             baseline_by_path: HashMap::new(),
             current_by_path: HashMap::new(),
             origin_by_current_path: HashMap::new(),
+            next_revision: 0,
+            rendered_diffs: HashMap::new(),
+            unified_diff: None,
+            #[cfg(test)]
+            rendered_diff_count: std::cell::Cell::new(0),
         }
     }
 }
@@ -56,7 +82,7 @@ impl TurnDiffTracker {
     }
 
     pub fn with_environment_display_roots(
-        display_roots: impl IntoIterator<Item = (String, PathBuf)>,
+        display_roots: impl IntoIterator<Item = (String, PathUri)>,
     ) -> Self {
         let mut tracker = Self::new();
         tracker.display_roots_by_environment = display_roots.into_iter().collect();
@@ -64,6 +90,10 @@ impl TurnDiffTracker {
     }
 
     pub fn track_delta(&mut self, environment_id: &str, delta: &AppliedPatchDelta) {
+        if !self.valid {
+            return;
+        }
+
         if !delta.is_exact() {
             self.invalidate();
             return;
@@ -72,17 +102,24 @@ impl TurnDiffTracker {
         for change in delta.changes() {
             self.apply_change(environment_id, change);
         }
+        self.refresh_unified_diff();
     }
 
     pub fn invalidate(&mut self) {
         self.valid = false;
+        self.rendered_diffs.clear();
+        self.unified_diff = None;
     }
 
     pub fn get_unified_diff(&self) -> Option<String> {
-        if !self.valid {
-            return None;
-        }
+        self.unified_diff.clone()
+    }
 
+    pub(crate) fn has_unified_diff(&self) -> bool {
+        self.unified_diff.is_some()
+    }
+
+    fn refresh_unified_diff(&mut self) {
         let rename_pairs = self.rename_pairs();
         let paired_destinations = rename_pairs.values().cloned().collect::<HashSet<_>>();
         let mut handled = HashSet::new();
@@ -95,6 +132,8 @@ impl TurnDiffTracker {
         paths.sort_by_key(|path| self.display_path(path));
         paths.dedup();
 
+        let mut previous_diffs = std::mem::take(&mut self.rendered_diffs);
+        let mut rendered_diffs = HashMap::new();
         let mut aggregated = String::new();
         for path in paths {
             if !handled.insert(path.clone()) {
@@ -105,26 +144,45 @@ impl TurnDiffTracker {
                 continue;
             }
 
-            let diff = if let Some(dest) = rename_pairs.get(&path) {
+            let (left_path, right_path) = if let Some(dest) = rename_pairs.get(&path) {
                 handled.insert(dest.clone());
-                self.render_rename_diff(&path, dest)
+                (&path, dest)
             } else {
-                self.render_path_diff(&path)
+                (&path, &path)
             };
 
-            if let Some(diff) = diff {
-                aggregated.push_str(&diff);
+            let left_content = self.baseline_by_path.get(left_path);
+            let right_content = self.current_by_path.get(right_path);
+            let key = DiffCacheKey {
+                left_path: left_path.clone(),
+                left_revision: left_content.map(|content| content.revision),
+                right_path: right_path.clone(),
+                right_revision: right_content.map(|content| content.revision),
+            };
+            let rendered = previous_diffs.remove(&key).unwrap_or_else(|| {
+                self.render_diff(
+                    left_path,
+                    left_content.map(|content| content.content.as_str()),
+                    right_path,
+                    right_content.map(|content| content.content.as_str()),
+                )
+            });
+
+            if let Some(diff) = rendered.as_deref() {
+                aggregated.push_str(diff);
                 if !aggregated.ends_with('\n') {
                     aggregated.push('\n');
                 }
             }
+            rendered_diffs.insert(key, rendered);
         }
 
-        (!aggregated.is_empty()).then_some(aggregated)
+        self.rendered_diffs = rendered_diffs;
+        self.unified_diff = (!aggregated.is_empty()).then_some(aggregated);
     }
 
     fn apply_change(&mut self, environment_id: &str, change: &AppliedPatchChange) {
-        let source_path = TrackedPath::new(environment_id, change.path.as_path());
+        let source_path = TrackedPath::new(environment_id, &change.path);
         match &change.change {
             AppliedPatchFileChange::Add {
                 content,
@@ -138,7 +196,7 @@ impl TurnDiffTracker {
                 new_content,
             } => {
                 let move_path = move_path
-                    .as_deref()
+                    .as_ref()
                     .map(|path| TrackedPath::new(environment_id, path));
                 self.apply_update(
                     source_path,
@@ -157,18 +215,20 @@ impl TurnDiffTracker {
             && !self.baseline_by_path.contains_key(&path)
             && let Some(overwritten_content) = overwritten_content
         {
+            let overwritten_content = self.tracked_content(overwritten_content);
             self.baseline_by_path
-                .insert(path.clone(), overwritten_content.to_string());
+                .insert(path.clone(), overwritten_content);
         }
-        self.current_by_path.insert(path, content.to_string());
+        let content = self.tracked_content(content);
+        self.current_by_path.insert(path, content);
     }
 
     fn apply_delete(&mut self, path: TrackedPath, content: &str) {
         if self.current_by_path.remove(&path).is_none()
             && !self.baseline_by_path.contains_key(&path)
         {
-            self.baseline_by_path
-                .insert(path.clone(), content.to_string());
+            let content = self.tracked_content(content);
+            self.baseline_by_path.insert(path.clone(), content);
         }
         self.origin_by_current_path.remove(&path);
     }
@@ -184,8 +244,9 @@ impl TurnDiffTracker {
         if !self.current_by_path.contains_key(&source_path)
             && !self.baseline_by_path.contains_key(&source_path)
         {
+            let old_content = self.tracked_content(old_content);
             self.baseline_by_path
-                .insert(source_path.clone(), old_content.to_string());
+                .insert(source_path.clone(), old_content);
         }
 
         match move_path {
@@ -194,25 +255,35 @@ impl TurnDiffTracker {
                     && !self.baseline_by_path.contains_key(&dest_path)
                     && let Some(overwritten_move_content) = overwritten_move_content
                 {
+                    let overwritten_move_content = self.tracked_content(overwritten_move_content);
                     self.baseline_by_path
-                        .insert(dest_path.clone(), overwritten_move_content.to_string());
+                        .insert(dest_path.clone(), overwritten_move_content);
                 }
                 let origin = self
                     .origin_by_current_path
                     .remove(&source_path)
                     .unwrap_or_else(|| source_path.clone());
                 self.current_by_path.remove(&source_path);
-                self.current_by_path
-                    .insert(dest_path.clone(), new_content.to_string());
+                let new_content = self.tracked_content(new_content);
+                self.current_by_path.insert(dest_path.clone(), new_content);
                 self.origin_by_current_path.remove(&dest_path);
                 if dest_path != origin {
                     self.origin_by_current_path.insert(dest_path, origin);
                 }
             }
             None => {
-                self.current_by_path
-                    .insert(source_path, new_content.to_string());
+                let new_content = self.tracked_content(new_content);
+                self.current_by_path.insert(source_path, new_content);
             }
+        }
+    }
+
+    fn tracked_content(&mut self, content: &str) -> TrackedContent {
+        let revision = self.next_revision;
+        self.next_revision += 1;
+        TrackedContent {
+            content: content.to_string(),
+            revision,
         }
     }
 
@@ -234,28 +305,6 @@ impl TurnDiffTracker {
             .collect()
     }
 
-    fn render_path_diff(&self, path: &TrackedPath) -> Option<String> {
-        self.render_diff(
-            path,
-            self.baseline_by_path.get(path).map(String::as_str),
-            path,
-            self.current_by_path.get(path).map(String::as_str),
-        )
-    }
-
-    fn render_rename_diff(
-        &self,
-        source_path: &TrackedPath,
-        dest_path: &TrackedPath,
-    ) -> Option<String> {
-        self.render_diff(
-            source_path,
-            self.baseline_by_path.get(source_path).map(String::as_str),
-            dest_path,
-            self.current_by_path.get(dest_path).map(String::as_str),
-        )
-    }
-
     fn render_diff(
         &self,
         left_path: &TrackedPath,
@@ -267,8 +316,13 @@ impl TurnDiffTracker {
             return None;
         }
 
-        let left_display = self.display_path(left_path);
-        let right_display = self.display_path(right_path);
+        #[cfg(test)]
+        self.rendered_diff_count
+            .set(self.rendered_diff_count.get() + 1);
+
+        // Git diff paths always use `/`, even when the displayed target path is Windows-native.
+        let left_display = self.display_path(left_path).replace('\\', "/");
+        let right_display = self.display_path(right_path).replace('\\', "/");
         let left_oid = left_content.map_or_else(
             || ZERO_OID.to_string(),
             |content| git_blob_oid(content.as_bytes()),
@@ -299,23 +353,29 @@ impl TurnDiffTracker {
             DEV_NULL.to_string()
         };
 
-        let unified =
-            similar::TextDiff::from_lines(left_content.unwrap_or(""), right_content.unwrap_or(""))
-                .unified_diff()
-                .context_radius(3)
-                .header(&old_header, &new_header)
-                .to_string();
+        let mut config = similar::TextDiff::configure();
+        config.timeout(DIFF_TIMEOUT);
+        let unified = config
+            .diff_lines(left_content.unwrap_or(""), right_content.unwrap_or(""))
+            .unified_diff()
+            .context_radius(3)
+            .header(&old_header, &new_header)
+            .to_string();
         diff.push_str(&unified);
         Some(diff)
+    }
+
+    #[cfg(test)]
+    fn rendered_diff_count(&self) -> usize {
+        self.rendered_diff_count.get()
     }
 
     fn display_path(&self, path: &TrackedPath) -> String {
         let display = self
             .display_roots_by_environment
             .get(&path.environment_id)
-            .and_then(|root| path.path.strip_prefix(root).ok())
-            .unwrap_or(path.path.as_path());
-        let display = display.display().to_string().replace('\\', "/");
+            .and_then(|root| path.path.relative_path_from(root))
+            .unwrap_or_else(|| path.path.inferred_native_path_string());
         if self.display_roots_by_environment.len() > 1 && !path.environment_id.is_empty() {
             format!("{}/{display}", path.environment_id)
         } else {

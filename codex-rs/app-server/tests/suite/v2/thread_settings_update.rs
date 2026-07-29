@@ -1,21 +1,15 @@
 use anyhow::Context;
 use anyhow::Result;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
-use app_test_support::to_response;
-use app_test_support::write_mock_responses_config_toml;
 use app_test_support::write_models_cache;
-use chrono::Utc;
 use codex_app_server_protocol::JSONRPCError;
-use codex_app_server_protocol::JSONRPCNotification;
-use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
-use codex_app_server_protocol::ThreadResumeParams;
-use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSettingsUpdateParams;
 use codex_app_server_protocol::ThreadSettingsUpdateResponse;
 use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
@@ -25,20 +19,10 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::test_support::all_model_presets;
-use codex_protocol::ThreadId;
-use codex_protocol::config_types::CollaborationMode;
-use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
-use codex_protocol::config_types::Settings;
-use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::protocol::SessionSource;
-use codex_state::StateRuntime;
-use codex_state::ThreadMetadataBuilder;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -56,8 +40,10 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
     write_models_cache(codex_home.path())?;
     let (model_id, service_tier_id) = service_tier_model_and_tier_id()?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
     let thread = start_thread(&mut mcp).await?.thread;
 
     send_thread_settings_update(
@@ -107,87 +93,73 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
 }
 
 #[tokio::test]
-async fn updated_model_and_reasoning_survive_restart_and_explicit_clear() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let body = responses::sse(vec![
+        responses::ev_response_created("resp-1"),
+        responses::ev_assistant_message("msg-1", "done"),
+        responses::ev_completed("resp-1"),
+    ]);
+    let response_mock = responses::mount_sse_once(&server, body).await;
     let codex_home = TempDir::new()?;
+    let initial_workspace = TempDir::new()?;
+    let workspace = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
-    write_models_cache(codex_home.path())?;
-    let config_path = codex_home.path().join("config.toml");
-    let config_toml = std::fs::read_to_string(&config_path)?;
-    std::fs::write(
-        &config_path,
-        format!("{config_toml}\nmodel_reasoning_effort = \"high\"\n"),
-    )?;
 
-    let (thread_id, rollout_path) = {
-        let mut mcp = TestAppServer::new(codex_home.path()).await?;
-        timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-        let thread = start_thread(&mut mcp).await?.thread;
-        let rollout_path = thread.path.clone().context("thread rollout path")?;
-        send_thread_settings_update(
-            &mut mcp,
-            ThreadSettingsUpdateParams {
-                thread_id: thread.id.clone(),
-                model: Some("mock-model-2".to_string()),
-                effort: Some(ReasoningEffort::Ultra),
-                ..Default::default()
-            },
-        )
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
-        let updated = read_thread_settings_updated(&mut mcp).await?;
-        assert_eq!(updated.thread_settings.model, "mock-model-2");
-        assert_eq!(updated.thread_settings.effort, Some(ReasoningEffort::Ultra));
-        (thread.id, rollout_path)
-    };
-
-    {
-        let mut mcp = TestAppServer::new(codex_home.path()).await?;
-        timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-        overwrite_cached_resume_settings(
-            codex_home.path(),
-            &thread_id,
-            rollout_path.as_path(),
-            "mock-model",
-            Some(ReasoningEffort::Low),
-        )
+    let request_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            cwd: Some(initial_workspace.path().to_string_lossy().into_owned()),
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
         .await?;
-        let resumed = resume_thread(&mut mcp, &thread_id).await?;
-        assert_eq!(resumed.model, "mock-model-2");
-        assert_eq!(resumed.reasoning_effort, Some(ReasoningEffort::Ultra));
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
 
-        send_thread_settings_update(
-            &mut mcp,
-            ThreadSettingsUpdateParams {
-                thread_id: thread_id.clone(),
-                collaboration_mode: Some(CollaborationMode {
-                    mode: ModeKind::Default,
-                    settings: Settings {
-                        model: "mock-model-2".to_string(),
-                        reasoning_effort: None,
-                        developer_instructions: None,
-                    },
-                }),
-                ..Default::default()
-            },
-        )
-        .await?;
-        let updated = read_thread_settings_updated(&mut mcp).await?;
-        assert_eq!(updated.thread_settings.effort, None);
-    }
-
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-    overwrite_cached_resume_settings(
-        codex_home.path(),
-        &thread_id,
-        rollout_path.as_path(),
-        "mock-model",
-        Some(ReasoningEffort::High),
+    send_thread_settings_update(
+        &mut mcp,
+        ThreadSettingsUpdateParams {
+            thread_id: thread.id.clone(),
+            cwd: Some(workspace.path().to_path_buf()),
+            ..Default::default()
+        },
     )
     .await?;
-    let resumed = resume_thread(&mut mcp, &thread_id).await?;
-    assert_eq!(resumed.model, "mock-model-2");
-    assert_eq!(resumed.reasoning_effort, None);
+    let updated = read_thread_settings_updated(&mut mcp).await?;
+    assert_eq!(updated.thread_settings.cwd.as_path(), workspace.path());
+
+    start_text_turn(&mut mcp, thread.id).await?;
+    timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let environment_context = response_mock
+        .single_request()
+        .message_input_texts("user")
+        .into_iter()
+        .find(|text| text.starts_with("<environment_context>"))
+        .context("environment context should be model visible")?;
+    assert!(
+        environment_context.contains(&format!(
+            "<cwd>{}</cwd>",
+            workspace.path().to_string_lossy()
+        )),
+        "default environment should use the updated cwd: {environment_context}"
+    );
+    assert!(
+        environment_context.contains(&format!(
+            "<workspace_roots><root>{}</root></workspace_roots>",
+            workspace.path().to_string_lossy()
+        )),
+        "default workspace root should use the updated cwd: {environment_context}"
+    );
+
     Ok(())
 }
 
@@ -201,8 +173,10 @@ async fn thread_settings_update_while_turn_is_active_emits_notification() -> Res
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
     let thread = start_thread(&mut mcp).await?.thread;
     start_text_turn(&mut mcp, thread.id.clone()).await?;
     timeout(
@@ -244,8 +218,10 @@ async fn thread_settings_update_null_service_tier_uses_default() -> Result<()> {
     write_models_cache(codex_home.path())?;
     let (model_id, service_tier_id) = service_tier_model_and_tier_id()?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
     let thread = start_thread(&mut mcp).await?.thread;
 
     send_thread_settings_update(
@@ -310,8 +286,10 @@ async fn thread_settings_update_rejects_sandbox_policy_with_permissions() -> Res
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
     let thread = start_thread(&mut mcp).await?.thread;
 
     let request_id = mcp
@@ -344,8 +322,10 @@ async fn turn_start_settings_override_emits_thread_settings_updated() -> Result<
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
     let thread = start_thread(&mut mcp).await?.thread;
     timeout(
         DEFAULT_TIMEOUT,
@@ -365,12 +345,8 @@ async fn turn_start_settings_override_emits_thread_settings_updated() -> Result<
             ..Default::default()
         })
         .await?;
-    let turn_response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
-    )
-    .await??;
-    let TurnStartResponse { turn } = to_response(turn_response)?;
+    let TurnStartResponse { turn } =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(turn_request_id)).await??;
     assert!(!turn.id.is_empty());
 
     let updated = read_thread_settings_updated(&mut mcp).await?;
@@ -390,12 +366,8 @@ async fn send_thread_settings_update(
     params: ThreadSettingsUpdateParams,
 ) -> Result<()> {
     let request_id = mcp.send_thread_settings_update_request(params).await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let _: ThreadSettingsUpdateResponse = to_response(response)?;
+    let _: ThreadSettingsUpdateResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     Ok(())
 }
 
@@ -410,73 +382,20 @@ async fn start_text_turn(mcp: &mut TestAppServer, thread_id: String) -> Result<(
             ..Default::default()
         })
         .await?;
-    let turn_response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
-    )
-    .await??;
-    let TurnStartResponse { turn } = to_response(turn_response)?;
+    let TurnStartResponse { turn } =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(turn_request_id)).await??;
     assert!(!turn.id.is_empty());
     Ok(())
 }
 
 async fn start_thread(mcp: &mut TestAppServer) -> Result<ThreadStartResponse> {
     let request_id = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
         .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    to_response(response)
-}
-
-async fn resume_thread(mcp: &mut TestAppServer, thread_id: &str) -> Result<ThreadResumeResponse> {
-    let request_id = mcp
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: thread_id.to_string(),
-            ..Default::default()
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    to_response(response)
-}
-
-async fn overwrite_cached_resume_settings(
-    codex_home: &Path,
-    thread_id: &str,
-    rollout_path: &Path,
-    model: &str,
-    reasoning_effort: Option<ReasoningEffort>,
-) -> Result<()> {
-    let state = StateRuntime::init(codex_home.to_path_buf(), "mock_provider".to_string()).await?;
-    let thread_id = ThreadId::from_string(thread_id)?;
-    let mut metadata = match state.get_thread(thread_id).await? {
-        Some(metadata) => metadata,
-        None => {
-            let mut builder = ThreadMetadataBuilder::new(
-                thread_id,
-                rollout_path.to_path_buf(),
-                Utc::now(),
-                SessionSource::default(),
-            );
-            builder.model_provider = Some("mock_provider".to_string());
-            builder.cwd = codex_home.to_path_buf();
-            builder.build("mock_provider")
-        }
-    };
-    metadata.model = Some(model.to_string());
-    metadata.reasoning_effort = reasoning_effort;
-    state.upsert_thread(&metadata).await?;
-    Ok(())
+    timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await?
 }
 
 async fn read_thread_with_turns(
@@ -489,26 +408,17 @@ async fn read_thread_with_turns(
             include_turns: true,
         })
         .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    to_response(response)
+    timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await?
 }
 
 async fn read_thread_settings_updated(
     mcp: &mut TestAppServer,
 ) -> Result<ThreadSettingsUpdatedNotification> {
-    let notification: JSONRPCNotification = timeout(
+    timeout(
         DEFAULT_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/settings/updated"),
+        mcp.read_notification("thread/settings/updated"),
     )
-    .await??;
-    let params = notification
-        .params
-        .context("thread/settings/updated should include params")?;
-    Ok(serde_json::from_value(params)?)
+    .await?
 }
 
 async fn received_response_bodies(server: &wiremock::MockServer) -> Result<Vec<Value>> {
@@ -534,13 +444,8 @@ fn service_tier_model_and_tier_id() -> Result<(String, String)> {
 }
 
 fn create_config_toml(codex_home: &std::path::Path, server_uri: &str) -> std::io::Result<()> {
-    write_mock_responses_config_toml(
-        codex_home,
-        server_uri,
-        &BTreeMap::default(),
-        /*auto_compact_limit*/ 200_000,
-        /*requires_openai_auth*/ None,
-        "mock_provider",
-        "compact",
-    )
+    MockResponsesConfig::new(server_uri)
+        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 200000")
+        .with_provider_config("supports_websockets = false")
+        .write(codex_home)
 }

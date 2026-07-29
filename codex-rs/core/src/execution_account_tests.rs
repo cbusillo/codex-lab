@@ -4,6 +4,8 @@ use std::path::Path;
 
 use base64::Engine;
 use chrono::Duration;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
 use codex_login::auth::save_auth;
 use codex_login::token_data::IdTokenInfo;
 use codex_login::token_data::TokenData;
@@ -52,9 +54,20 @@ fn rate_limit_snapshot(resets_at: DateTime<Utc>, used_percent: f64) -> RateLimit
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     }
+}
+
+#[test]
+fn model_catalog_auth_identity_matches_equivalent_credentials() {
+    let first = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("same-key"));
+    let second = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("same-key"));
+    let different = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("different-key"));
+
+    assert!(auth_managers_share_model_catalog(&first, &second));
+    assert!(!auth_managers_share_model_catalog(&first, &different));
 }
 
 async fn test_accounts() -> (
@@ -92,6 +105,7 @@ async fn test_accounts() -> (
         codex_home.path(),
         &control_auth,
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("save control auth");
     let control_manager = Arc::new(
@@ -99,7 +113,12 @@ async fn test_accounts() -> (
             codex_home.path().to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
+                OutboundProxyPolicy::ReqwestDefault,
+            )),
         )
         .await,
     );
@@ -115,6 +134,11 @@ fn options(
         codex_home: codex_home.to_path_buf(),
         auth_home: codex_home.to_path_buf(),
         auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        keyring_backend_kind: AuthKeyringBackendKind::default(),
+        forced_chatgpt_workspace_id: None,
+        auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
+            OutboundProxyPolicy::ReqwestDefault,
+        )),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
         allow_api_key_fallback: false,
         pooling,
@@ -132,14 +156,14 @@ fn prefer_execution_account(
     crate::account_usage::record_rate_limit_snapshot(
         codex_home,
         &control.id,
-        rate_limit_snapshot(now + Duration::hours(4), 40.0),
+        rate_limit_snapshot(now + Duration::hours(4), /*used_percent*/ 40.0),
         now,
     )
     .expect("record control usage");
     crate::account_usage::record_rate_limit_snapshot(
         codex_home,
         &execution.id,
-        rate_limit_snapshot(now + Duration::hours(1), 40.0),
+        rate_limit_snapshot(now + Duration::hours(1), /*used_percent*/ 40.0),
         now,
     )
     .expect("record execution usage");
@@ -189,7 +213,7 @@ async fn lease_prefers_reset_soonest_and_stays_pinned_without_changing_control()
     crate::account_usage::record_rate_limit_snapshot(
         codex_home.path(),
         &control.id,
-        rate_limit_snapshot(now + Duration::minutes(10), 1.0),
+        rate_limit_snapshot(now + Duration::minutes(10), /*used_percent*/ 1.0),
         now,
     )
     .expect("update control usage");
@@ -523,6 +547,7 @@ async fn api_key_control_account_does_not_pool_chatgpt_accounts_for_any_start() 
         codex_home.path(),
         &control_auth,
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("save control api key auth");
     let control_manager = Arc::new(
@@ -530,7 +555,12 @@ async fn api_key_control_account_does_not_pool_chatgpt_accounts_for_any_start() 
             codex_home.path().to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
+                OutboundProxyPolicy::ReqwestDefault,
+            )),
         )
         .await,
     );
@@ -630,6 +660,33 @@ async fn execution_auth_revision_is_strictly_monotonic_across_replacements() {
     assert!(first_replacement_revision < second_replacement_revision);
 }
 
+#[tokio::test]
+async fn execution_account_snapshot_detects_auth_replacement() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let control_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-control"));
+    let lease = ExecutionAccountLease::resolve(
+        ThreadId::new(),
+        control_manager,
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Disabled,
+            ExecutionAccountStart::New,
+        ),
+    )
+    .await;
+    let initial_snapshot = lease.snapshot().await;
+
+    assert!(lease.snapshot_is_current(&initial_snapshot));
+    lease.replace_with_detached_auth_manager_for_testing(
+        "replacement".to_string(),
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-replacement")),
+    );
+    assert!(!lease.snapshot_is_current(&initial_snapshot));
+
+    let replacement_snapshot = lease.snapshot().await;
+    assert!(lease.snapshot_is_current(&replacement_snapshot));
+}
+
 #[test]
 fn persist_lease_atomically_replaces_existing_lease() {
     let codex_home = tempfile::tempdir().expect("tempdir");
@@ -714,6 +771,7 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
         codex_home.path(),
         &execution_auth,
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("save switched control auth");
     codex_login::set_active_account_id(
@@ -764,6 +822,7 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
         codex_home.path(),
         &control_auth,
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("restore control auth");
     codex_login::set_active_account_id(
@@ -780,6 +839,54 @@ async fn pooled_execution_lease_shares_then_detaches_from_control_account() {
     assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
     assert_eq!(lease.identity().stored_account_id, Some(control.id));
     assert_eq!(lease.prompt_cache_discriminator(), None);
+}
+
+#[tokio::test]
+async fn removed_detached_execution_account_rebinds_to_control_account() {
+    let (codex_home, control_manager, control, execution) = test_accounts().await;
+    let thread_id = ThreadId::default();
+    persist_lease(codex_home.path(), thread_id, &execution.id).expect("persist execution lease");
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&control_manager),
+        options(
+            codex_home.path(),
+            ExecutionAccountPooling::Enabled,
+            ExecutionAccountStart::Resumed,
+        ),
+    )
+    .await;
+    assert_eq!(
+        lease.identity().stored_account_id,
+        Some(execution.id.clone())
+    );
+    assert!(!Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(lease.prompt_cache_discriminator(), None);
+
+    codex_login::remove_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        &execution.id,
+    )
+    .expect("remove execution account")
+    .expect("stored execution account");
+    assert!(lease.rebind_after_account_removal(&execution.id).await);
+
+    assert!(Arc::ptr_eq(&lease.auth_manager(), &control_manager));
+    assert_eq!(lease.identity().stored_account_id, Some(control.id.clone()));
+    assert!(lease.prompt_cache_discriminator().is_some());
+    assert_eq!(
+        lease
+            .auth_manager()
+            .auth_cached()
+            .and_then(|auth| auth.get_account_id()),
+        Some("control".to_string())
+    );
+    assert_eq!(
+        read_persisted_lease(codex_home.path(), thread_id),
+        Some(control.id)
+    );
+    assert!(!lease.rebind_after_account_removal(&execution.id).await);
 }
 
 #[tokio::test]

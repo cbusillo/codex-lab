@@ -13,6 +13,7 @@ use super::MatcherGroup;
 fn hooks_file_deserializes_existing_json_shape() {
     let parsed: HooksFile = serde_json::from_str(
         r#"{
+  "description": "Optional stop-time review gate for Codex Companion.",
   "hooks": {
     "PreToolUse": [
       {
@@ -22,7 +23,8 @@ fn hooks_file_deserializes_existing_json_shape() {
             "type": "command",
             "command": "python3 /tmp/pre.py",
             "timeout": 10,
-            "statusMessage": "checking"
+            "statusMessage": "checking",
+            "additionalContextLimit": 4096
           }
         ]
       }
@@ -35,7 +37,7 @@ fn hooks_file_deserializes_existing_json_shape() {
     assert_eq!(
         parsed,
         HooksFile {
-            description: None,
+            description: Some("Optional stop-time review gate for Codex Companion.".to_string()),
             hooks: HookEventsToml {
                 pre_tool_use: vec![MatcherGroup {
                     matcher: Some("^Bash$".to_string()),
@@ -46,6 +48,7 @@ fn hooks_file_deserializes_existing_json_shape() {
                         timeout_sec: Some(10),
                         r#async: false,
                         status_message: Some("checking".to_string()),
+                        additional_context_limit: Some(4096),
                     }],
                 }],
                 ..Default::default()
@@ -55,48 +58,26 @@ fn hooks_file_deserializes_existing_json_shape() {
 }
 
 #[test]
-fn hooks_file_ignores_top_level_metadata() {
-    let parsed: HooksFile = serde_json::from_str(
+fn hooks_file_rejects_events_outside_hooks_object() {
+    let error = serde_json::from_str::<HooksFile>(
         r#"{
-  "$schema": "https://example.test/hooks.schema.json",
-  "version": 1,
-  "description": "project hooks",
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /tmp/pre.py"
-          }
-        ]
-      }
-    ]
-  }
+  "SessionStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 /tmp/session_start.py"
+        }
+      ]
+    }
+  ]
 }"#,
     )
-    .expect("hooks.json with metadata should deserialize");
+    .expect_err("root-level hook events should be rejected");
 
-    assert_eq!(
-        parsed,
-        HooksFile {
-            description: Some("project hooks".to_string()),
-            hooks: HookEventsToml {
-                pre_tool_use: vec![MatcherGroup {
-                    matcher: Some("^Bash$".to_string()),
-                    hooks: vec![HookHandlerConfig::Command {
-                        id: None,
-                        command: "python3 /tmp/pre.py".to_string(),
-                        command_windows: None,
-                        timeout_sec: None,
-                        r#async: false,
-                        status_message: None,
-                    }],
-                }],
-                ..Default::default()
-            },
-        }
+    assert!(
+        error.to_string().contains("unknown field `SessionStart`"),
+        "unexpected parse error: {error}"
     );
 }
 
@@ -112,6 +93,7 @@ type = "command"
 command = "python3 /tmp/pre.py"
 timeout = 10
 statusMessage = "checking"
+additionalContextLimit = 4096
 "#,
     )
     .expect("hook events TOML should deserialize");
@@ -128,6 +110,7 @@ statusMessage = "checking"
                     timeout_sec: Some(10),
                     r#async: false,
                     status_message: Some("checking".to_string()),
+                    additional_context_limit: Some(4096),
                 }],
             }],
             ..Default::default()
@@ -166,6 +149,7 @@ command = "python3 /tmp/pre.py"
                         timeout_sec: None,
                         r#async: false,
                         status_message: None,
+                        additional_context_limit: None,
                     }],
                 }],
                 ..Default::default()
@@ -212,6 +196,7 @@ command = "python3 /enterprise/place/pre.py"
                         timeout_sec: None,
                         r#async: false,
                         status_message: None,
+                        additional_context_limit: None,
                     }],
                 }],
                 ..Default::default()
@@ -249,6 +234,7 @@ command_windows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
                     timeout_sec: None,
                     r#async: false,
                     status_message: None,
+                    additional_context_limit: None,
                 }],
             }],
             ..Default::default()
@@ -285,9 +271,91 @@ commandWindows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
                     timeout_sec: None,
                     r#async: false,
                     status_message: None,
+                    additional_context_limit: None,
                 }],
             }],
             ..Default::default()
         }
     );
+}
+
+#[test]
+fn hook_handler_omits_unset_additional_context_limit() {
+    let handler = HookHandlerConfig::Command {
+        id: None,
+        command: "python3 /tmp/pre.py".to_string(),
+        command_windows: None,
+        timeout_sec: None,
+        r#async: false,
+        status_message: None,
+        additional_context_limit: None,
+    };
+
+    let serialized = serde_json::to_value(handler).expect("hook handler should serialize");
+
+    assert_eq!(serialized.get("additionalContextLimit"), None);
+}
+
+#[test]
+fn hooks_file_parses_handler_ids() {
+    let parsed: HooksFile = serde_json::from_str(
+        r#"{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "id": "greet", "command": "echo hi" }
+        ]
+      }
+    ]
+  }
+}"#,
+    )
+    .expect("hooks.json with handler ids should deserialize");
+
+    assert_eq!(
+        parsed,
+        HooksFile {
+            description: None,
+            hooks: HookEventsToml {
+                session_start: vec![MatcherGroup {
+                    matcher: None,
+                    hooks: vec![HookHandlerConfig::Command {
+                        id: Some("greet".to_string()),
+                        command: "echo hi".to_string(),
+                        command_windows: None,
+                        timeout_sec: None,
+                        r#async: false,
+                        status_message: None,
+                        additional_context_limit: None,
+                    }],
+                }],
+                ..Default::default()
+            },
+        }
+    );
+}
+
+#[test]
+fn hooks_file_tolerates_non_event_extension_keys() {
+    let parsed: HooksFile = serde_json::from_str(
+        r#"{
+  "$schema": "https://example.com/hooks.schema.json",
+  "editorMetadata": { "author": "codex" },
+  "hooks": {}
+}"#,
+    )
+    .expect("extension keys should not be rejected");
+
+    assert_eq!(parsed, HooksFile::default());
+}
+
+#[test]
+fn hooks_file_rejects_top_level_event_tables_including_casing_mistakes() {
+    for key in ["PreToolUse", "pretooluse", "sessionStart"] {
+        let json = format!(r#"{{ "{key}": [] }}"#);
+        let error = serde_json::from_str::<HooksFile>(&json)
+            .expect_err("top-level event tables should be rejected");
+        assert_eq!(error.to_string().contains(key), true);
+    }
 }

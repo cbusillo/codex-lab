@@ -2,9 +2,12 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 
+use crate::model::AgentMessageMetadata;
+use crate::model::ConversationBody;
 use crate::model::ConversationChannel;
 use crate::model::ConversationItemKind;
 use crate::model::ConversationPart;
+use crate::model::ConversationRole;
 use crate::model::ExecutionStatus;
 use crate::model::ProducerRef;
 use crate::model::ToolCallKind;
@@ -108,6 +111,90 @@ fn response_outputs_enter_thread_conversation_on_completion() -> anyhow::Result<
 }
 
 #[test]
+fn agent_messages_preserve_routing_and_content() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let writer = create_started_writer(&temp)?;
+    start_turn(&writer, "turn-1")?;
+
+    let request = writer.write_json_payload(
+        RawPayloadKind::InferenceRequest,
+        &json!({
+            "input": [
+                {
+                    "type": "agent_message",
+                    "author": "/root/worker",
+                    "recipient": "/root",
+                    "content": [{"type": "input_text", "text": "done"}]
+                },
+                {
+                    "type": "agent_message",
+                    "author": "/root",
+                    "recipient": "/root/worker",
+                    "content": [{
+                        "type": "encrypted_content",
+                        "encrypted_content": "encrypted-task"
+                    }]
+                }
+            ]
+        }),
+    )?;
+    append_inference_start(&writer, "inference-1", "turn-1", request)?;
+
+    let rollout = replay_bundle(temp.path())?;
+    let actual = rollout.inference_calls["inference-1"]
+        .request_item_ids
+        .iter()
+        .map(|item_id| {
+            let item = &rollout.conversation_items[item_id];
+            (
+                item.role.clone(),
+                item.channel.clone(),
+                item.kind.clone(),
+                item.agent_message.clone(),
+                item.body.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        actual,
+        vec![
+            (
+                ConversationRole::Assistant,
+                Some(ConversationChannel::Analysis),
+                ConversationItemKind::Message,
+                Some(AgentMessageMetadata {
+                    author: "/root/worker".to_string(),
+                    recipient: "/root".to_string(),
+                }),
+                ConversationBody {
+                    parts: vec![ConversationPart::Text {
+                        text: "done".to_string(),
+                    }],
+                },
+            ),
+            (
+                ConversationRole::Assistant,
+                Some(ConversationChannel::Analysis),
+                ConversationItemKind::Message,
+                Some(AgentMessageMetadata {
+                    author: "/root".to_string(),
+                    recipient: "/root/worker".to_string(),
+                }),
+                ConversationBody {
+                    parts: vec![ConversationPart::Encoded {
+                        label: "encrypted_content".to_string(),
+                        value: "encrypted-task".to_string(),
+                    }],
+                },
+            ),
+        ]
+    );
+
+    Ok(())
+}
+
+#[test]
 fn later_full_request_reuses_prior_json_tool_call_by_position() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let writer = create_started_writer(&temp)?;
@@ -189,6 +276,7 @@ fn incremental_request_carries_prior_request_and_response_items_forward() -> any
             "token_usage": {
                 "input_tokens": 10,
                 "cached_input_tokens": 1,
+                "cache_write_input_tokens": 3,
                 "output_tokens": 5,
                 "reasoning_output_tokens": 2,
                 "total_tokens": 15
@@ -242,6 +330,13 @@ fn incremental_request_carries_prior_request_and_response_items_forward() -> any
     assert_eq!(
         first.usage.as_ref().map(|usage| usage.input_tokens),
         Some(10),
+    );
+    assert_eq!(
+        first
+            .usage
+            .as_ref()
+            .map(|usage| usage.cache_write_input_tokens),
+        Some(3),
     );
 
     Ok(())
@@ -646,6 +741,48 @@ fn unsupported_model_item_is_reducer_error() -> anyhow::Result<()> {
         &temp,
         "unsupported model item type new_unhandled_model_item",
     )
+}
+
+#[test]
+fn additional_tools_are_excluded_from_request_conversation() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let writer = create_started_writer(&temp)?;
+    start_turn(&writer, "turn-1")?;
+
+    let request = writer.write_json_payload(
+        RawPayloadKind::InferenceRequest,
+        &json!({
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{
+                        "type": "function",
+                        "name": "lookup",
+                        "parameters": {"type": "object", "properties": {}}
+                    }]
+                },
+                message("user", "find it")
+            ]
+        }),
+    )?;
+    append_inference_start(&writer, "inference-1", "turn-1", request)?;
+
+    let rollout = replay_bundle(temp.path())?;
+    let request_item_ids = &rollout.inference_calls["inference-1"].request_item_ids;
+
+    assert_eq!(request_item_ids.len(), 1);
+    assert_eq!(rollout.conversation_items.len(), 1);
+    assert_eq!(
+        rollout.conversation_items[&request_item_ids[0]].body,
+        ConversationBody {
+            parts: vec![ConversationPart::Text {
+                text: "find it".to_string(),
+            }],
+        }
+    );
+
+    Ok(())
 }
 
 #[test]

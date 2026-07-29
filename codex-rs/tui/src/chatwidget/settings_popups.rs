@@ -1,7 +1,7 @@
 //! Settings-adjacent popup surfaces for `ChatWidget`.
 //!
-//! This keeps theme, personality, audio-device, and experimental-feature UI
-//! out of the main orchestration module without changing their event wiring.
+//! This keeps theme, personality, and experimental-feature UI out of the main
+//! orchestration module without changing their event wiring.
 
 use super::*;
 use crate::agent_install_helpers::AgentInstallStatus;
@@ -94,60 +94,35 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_settings_popup(&mut self) {
-        let mut items = Vec::new();
-        items.push(SelectionItem {
-            name: "Manage accounts".to_string(),
-            description: Some("Add, switch, or disconnect stored accounts.".to_string()),
-            actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::ShowLoginAccounts);
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        });
-        items.push(SelectionItem {
-            name: "Account switching".to_string(),
-            description: Some("Configure automatic account switching.".to_string()),
-            actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::OpenAccountSwitchSettings);
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        });
-        items.push(SelectionItem {
-            name: "Agents".to_string(),
-            description: Some("Check third-party agent CLIs used by spawn_agent.".to_string()),
-            actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::OpenAgentsSettings);
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        });
-
-        if self.realtime_audio_device_selection_enabled() {
-            items.extend(
-                [
-                    RealtimeAudioDeviceKind::Microphone,
-                    RealtimeAudioDeviceKind::Speaker,
-                ]
-                .into_iter()
-                .map(|kind| {
-                    let description = Some(format!(
-                        "Current: {}",
-                        self.current_realtime_audio_selection_label(kind)
-                    ));
-                    let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                        tx.send(AppEvent::OpenRealtimeAudioDeviceSelection { kind });
-                    })];
-                    SelectionItem {
-                        name: kind.title().to_string(),
-                        description,
-                        actions,
-                        dismiss_on_select: true,
-                        ..Default::default()
-                    }
-                }),
-            );
-        }
+        let items = vec![
+            SelectionItem {
+                name: "Manage accounts".to_string(),
+                description: Some("Add, switch, or disconnect stored accounts.".to_string()),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::ShowLoginAccounts);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Account switching".to_string(),
+                description: Some("Configure automatic account switching.".to_string()),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenAccountSwitchSettings);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Agents".to_string(),
+                description: Some("Check third-party agent CLIs used by spawn_agent.".to_string()),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenAgentsSettings);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Settings".to_string()),
@@ -170,128 +145,6 @@ impl ChatWidget {
     ) {
         self.bottom_pane
             .show_selection_view(agents_settings_params(statuses));
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub(crate) fn open_realtime_audio_device_selection(&mut self, kind: RealtimeAudioDeviceKind) {
-        match list_realtime_audio_device_names(kind) {
-            Ok(device_names) => {
-                self.open_realtime_audio_device_selection_with_names(kind, device_names);
-            }
-            Err(err) => {
-                self.add_error_message(format!(
-                    "Failed to load realtime {} devices: {err}",
-                    kind.noun()
-                ));
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn open_realtime_audio_device_selection(&mut self, kind: RealtimeAudioDeviceKind) {
-        let _ = kind;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub(super) fn open_realtime_audio_device_selection_with_names(
-        &mut self,
-        kind: RealtimeAudioDeviceKind,
-        device_names: Vec<String>,
-    ) {
-        let current_selection = self.current_realtime_audio_device_name(kind);
-        let current_available = current_selection
-            .as_deref()
-            .is_some_and(|name| device_names.iter().any(|device_name| device_name == name));
-        let mut items = vec![SelectionItem {
-            name: "System default".to_string(),
-            description: Some("Use your operating system default device.".to_string()),
-            is_current: current_selection.is_none(),
-            actions: vec![Box::new(move |tx| {
-                tx.send(AppEvent::PersistRealtimeAudioDeviceSelection { kind, name: None });
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        }];
-
-        if let Some(selection) = current_selection.as_deref()
-            && !current_available
-        {
-            items.push(SelectionItem {
-                name: format!("Unavailable: {selection}"),
-                description: Some("Configured device is not currently available.".to_string()),
-                is_current: true,
-                is_disabled: true,
-                disabled_reason: Some("Reconnect the device or choose another one.".to_string()),
-                ..Default::default()
-            });
-        }
-
-        items.extend(device_names.into_iter().map(|device_name| {
-            let persisted_name = device_name.clone();
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::PersistRealtimeAudioDeviceSelection {
-                    kind,
-                    name: Some(persisted_name.clone()),
-                });
-            })];
-            SelectionItem {
-                is_current: current_selection.as_deref() == Some(device_name.as_str()),
-                name: device_name,
-                actions,
-                dismiss_on_select: true,
-                ..Default::default()
-            }
-        }));
-
-        let mut header = ColumnRenderable::new();
-        header.push(Line::from(format!("Select {}", kind.title()).bold()));
-        header.push(Line::from(
-            "Saved devices apply to realtime voice only.".dim(),
-        ));
-
-        self.bottom_pane.show_selection_view(SelectionViewParams {
-            header: Box::new(header),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            ..Default::default()
-        });
-    }
-
-    pub(crate) fn open_realtime_audio_restart_prompt(&mut self, kind: RealtimeAudioDeviceKind) {
-        let restart_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-            tx.send(AppEvent::RestartRealtimeAudioDevice { kind });
-        })];
-        let items = vec![
-            SelectionItem {
-                name: "Restart now".to_string(),
-                description: Some(format!("Restart local {} audio now.", kind.noun())),
-                actions: restart_actions,
-                dismiss_on_select: true,
-                ..Default::default()
-            },
-            SelectionItem {
-                name: "Apply later".to_string(),
-                description: Some(format!(
-                    "Keep the current {} until local audio starts again.",
-                    kind.noun()
-                )),
-                dismiss_on_select: true,
-                ..Default::default()
-            },
-        ];
-
-        let mut header = ColumnRenderable::new();
-        header.push(Line::from(format!("Restart {} now?", kind.title()).bold()));
-        header.push(Line::from(
-            "Configuration is saved. Restart local audio to use it immediately.".dim(),
-        ));
-
-        self.bottom_pane.show_selection_view(SelectionViewParams {
-            header: Box::new(header),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            ..Default::default()
-        });
     }
 
     pub(crate) fn open_experimental_popup(&mut self) {
@@ -372,7 +225,7 @@ fn agent_status_selection_item(status: AgentInstallStatus) -> SelectionItem {
     };
 
     SelectionItem {
-        name: format!("{} ({})", status.name, marker),
+        name: format!("{} ({marker})", status.name),
         description: Some(description),
         selected_description,
         search_value: Some(format!(
@@ -381,54 +234,5 @@ fn agent_status_selection_item(status: AgentInstallStatus) -> SelectionItem {
         )),
         dismiss_on_select: true,
         ..Default::default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn status(name: &str, family: &str, command: &str, installed: bool) -> AgentInstallStatus {
-        AgentInstallStatus {
-            name: name.to_string(),
-            family: family.to_string(),
-            command: command.to_string(),
-            description: format!("{name} description"),
-            installed,
-            install_hint: format!("Install `{command}` and make sure it is on PATH."),
-        }
-    }
-
-    #[test]
-    fn agents_settings_params_marks_installed_and_missing_agents() {
-        let params = agents_settings_params(vec![
-            status("Claude Code", "claude", "claude", true),
-            status("Qwen Code", "qwen", "qwen", false),
-        ]);
-
-        assert_eq!(params.title.as_deref(), Some("Agents"));
-        assert_eq!(params.items.len(), 2);
-        assert_eq!(params.items[0].name, "Claude Code (installed)");
-        assert!(params.items[0].dismiss_on_select);
-        assert_eq!(
-            params.items[0].description.as_deref(),
-            Some("installed - `claude` is on PATH")
-        );
-        assert_eq!(
-            params.items[0].selected_description.as_deref(),
-            Some("Claude Code description Command: `claude` is available on PATH.")
-        );
-        assert_eq!(params.items[1].name, "Qwen Code (not installed)");
-        assert!(params.items[1].dismiss_on_select);
-        assert_eq!(
-            params.items[1].description.as_deref(),
-            Some("not installed - Install `qwen` and make sure it is on PATH.")
-        );
-        assert_eq!(
-            params.items[1].selected_description.as_deref(),
-            Some(
-                "Qwen Code description Command: `qwen`. Install `qwen` and make sure it is on PATH."
-            )
-        );
     }
 }

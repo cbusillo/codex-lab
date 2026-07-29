@@ -1,9 +1,11 @@
 use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::AccountListEntry;
-use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthKeyringBackendKind;
 use codex_login::StoredAccount;
+use codex_protocol::auth::AuthMode;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -26,7 +28,6 @@ use std::path::PathBuf;
 use textwrap::wrap;
 
 use crate::account_label::account_display_label;
-use crate::account_label::account_mode_priority;
 use crate::app_event::AppEvent;
 use crate::app_event::AuthAccountSelection;
 use crate::app_event::RemoveAuthAccountSelection;
@@ -44,6 +45,7 @@ use account_pool::AccountPoolBehavior;
 use account_pool::CURRENT_AUTH_ACCOUNT_ID;
 use account_pool::CURRENT_ONLY_POOL_NOTICE;
 use account_pool::account_matches_auth;
+use account_pool::auth_mode_to_api;
 use account_pool::current_auth_account_row;
 
 pub(crate) const LOGIN_ACCOUNTS_VIEW_ID: &str = "login-accounts";
@@ -55,6 +57,7 @@ pub(crate) struct LoginAccountsView {
     codex_home: PathBuf,
     default_auth_home_is_current: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: AuthKeyringBackendKind,
     pool_behavior: AccountPoolBehavior,
     accounts: Vec<AccountRow>,
     remote_loaded: bool,
@@ -71,7 +74,7 @@ struct AccountRow {
     id: String,
     label: String,
     detail: Option<String>,
-    mode: AuthMode,
+    mode: ApiAuthMode,
     is_active: bool,
     is_pooled: bool,
 }
@@ -94,12 +97,14 @@ impl LoginAccountsView {
         app_event_tx: AppEventSender,
         default_auth_home_is_current: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
+        auth_keyring_backend_kind: AuthKeyringBackendKind,
         feedback: Option<LoginAccountsFeedback>,
     ) -> Self {
         let mut loaded = load_account_rows(
             codex_home,
             default_auth_home_is_current,
             auth_credentials_store_mode,
+            auth_keyring_backend_kind,
             /*previously_selected_id*/ None,
         );
 
@@ -108,6 +113,7 @@ impl LoginAccountsView {
             codex_home: codex_home.to_path_buf(),
             default_auth_home_is_current,
             auth_credentials_store_mode,
+            auth_keyring_backend_kind,
             pool_behavior: AccountPoolBehavior::for_store_mode(auth_credentials_store_mode),
             accounts: loaded.accounts,
             remote_loaded: false,
@@ -140,6 +146,7 @@ impl LoginAccountsView {
             codex_home: PathBuf::new(),
             default_auth_home_is_current: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::default(),
+            auth_keyring_backend_kind: AuthKeyringBackendKind::default(),
             pool_behavior: AccountPoolBehavior::Pooled,
             accounts: rows,
             remote_loaded: true,
@@ -249,6 +256,7 @@ impl LoginAccountsView {
             &self.codex_home,
             self.default_auth_home_is_current,
             self.auth_credentials_store_mode,
+            self.auth_keyring_backend_kind,
             previously_selected_id,
         );
         self.accounts = loaded.accounts;
@@ -654,9 +662,13 @@ impl Renderable for LoginAddAccountView {
                 lines.push(render_selectable_line(
                     "ChatGPT sign-in",
                     self.selected == 0,
-                    false,
+                    /*active*/ false,
                 ));
-                lines.push(render_selectable_line("API key", self.selected == 1, false));
+                lines.push(render_selectable_line(
+                    "API key",
+                    self.selected == 1,
+                    /*active*/ false,
+                ));
                 lines.push(Line::from(""));
                 lines.push(add_account_hint_line("Start", "Back"));
             }
@@ -791,7 +803,11 @@ impl Renderable for LoginAddAccountView {
                     Style::default().fg(Color::Red),
                 )));
                 lines.push(Line::from(""));
-                lines.push(render_selectable_line("Try again", true, false));
+                lines.push(render_selectable_line(
+                    "Try again",
+                    /*selected*/ true,
+                    /*active*/ false,
+                ));
                 lines.push(Line::from(""));
                 lines.push(add_account_hint_line("Retry", "Back"));
             }
@@ -806,7 +822,11 @@ impl Renderable for LoginAddAccountView {
                     Style::default().fg(Color::Red),
                 )));
                 lines.push(Line::from(""));
-                lines.push(render_selectable_line("Try again", true, false));
+                lines.push(render_selectable_line(
+                    "Try again",
+                    /*selected*/ true,
+                    /*active*/ false,
+                ));
                 lines.push(Line::from(""));
                 lines.push(add_account_hint_line("Retry", "Back"));
             }
@@ -920,7 +940,7 @@ impl Renderable for LoginAccountsView {
         lines.push(render_selectable_line(
             self.pool_behavior.account_action_label(),
             add_selected,
-            false,
+            /*active*/ false,
         ));
         lines.push(Line::from(""));
         let mut hint_spans = vec![
@@ -982,7 +1002,7 @@ impl AccountRow {
             id,
             label,
             detail,
-            mode,
+            mode: auth_mode_to_api(mode),
             is_active,
             is_pooled: true,
         }
@@ -1006,7 +1026,7 @@ impl AccountRow {
         self.is_pooled
             && matches!(
                 self.mode,
-                AuthMode::ApiKey | AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens
+                ApiAuthMode::ApiKey | ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens
             )
     }
 
@@ -1113,6 +1133,8 @@ fn account_detail(account: &StoredAccount) -> Option<String> {
         }
         AuthMode::AgentIdentity => details.push("agent identity".to_string()),
         AuthMode::PersonalAccessToken => details.push("personal access token".to_string()),
+        AuthMode::Headers => details.push("request headers".to_string()),
+        AuthMode::BedrockApiKey => details.push("Bedrock API key".to_string()),
     }
     if let Some(created_at) = account.created_at {
         details.push(format!("connected {}", format_timestamp(created_at)));
@@ -1129,20 +1151,24 @@ fn account_list_entry_label(entry: &AccountListEntry) -> String {
     }
 
     match entry.auth_mode {
-        AuthMode::ApiKey => "API key".to_string(),
-        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT".to_string(),
-        AuthMode::AgentIdentity => "Agent identity".to_string(),
-        AuthMode::PersonalAccessToken => "Personal access token".to_string(),
+        ApiAuthMode::ApiKey => "API key".to_string(),
+        ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => "ChatGPT".to_string(),
+        ApiAuthMode::Headers => "Request headers".to_string(),
+        ApiAuthMode::AgentIdentity => "Agent identity".to_string(),
+        ApiAuthMode::PersonalAccessToken => "Personal access token".to_string(),
+        ApiAuthMode::BedrockApiKey => "Bedrock API key".to_string(),
     }
 }
 
 fn account_list_entry_detail(entry: &AccountListEntry) -> Option<String> {
     let mut details = Vec::new();
     let mode_detail = match entry.auth_mode {
-        AuthMode::ApiKey => "API key",
-        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT",
-        AuthMode::AgentIdentity => "agent identity",
-        AuthMode::PersonalAccessToken => "personal access token",
+        ApiAuthMode::ApiKey => "API key",
+        ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => "ChatGPT",
+        ApiAuthMode::Headers => "request headers",
+        ApiAuthMode::AgentIdentity => "agent identity",
+        ApiAuthMode::PersonalAccessToken => "personal access token",
+        ApiAuthMode::BedrockApiKey => "Bedrock API key",
     };
     if entry
         .label
@@ -1166,8 +1192,8 @@ fn format_epoch_timestamp(timestamp: i64) -> String {
 
 fn sort_account_rows(accounts: &mut [AccountRow]) {
     accounts.sort_by(|left, right| {
-        account_mode_priority(left.mode)
-            .cmp(&account_mode_priority(right.mode))
+        api_account_mode_priority(left.mode)
+            .cmp(&api_account_mode_priority(right.mode))
             .then_with(|| {
                 left.label
                     .to_ascii_lowercase()
@@ -1176,6 +1202,17 @@ fn sort_account_rows(accounts: &mut [AccountRow]) {
             .then_with(|| left.label.cmp(&right.label))
             .then_with(|| left.id.cmp(&right.id))
     });
+}
+
+fn api_account_mode_priority(mode: ApiAuthMode) -> u8 {
+    match mode {
+        ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens => 0,
+        ApiAuthMode::ApiKey => 1,
+        ApiAuthMode::AgentIdentity => 2,
+        ApiAuthMode::PersonalAccessToken => 3,
+        ApiAuthMode::Headers => 4,
+        ApiAuthMode::BedrockApiKey => 5,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1189,6 +1226,7 @@ fn load_account_rows(
     codex_home: &Path,
     default_auth_home_is_current: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: AuthKeyringBackendKind,
     previously_selected_id: Option<String>,
 ) -> LoadedLoginAccounts {
     let pool_behavior = AccountPoolBehavior::for_store_mode(auth_credentials_store_mode);
@@ -1196,9 +1234,14 @@ fn load_account_rows(
         codex_home,
         default_auth_home_is_current,
         auth_credentials_store_mode,
+        auth_keyring_backend_kind,
     );
     let current_auth = if default_auth_home_is_current && !pool_behavior.supports_pooling() {
-        match codex_login::load_auth_dot_json(codex_home, auth_credentials_store_mode) {
+        match codex_login::load_auth_dot_json(
+            codex_home,
+            auth_credentials_store_mode,
+            auth_keyring_backend_kind,
+        ) {
             Ok(auth) => auth,
             Err(err) => {
                 if error.is_none() {
@@ -1274,6 +1317,7 @@ fn sync_account_store_from_auth(
     codex_home: &Path,
     default_auth_home_is_current: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: AuthKeyringBackendKind,
 ) -> Option<String> {
     if !default_auth_home_is_current {
         return None;
@@ -1282,7 +1326,11 @@ fn sync_account_store_from_auth(
         return None;
     }
 
-    let auth = match codex_login::load_auth_dot_json(codex_home, auth_credentials_store_mode) {
+    let auth = match codex_login::load_auth_dot_json(
+        codex_home,
+        auth_credentials_store_mode,
+        auth_keyring_backend_kind,
+    ) {
         Ok(Some(auth)) => auth,
         Ok(None) => return None,
         Err(err) => return Some(format!("Failed to read current auth: {err}")),

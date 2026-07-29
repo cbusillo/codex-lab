@@ -2,9 +2,9 @@ load("//:defs.bzl", "codex_rust_crate")
 
 codex_rust_crate(
     name = "browser",
-    crate_name = "codex_browser",
     compile_data = [
         "src/js/virtual_cursor.js",
     ],
+    crate_name = "codex_browser",
     test_tags = ["no-sandbox"],
 )

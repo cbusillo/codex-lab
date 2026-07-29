@@ -45,6 +45,7 @@ mod windows;
 const SECRETS_VERSION: u8 = 1;
 const LOCAL_SECRETS_FILENAME: &str = "local.age";
 const CODEX_AUTH_SECRETS_FILENAME: &str = "codex_auth.age";
+const LOGIN_AGGREGATE_SECRETS_FILENAME: &str = "login_aggregate.age";
 const MCP_OAUTH_SECRETS_FILENAME: &str = "mcp_oauth.age";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -52,6 +53,7 @@ pub enum LocalSecretsNamespace {
     #[default]
     ManagedSecrets,
     CodexAuth,
+    LoginAggregate,
     McpOAuth,
 }
 
@@ -60,6 +62,7 @@ impl LocalSecretsNamespace {
         match self {
             Self::ManagedSecrets => LOCAL_SECRETS_FILENAME,
             Self::CodexAuth => CODEX_AUTH_SECRETS_FILENAME,
+            Self::LoginAggregate => LOGIN_AGGREGATE_SECRETS_FILENAME,
             Self::McpOAuth => MCP_OAUTH_SECRETS_FILENAME,
         }
     }
@@ -790,6 +793,11 @@ mod tests {
             keyring.clone(),
             LocalSecretsNamespace::CodexAuth,
         );
+        let login_aggregate_backend = LocalSecretsBackend::new_with_namespace(
+            codex_home.path().to_path_buf(),
+            keyring.clone(),
+            LocalSecretsNamespace::LoginAggregate,
+        );
         let mcp_oauth_backend = LocalSecretsBackend::new_with_namespace(
             codex_home.path().to_path_buf(),
             keyring.clone(),
@@ -800,6 +808,7 @@ mod tests {
 
         managed_backend.set(&scope, &name, "managed")?;
         codex_auth_backend.set(&scope, &name, "codex-auth")?;
+        login_aggregate_backend.set(&scope, &name, "login-aggregate")?;
         mcp_oauth_backend.set(&scope, &name, "mcp-oauth")?;
 
         assert_eq!(
@@ -811,12 +820,17 @@ mod tests {
             Some("codex-auth".to_string())
         );
         assert_eq!(
+            login_aggregate_backend.get(&scope, &name)?,
+            Some("login-aggregate".to_string())
+        );
+        assert_eq!(
             mcp_oauth_backend.get(&scope, &name)?,
             Some("mcp-oauth".to_string())
         );
         let secrets_dir = codex_home.path().join("secrets");
         assert!(secrets_dir.join(LOCAL_SECRETS_FILENAME).exists());
         assert!(secrets_dir.join(CODEX_AUTH_SECRETS_FILENAME).exists());
+        assert!(secrets_dir.join(LOGIN_AGGREGATE_SECRETS_FILENAME).exists());
         assert!(secrets_dir.join(MCP_OAUTH_SECRETS_FILENAME).exists());
 
         let managed_account = compute_keyring_account_for_namespace(
@@ -827,15 +841,23 @@ mod tests {
             codex_home.path(),
             LocalSecretsNamespace::CodexAuth,
         );
+        let login_aggregate_account = compute_keyring_account_for_namespace(
+            codex_home.path(),
+            LocalSecretsNamespace::LoginAggregate,
+        );
         let mcp_oauth_account = compute_keyring_account_for_namespace(
             codex_home.path(),
             LocalSecretsNamespace::McpOAuth,
         );
         assert_ne!(managed_account, codex_auth_account);
+        assert_ne!(managed_account, login_aggregate_account);
         assert_ne!(managed_account, mcp_oauth_account);
+        assert_ne!(codex_auth_account, login_aggregate_account);
         assert_ne!(codex_auth_account, mcp_oauth_account);
+        assert_ne!(login_aggregate_account, mcp_oauth_account);
         assert!(keyring.saved_value(&managed_account).is_some());
         assert!(keyring.saved_value(&codex_auth_account).is_some());
+        assert!(keyring.saved_value(&login_aggregate_account).is_some());
         assert!(keyring.saved_value(&mcp_oauth_account).is_some());
         Ok(())
     }

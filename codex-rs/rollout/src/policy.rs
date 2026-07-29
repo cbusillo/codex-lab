@@ -1,5 +1,6 @@
 use crate::protocol::EventMsg;
 use crate::protocol::RolloutItem;
+use codex_extension_items::ExtensionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -8,11 +9,14 @@ use codex_protocol::protocol::ThreadHistoryMode;
 pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistoryMode) -> bool {
     match item {
         RolloutItem::ResponseItem(item) => should_persist_response_item(item),
+        RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
         RolloutItem::EventMsg(ev) => should_persist_event_msg(ev, history_mode),
         // Persist Codex executive markers so we can analyze flows (e.g., compaction, API turns).
-        RolloutItem::Compacted(_) | RolloutItem::TurnContext(_) | RolloutItem::SessionMeta(_) => {
-            true
-        }
+        RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::WorldState(_)
+        | RolloutItem::SessionMeta(_) => true,
     }
 }
 
@@ -48,8 +52,9 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::ContextCompaction { .. } => true,
-        ResponseItem::CompactionTrigger { .. } => false,
-        ResponseItem::Other => false,
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::Other => false,
     }
 }
 
@@ -58,7 +63,8 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
 pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
     match item {
         ResponseItem::Message { role, .. } => role != "developer",
-        ResponseItem::LocalShellCall { .. }
+        ResponseItem::AgentMessage { .. }
+        | ResponseItem::LocalShellCall { .. }
         | ResponseItem::FunctionCall { .. }
         | ResponseItem::ToolSearchCall { .. }
         | ResponseItem::FunctionCallOutput { .. }
@@ -66,7 +72,7 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
         | ResponseItem::CustomToolCall { .. }
         | ResponseItem::CustomToolCallOutput { .. }
         | ResponseItem::WebSearchCall { .. } => true,
-        ResponseItem::AgentMessage { .. }
+        ResponseItem::AdditionalTools { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Compaction { .. }
@@ -81,31 +87,39 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
 pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) -> bool {
     match ev {
         EventMsg::ItemCompleted(event) => {
+            // Paginated rollouts store TurnItems.
+            // Legacy rollouts keep only items with no raw ResponseItem or legacy equivalent.
             matches!(history_mode, ThreadHistoryMode::Paginated)
-                || matches!(&event.item, TurnItem::Plan(_))
+                || matches!(
+                    event.item,
+                    TurnItem::Plan(_) | TurnItem::Extension(ExtensionItem::Sleep(_))
+                )
         }
         EventMsg::TokenCount(_)
         | EventMsg::ThreadGoalUpdated(_)
-        | EventMsg::ThreadSettingsApplied(_)
         | EventMsg::ThreadRolledBack(_)
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::TurnComplete(_)
-        | EventMsg::ProjectValidationCompleted(_) => true,
-        // This fork keeps manual review lifecycle events distinct from background review state and
-        // has no canonical review TurnItem variants, so both history modes retain these events.
-        EventMsg::EnteredReviewMode(_) | EventMsg::ExitedReviewMode(_) => true,
-        // Paginated rollouts retain the canonical completed TurnItem instead of its legacy
-        // projection. Legacy rollouts preserve the existing event set unchanged.
+        | EventMsg::ProjectValidationCompleted(_)
+        | EventMsg::ThreadSettingsApplied(_) => true,
+
+        // Only persist these legacy events when the thread's history mode is Legacy.
+        // New, paginated rollouts persist ItemCompleted events with TurnItems.
         EventMsg::UserMessage(_)
         | EventMsg::AgentMessage(_)
         | EventMsg::AgentReasoning(_)
         | EventMsg::AgentReasoningRawContent(_)
+        | EventMsg::EnteredReviewMode(_)
+        | EventMsg::ExitedReviewMode(_)
         | EventMsg::PatchApplyEnd(_)
         | EventMsg::ContextCompacted(_)
         | EventMsg::McpToolCallEnd(_)
         | EventMsg::WebSearchEnd(_)
-        | EventMsg::ImageGenerationEnd(_) => matches!(history_mode, ThreadHistoryMode::Legacy),
+        | EventMsg::ImageGenerationEnd(_)
+        | EventMsg::SubAgentActivity(_) => matches!(history_mode, ThreadHistoryMode::Legacy),
+
+        // Transient, non-durable events.
         EventMsg::Error(_)
         | EventMsg::GuardianAssessment(_)
         | EventMsg::ExecCommandEnd(_)
@@ -123,12 +137,16 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::RealtimeConversationSdp(_)
         | EventMsg::RealtimeConversationRealtime(_)
         | EventMsg::RealtimeConversationClosed(_)
+        | EventMsg::SafetyBuffering(_)
         | EventMsg::ModelReroute(_)
         | EventMsg::ModelVerification(_)
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::AgentReasoningSectionBreak(_)
         | EventMsg::RawResponseItem(_)
+        | EventMsg::RawResponseCompleted(_)
         | EventMsg::SessionConfigured(_)
+        | EventMsg::EnvironmentConnected(_)
+        | EventMsg::EnvironmentDisconnected(_)
         | EventMsg::McpToolCallBegin(_)
         | EventMsg::ExecCommandBegin(_)
         | EventMsg::TerminalInteraction(_)
@@ -167,5 +185,31 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
 }
 
 #[cfg(test)]
-#[path = "policy_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use codex_protocol::protocol::ProjectValidationCompletedEvent;
+    use codex_protocol::protocol::ProjectValidationSkipReason;
+    use codex_protocol::protocol::ProjectValidationStatus;
+
+    #[test]
+    fn project_validation_dispositions_are_persisted_in_all_history_modes() {
+        let event = EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
+            turn_id: "turn-1".to_string(),
+            item_id: None,
+            command: Vec::new(),
+            command_truncated: false,
+            cwd: None,
+            status: ProjectValidationStatus::Skipped,
+            skip_reason: Some(ProjectValidationSkipReason::NoApplicableProvider),
+            changed_file_count: Some(1),
+            exit_code: None,
+            output: "automatic validation skipped".to_string(),
+            output_truncated: false,
+            duration_ms: 0,
+        });
+
+        for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+            assert!(should_persist_event_msg(&event, history_mode));
+        }
+    }
+}

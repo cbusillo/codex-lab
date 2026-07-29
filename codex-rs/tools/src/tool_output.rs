@@ -18,6 +18,12 @@ pub trait ToolOutput: Send {
 
     fn success_for_logging(&self) -> bool;
 
+    /// Whether this output contains external context that should disable memory generation when
+    /// `memories.disable_on_external_context` is enabled.
+    fn contains_external_context(&self) -> bool {
+        false
+    }
+
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem;
 
     /// Returns the tool call id exposed to `PostToolUse` hooks for this output.
@@ -58,6 +64,10 @@ where
         (**self).success_for_logging()
     }
 
+    fn contains_external_context(&self) -> bool {
+        (**self).contains_external_context()
+    }
+
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         (**self).to_response_item(call_id, payload)
     }
@@ -83,6 +93,7 @@ where
 pub struct JsonToolOutput {
     value: JsonValue,
     success: Option<bool>,
+    contains_external_context: bool,
 }
 
 impl JsonToolOutput {
@@ -90,11 +101,21 @@ impl JsonToolOutput {
         Self {
             value,
             success: Some(true),
+            contains_external_context: false,
         }
     }
 
     pub fn with_success(value: JsonValue, success: Option<bool>) -> Self {
-        Self { value, success }
+        Self {
+            value,
+            success,
+            contains_external_context: false,
+        }
+    }
+
+    pub fn with_external_context(mut self) -> Self {
+        self.contains_external_context = true;
+        self
     }
 }
 
@@ -105,6 +126,10 @@ impl ToolOutput for JsonToolOutput {
 
     fn success_for_logging(&self) -> bool {
         self.success.unwrap_or(true)
+    }
+
+    fn contains_external_context(&self) -> bool {
+        self.contains_external_context
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
@@ -177,6 +202,9 @@ fn response_input_to_code_mode_result(response: ResponseInputItem) -> JsonValue 
                             detail: detail.or(Some(DEFAULT_IMAGE_DETAIL)),
                         }
                     }
+                    codex_protocol::models::ContentItem::InputAudio { audio_url } => {
+                        FunctionCallOutputContentItem::InputAudio { audio_url }
+                    }
                 })
                 .collect::<Vec<_>>(),
         ),
@@ -208,8 +236,14 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
                 {
                     Some(image_url.clone())
                 }
+                FunctionCallOutputContentItem::InputAudio { audio_url }
+                    if !audio_url.trim().is_empty() =>
+                {
+                    Some(audio_url.clone())
+                }
                 FunctionCallOutputContentItem::InputText { .. }
                 | FunctionCallOutputContentItem::InputImage { .. }
+                | FunctionCallOutputContentItem::InputAudio { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
             })
             .collect::<Vec<_>>()

@@ -19,6 +19,7 @@ use crossterm::cursor::SetCursorStyle;
 use crossterm::event::DisableBracketedPaste;
 use crossterm::event::DisableFocusChange;
 use crossterm::event::EnableBracketedPaste;
+#[cfg(not(windows))]
 use crossterm::event::EnableFocusChange;
 use crossterm::event::KeyEvent;
 use crossterm::terminal::EnterAlternateScreen;
@@ -60,6 +61,10 @@ mod frame_requester;
 mod job_control;
 mod keyboard_modes;
 mod terminal_stderr;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(any(windows, test))]
+mod windows_console;
 
 /// Target frame interval for UI redraw scheduling.
 pub(crate) const TARGET_FRAME_INTERVAL: Duration = frame_rate_limiter::MIN_FRAME_INTERVAL;
@@ -103,6 +108,7 @@ mod tests {
     use codex_config::types::NotificationCondition;
     use ratatui::layout::Position;
     use ratatui::layout::Rect;
+    use ratatui::text::Line;
 
     #[test]
     fn unfocused_notification_condition_is_suppressed_when_focused() {
@@ -118,6 +124,26 @@ mod tests {
             NotificationCondition::Always,
             /*terminal_focused*/ true
         ));
+    }
+
+    #[test]
+    fn windows_console_input_modes_preserve_original_vt_input_state() {
+        let input_record_mode = super::windows_console::input_record_mode(/*mode*/ 0x398);
+        assert_eq!(input_record_mode, 0x198);
+        assert_eq!(
+            super::windows_console::restored_input_mode(
+                input_record_mode,
+                super::windows_console::VirtualTerminalInput::Enabled,
+            ),
+            0x398
+        );
+        assert_eq!(
+            super::windows_console::restored_input_mode(
+                /*mode*/ 0x198,
+                super::windows_console::VirtualTerminalInput::Disabled,
+            ),
+            0x198
+        );
     }
 
     #[test]
@@ -168,6 +194,20 @@ mod tests {
             "expected stale cells inside the new viewport to be cleared, rows: {rows:?}"
         );
     }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn inserting_history_lines_schedules_a_draw() {
+        let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
+        let mut draw_rx = tui.draw_tx.subscribe();
+
+        tui.insert_history_lines(vec![Line::from("committed stream line")]);
+        tokio::time::advance(std::time::Duration::from_millis(20)).await;
+
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), draw_rx.recv()).await,
+            Ok(Ok(()))
+        ));
+    }
 }
 
 pub fn set_modes() -> Result<()> {
@@ -176,6 +216,8 @@ pub fn set_modes() -> Result<()> {
     execute!(stdout(), EnableBracketedPaste)?;
 
     enable_raw_mode()?;
+    #[cfg(windows)]
+    windows_console::set_input_record_mode()?;
     // Enable keyboard enhancement flags so modifiers for keys like Enter are disambiguated.
     // chat_composer.rs is using a keyboard event listener to enter for any modified keys
     // to create a new line that require this.
@@ -184,7 +226,10 @@ pub fn set_modes() -> Result<()> {
     // gracefully if unsupported.
     keyboard_modes::enable_keyboard_enhancement();
 
+    #[cfg(not(windows))]
     let _ = execute!(stdout(), EnableFocusChange);
+    #[cfg(windows)]
+    let _ = execute!(stdout(), DisableFocusChange);
     Ok(())
 }
 
@@ -262,6 +307,10 @@ fn restore_common(
     {
         first_error.get_or_insert(err);
     }
+    #[cfg(windows)]
+    if let Err(err) = windows_console::restore_input_mode() {
+        first_error.get_or_insert(err);
+    }
     if let Err(err) = execute!(
         stdout(),
         SetCursorStyle::DefaultUserShape,
@@ -277,13 +326,26 @@ fn restore_common(
 
 /// Restore the terminal to its original state.
 /// Inverse of `set_modes`.
+#[cfg(unix)]
 pub fn restore() -> Result<()> {
     restore_common(RawModeRestore::Disable, KeyboardRestore::PopStack)
 }
 
+/// Force crossterm's cached raw-mode state back in sync with the terminal after `fg`.
+///
+/// A shell may restore the job's saved termios after the process receives `SIGCONT`. When that
+/// races with [`set_modes`], crossterm still believes raw mode is enabled even though the terminal
+/// has returned to canonical, echoing mode. Clearing crossterm's saved state before enabling raw
+/// mode again makes the kernel state authoritative once the shell has completed its handoff.
+#[cfg(unix)]
+pub(super) fn reapply_raw_mode_after_resume() -> Result<()> {
+    disable_raw_mode()?;
+    enable_raw_mode()
+}
+
 /// Restore the terminal after Codex is exiting.
 ///
-/// Uses a stronger keyboard reset than [`restore`] so the parent shell recovers even if a
+/// Uses a stronger keyboard reset than `restore` so the parent shell recovers even if a
 /// terminal missed the stack pop that normally pairs with [`set_modes`].
 pub fn restore_after_exit() -> Result<()> {
     let mut first_error =
@@ -301,22 +363,6 @@ pub fn restore_after_exit() -> Result<()> {
 /// Restore the terminal to its original state, but keep raw mode enabled.
 pub fn restore_keep_raw() -> Result<()> {
     restore_common(RawModeRestore::Keep, KeyboardRestore::PopStack)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RestoreMode {
-    #[allow(dead_code)]
-    Full, // Fully restore the terminal (disables raw mode).
-    KeepRaw, // Restore the terminal but keep raw mode enabled.
-}
-
-impl RestoreMode {
-    fn restore(self) -> Result<()> {
-        match self {
-            RestoreMode::Full => restore(),
-            RestoreMode::KeepRaw => restore_keep_raw(),
-        }
-    }
 }
 
 /// Flush the underlying stdin buffer to clear any input that may be buffered at the terminal level.
@@ -629,9 +675,9 @@ impl Tui {
     /// Temporarily restore terminal state to run an external interactive program `f`.
     ///
     /// This pauses crossterm's stdin polling by dropping the underlying event stream, restores
-    /// terminal modes and stderr (optionally keeping raw mode enabled), then re-applies Codex TUI
-    /// modes and stderr suppression before resuming events.
-    pub async fn with_restored<R, F, Fut>(&mut self, mode: RestoreMode, f: F) -> R
+    /// terminal modes and stderr while keeping raw mode enabled, then re-applies Codex TUI modes
+    /// and stderr suppression before resuming events.
+    pub async fn with_restored<R, F, Fut>(&mut self, f: F) -> R
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = R>,
@@ -645,7 +691,7 @@ impl Tui {
             let _ = self.leave_alt_screen();
         }
 
-        if let Err(err) = mode.restore() {
+        if let Err(err) = restore_keep_raw() {
             tracing::warn!("failed to restore terminal modes before external program: {err}");
         }
         if let Err(err) = terminal_stderr::pause() {
@@ -854,7 +900,7 @@ impl Tui {
             };
             crate::insert_history::insert_history_hyperlink_lines_with_mode_and_wrap_policy(
                 terminal,
-                batch.lines.clone(),
+                &batch.lines,
                 mode,
                 batch.wrap_policy,
             )?;
@@ -873,7 +919,7 @@ impl Tui {
         #[cfg(unix)]
         let mut prepared_resume = self
             .suspend_context
-            .prepare_resume_action(&mut self.terminal, &mut self.alt_saved_viewport);
+            .prepare_resume_action(&mut self.alt_saved_viewport);
 
         // Precompute any viewport updates that need a cursor-position query before entering
         // the synchronized update, to avoid racing with the event reader.
@@ -1009,7 +1055,7 @@ impl Tui {
         #[cfg(unix)]
         let mut prepared_resume = self
             .suspend_context
-            .prepare_resume_action(&mut self.terminal, &mut self.alt_saved_viewport);
+            .prepare_resume_action(&mut self.alt_saved_viewport);
 
         ensure_virtual_terminal_processing()?;
 

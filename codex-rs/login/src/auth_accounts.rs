@@ -1,10 +1,11 @@
 use crate::token_data::TokenData;
 use chrono::DateTime;
 use chrono::Utc;
-use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthKeyringBackendKind;
 use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
+use codex_protocol::auth::AuthMode;
 use fs2::FileExt;
 use rand::RngCore;
 use serde::Deserialize;
@@ -23,6 +24,8 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use crate::auth::AuthDotJson;
+use crate::auth::compare_and_swap_auth;
+use crate::auth::encrypted_aggregate::is_encrypted_aggregate_enabled;
 use crate::auth::encrypted_aggregate::with_invalidated_encrypted_aggregate;
 use crate::auth::save_auth;
 
@@ -216,6 +219,9 @@ fn write_accounts_file_with_keyring_store(
     keyring_store: Arc<dyn KeyringStore>,
 ) -> io::Result<()> {
     let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
+    if !is_encrypted_aggregate_enabled(auth_credentials_store_mode) {
+        return write_accounts_file_legacy(&path, data);
+    }
     with_invalidated_encrypted_aggregate(
         codex_home,
         auth_credentials_store_mode,
@@ -231,11 +237,12 @@ pub(crate) fn write_accounts_file_with_keyring_store_for_tests(
     data: &AccountsFile,
     keyring_store: Arc<dyn KeyringStore>,
 ) -> io::Result<()> {
-    write_accounts_file_with_keyring_store(
+    let path = accounts_file_path_for_mode(codex_home, auth_credentials_store_mode);
+    with_invalidated_encrypted_aggregate(
         codex_home,
         auth_credentials_store_mode,
-        data,
         keyring_store,
+        || write_accounts_file_legacy(&path, data),
     )
 }
 
@@ -288,13 +295,13 @@ fn create_accounts_tmp_file(path: &Path) -> io::Result<(PathBuf, fs::File)> {
             Err(err) => return Err(err),
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!(
-            "failed to allocate temporary accounts path for {}",
-            path.display()
-        ),
-    ))
+    // Exhausting every candidate temp name is a failure of this helper, not the
+    // `AlreadyExists` outcome of a single create attempt, so report it as a
+    // generic error that callers surface unchanged.
+    Err(io::Error::other(format!(
+        "failed to allocate temporary accounts path for {}",
+        path.display()
+    )))
 }
 
 fn replace_accounts_file(src: &Path, dst: &Path) -> io::Result<()> {
@@ -443,7 +450,10 @@ fn upsert_account(
                     .position(|acc| match_chatgpt_account(acc, tokens))
             })
         }
-        AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => None,
+        AuthMode::AgentIdentity
+        | AuthMode::PersonalAccessToken
+        | AuthMode::Headers
+        | AuthMode::BedrockApiKey => None,
     };
 
     if let Some(idx) = existing_idx {
@@ -478,7 +488,7 @@ fn upsert_account(
 fn select_fallback_active_account(data: &mut AccountsFile) {
     if let Some(account) = data.accounts.first_mut() {
         data.active_account_id = Some(account.id.clone());
-        touch_account(account, true);
+        touch_account(account, /*used*/ true);
     } else {
         data.active_account_id = None;
     }
@@ -572,6 +582,7 @@ fn auth_from_stored_account(account: &StoredAccount) -> io::Result<AuthDotJson> 
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         }),
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
             Ok(AuthDotJson {
@@ -583,13 +594,14 @@ fn auth_from_stored_account(account: &StoredAccount) -> io::Result<AuthDotJson> 
                 last_refresh: account.last_refresh,
                 agent_identity: None,
                 personal_access_token: None,
+                bedrock_api_key: None,
             })
         }
-        AuthMode::AgentIdentity => Err(io::Error::other(
-            "stored agent identity account activation is not supported",
-        )),
-        AuthMode::PersonalAccessToken => Err(io::Error::other(
-            "stored personal access token account activation is not supported",
+        AuthMode::AgentIdentity
+        | AuthMode::PersonalAccessToken
+        | AuthMode::Headers
+        | AuthMode::BedrockApiKey => Err(io::Error::other(
+            "stored account activation is not supported for this authentication mode",
         )),
     }
 }
@@ -611,7 +623,10 @@ fn update_stored_account_from_auth(
             account.tokens = auth.tokens.clone();
             account.last_refresh = auth.last_refresh;
         }
-        AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => {
+        AuthMode::AgentIdentity
+        | AuthMode::PersonalAccessToken
+        | AuthMode::Headers
+        | AuthMode::BedrockApiKey => {
             return Err(io::Error::other(
                 "catalog account storage does not support this authentication mode",
             ));
@@ -641,6 +656,7 @@ pub(crate) fn update_catalog_account_from_auth(
 pub(crate) fn compare_and_swap_catalog_account_auth(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
     catalog_id: &str,
     expected: &AuthDotJson,
     replacement: &AuthDotJson,
@@ -656,21 +672,26 @@ pub(crate) fn compare_and_swap_catalog_account_auth(
         return Ok(false);
     }
     let sync_active_auth = data.active_account_id.as_deref() == Some(catalog_id);
-    let previous_active_auth = if sync_active_auth {
-        crate::load_auth_dot_json(codex_home, auth_credentials_store_mode)?
-    } else {
-        None
-    };
-    if sync_active_auth {
-        save_auth(codex_home, replacement, auth_credentials_store_mode)?;
+    if sync_active_auth
+        && !compare_and_swap_auth(
+            codex_home,
+            expected,
+            replacement,
+            auth_credentials_store_mode,
+            keyring_backend_kind,
+        )?
+    {
+        return Ok(false);
     }
     update_stored_account_from_auth(&mut data.accounts[account_index], replacement)?;
     if let Err(err) = write_accounts_file(codex_home, auth_credentials_store_mode, &data) {
         if sync_active_auth
-            && let Err(rollback_err) = restore_previous_auth(
+            && let Err(rollback_err) = compare_and_swap_auth(
                 codex_home,
-                previous_active_auth,
+                replacement,
+                expected,
                 auth_credentials_store_mode,
+                keyring_backend_kind,
             )
         {
             tracing::warn!("failed to roll back active auth refresh: {rollback_err}");
@@ -711,7 +732,7 @@ pub fn set_active_account_id(
         && let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == id)
     {
         data.active_account_id = Some(id);
-        touch_account(account, true);
+        touch_account(account, /*used*/ true);
         updated = Some(account.clone());
     } else {
         data.active_account_id = None;
@@ -726,19 +747,36 @@ pub fn activate_account(
     codex_home: &Path,
     account_id: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<StoredAccount> {
-    commit_stored_active_account(codex_home, account_id, auth_credentials_store_mode)
+    commit_stored_active_account(
+        codex_home,
+        account_id,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+    )
 }
 
 fn restore_previous_auth(
     codex_home: &Path,
     previous_auth: Option<AuthDotJson>,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<()> {
     if let Some(previous_auth) = previous_auth {
-        save_auth(codex_home, &previous_auth, auth_credentials_store_mode)
+        save_auth(
+            codex_home,
+            &previous_auth,
+            auth_credentials_store_mode,
+            keyring_backend_kind,
+        )
     } else {
-        crate::delete_auth(codex_home, auth_credentials_store_mode).map(|_| ())
+        crate::delete_auth(
+            codex_home,
+            auth_credentials_store_mode,
+            keyring_backend_kind,
+        )
+        .map(|_| ())
     }
 }
 
@@ -753,17 +791,28 @@ pub fn commit_active_account(
     account_id: &str,
     _auth: &AuthDotJson,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<StoredAccount> {
-    commit_stored_active_account(codex_home, account_id, auth_credentials_store_mode)
+    commit_stored_active_account(
+        codex_home,
+        account_id,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+    )
 }
 
 fn commit_stored_active_account(
     codex_home: &Path,
     account_id: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<StoredAccount> {
     let _catalog_guard = acquire_catalog_write_guard(codex_home)?;
-    let previous_auth = crate::load_auth_dot_json(codex_home, auth_credentials_store_mode)?;
+    let previous_auth = crate::load_auth_dot_json(
+        codex_home,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+    )?;
     let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
     let account_index = data
         .accounts
@@ -772,14 +821,22 @@ fn commit_stored_active_account(
         .ok_or_else(|| io::Error::other(format!("account with id {account_id} was not found")))?;
     let auth = auth_from_stored_account(&data.accounts[account_index])?;
 
-    save_auth(codex_home, &auth, auth_credentials_store_mode)?;
+    save_auth(
+        codex_home,
+        &auth,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+    )?;
     data.active_account_id = Some(account_id.to_string());
-    touch_account(&mut data.accounts[account_index], true);
+    touch_account(&mut data.accounts[account_index], /*used*/ true);
     let activated = data.accounts[account_index].clone();
     if let Err(err) = write_accounts_file(codex_home, auth_credentials_store_mode, &data) {
-        if let Err(rollback_err) =
-            restore_previous_auth(codex_home, previous_auth, auth_credentials_store_mode)
-        {
+        if let Err(rollback_err) = restore_previous_auth(
+            codex_home,
+            previous_auth,
+            auth_credentials_store_mode,
+            keyring_backend_kind,
+        ) {
             tracing::warn!("failed to roll back stored account activation: {rollback_err}");
         }
         return Err(err);
@@ -816,9 +873,19 @@ pub fn remove_account(
 pub fn clear_active_account(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
 ) -> io::Result<()> {
-    set_active_account_id(codex_home, auth_credentials_store_mode, None)?;
-    crate::delete_auth(codex_home, auth_credentials_store_mode).map(|_| ())
+    set_active_account_id(
+        codex_home,
+        auth_credentials_store_mode,
+        /*account_id*/ None,
+    )?;
+    crate::delete_auth(
+        codex_home,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+    )
+    .map(|_| ())
 }
 
 pub fn remove_account_matching_credentials(
@@ -842,7 +909,10 @@ pub fn remove_account_matching_credentials(
                 .iter()
                 .position(|account| match_chatgpt_account(account, tokens))
         }),
-        AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => None,
+        AuthMode::AgentIdentity
+        | AuthMode::PersonalAccessToken
+        | AuthMode::Headers
+        | AuthMode::BedrockApiKey => None,
     }
     .map(|pos| data.accounts.remove(pos));
 
@@ -887,7 +957,7 @@ pub fn upsert_api_key_account(
     if make_active {
         data.active_account_id = Some(stored.id.clone());
         if let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == stored.id) {
-            touch_account(account, true);
+            touch_account(account, /*used*/ true);
             stored = account.clone();
         }
     }
@@ -923,7 +993,7 @@ pub(crate) fn insert_api_key_account_if_missing(
         created_at: None,
         last_used_at: None,
     };
-    touch_account(&mut account, false);
+    touch_account(&mut account, /*used*/ false);
     data.accounts.push(account.clone());
     write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(Some(account))
@@ -956,7 +1026,7 @@ pub fn upsert_chatgpt_account(
     if make_active {
         data.active_account_id = Some(stored.id.clone());
         if let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == stored.id) {
-            touch_account(account, true);
+            touch_account(account, /*used*/ true);
             stored = account.clone();
         }
     }
@@ -1025,7 +1095,7 @@ pub(crate) fn insert_chatgpt_account_if_missing(
         created_at: None,
         last_used_at: None,
     };
-    touch_account(&mut account, false);
+    touch_account(&mut account, /*used*/ false);
     data.accounts.push(account.clone());
     write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(Some(account))

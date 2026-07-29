@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Component;
@@ -16,53 +17,51 @@ use codex_utils_output_truncation::approx_token_count;
 
 const DEFAULT_SKILL_METADATA_CHAR_BUDGET: usize = 8_000;
 const SKILL_METADATA_CONTEXT_WINDOW_PERCENT: usize = 2;
+const MAX_DEFAULT_CONTEXT_SKILL_DESCRIPTION_CHARS: usize = 1_024;
+const TRUNCATED_SKILL_DESCRIPTION_SUFFIX: &str = "...";
 const SKILL_DESCRIPTION_TRUNCATION_WARNING_THRESHOLD_CHARS: usize = 100;
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 pub const SKILL_DESCRIPTION_TRUNCATED_WARNING: &str = "Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.";
 pub const SKILL_DESCRIPTION_TRUNCATED_WARNING_WITH_PERCENT: &str = "Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.";
 pub const SKILL_DESCRIPTIONS_REMOVED_WARNING_PREFIX: &str =
     "Exceeded skills context budget. All skill descriptions were removed and";
-pub const SKILLS_INTRO_WITH_ABSOLUTE_PATHS: &str = "A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.";
-pub const SKILLS_INTRO_WITH_ALIASES: &str = "A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.";
-pub const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r###"- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
+pub const SKILLS_INTRO_WITH_ABSOLUTE_PATHS: &str = "A skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that can be used. Each entry includes a name, description, and source locator. `file` locators are on the host filesystem, `environment resource` locators are owned by an execution environment, `orchestrator resource` locators are opaque non-filesystem resources, and `custom resource` locators use their provider's access mechanism.";
+const SKILLS_INTRO_WITH_ALIASES: &str = "A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.";
+const SKILLS_BINDING_ROUTING_RULES: &str = r###"- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement in the described context. Read its complete `SKILL.md` through the listed source mechanism before taking other investigative or implementation actions for that turn.
+- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, find that delegated skill in the Available Skills list above and read its complete `SKILL.md` through the listed source mechanism before taking actions in that subdomain.
+- Match skills independently against every part of the request. One relevant skill does not suppress another: for example, regression investigation and durable GitHub planning can require separate skills in the same turn.
+- If multiple skills apply, use all relevant mandatory or delegated skills before ordinary work. Do not choose only one when another skill also matches the user's request."###;
+pub const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r###"- Discovery: The list above is the skills available in this session (name + description + source locator). `file` entries live on the host filesystem, `environment resource` and `orchestrator resource` entries must be accessed through `skills.list` and `skills.read`, and `custom resource` entries use their provider's access mechanism.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
-- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement in the described context. Open its `SKILL.md` before taking other investigative or implementation actions for that turn.
-- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, find that delegated skill in the Available Skills list above and open its `SKILL.md` before taking actions in that subdomain.
-- Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
+- Missing/blocked: If a named skill isn't in the list or its source can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
-  1) Open the selected skill's `SKILL.md`. Read only enough to follow the workflow.
-  2) When `SKILL.md` references relative paths (e.g., `scripts/foo.py`), resolve them relative to the skill directory listed above first, and only consider other paths if needed.
-  3) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
-  4) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
-  5) If `assets/` or templates exist, reuse them instead of recreating from scratch.
+  1) After deciding to use a skill, the main agent must read its `SKILL.md` completely before taking task actions. For a `file` entry, open the listed path. For an `environment resource`, call `skills.list` with `{"authority":{"kind":"executor"}}`; for an `orchestrator resource`, use `{"authority":{"kind":"orchestrator"}}`. Select the matching package and pass its exact authority, package, and `main_resource` to `skills.read`. Follow `next_cursor`; if a read is paginated, continue until EOF.
+  2) When `SKILL.md` references another resource, use the same access mechanism. Resolve relative references beneath an executor skill's returned package and call `skills.read` with the same authority and package. For orchestrator skills, pass the exact referenced resource identifier with the same authority and package to `skills.read`; do not treat `skill://` identifiers as filesystem paths.
+  3) If `SKILL.md` points to extra folders such as `references/`, use its routing instructions to identify the resources required for the task. The main agent must read each required instruction or reference file itself before acting on it. Do not delegate reading, summarizing, or interpreting skill instructions to a subagent. Subagents may still perform task work when the selected skill allows it.
+  4) For filesystem-backed skills, prefer running or patching provided scripts instead of retyping large code blocks. For environment and orchestrator skills, use `skills.read` and the available tools; do not invent a local path.
+  5) Reuse provided assets or templates through the same source access mechanism instead of recreating them.
 - Coordination and sequencing:
-  - Match skills independently against every part of the request. One relevant skill does not suppress another: for example, regression investigation and durable GitHub planning can require separate skills in the same turn.
-  - If multiple skills apply, use all relevant mandatory or delegated skills before ordinary work. Do not choose only one when another skill also matches the user's request.
   - For non-binding matches, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
 - Context hygiene:
-  - Keep context small: summarize long sections instead of pasting them; only load extra files when needed.
+  - Progressive disclosure applies to selecting relevant files, not partially reading a selected instruction file. Do not load unrelated references, scripts, or assets.
   - Avoid deep reference-chasing: prefer opening only files directly linked from `SKILL.md` unless you're blocked.
   - When variants exist (frameworks, providers, domains), pick only the relevant reference file(s) and note that choice.
 - Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue."###;
 pub const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r###"- Discovery: The list above is the skills available in this session (name + description + short path). Skill bodies live on disk at the listed paths after expanding the matching alias from `### Skill roots`.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
-- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement in the described context. Expand the listed short `path` with the matching alias from `### Skill roots`, then open its `SKILL.md` before taking other investigative or implementation actions for that turn.
-- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, find that delegated skill in the Available Skills list above and open its `SKILL.md` before taking actions in that subdomain.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
-  1) Expand the listed short `path` with the matching alias from `### Skill roots`, then open the selected skill's `SKILL.md`. Read only enough to follow the workflow.
+  1) After deciding to use a skill, the main agent must expand the listed short `path` with the matching alias from `### Skill roots`, then open and read its `SKILL.md` completely before taking task actions. If a read is truncated or paginated, continue until EOF.
   2) When `SKILL.md` references relative paths (e.g., `scripts/foo.py`), resolve them relative to the directory containing that expanded `SKILL.md` first, and only consider other paths if needed.
-  3) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
+  3) If `SKILL.md` points to extra folders such as `references/`, use its routing instructions to identify the files required for the task. The main agent must read each required instruction or reference file itself before acting on it. Do not delegate reading, summarizing, or interpreting skill instructions to a subagent. Subagents may still perform task work when the selected skill allows it.
   4) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
   5) If `assets/` or templates exist, reuse them instead of recreating from scratch.
 - Coordination and sequencing:
-  - Match skills independently against every part of the request. One relevant skill does not suppress another: for example, regression investigation and durable GitHub planning can require separate skills in the same turn.
-  - If multiple skills apply, use all relevant mandatory or delegated skills before ordinary work. Do not choose only one when another skill also matches the user's request.
   - For non-binding matches, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
 - Context hygiene:
-  - Keep context small: summarize long sections instead of pasting them; only load extra files when needed.
+  - Progressive disclosure applies to selecting relevant files, not partially reading a selected instruction file. Do not load unrelated references, scripts, or assets.
   - Avoid deep reference-chasing: prefer opening only files directly linked from `SKILL.md` unless you're blocked.
   - When variants exist (frameworks, providers, domains), pick only the relevant reference file(s) and note that choice.
 - Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue."###;
@@ -79,14 +78,8 @@ pub fn render_available_skills_body(skill_root_lines: &[String], skill_lines: &[
     }
     lines.push("### Available skills".to_string());
     lines.extend(skill_lines.iter().cloned());
-
-    lines.push("### How to use skills".to_string());
-    let how_to_use = if skill_root_lines.is_empty() {
-        SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS
-    } else {
-        SKILLS_HOW_TO_USE_WITH_ALIASES
-    };
-    lines.push(how_to_use.to_string());
+    lines.push("### Binding skill routing".to_string());
+    lines.push(SKILLS_BINDING_ROUTING_RULES.to_string());
 
     format!("\n{}\n", lines.join("\n"))
 }
@@ -454,7 +447,7 @@ impl SkillRenderReport {
 
 struct SkillLine<'a> {
     name: &'a str,
-    description: &'a str,
+    description: Cow<'a, str>,
     path: String,
 }
 
@@ -493,9 +486,10 @@ impl<'a> SkillLine<'a> {
     }
 
     fn with_path(skill: &'a SkillMetadata, path: String) -> Self {
+        let description = truncate_default_context_skill_description(skill.description.as_str());
         Self {
             name: skill.name.as_str(),
-            description: skill.description.as_str(),
+            description,
             path,
         }
     }
@@ -513,7 +507,7 @@ impl<'a> SkillLine<'a> {
     }
 
     fn render_full(&self) -> String {
-        self.render_with_description(self.description)
+        self.render_with_description(self.description.as_ref())
     }
 
     fn render_minimum(&self) -> String {
@@ -532,7 +526,7 @@ impl<'a> SkillLine<'a> {
             format!("- {}: (file: {})", self.name, self.path)
         } else {
             let end = self.rendered_description_prefix_len(description_chars);
-            let description = &self.description[..end];
+            let description = &self.description.as_ref()[..end];
             format!("- {}: {} (file: {})", self.name, description, self.path)
         }
     }
@@ -544,6 +538,26 @@ impl<'a> SkillLine<'a> {
             format!("- {}: {} (file: {})", self.name, description, self.path)
         }
     }
+}
+
+fn truncate_default_context_skill_description(description: &str) -> Cow<'_, str> {
+    if description
+        .char_indices()
+        .nth(MAX_DEFAULT_CONTEXT_SKILL_DESCRIPTION_CHARS)
+        .is_none()
+    {
+        return Cow::Borrowed(description);
+    }
+
+    let prefix_chars = MAX_DEFAULT_CONTEXT_SKILL_DESCRIPTION_CHARS
+        .saturating_sub(TRUNCATED_SKILL_DESCRIPTION_SUFFIX.chars().count());
+    let prefix_end = description
+        .char_indices()
+        .nth(prefix_chars)
+        .map_or(description.len(), |(index, _)| index);
+    let mut truncated = description[..prefix_end].to_string();
+    truncated.push_str(TRUNCATED_SKILL_DESCRIPTION_SUFFIX);
+    Cow::Owned(truncated)
 }
 
 impl<'a> DescriptionBudgetLine<'a> {
@@ -931,6 +945,7 @@ mod tests {
             path_to_skills_md: test_path_buf(&format!("/tmp/{name}/SKILL.md")).abs(),
             scope,
             plugin_id: None,
+            remote_plugin_id: None,
         }
     }
 
@@ -991,22 +1006,37 @@ mod tests {
     }
 
     #[test]
-    fn available_skills_guidance_preserves_binding_trigger_rules() {
-        let absolute = render_available_skills_body(&[], &[]);
-        assert!(absolute.contains("If a skill description says it MUST be used"));
-        assert!(absolute.contains("Open its `SKILL.md` before taking other investigative"));
-        assert!(absolute.contains("find that delegated skill in the Available Skills list"));
-        assert!(absolute.contains("Match skills independently against every part of the request"));
-        assert!(absolute.contains("use all relevant mandatory or delegated skills"));
-        assert!(!absolute.contains("After deciding to use a skill"));
+    fn skill_usage_instructions_require_complete_main_agent_reads() {
+        for instructions in [
+            SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS,
+            SKILLS_HOW_TO_USE_WITH_ALIASES,
+        ] {
+            assert!(instructions.contains("read its `SKILL.md` completely"));
+            assert!(instructions.contains("continue until EOF"));
+            assert!(instructions.contains(
+                "The main agent must read each required instruction or reference file itself"
+            ));
+            assert!(instructions.contains(
+                "Do not delegate reading, summarizing, or interpreting skill instructions"
+            ));
+            assert!(instructions.contains(
+                "Subagents may still perform task work when the selected skill allows it"
+            ));
+            assert!(instructions.contains(
+                "Progressive disclosure applies to selecting relevant files, not partially reading a selected instruction file"
+            ));
+            assert!(!instructions.contains("Read only enough to follow the workflow"));
+        }
+    }
 
-        let aliased = render_available_skills_body(&["- `r0` = `/tmp/skills`".to_string()], &[]);
-        assert!(aliased.contains("If a skill description says it MUST be used"));
-        assert!(aliased.contains("Expand the listed short `path`"));
-        assert!(aliased.contains("find that delegated skill in the Available Skills list"));
-        assert!(aliased.contains("Match skills independently against every part of the request"));
-        assert!(aliased.contains("use all relevant mandatory or delegated skills"));
-        assert!(!aliased.contains("After deciding to use a skill"));
+    #[test]
+    fn available_skills_guidance_preserves_binding_trigger_rules() {
+        let rendered = render_available_skills_body(&[], &[]);
+
+        assert!(rendered.contains("If a skill description says it MUST be used"));
+        assert!(rendered.contains("Delegated triggers"));
+        assert!(rendered.contains("Match skills independently against every part"));
+        assert!(rendered.contains("use all relevant mandatory or delegated skills"));
     }
 
     #[test]
@@ -1030,6 +1060,28 @@ mod tests {
         assert_eq!(
             default_skill_metadata_budget(Some(-1)),
             SkillMetadataBudget::Characters(DEFAULT_SKILL_METADATA_CHAR_BUDGET)
+        );
+    }
+
+    #[test]
+    fn default_context_caps_descriptions_without_mutating_metadata() {
+        let description = "\u{1F4A1}".repeat(MAX_DEFAULT_CONTEXT_SKILL_DESCRIPTION_CHARS + 1);
+        let skill = make_skill_with_description("long-skill", SkillScope::Repo, &description);
+        let expected_description = "\u{1F4A1}".repeat(
+            MAX_DEFAULT_CONTEXT_SKILL_DESCRIPTION_CHARS
+                - TRUNCATED_SKILL_DESCRIPTION_SUFFIX.chars().count(),
+        ) + TRUNCATED_SKILL_DESCRIPTION_SUFFIX;
+
+        let rendered = build_available_skills_from_metadata(
+            std::slice::from_ref(&skill),
+            SkillMetadataBudget::Characters(usize::MAX),
+        )
+        .expect("skill should render");
+
+        assert_eq!(skill.description, description);
+        assert_eq!(
+            rendered.skill_lines,
+            vec![expected_skill_line(&skill, &expected_description)]
         );
     }
 

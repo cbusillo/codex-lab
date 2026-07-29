@@ -6,7 +6,7 @@
   },
   "model": "gpt-5.6-sol",
   "sandbox": "read-only",
-  "prompt": "Launch the configured external failure fixture, wait for it, inspect its classified provider status, close it, and finish.",
+  "prompt": "Launch the configured external failure fixture, wait for it, inspect its classified provider status, interrupt it for cleanup, and finish.",
   "files": {
     "README.md": "# External provider diagnostics fixture\n",
     "fixture-auth-failure.sh": "#!/bin/sh\necho 'Authentication required. Please sign in.' >&2\nexit 1\n"
@@ -22,7 +22,8 @@
               "type": "function_call",
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Fail with the configured authentication diagnostic.\",\"task_name\":\"provider_failure\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external_failure\",\"fork_turns\":\"none\"}",
-              "call_id": "call-provider-failure-spawn"
+              "call_id": "call-provider-failure-spawn",
+              "namespace": "collaboration"
             }
           }
         ]
@@ -35,7 +36,8 @@
               "type": "function_call",
               "name": "wait_agent",
               "arguments": "{\"timeout_ms\":10000}",
-              "call_id": "call-provider-failure-wait"
+              "call_id": "call-provider-failure-wait",
+              "namespace": "collaboration"
             }
           }
         ]
@@ -48,20 +50,22 @@
               "type": "function_call",
               "name": "list_agents",
               "arguments": "{}",
-              "call_id": "call-provider-failure-list"
+              "call_id": "call-provider-failure-list",
+              "namespace": "collaboration"
             }
           }
         ]
       },
       {
-        "response_id": "resp-provider-failure-close",
+        "response_id": "resp-provider-failure-interrupt",
         "events": [
           {
             "item": {
               "type": "function_call",
-              "name": "close_agent",
+              "name": "interrupt_agent",
               "arguments": "{\"target\":\"provider_failure\"}",
-              "call_id": "call-provider-failure-close"
+              "call_id": "call-provider-failure-interrupt",
+              "namespace": "collaboration"
             }
           }
         ]
@@ -120,7 +124,7 @@
       },
       {
         "request": 4,
-        "call_id": "call-provider-failure-close",
+        "call_id": "call-provider-failure-interrupt",
         "contains": "Authentication required"
       }
     ]

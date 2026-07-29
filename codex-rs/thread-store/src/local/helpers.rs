@@ -1,7 +1,8 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::FileTimes;
 use std::fs::OpenOptions;
-use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -17,9 +18,12 @@ use codex_protocol::protocol::NetworkAccess;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::ARCHIVED_SESSIONS_SUBDIR;
 use codex_rollout::ThreadItem;
+use codex_rollout::find_thread_names_by_ids;
 use codex_state::ThreadMetadata;
 
+use super::LocalThreadStore;
 use crate::StoredThread;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -55,82 +59,11 @@ pub(super) fn scoped_rollout_path(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RolloutPathCollection {
-    Active,
-    Archived,
-    External,
-}
-
-pub(super) async fn rollout_path_collection(
-    codex_home: &Path,
-    path: &Path,
-) -> RolloutPathCollection {
-    let existing_path = codex_rollout::existing_rollout_path(path).await;
-    let path = existing_path.as_deref().unwrap_or(path);
-    if path_is_under_root(
-        path,
-        codex_home
-            .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
-            .as_path(),
-    ) {
-        RolloutPathCollection::Archived
-    } else if path_is_under_root(
-        path,
-        codex_home.join(codex_rollout::SESSIONS_SUBDIR).as_path(),
-    ) {
-        RolloutPathCollection::Active
-    } else {
-        RolloutPathCollection::External
-    }
-}
-
-pub(super) async fn rollout_path_is_managed_archived(codex_home: &Path, path: &Path) -> bool {
-    rollout_path_collection(codex_home, path).await == RolloutPathCollection::Archived
-}
-
-pub(super) async fn rollout_path_is_external(codex_home: &Path, path: &Path) -> bool {
-    rollout_path_collection(codex_home, path).await == RolloutPathCollection::External
-}
-
-pub(super) async fn rollout_paths_match(left: &Path, right: &Path) -> bool {
-    let (Some(left), Some(right)) = (
-        codex_rollout::existing_rollout_path(left).await,
-        codex_rollout::existing_rollout_path(right).await,
-    ) else {
-        return false;
-    };
-    codex_utils_path::paths_match_after_normalization(left, right)
-}
-
-fn path_is_under_root(path: &Path, root: &Path) -> bool {
-    if let (Ok(path), Ok(root)) = (
-        codex_utils_path::normalize_for_path_comparison(path),
-        codex_utils_path::normalize_for_path_comparison(root),
-    ) {
-        return path.starts_with(root);
-    }
-    lexically_normalized_path(path).starts_with(lexically_normalized_path(root))
-}
-
-fn lexically_normalized_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => match normalized.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    normalized.pop();
-                }
-                Some(Component::ParentDir) | None if !normalized.has_root() => {
-                    normalized.push(component.as_os_str());
-                }
-                _ => {}
-            },
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    normalized
+pub(super) fn rollout_path_is_archived(codex_home: &Path, path: &Path) -> bool {
+    path.starts_with(codex_home.join(ARCHIVED_SESSIONS_SUBDIR))
+        || path
+            .components()
+            .any(|component| component.as_os_str() == OsStr::new(ARCHIVED_SESSIONS_SUBDIR))
 }
 
 pub(super) fn matching_rollout_file_name(
@@ -178,6 +111,7 @@ pub(super) fn stored_thread_from_rollout_item(
         .or_else(|| thread_id_from_rollout_path(item.path.as_path()))?;
     let created_at = parse_rfc3339(item.created_at.as_deref()).unwrap_or_else(Utc::now);
     let updated_at = parse_rfc3339(item.updated_at.as_deref()).unwrap_or(created_at);
+    let recency_at = parse_rfc3339(item.recency_at.as_deref()).unwrap_or(updated_at);
     let archived_at = archived.then_some(updated_at);
     let git_info = git_info_from_parts(
         item.git_sha.clone(),
@@ -194,6 +128,7 @@ pub(super) fn stored_thread_from_rollout_item(
 
     Some(StoredThread {
         thread_id,
+        extra_config: None,
         rollout_path: Some(rollout_path),
         forked_from_id: None,
         parent_thread_id: item.parent_thread_id,
@@ -207,12 +142,14 @@ pub(super) fn stored_thread_from_rollout_item(
         reasoning_effort: None,
         created_at,
         updated_at,
+        recency_at,
         archived_at,
+        is_pinned: item.is_pinned,
         cwd: item.cwd.unwrap_or_default(),
         cli_version: item.cli_version.unwrap_or_default(),
         source,
-        history_mode: ThreadHistoryMode::Legacy,
         session_provenance: item.session_provenance,
+        history_mode: item.history_mode,
         thread_source: None,
         agent_nickname: item.agent_nickname,
         agent_role: item.agent_role,
@@ -247,6 +184,52 @@ pub(super) fn permission_profile_to_metadata_value(
     }
 }
 
+pub(super) fn sqlite_thread_name(metadata: &ThreadMetadata) -> Option<String> {
+    metadata
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+pub(super) async fn resolve_thread_names(
+    store: &LocalThreadStore,
+    thread_history_modes: &HashMap<ThreadId, ThreadHistoryMode>,
+) -> HashMap<ThreadId, String> {
+    let mut names = HashMap::<ThreadId, String>::with_capacity(thread_history_modes.len());
+    let legacy_thread_ids = thread_history_modes
+        .iter()
+        .filter_map(|(&thread_id, &history_mode)| {
+            (history_mode == ThreadHistoryMode::Legacy).then_some(thread_id)
+        })
+        .collect::<HashSet<_>>();
+    if let Some(state_db_ctx) = store.state_db().await {
+        for (&thread_id, &history_mode) in thread_history_modes {
+            let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await else {
+                continue;
+            };
+            let name = match history_mode {
+                ThreadHistoryMode::Legacy => distinct_thread_metadata_title(&metadata),
+                ThreadHistoryMode::Paginated => sqlite_thread_name(&metadata),
+            };
+            if let Some(name) = name {
+                names.insert(thread_id, name);
+            }
+        }
+    }
+    if let Ok(legacy_names) =
+        find_thread_names_by_ids(store.config.codex_home.as_path(), &legacy_thread_ids).await
+    {
+        // Legacy titles remain authoritative when present; the index only fills
+        // names for threads whose SQLite title is still derived from the preview.
+        for (thread_id, name) in legacy_names {
+            names.entry(thread_id).or_insert(name);
+        }
+    }
+    names
+}
+
 pub(super) fn distinct_thread_metadata_title(metadata: &ThreadMetadata) -> Option<String> {
     let title = metadata.title.trim();
     if title.is_empty() || metadata.first_user_message.as_deref().map(str::trim) == Some(title) {
@@ -256,11 +239,10 @@ pub(super) fn distinct_thread_metadata_title(metadata: &ThreadMetadata) -> Optio
     }
 }
 
-pub(super) fn set_thread_name_from_title(thread: &mut StoredThread, title: String) {
-    if title.trim().is_empty() || thread.preview.trim() == title.trim() {
-        return;
+pub(super) fn set_thread_name(thread: &mut StoredThread, name: String) {
+    if thread.history_mode == ThreadHistoryMode::Paginated || thread.preview.trim() != name.trim() {
+        thread.name = Some(name);
     }
-    thread.name = Some(title);
 }
 
 fn parse_rfc3339(value: Option<&str>) -> Option<DateTime<Utc>> {
@@ -316,7 +298,6 @@ fn thread_id_from_rollout_path(path: &Path) -> Option<ThreadId> {
 mod tests {
     use codex_rollout::ThreadItem;
     use pretty_assertions::assert_eq;
-    use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::*;
@@ -343,49 +324,5 @@ mod tests {
                 compressed_path.with_file_name(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"))
             )
         );
-    }
-
-    #[tokio::test]
-    async fn rollout_path_collection_resolves_existing_aliases() {
-        let root = TempDir::new().expect("temp dir");
-        let codex_home = root.path().join("codex-home");
-        let sessions_root = codex_home.join(codex_rollout::SESSIONS_SUBDIR);
-        let archived_root = codex_home.join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR);
-        std::fs::create_dir_all(&sessions_root).expect("sessions dir");
-        std::fs::create_dir_all(&archived_root).expect("archived sessions dir");
-        let external_root = root.path().join("external");
-        std::fs::create_dir_all(&external_root).expect("external dir");
-        std::fs::write(external_root.join("rollout.jsonl"), "").expect("external rollout");
-        let parent_alias = sessions_root.join("../../external/rollout.jsonl");
-        assert_eq!(
-            rollout_path_collection(&codex_home, &parent_alias).await,
-            RolloutPathCollection::External
-        );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-
-            let external_compressed = external_root.join("compressed.jsonl.zst");
-            std::fs::write(&external_compressed, "").expect("external compressed rollout");
-            symlink(
-                &external_compressed,
-                sessions_root.join("compressed.jsonl.zst"),
-            )
-            .expect("compressed file symlink");
-            assert_eq!(
-                rollout_path_collection(&codex_home, &sessions_root.join("compressed.jsonl")).await,
-                RolloutPathCollection::External
-            );
-
-            std::fs::write(archived_root.join("archived.jsonl.zst"), "")
-                .expect("archived compressed rollout");
-            let archive_alias = root.path().join("archive-alias");
-            symlink(&archived_root, &archive_alias).expect("archive root symlink");
-            assert_eq!(
-                rollout_path_collection(&codex_home, &archive_alias.join("archived.jsonl")).await,
-                RolloutPathCollection::Archived
-            );
-        }
     }
 }

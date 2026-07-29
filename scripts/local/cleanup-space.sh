@@ -125,6 +125,95 @@ is_bounded_exec_harness_output_root() {
 	return 1
 }
 
+is_bounded_repo_temp_path() {
+	local path="$1"
+	local physical
+	if ! physical="$(physical_path "$path")"; then
+		return 1
+	fi
+	local physical_repo_root
+	physical_repo_root="$(cd -P -- "$repo_root" && pwd -P)"
+	case "$physical" in
+	"$physical_repo_root"/.tmp/*)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+is_bounded_exec_harness_cache() {
+	local path="$1"
+	local physical
+	if ! physical="$(physical_path "$path")"; then
+		return 1
+	fi
+	if is_bounded_repo_temp_path "$path"; then
+		return 0
+	fi
+	if [[ -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then
+		local artifact_root
+		if ! artifact_root="$(physical_path "$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT")"; then
+			return 1
+		fi
+		case "$physical" in
+		"$artifact_root"/local/*/exec-harness/cargo-target | "$artifact_root"/local/*/exec-harness/cargo-target/*)
+			return 0
+			;;
+		esac
+	fi
+
+	local cache_home=""
+	if [[ -n "${CODEX_LAB_HOME:-}" ]]; then
+		cache_home="${CODEX_LAB_HOME%/}"
+	elif [[ "$repo_root" == */.code/worktrees/*/* ]]; then
+		cache_home="${repo_root%%/.code/worktrees/*}/.code"
+	elif [[ "$repo_root" == */.code/working/*/branches/* ]]; then
+		cache_home="${repo_root%%/.code/working/*}/.code"
+	else
+		cache_home="${HOME%/}/.codex-lab"
+	fi
+	local physical_cache_home
+	if ! physical_cache_home="$(physical_path "$cache_home")"; then
+		return 1
+	fi
+	case "$physical" in
+	"$physical_cache_home"/working/_target-cache/*/exec-harness | "$physical_cache_home"/working/_target-cache/*/exec-harness/*)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+is_bounded_local_cargo_cache() {
+	local path="$1"
+	local physical
+	if ! physical="$(physical_path "$path")"; then
+		return 1
+	fi
+	if is_bounded_repo_temp_path "$path"; then
+		return 0
+	fi
+	local physical_repo_root
+	physical_repo_root="$(cd -P -- "$repo_root" && pwd -P)"
+	case "$physical" in
+	"$physical_repo_root"/codex-rs/target | "$physical_repo_root"/target)
+		return 0
+		;;
+	esac
+	if [[ -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then
+		local artifact_root
+		if ! artifact_root="$(physical_path "$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT")"; then
+			return 1
+		fi
+		case "$physical" in
+		"$artifact_root"/local/*/cargo-target | "$artifact_root"/local/*/cargo-target/* | "$artifact_root"/local/*/worktrees/*/cargo-target | "$artifact_root"/local/*/worktrees/*/cargo-target/*)
+			return 0
+			;;
+		esac
+	fi
+	return 1
+}
+
 is_bounded_artifact_temp_root() {
 	local path="$1"
 	local physical
@@ -174,28 +263,29 @@ unset CODEX_EXEC_HARNESS_OUTPUT_ROOT
 unset CODEX_EXEC_HARNESS_REPORT_JSON
 
 if [[ "$keep_exec_harness_cache" -eq 0 ]]; then
-	remove_path "$CARGO_TARGET_DIR" "shared exec harness target cache"
+	if is_bounded_exec_harness_cache "$CARGO_TARGET_DIR"; then
+		remove_path "$CARGO_TARGET_DIR" "shared exec harness target cache"
+	elif [[ -e "$CARGO_TARGET_DIR" || -L "$CARGO_TARGET_DIR" ]]; then
+		printf '%8s  %s  (%s)\n' "skipped" "$CARGO_TARGET_DIR" "custom exec harness target cache outside bounded cache roots"
+	fi
 fi
 unset CARGO_TARGET_DIR
 
 if [[ "$keep_local_cargo_cache" -eq 0 ]]; then
-	local_cargo_env="$(env -u CARGO_TARGET_DIR CODEX_LAB_CARGO_TARGET_NO_MKDIR=1 "$repo_root/scripts/local/cargo-build-env.sh")"
-	eval "$local_cargo_env"
-	remove_path "$CARGO_TARGET_DIR" "artifact-volume local Cargo target cache"
-	unset CARGO_TARGET_DIR
+	local_cargo_target="$(env -u CARGO_TARGET_DIR CODEX_LAB_CARGO_TARGET_NO_MKDIR=1 "$repo_root/scripts/local/cargo-build-env.sh")"
+	if is_bounded_local_cargo_cache "$local_cargo_target"; then
+		remove_path "$local_cargo_target" "artifact-volume local Cargo target cache"
+	elif [[ -e "$local_cargo_target" || -L "$local_cargo_target" ]]; then
+		printf '%8s  %s  (%s)\n' "skipped" "$local_cargo_target" "custom local Cargo target cache outside bounded cache roots"
+	fi
 fi
 
 if [[ "$keep_artifact_temp" -eq 0 && -n "${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT:-}" ]]; then
-	if artifact_env="$("$repo_root/scripts/local/artifact-env.sh" --no-mkdir 2>/dev/null)"; then
-		artifact_tmpdir="$(
-			eval "$artifact_env"
-			printf '%s' "$TMPDIR"
-		)"
-		if is_bounded_artifact_temp_root "$artifact_tmpdir"; then
-			remove_path "$artifact_tmpdir" "artifact-volume temporary output"
-		elif [[ -e "$artifact_tmpdir" || -L "$artifact_tmpdir" ]]; then
-			printf '%8s  %s  (%s)\n' "skipped" "$artifact_tmpdir" "artifact temp outside expected artifact root"
-		fi
+	artifact_tmpdir="${CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT%/}/local/codex-lab/tmp"
+	if is_bounded_artifact_temp_root "$artifact_tmpdir"; then
+		remove_path "$artifact_tmpdir" "artifact-volume temporary output"
+	elif [[ -e "$artifact_tmpdir" || -L "$artifact_tmpdir" ]]; then
+		printf '%8s  %s  (%s)\n' "skipped" "$artifact_tmpdir" "artifact temp outside expected artifact root"
 	fi
 fi
 

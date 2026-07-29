@@ -2,11 +2,141 @@ use super::*;
 use crate::auth_profiles::record_auth_profile_login;
 use crate::token_data::IdTokenInfo;
 use base64::Engine;
+use codex_keyring_store::tests::MockKeyringStore;
+use keyring::Error as KeyringError;
 use pretty_assertions::assert_eq;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use tempfile::TempDir;
 
 const TEST_AUTH_CREDENTIALS_STORE_MODE: AuthCredentialsStoreMode = AuthCredentialsStoreMode::File;
+const TEST_AUTH_KEYRING_BACKEND_KIND: AuthKeyringBackendKind = AuthKeyringBackendKind::Direct;
+
+fn compute_login_aggregate_keyring_account(codex_home: &Path) -> String {
+    let canonical = codex_home
+        .canonicalize()
+        .unwrap_or_else(|_| codex_home.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let digest = hasher.finalize();
+    let hex = format!("{digest:x}");
+    let short = hex.get(..16).unwrap_or(hex.as_str());
+    format!("secrets|login-aggregate|{short}")
+}
+
+#[test]
+fn file_mode_account_catalog_write_does_not_access_keyring() -> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let keyring = Arc::new(MockKeyringStore::default());
+    keyring.set_error(
+        &compute_login_aggregate_keyring_account(codex_home.path()),
+        KeyringError::Invalid("file mode".into(), "keyring access".into()),
+    );
+    let expected = AccountsFile::default();
+
+    super::write_accounts_file_with_keyring_store(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        &expected,
+        keyring,
+    )?;
+
+    assert_eq!(
+        super::read_accounts_file(codex_home.path(), AuthCredentialsStoreMode::File)?,
+        expected
+    );
+    assert!(
+        !codex_home
+            .path()
+            .join("secrets/login_aggregate.age")
+            .exists()
+    );
+    Ok(())
+}
+
+fn activate_account(
+    codex_home: &Path,
+    account_id: &str,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<StoredAccount> {
+    super::activate_account(
+        codex_home,
+        account_id,
+        auth_credentials_store_mode,
+        TEST_AUTH_KEYRING_BACKEND_KIND,
+    )
+}
+
+#[allow(deprecated)]
+fn commit_active_account(
+    codex_home: &Path,
+    account_id: &str,
+    auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<StoredAccount> {
+    super::commit_active_account(
+        codex_home,
+        account_id,
+        auth,
+        auth_credentials_store_mode,
+        TEST_AUTH_KEYRING_BACKEND_KIND,
+    )
+}
+
+fn clear_active_account(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<()> {
+    super::clear_active_account(
+        codex_home,
+        auth_credentials_store_mode,
+        TEST_AUTH_KEYRING_BACKEND_KIND,
+    )
+}
+
+fn save_auth(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<()> {
+    crate::save_auth(
+        codex_home,
+        auth,
+        auth_credentials_store_mode,
+        TEST_AUTH_KEYRING_BACKEND_KIND,
+    )
+}
+
+fn load_auth_dot_json(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> io::Result<Option<AuthDotJson>> {
+    crate::load_auth_dot_json(
+        codex_home,
+        auth_credentials_store_mode,
+        TEST_AUTH_KEYRING_BACKEND_KIND,
+    )
+}
+
+fn compare_and_swap_catalog_account_auth(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    catalog_id: &str,
+    expected: &AuthDotJson,
+    replacement: &AuthDotJson,
+) -> io::Result<bool> {
+    super::compare_and_swap_catalog_account_auth(
+        codex_home,
+        auth_credentials_store_mode,
+        TEST_AUTH_KEYRING_BACKEND_KIND,
+        catalog_id,
+        expected,
+        replacement,
+    )
+}
 
 fn list_accounts(codex_home: &Path) -> io::Result<Vec<StoredAccount>> {
     super::list_accounts(codex_home, TEST_AUTH_CREDENTIALS_STORE_MODE)
@@ -333,14 +463,15 @@ fn upsert_chatgpt_dedupes_by_id_token_account_id_without_email() {
     let temp = TempDir::new().expect("tempdir");
     let first = upsert_chatgpt_account(
         temp.path(),
-        make_chatgpt_tokens_with_claim_only_account_id(Some("acct-1"), None),
+        make_chatgpt_tokens_with_claim_only_account_id(Some("acct-1"), /*email*/ None),
         Utc::now(),
         /*label*/ None,
         /*make_active*/ true,
     )
     .expect("insert chatgpt");
 
-    let second_tokens = make_chatgpt_tokens_with_claim_only_account_id(Some("acct-1"), None);
+    let second_tokens =
+        make_chatgpt_tokens_with_claim_only_account_id(Some("acct-1"), /*email*/ None);
     let second = upsert_chatgpt_account(
         temp.path(),
         second_tokens.clone(),
@@ -468,8 +599,9 @@ fn activate_api_key_account_writes_auth_and_marks_active() {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
-        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+        load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
             .expect("read auth json")
             .expect("auth json should exist")
     );
@@ -494,6 +626,7 @@ fn commit_active_account_writes_stored_auth_and_marks_active() {
         last_refresh: None,
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
     let activated = commit_active_account(
         temp.path(),
@@ -519,8 +652,9 @@ fn commit_active_account_writes_stored_auth_and_marks_active() {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
-        crate::load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
+        load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
             .expect("read auth json")
             .expect("auth json should exist")
     );
@@ -550,14 +684,14 @@ fn auth_for_account_returns_auth_without_persisting_activation() {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
         auth
     );
     assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
     assert_eq!(
         None,
-        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
-            .expect("read auth json")
+        load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File).expect("read auth json")
     );
 }
 
@@ -578,8 +712,9 @@ fn commit_active_account_leaves_existing_state_unchanged_when_account_is_missing
         last_refresh: None,
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
-    crate::save_auth(temp.path(), &previous_auth, AuthCredentialsStoreMode::File)
+    save_auth(temp.path(), &previous_auth, AuthCredentialsStoreMode::File)
         .expect("save previous auth");
     let err = activate_account(temp.path(), "missing", AuthCredentialsStoreMode::File)
         .expect_err("missing account should fail");
@@ -593,7 +728,7 @@ fn commit_active_account_leaves_existing_state_unchanged_when_account_is_missing
     );
     assert_eq!(
         previous_auth,
-        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+        load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
             .expect("read auth json")
             .expect("auth json should exist")
     );
@@ -616,8 +751,7 @@ fn commit_active_account_preserves_stored_accounts_without_existing_auth() {
     assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
     assert_eq!(
         None,
-        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
-            .expect("read auth json")
+        load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File).expect("read auth json")
     );
     assert_eq!(
         vec![stored],
@@ -649,8 +783,9 @@ fn commit_active_account_restores_auth_when_accounts_write_fails() {
         last_refresh: None,
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
-    crate::save_auth(
+    save_auth(
         temp.path(),
         &previous_auth,
         TEST_AUTH_CREDENTIALS_STORE_MODE,
@@ -686,7 +821,7 @@ fn commit_active_account_restores_auth_when_accounts_write_fails() {
     );
     assert_eq!(
         previous_auth,
-        crate::load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
+        load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
             .expect("read auth json")
             .expect("auth json should exist")
     );
@@ -724,8 +859,9 @@ fn activate_chatgpt_account_writes_auth_and_marks_active() {
             last_refresh: Some(last_refresh),
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
-        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+        load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
             .expect("read auth json")
             .expect("auth json should exist")
     );
@@ -829,7 +965,7 @@ fn clear_active_account_removes_active_marker_and_auth_file() {
         /*make_active*/ true,
     )
     .expect("insert active account");
-    crate::save_auth(
+    save_auth(
         temp.path(),
         &crate::AuthDotJson {
             auth_mode: Some(AuthMode::ApiKey),
@@ -838,6 +974,7 @@ fn clear_active_account_removes_active_marker_and_auth_file() {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
         AuthCredentialsStoreMode::File,
     )
@@ -855,7 +992,7 @@ fn clear_active_account_removes_active_marker_and_auth_file() {
     assert_eq!(None, get_active_account_id(temp.path()).expect("active id"));
     assert_eq!(
         None,
-        crate::load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
+        load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
             .expect("auth should be readable")
     );
 }
@@ -1011,8 +1148,7 @@ fn compare_and_swap_catalog_account_auth_syncs_active_auth() {
     let (_stored, expected) =
         auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &account.id)
             .expect("load stored auth");
-    crate::save_auth(temp.path(), &expected, TEST_AUTH_CREDENTIALS_STORE_MODE)
-        .expect("save active auth");
+    save_auth(temp.path(), &expected, TEST_AUTH_CREDENTIALS_STORE_MODE).expect("save active auth");
     let mut replacement = expected.clone();
     let replacement_tokens = replacement.tokens.as_mut().expect("replacement tokens");
     replacement_tokens.access_token = "updated-access".to_string();
@@ -1031,7 +1167,7 @@ fn compare_and_swap_catalog_account_auth_syncs_active_auth() {
     );
     assert_eq!(
         replacement,
-        crate::load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
+        load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
             .expect("load active auth")
             .expect("active auth should exist")
     );
@@ -1040,6 +1176,63 @@ fn compare_and_swap_catalog_account_auth_syncs_active_auth() {
         auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &account.id,)
             .expect("load catalog auth")
             .1
+    );
+}
+
+#[test]
+fn compare_and_swap_catalog_account_auth_preserves_concurrent_login() {
+    let temp = TempDir::new().expect("tempdir");
+    let initial_tokens = make_chatgpt_tokens(Some("acct-active"), Some("user@example.com"));
+    let account = upsert_chatgpt_account(
+        temp.path(),
+        initial_tokens,
+        Utc::now() - chrono::Duration::days(1),
+        /*label*/ None,
+        /*make_active*/ true,
+    )
+    .expect("store active account");
+    let (_stored, expected) =
+        auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &account.id)
+            .expect("load stored auth");
+    save_auth(temp.path(), &expected, TEST_AUTH_CREDENTIALS_STORE_MODE).expect("save active auth");
+
+    let concurrent_login = AuthDotJson {
+        auth_mode: Some(AuthMode::ApiKey),
+        openai_api_key: Some("sk-concurrent-login".to_string()),
+        tokens: None,
+        last_refresh: None,
+        agent_identity: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
+    };
+    save_auth(
+        temp.path(),
+        &concurrent_login,
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+    )
+    .expect("save concurrent login before catalog mirror");
+
+    let mut replacement = expected.clone();
+    replacement
+        .tokens
+        .as_mut()
+        .expect("replacement tokens")
+        .access_token = "stale-refresh".to_string();
+    assert!(
+        !compare_and_swap_catalog_account_auth(
+            temp.path(),
+            TEST_AUTH_CREDENTIALS_STORE_MODE,
+            &account.id,
+            &expected,
+            &replacement,
+        )
+        .expect("compare and swap auth")
+    );
+    assert_eq!(
+        concurrent_login,
+        load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
+            .expect("load active auth")
+            .expect("active auth should exist")
     );
 }
 
@@ -1315,7 +1508,7 @@ fn inactive_chatgpt_sync_updates_a_matching_inactive_account() {
 #[test]
 fn same_workspace_different_users_remain_separate_accounts() {
     let temp = TempDir::new().expect("tempdir");
-    let first_tokens = make_chatgpt_tokens(Some("shared-workspace"), None);
+    let first_tokens = make_chatgpt_tokens(Some("shared-workspace"), /*email*/ None);
     upsert_chatgpt_account(
         temp.path(),
         first_tokens,
@@ -1324,7 +1517,7 @@ fn same_workspace_different_users_remain_separate_accounts() {
         /*make_active*/ false,
     )
     .expect("store first user");
-    let mut second_tokens = make_chatgpt_tokens(Some("shared-workspace"), None);
+    let mut second_tokens = make_chatgpt_tokens(Some("shared-workspace"), /*email*/ None);
     second_tokens.id_token.chatgpt_user_id = Some("user-67890".to_string());
 
     upsert_chatgpt_account(

@@ -52,6 +52,7 @@ use codex_sandboxing::policy_transforms::normalize_additional_permissions;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 
 const APPLY_PATCH_ARGUMENT_DIFF_BUFFER_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -86,7 +87,11 @@ impl ToolArgumentDiffConsumer for ApplyPatchArgumentDiffConsumer {
         call_id: String,
         diff: &str,
     ) -> Option<EventMsg> {
-        if !turn.features.enabled(Feature::ApplyPatchStreamingEvents) {
+        if !turn
+            .config
+            .features
+            .enabled(Feature::ApplyPatchStreamingEvents)
+        {
             return None;
         }
 
@@ -203,28 +208,19 @@ fn format_update_chunks_for_progress(chunks: &[codex_apply_patch::UpdateFileChun
     unified_diff
 }
 
-fn file_paths_for_action(action: &ApplyPatchAction) -> Vec<AbsolutePathBuf> {
+fn file_paths_for_action(action: &ApplyPatchAction) -> Vec<PathUri> {
     let mut keys = Vec::new();
-    let cwd = &action.cwd;
-
     for (path, change) in action.changes() {
-        if let Some(key) = to_abs_path(cwd, path) {
-            keys.push(key);
-        }
+        keys.push(path.clone());
 
         if let ApplyPatchFileChange::Update { move_path, .. } = change
             && let Some(dest) = move_path
-            && let Some(key) = to_abs_path(cwd, dest)
         {
-            keys.push(key);
+            keys.push(dest.clone());
         }
     }
 
     keys
-}
-
-fn to_abs_path(cwd: &AbsolutePathBuf, path: &Path) -> Option<AbsolutePathBuf> {
-    Some(AbsolutePathBuf::resolve_path_against_base(path, cwd))
 }
 
 fn write_permissions_for_paths(
@@ -272,13 +268,14 @@ async fn effective_patch_permissions(
     turn: &TurnContext,
     environment_id: &str,
     action: &ApplyPatchAction,
-    cwd: &AbsolutePathBuf,
-) -> (
-    Vec<AbsolutePathBuf>,
+    cwd: &PathUri,
+) -> std::io::Result<(
+    Vec<PathUri>,
     crate::tools::handlers::EffectiveAdditionalPermissions,
     codex_protocol::permissions::FileSystemSandboxPolicy,
-) {
+)> {
     let file_paths = file_paths_for_action(action);
+    let native_cwd = cwd.to_abs_path()?;
     let granted_permissions = merge_permission_profiles(
         session
             .granted_session_permissions(environment_id)
@@ -294,23 +291,46 @@ async fn effective_patch_permissions(
         &base_file_system_sandbox_policy,
         granted_permissions.as_ref(),
     );
+    let native_file_paths = file_paths
+        .iter()
+        .map(PathUri::to_abs_path)
+        .collect::<Result<Vec<_>, _>>()?;
     let effective_additional_permissions = apply_granted_turn_permissions(
         session,
         environment_id,
-        cwd.as_path(),
+        native_cwd.as_path(),
         crate::sandboxing::SandboxPermissions::UseDefault,
-        write_permissions_for_paths(&file_paths, &file_system_sandbox_policy, cwd),
+        write_permissions_for_paths(&native_file_paths, &file_system_sandbox_policy, &native_cwd),
     )
     .await;
 
-    (
+    Ok((
         file_paths,
         effective_additional_permissions,
         file_system_sandbox_policy,
+    ))
+}
+
+fn patch_permissions_without_path_matching(
+    action: &ApplyPatchAction,
+) -> (
+    Vec<PathUri>,
+    crate::tools::handlers::EffectiveAdditionalPermissions,
+    codex_protocol::permissions::FileSystemSandboxPolicy,
+) {
+    // TODO(anp): Make permission matching operate on PathUri. Until then, foreign paths skip
+    // permission matching; a managed turn still fails closed at the platform sandbox boundary.
+    (
+        file_paths_for_action(action),
+        crate::tools::handlers::EffectiveAdditionalPermissions {
+            sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
+            additional_permissions: None,
+            permissions_preapproved: false,
+        },
+        codex_protocol::permissions::FileSystemSandboxPolicy::unrestricted(),
     )
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for ApplyPatchHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("apply_patch")
@@ -320,13 +340,20 @@ impl ToolExecutor<ToolInvocation> for ApplyPatchHandler {
         create_apply_patch_freeform_tool(self.multi_environment)
     }
 
-    async fn handle(
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl ApplyPatchHandler {
+    async fn handle_call(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
+            step_context,
             tracker,
             call_id,
             tool_name,
@@ -351,18 +378,25 @@ impl ToolExecutor<ToolInvocation> for ApplyPatchHandler {
             require_environment_id(args.environment_id.as_deref(), self.multi_environment)?;
 
         // Verify the parsed patch against the selected environment filesystem.
-        let Some(turn_environment) =
-            resolve_tool_environment(turn.as_ref(), selected_environment_id.as_deref())?
+        let Some(turn_environment) = resolve_tool_environment(
+            &step_context.environments,
+            selected_environment_id.as_deref(),
+        )?
         else {
             return Err(FunctionCallError::RespondToModel(
                 "apply_patch is unavailable in this session".to_string(),
             ));
         };
-        let cwd = turn_environment.cwd.clone();
         let fs = turn_environment.environment.get_filesystem();
-        let sandbox = turn.file_system_sandbox_context(/*additional_permissions*/ None, &cwd);
-        match codex_apply_patch::verify_apply_patch_args(args, &cwd, fs.as_ref(), Some(&sandbox))
-            .await
+        let sandbox = turn
+            .file_system_sandbox_context(/*additional_permissions*/ None, turn_environment);
+        match codex_apply_patch::verify_apply_patch_args(
+            args,
+            turn_environment.cwd(),
+            fs.as_ref(),
+            Some(&sandbox),
+        )
+        .await
         {
             codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
                 let (file_paths, effective_additional_permissions, file_system_sandbox_policy) =
@@ -371,9 +405,10 @@ impl ToolExecutor<ToolInvocation> for ApplyPatchHandler {
                         turn.as_ref(),
                         &turn_environment.environment_id,
                         &changes,
-                        &cwd,
+                        turn_environment.cwd(),
                     )
-                    .await;
+                    .await
+                    .unwrap_or_else(|_| patch_permissions_without_path_matching(&changes));
                 match apply_patch::apply_patch(turn.as_ref(), &file_system_sandbox_policy, changes)
                     .await
                 {
@@ -441,7 +476,7 @@ impl ToolExecutor<ToolInvocation> for ApplyPatchHandler {
                             content,
                             delta.as_ref(),
                             &turn.config.validation,
-                            &cwd,
+                            turn_environment.cwd(),
                         );
                         Ok(boxed_tool_output(ApplyPatchToolOutput::from_text(content)))
                     }
@@ -519,7 +554,7 @@ impl CoreToolRuntime for ApplyPatchHandler {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn intercept_apply_patch(
     command: &[String],
-    cwd: &AbsolutePathBuf,
+    cwd: &PathUri,
     fs: &dyn ExecutorFileSystem,
     turn_environment: TurnEnvironment,
     session: Arc<Session>,
@@ -528,7 +563,8 @@ pub(crate) async fn intercept_apply_patch(
     call_id: &str,
     tool_name: &str,
 ) -> Result<Option<FunctionToolOutput>, FunctionCallError> {
-    let sandbox = turn.file_system_sandbox_context(/*additional_permissions*/ None, cwd);
+    let sandbox =
+        turn.file_system_sandbox_context(/*additional_permissions*/ None, &turn_environment);
     match codex_apply_patch::maybe_parse_apply_patch_verified(command, cwd, fs, Some(&sandbox))
         .await
     {
@@ -541,7 +577,8 @@ pub(crate) async fn intercept_apply_patch(
                     &changes,
                     cwd,
                 )
-                .await;
+                .await
+                .unwrap_or_else(|_| patch_permissions_without_path_matching(&changes));
             match apply_patch::apply_patch(turn.as_ref(), &file_system_sandbox_policy, changes)
                 .await
             {

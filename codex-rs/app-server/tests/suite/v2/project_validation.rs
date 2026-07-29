@@ -1,0 +1,177 @@
+//! End-to-end coverage for the `validation/completed` notification.
+//!
+//! Project Validation is configured in `config.toml` and runs inside the turn,
+//! so the only way to prove the notification contract is to let a real turn
+//! trigger a real validation command and read what lands on the wire. The client
+//! here deliberately initializes *without* the experimental API capability:
+//! `validation/completed` is stable surface and must reach ordinary clients.
+
+use anyhow::Context;
+use anyhow::Result;
+use app_test_support::MockResponsesConfig;
+use app_test_support::TestAppServer;
+use app_test_support::create_final_assistant_message_sse_response;
+use app_test_support::create_mock_responses_server_sequence;
+use app_test_support::create_shell_command_sse_response;
+use codex_app_server_protocol::ClientInfo;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::InitializeCapabilities;
+use codex_app_server_protocol::JSONRPCMessage;
+use codex_app_server_protocol::ProjectValidationCompletedNotification;
+use codex_app_server_protocol::ProjectValidationStatus;
+use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::UserInput;
+use pretty_assertions::assert_eq;
+use std::path::Path;
+use std::process::Command;
+use tempfile::TempDir;
+use tokio::time::timeout;
+
+const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git").args(args).current_dir(cwd).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// Project Validation only runs inside a repository, so the workspace needs a
+/// committed baseline before the turn starts.
+fn init_git_repo(path: &Path) -> Result<()> {
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "validation@example.invalid"][..],
+        &["config", "user.name", "Project Validation"][..],
+        &["commit", "--quiet", "--allow-empty", "-m", "baseline"][..],
+    ] {
+        run_git(path, args)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_validation_completion_reaches_a_client_without_experimental_api() -> Result<()> {
+    let server = create_mock_responses_server_sequence(vec![
+        create_shell_command_sse_response(
+            vec!["true".to_string()],
+            /*workdir*/ None,
+            /*timeout_ms*/ None,
+            "shell-call-1",
+        )?,
+        create_final_assistant_message_sse_response("done")?,
+    ])
+    .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_extra_config(
+            "[validation.project_command]\ncommand = [\"/bin/sh\", \"-c\", \"printf validation-pass\"]\ntimeout_ms = 30000\n",
+        )
+        .write(codex_home.path())?;
+
+    let workspace = TempDir::new()?;
+    // Canonicalize so the notification `cwd` matches what the test expects on
+    // platforms where the temp root is a symlink.
+    let workspace_path = std::fs::canonicalize(workspace.path())?;
+    init_git_repo(&workspace_path)?;
+
+    // Auto-env would move the thread off the prepared repository.
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    let initialized = mcp
+        .initialize_with_capabilities(
+            ClientInfo {
+                name: "codex-app-server-tests".to_string(),
+                title: None,
+                version: "0.1.0".to_string(),
+            },
+            Some(InitializeCapabilities {
+                experimental_api: false,
+                ..Default::default()
+            }),
+        )
+        .await?;
+    let JSONRPCMessage::Response(_) = initialized else {
+        anyhow::bail!("expected initialize response, got {initialized:?}");
+    };
+
+    let ThreadStartResponse { thread, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                model: Some("mock-model".to_string()),
+                cwd: Some(workspace_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        })
+        .await?;
+    let thread_id = thread.id;
+
+    let _: TurnStartResponse = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread_id.clone(),
+                client_user_message_id: None,
+                input: vec![UserInput::Text {
+                    text: "make the change".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let notification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("validation/completed"),
+    )
+    .await??;
+    let completed: ProjectValidationCompletedNotification = serde_json::from_value(
+        notification
+            .params
+            .context("validation/completed must carry params")?,
+    )?;
+
+    assert_eq!(
+        completed,
+        ProjectValidationCompletedNotification {
+            thread_id: thread_id.clone(),
+            // The turn id and duration are assigned at run time.
+            turn_id: completed.turn_id.clone(),
+            duration_ms: completed.duration_ms,
+            item_id: completed.item_id.clone(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf validation-pass".to_string(),
+            ],
+            command_truncated: false,
+            cwd: Some(workspace_path.clone().try_into()?),
+            status: ProjectValidationStatus::Passed,
+            skip_reason: None,
+            changed_file_count: None,
+            exit_code: Some(0),
+            output: "validation-pass".to_string(),
+            output_truncated: false,
+        }
+    );
+    assert!(
+        !completed.turn_id.is_empty(),
+        "validation must be attributed to the turn that triggered it"
+    );
+
+    Ok(())
+}

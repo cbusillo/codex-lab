@@ -9,4 +9,7 @@ mod serde_helpers;
 pub mod thread_history;
 pub mod thread_history_projection;
 pub mod v1;
+#[cfg(test)]
+#[path = "v1_tests.rs"]
+mod v1_tests;
 pub mod v2;

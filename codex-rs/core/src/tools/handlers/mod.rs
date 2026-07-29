@@ -1,13 +1,16 @@
-pub(crate) mod agent_jobs;
-pub(crate) mod agent_jobs_spec;
 pub(crate) mod apply_patch;
 pub(crate) mod apply_patch_spec;
 mod auto_review_disposition;
 pub(crate) mod auto_review_disposition_spec;
+mod browser;
+pub(crate) mod browser_spec;
 mod code_bridge;
 pub(crate) mod code_bridge_spec;
+mod current_time;
 mod dynamic;
 pub(crate) mod extension_tools;
+mod get_context_remaining;
+pub(crate) mod get_context_remaining_spec;
 mod list_available_plugins_to_install;
 pub(crate) mod list_available_plugins_to_install_spec;
 mod mcp;
@@ -15,8 +18,11 @@ mod mcp_resource;
 pub(crate) mod mcp_resource_spec;
 pub(crate) mod multi_agents;
 pub(crate) mod multi_agents_common;
+mod multi_agents_routing_spec;
 pub(crate) mod multi_agents_spec;
 pub(crate) mod multi_agents_v2;
+mod new_context_window;
+pub(crate) mod new_context_window_spec;
 mod plan;
 pub(crate) mod plan_spec;
 mod request_permissions;
@@ -26,6 +32,7 @@ mod request_user_input;
 pub(crate) mod request_user_input_spec;
 mod shell;
 pub(crate) mod shell_spec;
+mod sleep;
 mod test_sync;
 pub(crate) mod test_sync_spec;
 mod tool_search;
@@ -33,6 +40,7 @@ pub(crate) mod tool_search_spec;
 pub(crate) mod unified_exec;
 mod view_image;
 pub(crate) mod view_image_spec;
+mod wait_for_environment;
 
 use codex_sandboxing::policy_transforms::intersect_permission_profiles;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
@@ -44,36 +52,43 @@ use serde_json::Map;
 use serde_json::Value;
 use std::path::Path;
 
+use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
-use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 pub(crate) use crate::tools::code_mode::CodeModeExecuteHandler;
 pub(crate) use crate::tools::code_mode::CodeModeWaitHandler;
 pub use apply_patch::ApplyPatchHandler;
 pub(crate) use auto_review_disposition::AutoReviewDispositionHandler;
+pub use browser::BrowserHandler;
 pub use code_bridge::CodeBridgeHandler;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::AskForApproval;
+pub use current_time::CurrentTimeHandler;
 pub use dynamic::DynamicToolHandler;
+pub use get_context_remaining::GetContextRemainingHandler;
 pub use list_available_plugins_to_install::ListAvailablePluginsToInstallHandler;
 pub use mcp::McpHandler;
 pub use mcp_resource::ListMcpResourceTemplatesHandler;
 pub use mcp_resource::ListMcpResourcesHandler;
 pub use mcp_resource::ReadMcpResourceHandler;
+pub use new_context_window::NewContextWindowHandler;
 pub use plan::PlanHandler;
 pub use request_permissions::RequestPermissionsHandler;
 pub use request_plugin_install::RequestPluginInstallHandler;
 pub use request_user_input::RequestUserInputHandler;
 pub use shell::ShellCommandHandler;
 pub(crate) use shell::ShellCommandHandlerOptions;
+pub use sleep::SleepHandler;
 pub use test_sync::TestSyncHandler;
-pub use tool_search::ToolSearchHandler;
+pub(crate) use tool_search::ToolSearchHandlerCache;
 pub use unified_exec::ExecCommandHandler;
 pub(crate) use unified_exec::ExecCommandHandlerOptions;
 pub use unified_exec::WriteStdinHandler;
 pub use view_image::ViewImageHandler;
+pub(crate) use wait_for_environment::WaitForEnvironmentHandler;
+pub use wait_for_environment::WaitForEnvironmentToolConfig;
 
 pub(crate) fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
 where
@@ -149,15 +164,14 @@ fn resolve_workdir_base_path(
 }
 
 fn resolve_tool_environment<'a>(
-    turn: &'a TurnContext,
+    environments: &'a TurnEnvironmentSnapshot,
     environment_id: Option<&str>,
 ) -> Result<Option<&'a TurnEnvironment>, FunctionCallError> {
     environment_id.map_or_else(
-        || Ok(turn.environments.primary()),
+        || Ok(environments.primary()),
         |environment_id| {
-            turn.environments
-                .turn_environments
-                .iter()
+            environments
+                .turn_environments()
                 .find(|environment| environment.environment_id == environment_id)
                 .map(Some)
                 .ok_or_else(|| {
@@ -441,12 +455,14 @@ mod tests {
                             value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
                         },
                         access: FileSystemAccessMode::Write,
+                        missing_path_behavior: None,
                     },
                     FileSystemSandboxEntry {
                         path: FileSystemPath::GlobPattern {
                             pattern: "**/*.env".to_string(),
                         },
                         access: FileSystemAccessMode::Deny,
+                        missing_path_behavior: None,
                     },
                 ],
                 glob_scan_max_depth: None,

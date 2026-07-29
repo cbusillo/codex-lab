@@ -6,6 +6,7 @@
 //!
 //! Responsibilities here are intentionally narrow:
 //! - remember picker entries and their first-seen order
+//! - remember which V2 child threads are owned by their parent agent
 //! - answer traversal questions like "what is the next thread?"
 //! - derive user-facing picker/footer text from cached thread metadata
 //!
@@ -19,12 +20,14 @@
 //! updated or marked closed.
 
 use crate::multi_agents::AgentPickerThreadEntry;
+use crate::multi_agents::SubAgentActivityDisplay;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut;
 use crate::multi_agents::previous_agent_shortcut;
 use codex_protocol::ThreadId;
 use ratatui::text::Span;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Small state container for multi-agent picker ordering and labeling.
 ///
@@ -41,6 +44,10 @@ pub(crate) struct AgentNavigationState {
     threads: HashMap<ThreadId, AgentPickerThreadEntry>,
     /// Stable first-seen traversal order for picker rows and keyboard cycling.
     order: Vec<ThreadId>,
+    /// Threads with observed terminal liveness that must not be revived by delayed activity.
+    stopped_threads: HashSet<ThreadId>,
+    /// Spawned child threads whose instructions are owned by their parent agent.
+    parent_owned_threads: HashSet<ThreadId>,
 }
 
 /// Direction of keyboard traversal through the stable picker order.
@@ -61,6 +68,15 @@ impl AgentNavigationState {
     /// this stays optional.
     pub(crate) fn get(&self, thread_id: &ThreadId) -> Option<&AgentPickerThreadEntry> {
         self.threads.get(thread_id)
+    }
+
+    pub(crate) fn is_parent_owned(&self, thread_id: ThreadId) -> bool {
+        self.parent_owned_threads.contains(&thread_id)
+    }
+
+    /// Marks a spawned child thread as view-only for direct user instructions.
+    pub(crate) fn mark_parent_owned(&mut self, thread_id: ThreadId) {
+        self.parent_owned_threads.insert(thread_id);
     }
 
     /// Returns whether the picker cache currently knows about any threads.
@@ -86,14 +102,78 @@ impl AgentNavigationState {
         if !self.threads.contains_key(&thread_id) {
             self.order.push(thread_id);
         }
+        let (previous_agent_path, previous_is_running) = self
+            .threads
+            .get(&thread_id)
+            .map(|entry| (entry.agent_path.clone(), entry.is_running))
+            .unwrap_or((None, false));
         self.threads.insert(
             thread_id,
             AgentPickerThreadEntry {
                 agent_nickname,
                 agent_role,
+                agent_path: previous_agent_path,
+                is_running: previous_is_running && !is_closed,
                 is_closed,
             },
         );
+    }
+
+    pub(crate) fn record_sub_agent_activity(&mut self, activity: SubAgentActivityDisplay) {
+        if !self.threads.contains_key(&activity.thread_id) {
+            self.order.push(activity.thread_id);
+        }
+        let entry =
+            self.threads
+                .entry(activity.thread_id)
+                .or_insert_with(|| AgentPickerThreadEntry {
+                    agent_nickname: None,
+                    agent_role: None,
+                    agent_path: None,
+                    is_running: false,
+                    is_closed: false,
+                });
+        entry.agent_path = Some(activity.agent_path);
+        if activity.is_running_hint
+            && !entry.is_closed
+            && !self.stopped_threads.contains(&activity.thread_id)
+        {
+            entry.is_running = true;
+        } else {
+            entry.is_running = false;
+            self.stopped_threads.insert(activity.thread_id);
+        }
+    }
+
+    pub(crate) fn mark_running(&mut self, thread_id: ThreadId) {
+        if self
+            .threads
+            .get(&thread_id)
+            .is_some_and(|entry| entry.is_closed)
+        {
+            return;
+        }
+        self.stopped_threads.remove(&thread_id);
+        self.set_running(thread_id, /*is_running*/ true);
+    }
+
+    pub(crate) fn mark_stopped(&mut self, thread_id: ThreadId) {
+        self.stopped_threads.insert(thread_id);
+        self.set_running(thread_id, /*is_running*/ false);
+    }
+
+    pub(crate) fn set_running(&mut self, thread_id: ThreadId, is_running: bool) {
+        if let Some(entry) = self.threads.get_mut(&thread_id) {
+            entry.is_running = is_running;
+        }
+    }
+
+    pub(crate) fn set_agent_path(&mut self, thread_id: ThreadId, agent_path: Option<String>) {
+        if let Some(agent_path) = agent_path
+            && let Some(entry) = self.threads.get_mut(&thread_id)
+        {
+            entry.agent_path = Some(agent_path);
+        }
     }
 
     /// Marks a thread as closed without removing it from the traversal cache.
@@ -105,6 +185,7 @@ impl AgentNavigationState {
     pub(crate) fn mark_closed(&mut self, thread_id: ThreadId) {
         if let Some(entry) = self.threads.get_mut(&thread_id) {
             entry.is_closed = true;
+            entry.is_running = false;
         } else {
             self.upsert(
                 thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
@@ -120,6 +201,8 @@ impl AgentNavigationState {
     pub(crate) fn clear(&mut self) {
         self.threads.clear();
         self.order.clear();
+        self.stopped_threads.clear();
+        self.parent_owned_threads.clear();
     }
 
     /// Removes a tracked thread entirely from picker metadata and traversal order.
@@ -130,6 +213,8 @@ impl AgentNavigationState {
     pub(crate) fn remove(&mut self, thread_id: ThreadId) {
         self.threads.remove(&thread_id);
         self.order.retain(|candidate| *candidate != thread_id);
+        self.stopped_threads.remove(&thread_id);
+        self.parent_owned_threads.remove(&thread_id);
     }
 
     /// Returns whether there is at least one tracked thread other than the primary one.
@@ -152,6 +237,22 @@ impl AgentNavigationState {
         self.order
             .iter()
             .filter_map(|thread_id| self.threads.get(thread_id).map(|entry| (*thread_id, entry)))
+            .collect()
+    }
+
+    pub(crate) fn ordered_path_backed_subagent_threads(
+        &self,
+        primary_thread_id: Option<ThreadId>,
+    ) -> Vec<(ThreadId, &AgentPickerThreadEntry)> {
+        self.ordered_threads()
+            .into_iter()
+            .filter(|(thread_id, entry)| {
+                Some(*thread_id) != primary_thread_id
+                    && entry
+                        .agent_path
+                        .as_deref()
+                        .is_some_and(|agent_path| !agent_path.trim().is_empty())
+            })
             .collect()
     }
 
@@ -217,6 +318,14 @@ impl AgentNavigationState {
             self.threads
                 .get(&thread_id)
                 .map(|entry| {
+                    if !is_primary
+                        && let Some(agent_path) = entry
+                            .agent_path
+                            .as_deref()
+                            .filter(|agent_path| !agent_path.trim().is_empty())
+                    {
+                        return format!("`{agent_path}`");
+                    }
                     format_agent_picker_item_name(
                         entry.agent_nickname.as_deref(),
                         entry.agent_role.as_deref(),
@@ -308,6 +417,20 @@ mod tests {
             state.ordered_thread_ids(),
             vec![main_thread_id, first_agent_id, second_agent_id]
         );
+    }
+
+    #[test]
+    fn parent_owned_state_is_removed_with_thread_metadata() {
+        let (mut state, _main_thread_id, first_agent_id, second_agent_id) = populated_state();
+
+        state.mark_parent_owned(first_agent_id);
+        assert!(state.is_parent_owned(first_agent_id));
+        state.remove(first_agent_id);
+        assert!(!state.is_parent_owned(first_agent_id));
+
+        state.mark_parent_owned(second_agent_id);
+        state.clear();
+        assert!(!state.is_parent_owned(second_agent_id));
     }
 
     #[test]

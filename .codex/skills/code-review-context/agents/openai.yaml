@@ -1,3 +1,0 @@
-interface:
-  display_name: "Context Review"
-  short_description: "Review model-visible context changes"

@@ -19,20 +19,21 @@ workspace = true
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-channel = { workspace = true }
-async-trait = { workspace = true }
 base64 = { workspace = true }
 bm25 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
+codex-code-bridge-client = { workspace = true }
+codex-code-bridge-protocol = { workspace = true }
 codex-analytics = { workspace = true }
+codex-agent-graph-store = { workspace = true }
 codex-api = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-apply-patch = { workspace = true }
 codex-auto-review = { workspace = true }
 codex-async-utils = { workspace = true }
+codex-browser = { workspace = true }
 codex-code-mode = { workspace = true }
-codex-code-bridge-client = { workspace = true }
-codex-code-bridge-protocol = { workspace = true }
 codex-connectors = { workspace = true }
 codex-context-fragments = { workspace = true }
 codex-config = { workspace = true }
@@ -40,8 +41,10 @@ codex-core-plugins = { workspace = true }
 codex-core-skills = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-extension-api = { workspace = true }
+codex-extension-items = { workspace = true }
 codex-features = { workspace = true }
 codex-feedback = { workspace = true }
+codex-file-system = { workspace = true }
 codex-login = { workspace = true }
 codex-memories-read = { workspace = true }
 codex-mcp = { workspace = true }
@@ -51,6 +54,7 @@ codex-shell-command = { workspace = true }
 codex-execpolicy = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-hooks = { workspace = true }
+codex-http-client = { workspace = true }
 codex-install-context = { workspace = true }
 codex-network-proxy = { workspace = true }
 codex-otel = { workspace = true }
@@ -63,6 +67,7 @@ codex-rollout = { workspace = true }
 codex-rollout-trace = { workspace = true }
 codex-rmcp-client = { workspace = true }
 codex-sandboxing = { workspace = true }
+codex-skills = { workspace = true }
 codex-state = { workspace = true }
 codex-terminal-detection = { workspace = true }
 codex-thread-store = { workspace = true }
@@ -73,12 +78,12 @@ codex-utils-image = { workspace = true }
 codex-utils-home-dir = { workspace = true }
 codex-utils-output-truncation = { workspace = true }
 codex-utils-path = { workspace = true }
+codex-utils-path-uri = { workspace = true }
 codex-utils-plugins = { workspace = true }
 codex-utils-pty = { workspace = true }
 codex-utils-string = { workspace = true }
 codex-utils-stream-parser = { workspace = true }
 codex-windows-sandbox = { package = "codex-windows-sandbox", path = "../windows-sandbox-rs" }
-csv = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }
 eventsource-stream = { workspace = true }
@@ -106,6 +111,7 @@ serde_yaml = { workspace = true }
 sha1 = { workspace = true }
 shlex = { workspace = true }
 similar = { workspace = true }
+symphonia = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
@@ -121,7 +127,7 @@ toml = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 url = { workspace = true }
-uuid = { workspace = true, features = ["serde", "v4", "v5"] }
+uuid = { workspace = true, features = ["serde", "v4", "v5", "v7"] }
 which = { workspace = true }
 whoami = { workspace = true }
 
@@ -139,9 +145,12 @@ codex-shell-escalation = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
-codex-image-generation-extension = { workspace = true }
 codex-code-bridge-service = { workspace = true }
+codex-exec-server-test-support = { workspace = true }
+codex-image-generation-extension = { workspace = true }
+codex-home = { workspace = true }
 codex-otel = { workspace = true }
+codex-skills-extension = { workspace = true }
 codex-test-binary-support = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 codex-web-search-extension = { workspace = true }
@@ -169,3 +178,4 @@ zstd = { workspace = true }
 
 [package.metadata.cargo-shear]
 ignored = ["openssl-sys"]
+ignored-paths = ["tests/remote_env_windows/*.rs"]

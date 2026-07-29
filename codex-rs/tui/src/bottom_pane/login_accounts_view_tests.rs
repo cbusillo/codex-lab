@@ -4,11 +4,15 @@ use crate::app_event_sender::AppEventSender;
 use crate::terminal_hyperlinks::strip_osc8;
 use assert_matches::assert_matches;
 use codex_app_server_protocol::AccountListEntry;
-use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::AuthMode as AppServerAuthMode;
+use codex_protocol::auth::AuthMode as CoreAuthMode;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::unbounded_channel;
+
+const TEST_AUTH_KEYRING_BACKEND: codex_login::AuthKeyringBackendKind =
+    codex_login::AuthKeyringBackendKind::Direct;
 
 fn app_event_sender() -> AppEventSender {
     let (tx, _rx) = unbounded_channel();
@@ -24,6 +28,7 @@ fn keyring_auth_is_not_mirrored_to_plaintext_account_catalog() {
             codex_home.path(),
             /*default_auth_home_is_current*/ true,
             codex_config::types::AuthCredentialsStoreMode::Keyring,
+            TEST_AUTH_KEYRING_BACKEND,
         ),
         None
     );
@@ -35,18 +40,20 @@ fn current_only_api_key_view(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> LoginAccountsView {
     let auth = codex_login::AuthDotJson {
-        auth_mode: Some(AuthMode::ApiKey),
+        auth_mode: Some(CoreAuthMode::ApiKey),
         openai_api_key: Some("sk-secure".to_string()),
         tokens: None,
         last_refresh: None,
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
     LoginAccountsView {
         app_event_tx,
         codex_home: std::path::PathBuf::new(),
         default_auth_home_is_current: true,
         auth_credentials_store_mode,
+        auth_keyring_backend_kind: TEST_AUTH_KEYRING_BACKEND,
         pool_behavior: AccountPoolBehavior::CurrentOnly,
         accounts: vec![current_auth_account_row(&auth, auth_credentials_store_mode)],
         remote_loaded: false,
@@ -97,18 +104,23 @@ fn current_only_modes_ignore_stale_plaintext_catalog() {
         codex_home.path(),
         "sk-current",
         AuthCredentialsStoreMode::Ephemeral,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("seed current ephemeral auth");
-    let current_auth =
-        codex_login::load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::Ephemeral)
-            .expect("load current auth")
-            .expect("current auth should exist");
+    let current_auth = codex_login::load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::Ephemeral,
+        TEST_AUTH_KEYRING_BACKEND,
+    )
+    .expect("load current auth")
+    .expect("current auth should exist");
 
     assert_eq!(
         load_account_rows(
             codex_home.path(),
             /*default_auth_home_is_current*/ true,
             AuthCredentialsStoreMode::Ephemeral,
+            TEST_AUTH_KEYRING_BACKEND,
             /*previously_selected_id*/ None,
         ),
         LoadedLoginAccounts {
@@ -172,7 +184,7 @@ fn render_add_account_state(state: LoginAddAccountState, area: Rect) -> Buffer {
 
 fn account_list_entry(
     account_id: &str,
-    auth_mode: AuthMode,
+    auth_mode: AppServerAuthMode,
     label: &str,
     is_active: bool,
 ) -> AccountListEntry {
@@ -192,8 +204,18 @@ fn loaded_account_list_enter_switches_server_account() {
     let mut view = LoginAccountsView::new_with_loaded_accounts(
         tx,
         vec![
-            account_list_entry("chatgpt", AuthMode::Chatgpt, "ChatGPT", true),
-            account_list_entry("api", AuthMode::ApiKey, "API key", false),
+            account_list_entry(
+                "chatgpt",
+                AppServerAuthMode::Chatgpt,
+                "ChatGPT",
+                /*is_active*/ true,
+            ),
+            account_list_entry(
+                "api",
+                AppServerAuthMode::ApiKey,
+                "API key",
+                /*is_active*/ false,
+            ),
         ],
         /*feedback*/ None,
     );
@@ -215,7 +237,12 @@ fn loaded_account_list_refresh_reopens_accounts() {
     let (tx, mut rx) = app_event_sender_with_rx();
     let mut view = LoginAccountsView::new_with_loaded_accounts(
         tx,
-        vec![account_list_entry("api", AuthMode::ApiKey, "API key", true)],
+        vec![account_list_entry(
+            "api",
+            AppServerAuthMode::ApiKey,
+            "API key",
+            /*is_active*/ true,
+        )],
         /*feedback*/ None,
     );
 
@@ -231,7 +258,12 @@ fn loaded_account_list_disconnect_emits_remove_event() {
     let (tx, mut rx) = app_event_sender_with_rx();
     let mut view = LoginAccountsView::new_with_loaded_accounts(
         tx,
-        vec![account_list_entry("api", AuthMode::ApiKey, "API key", true)],
+        vec![account_list_entry(
+            "api",
+            AppServerAuthMode::ApiKey,
+            "API key",
+            /*is_active*/ true,
+        )],
         /*feedback*/ None,
     );
 
@@ -252,8 +284,18 @@ fn loaded_account_list_renders_disconnect_hint() {
     let view = LoginAccountsView::new_with_loaded_accounts(
         app_event_sender(),
         vec![
-            account_list_entry("chatgpt", AuthMode::Chatgpt, "ChatGPT", true),
-            account_list_entry("api", AuthMode::ApiKey, "API key", false),
+            account_list_entry(
+                "chatgpt",
+                AppServerAuthMode::Chatgpt,
+                "ChatGPT",
+                /*is_active*/ true,
+            ),
+            account_list_entry(
+                "api",
+                AppServerAuthMode::ApiKey,
+                "API key",
+                /*is_active*/ false,
+            ),
         ],
         /*feedback*/ None,
     );
@@ -341,7 +383,7 @@ fn add_account_failed_esc_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::Failed("sign-in failed".to_string()),
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -350,7 +392,7 @@ fn add_account_api_key_failed_esc_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::ApiKeyFailed("invalid API key".to_string()),
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -359,7 +401,7 @@ fn add_account_device_code_failed_esc_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::DeviceCodeFailed("device code expired".to_string()),
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -368,7 +410,7 @@ fn add_account_complete_esc_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::Complete,
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -377,7 +419,7 @@ fn add_account_choose_q_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::Choose,
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-        false,
+        /*expect_cancel*/ false,
     );
 }
 
@@ -389,7 +431,7 @@ fn add_account_waiting_esc_cancels_and_returns_to_accounts() {
             auth_url: "https://auth.example.com/login".to_string(),
         },
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 
@@ -398,7 +440,7 @@ fn add_account_starting_esc_cancels_and_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::Starting,
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 
@@ -411,7 +453,7 @@ fn add_account_device_code_waiting_esc_cancels_and_returns_to_accounts() {
             user_code: "ABCD-EFGH".to_string(),
         },
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 
@@ -420,7 +462,7 @@ fn add_account_device_code_starting_esc_cancels_and_returns_to_accounts() {
     assert_add_account_returns_to_accounts(
         LoginAddAccountState::DeviceCodeStarting,
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 
@@ -432,7 +474,7 @@ fn add_account_waiting_q_cancels_and_returns_to_accounts() {
             auth_url: "https://auth.example.com/login".to_string(),
         },
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-        true,
+        /*expect_cancel*/ true,
     );
 }
 

@@ -4,8 +4,9 @@ use crate::auth_accounts::StoredAccount;
 use crate::auth_accounts::insert_api_key_account_if_missing;
 use crate::auth_accounts::insert_chatgpt_account_if_missing;
 use crate::auth_profiles::list_auth_profiles;
-use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthKeyringBackendKind;
+use codex_protocol::auth::AuthMode;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -87,7 +88,11 @@ fn import_auth_home(
     candidate: AuthImportCandidate,
     report: &mut AuthAccountImportReport,
 ) -> io::Result<()> {
-    let auth = match load_auth_dot_json(&candidate.home, AuthCredentialsStoreMode::File) {
+    let auth = match load_auth_dot_json(
+        &candidate.home,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    ) {
         Ok(Some(auth)) => auth,
         Ok(None) => {
             push_skip(
@@ -151,7 +156,10 @@ fn import_auth_payload(
                 tokens.id_token.email,
             )?
         }
-        AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => {
+        AuthMode::Headers
+        | AuthMode::AgentIdentity
+        | AuthMode::PersonalAccessToken
+        | AuthMode::BedrockApiKey => {
             push_skip(report, source, AuthAccountImportSkipReason::UnsupportedMode);
             return Ok(());
         }

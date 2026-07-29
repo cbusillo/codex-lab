@@ -8,26 +8,23 @@ use super::background_auto_review_status_has_summary;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
-use crate::app_event::RateLimitRefreshOrigin;
+use crate::app_info::app_info_from_api;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use crate::bottom_pane::LoginAddAccountState;
-use crate::status::StatusAccountDisplay;
-use crate::status::plan_type_display_name;
 use codex_app_server_client::AppServerEvent;
-use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
 use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_protocol::ThreadId;
 
 impl App {
-    fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
+    pub(super) fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
         let enabled_config_mcp_servers: Vec<String> = self
-            .chat_widget
-            .config_ref()
+            .config
             .mcp_servers
             .get()
             .iter()
@@ -39,7 +36,7 @@ impl App {
 
     pub(super) async fn handle_app_server_event(
         &mut self,
-        app_server_client: &mut AppServerSession,
+        app_server_client: &AppServerSession,
         event: AppServerEvent,
     ) {
         match event {
@@ -69,7 +66,7 @@ impl App {
 
     async fn handle_server_notification_event(
         &mut self,
-        app_server_client: &mut AppServerSession,
+        app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
         match &notification {
@@ -85,6 +82,19 @@ impl App {
                 self.refresh_mcp_startup_expected_servers_from_config();
             }
             ServerNotification::AccountRateLimitsUpdated(notification) => {
+                if matches!(
+                    notification.rate_limits.rate_limit_reached_type,
+                    Some(
+                        RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+                            | RateLimitReachedType::WorkspaceMemberCreditsDepleted
+                            | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
+                            | RateLimitReachedType::WorkspaceMemberUsageLimitReached
+                    )
+                ) || notification.rate_limits.spend_control_reached == Some(true)
+                {
+                    self.rate_limit_hard_stop_generation =
+                        self.rate_limit_hard_stop_generation.wrapping_add(1);
+                }
                 self.chat_widget
                     .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
                 return;
@@ -95,52 +105,59 @@ impl App {
                 return;
             }
             ServerNotification::AccountUpdated(notification) => {
-                let previously_had_chatgpt_account = self.chat_widget.has_chatgpt_account();
-                let previous_account_display = self.chat_widget.status_account_display().cloned();
-                let (status_account_display, plan_type, has_chatgpt_account) =
-                    Self::account_state_from_update(
-                        notification,
-                        previous_account_display.as_ref(),
-                    );
-                let account_display_changed = previous_account_display != status_account_display;
-                self.chat_widget.update_account_state(
-                    status_account_display,
-                    plan_type,
-                    has_chatgpt_account,
+                let has_codex_backend_auth = matches!(
+                    notification.auth_mode,
+                    Some(
+                        AuthMode::Chatgpt
+                            | AuthMode::ChatgptAuthTokens
+                            | AuthMode::AgentIdentity
+                            | AuthMode::PersonalAccessToken
+                    )
                 );
-                if has_chatgpt_account
-                    && self
-                        .chat_widget
-                        .config_ref()
-                        .model_provider
-                        .requires_openai_auth
-                    && (!previously_had_chatgpt_account || account_display_changed)
-                {
-                    self.app_event_tx.send(AppEvent::RefreshRateLimits {
-                        origin: RateLimitRefreshOrigin::StartupPrefetch,
-                    });
-                }
+                self.chat_widget.update_account_state(
+                    status_account_display_from_auth_mode(
+                        notification.auth_mode,
+                        notification.plan_type,
+                    ),
+                    notification.plan_type,
+                    notification
+                        .auth_mode
+                        .is_some_and(AuthMode::has_chatgpt_account),
+                    has_codex_backend_auth,
+                );
                 self.maybe_record_completed_auth_profile_login(notification);
                 self.maybe_complete_login_add_account(notification);
                 return;
             }
-            ServerNotification::ExternalAgentConfigImportCompleted(_) => {
-                let cwd = self.chat_widget.config_ref().cwd.to_path_buf();
+            ServerNotification::ExternalAgentConfigImportCompleted(notification) => {
+                let should_report_completion =
+                    app_server_client.consume_external_agent_config_import_completion();
                 if let Err(err) = self.refresh_in_memory_config_from_disk().await {
                     tracing::warn!(
                         error = %err,
                         "failed to refresh config after external agent config import"
                     );
                 }
+                let cwd = self.chat_widget.config_ref().cwd.to_path_buf();
                 self.chat_widget.refresh_plugin_mentions();
                 self.chat_widget.submit_op(AppCommand::reload_user_config());
                 self.fetch_plugins_list(app_server_client, cwd);
+                if should_report_completion {
+                    self.chat_widget.add_plain_history_lines(
+                        crate::external_agent_config_migration_flow::external_agent_config_migration_finished_lines(notification),
+                    );
+                }
                 return;
             }
             ServerNotification::AppListUpdated(notification) => {
                 self.chat_widget.on_connectors_loaded(
                     Ok(ConnectorsSnapshot {
-                        connectors: notification.data.clone(),
+                        connectors: notification
+                            .data
+                            .iter()
+                            .cloned()
+                            .map(app_info_from_api)
+                            .collect(),
                     }),
                     /*is_final*/ false,
                 );
@@ -188,74 +205,17 @@ impl App {
                 );
                 return;
             }
+            ServerNotificationThreadTarget::AppScoped => {
+                tracing::debug!(
+                    "ignoring app-scoped MCP startup notification without a TUI app-level target"
+                );
+                return;
+            }
             ServerNotificationThreadTarget::Global => {}
         }
 
         self.chat_widget
             .handle_server_notification(notification, /*replay_kind*/ None);
-    }
-
-    pub(super) fn account_state_from_update(
-        notification: &AccountUpdatedNotification,
-        previous_account_display: Option<&StatusAccountDisplay>,
-    ) -> (
-        Option<StatusAccountDisplay>,
-        Option<codex_protocol::account::PlanType>,
-        bool,
-    ) {
-        if let Some(account) = notification.account.as_ref() {
-            return Self::account_state_from_account(account);
-        }
-        let has_chatgpt_account = notification
-            .auth_mode
-            .is_some_and(AuthMode::has_chatgpt_account);
-        (
-            Self::status_account_display_from_update(notification, previous_account_display),
-            notification.plan_type,
-            has_chatgpt_account,
-        )
-    }
-
-    fn account_state_from_account(
-        account: &Account,
-    ) -> (
-        Option<StatusAccountDisplay>,
-        Option<codex_protocol::account::PlanType>,
-        bool,
-    ) {
-        match account {
-            Account::ApiKey {} => (Some(StatusAccountDisplay::ApiKey), None, false),
-            Account::Chatgpt { email, plan_type } => (
-                Some(StatusAccountDisplay::ChatGpt {
-                    email: Some(email.clone()),
-                    plan: Some(plan_type_display_name(*plan_type)),
-                }),
-                Some(*plan_type),
-                true,
-            ),
-            Account::AmazonBedrock {} => (None, None, false),
-        }
-    }
-
-    pub(super) fn status_account_display_from_update(
-        notification: &AccountUpdatedNotification,
-        previous_account_display: Option<&StatusAccountDisplay>,
-    ) -> Option<StatusAccountDisplay> {
-        let display =
-            status_account_display_from_auth_mode(notification.auth_mode, notification.plan_type);
-        match (&display, previous_account_display) {
-            (
-                Some(StatusAccountDisplay::ChatGpt { email: None, plan }),
-                Some(StatusAccountDisplay::ChatGpt {
-                    email: previous_email,
-                    plan: previous_plan,
-                }),
-            ) => Some(StatusAccountDisplay::ChatGpt {
-                email: previous_email.clone(),
-                plan: plan.clone().or_else(|| previous_plan.clone()),
-            }),
-            _ => display,
-        }
     }
 
     async fn handle_server_request_event(
@@ -316,8 +276,9 @@ impl App {
         if pending.login_id != login_id {
             return;
         }
-        if !notification.success {
-            let pending = self.pending_auth_profile_login.take().unwrap();
+        if !notification.success
+            && let Some(pending) = self.pending_auth_profile_login.take()
+        {
             self.chat_widget.add_error_message(format!(
                 "Login for auth profile {} failed.",
                 pending.profile_label
@@ -412,8 +373,21 @@ impl App {
         let (account_id, email) = match codex_login::load_auth_dot_json(
             &auth_home,
             self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
         ) {
-            Ok(Some(auth)) => (auth.account_id(), auth.account_email()),
+            Ok(Some(auth)) => {
+                let account_id = auth.tokens.as_ref().and_then(|tokens| {
+                    tokens
+                        .account_id
+                        .clone()
+                        .or_else(|| tokens.id_token.chatgpt_account_id.clone())
+                });
+                let email = auth
+                    .tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.id_token.email.clone());
+                (account_id, email)
+            }
             Ok(None) => (None, None),
             Err(err) => {
                 self.chat_widget.add_error_message(format!(

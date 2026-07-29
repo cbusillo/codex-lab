@@ -1,3 +1,0 @@
-interface:
-  display_name: "Codex Bug"
-  short_description: "Diagnose openai/codex GitHub bug reports"

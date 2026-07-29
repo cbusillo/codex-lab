@@ -3,7 +3,7 @@ use std::fmt;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result;
-use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ServerNotificationEnvelope;
 use codex_app_server_protocol::ServerRequest;
 use serde::Serialize;
 use tokio::sync::oneshot;
@@ -19,13 +19,14 @@ impl fmt::Display for ConnectionId {
 }
 
 /// Outgoing message from the server to the client.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum OutgoingMessage {
     Request(ServerRequest),
     /// AppServerNotification is specific to the case where this is run as an
     /// "app server" as opposed to an MCP server.
-    AppServerNotification(ServerNotification),
+    AppServerNotification(ServerNotificationEnvelope),
     Response(OutgoingResponse),
     Error(OutgoingError),
 }

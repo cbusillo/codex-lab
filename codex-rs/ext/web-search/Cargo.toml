@@ -13,13 +13,14 @@ doctest = false
 workspace = true
 
 [dependencies]
-async-trait = { workspace = true }
 codex-api = { workspace = true }
 codex-core = { workspace = true }
 codex-extension-api = { workspace = true }
+codex-extension-items = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
+codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
 codex-tools = { workspace = true }
 http = { workspace = true }

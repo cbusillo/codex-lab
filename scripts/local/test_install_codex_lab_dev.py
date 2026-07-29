@@ -47,20 +47,25 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertIn("CODEX_LAB_HOME/working", contents)
             self.assertIn("CODEX_LAB_CARGO_TARGET_SCOPE", contents)
             self.assertIn("PYTHON_BIN", contents)
-            self.assertIn("cargo_env=", contents)
-            self.assertIn("eval", contents)
+            self.assertIn("CARGO_TARGET_DIR=", contents)
+            self.assertNotIn("eval", contents)
             self.assertIn("Installed Codex Lab dev launcher", result.stdout)
 
     def test_launcher_routes_build_through_cargo_env_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
-            bin_dir = root / "bin"
-            lab_home = root / "home"
-            artifact_root = root / "artifacts"
+            bin_dir = root / "bin with spaces"
+            lab_home = root / "home with spaces"
+            artifact_root = root / "artifacts with spaces"
             fake_bin = root / "fake-bin"
+            cargo_pwd_file = root / "cargo-pwd"
+            caller_dir = root / "untrusted workspace"
+            process_home = root / "process home"
             artifact_root.mkdir()
             fake_bin.mkdir()
-            checkout = root / "checkout"
+            caller_dir.mkdir()
+            process_home.mkdir()
+            checkout = root / "checkout with spaces"
             for relative_path in (
                 "scripts/local/cargo-build-env.sh",
                 "scripts/local/codex_lab_provenance.py",
@@ -69,6 +74,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
                 destination = checkout / relative_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(REPO_ROOT / relative_path, destination)
+            (checkout / "codex-rs").mkdir()
             subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
             subprocess.run(
                 ["git", "config", "user.name", "Codex Lab Test"],
@@ -90,6 +96,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
                     """\
                     #!/bin/sh
                     set -eu
+                    printf '%s\\n' "$PWD" >"$FAKE_CARGO_PWD_FILE"
                     mkdir -p "$CARGO_TARGET_DIR/debug"
                     cat >"$CARGO_TARGET_DIR/debug/codex-lab" <<'EOF'
                     #!/usr/bin/env python3
@@ -138,15 +145,17 @@ class InstallCodexLabDevTest(unittest.TestCase):
                 ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
             ).strip()
             launcher_env = {
-                "CODEX_LAB_CARGO_TARGET_DIR": str(root / "target"),
+                "CODEX_LAB_CARGO_TARGET_DIR": str(root / "target with spaces"),
                 "CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT": str(artifact_root),
                 "FAKE_BINARY_COMMIT": source_commit,
                 "FAKE_DIRTY_STATE": "clean",
-                "HOME": os.environ["HOME"],
+                "FAKE_CARGO_PWD_FILE": str(cargo_pwd_file),
+                "HOME": str(process_home),
                 "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
             }
             result = subprocess.run(
                 [str(launcher)],
+                cwd=caller_dir,
                 env=launcher_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -158,9 +167,14 @@ class InstallCodexLabDevTest(unittest.TestCase):
             candidate_root = lab_home / "working" / "dogfood"
             self.assertIn(f"candidate={candidate_root.resolve()}", result.stdout)
             self.assertNotIn("cargo-target", result.stdout)
+            self.assertEqual(
+                Path(cargo_pwd_file.read_text(encoding="utf-8").strip()).resolve(),
+                (checkout / "codex-rs").resolve(),
+            )
 
             stale = subprocess.run(
                 [str(launcher)],
+                cwd=caller_dir,
                 env={**launcher_env, "FAKE_BINARY_COMMIT": "0" * 40},
                 capture_output=True,
                 text=True,
@@ -214,7 +228,13 @@ class InstallCodexLabDevTest(unittest.TestCase):
             launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
             result = subprocess.run(
-                [str(INSTALLER), "--bin-dir", str(bin_dir)],
+                [
+                    str(INSTALLER),
+                    "--bin-dir",
+                    str(bin_dir),
+                    "--codex-lab-home",
+                    str(root / "home"),
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

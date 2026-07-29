@@ -29,7 +29,7 @@ impl ChatWidget {
         let presets: Vec<ApprovalPreset> = builtin_approval_presets();
 
         #[cfg(target_os = "windows")]
-        let windows_sandbox_level = WindowsSandboxLevel::from_config(&self.config);
+        let windows_sandbox_level = crate::windows_sandbox::level_from_config(&self.config);
         #[cfg(target_os = "windows")]
         let windows_degraded_sandbox_enabled =
             matches!(windows_sandbox_level, WindowsSandboxLevel::RestrictedToken);
@@ -37,9 +37,7 @@ impl ChatWidget {
         let windows_degraded_sandbox_enabled = false;
 
         let show_elevate_sandbox_hint =
-            crate::legacy_core::windows_sandbox::ELEVATED_SANDBOX_NUX_ENABLED
-                && windows_degraded_sandbox_enabled
-                && presets.iter().any(|preset| preset.id == "auto");
+            windows_degraded_sandbox_enabled && presets.iter().any(|preset| preset.id == "auto");
 
         let guardian_disabled_reason = |enabled: bool| {
             let mut next_features = self.config.features.get().clone();
@@ -306,13 +304,8 @@ impl ChatWidget {
                 Self::permission_profile_selection_actions,
             )
         };
-        let requires_confirmation = approvals_reviewer == ApprovalsReviewer::User
-            && preset.id == "full-access"
-            && !self
-                .config
-                .notices
-                .hide_full_access_warning
-                .unwrap_or(false);
+        let requires_confirmation =
+            approvals_reviewer == ApprovalsReviewer::User && preset.id == "full-access";
         if requires_confirmation {
             let preset = preset.clone();
             return vec![Box::new(move |tx| {
@@ -326,13 +319,13 @@ impl ChatWidget {
         if approvals_reviewer == ApprovalsReviewer::User && preset.id == "auto" {
             #[cfg(target_os = "windows")]
             {
-                if WindowsSandboxLevel::from_config(&self.config) == WindowsSandboxLevel::Disabled {
+                if crate::windows_sandbox::level_from_config(&self.config)
+                    == WindowsSandboxLevel::Disabled
+                {
                     let preset = preset.clone();
-                    if crate::legacy_core::windows_sandbox::ELEVATED_SANDBOX_NUX_ENABLED
-                        && crate::legacy_core::windows_sandbox::sandbox_setup_is_complete(
-                            self.config.codex_home.as_path(),
-                        )
-                    {
+                    if crate::windows_sandbox::sandbox_setup_is_complete(
+                        self.config.codex_home.as_path(),
+                    ) {
                         return vec![Box::new(move |tx| {
                             tx.send(AppEvent::EnableWindowsSandboxForAgentMode {
                                 preset: preset.clone(),
@@ -428,23 +421,7 @@ impl ChatWidget {
         ));
         let header = ColumnRenderable::with(header_children);
 
-        let mut accept_actions = profile_selection.clone().map_or_else(
-            || {
-                Self::approval_preset_actions(
-                    approval,
-                    preset.permission_profile.clone(),
-                    preset.active_permission_profile.clone(),
-                    selected_name.clone(),
-                    ApprovalsReviewer::User,
-                )
-            },
-            Self::permission_profile_selection_actions,
-        );
-        accept_actions.push(Box::new(|tx| {
-            tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
-        }));
-
-        let mut accept_and_remember_actions = profile_selection.map_or_else(
+        let accept_actions = profile_selection.map_or_else(
             || {
                 Self::approval_preset_actions(
                     approval,
@@ -456,10 +433,6 @@ impl ChatWidget {
             },
             Self::permission_profile_selection_actions,
         );
-        accept_and_remember_actions.push(Box::new(|tx| {
-            tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
-            tx.send(AppEvent::PersistFullAccessWarningAcknowledged);
-        }));
 
         let deny_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
             if return_to_permissions {
@@ -474,13 +447,6 @@ impl ChatWidget {
                 name: "Yes, continue anyway".to_string(),
                 description: Some("Apply full access for this session".to_string()),
                 actions: accept_actions,
-                dismiss_on_select: true,
-                ..Default::default()
-            },
-            SelectionItem {
-                name: "Yes, and don't ask again".to_string(),
-                description: Some("Enable full access and remember this choice".to_string()),
-                actions: accept_and_remember_actions,
                 dismiss_on_select: true,
                 ..Default::default()
             },

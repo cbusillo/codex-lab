@@ -84,15 +84,11 @@ impl Session {
         let Some(start) = start else {
             return;
         };
-        let Some(cwd) = turn_context
-            .environments
-            .single_local_environment_cwd()
-            .cloned()
-        else {
+        let Some(cwd) = turn_context.environments.single_local_environment_cwd() else {
             let mut state = self.state.lock().await;
             let _ = state
                 .background_auto_review
-                .complete_regular_turn_from_start(start, None);
+                .complete_regular_turn_from_start(start, /*after_fingerprint*/ None);
             debug!("background auto review skipped: no single local worktree");
             return;
         };
@@ -186,7 +182,7 @@ impl Session {
                 Arc::clone(&self),
                 &persistence,
                 BackgroundAutoReviewStatus::Pending,
-                None,
+                /*error_summary*/ None,
             )
             .await;
         }
@@ -271,9 +267,11 @@ impl Session {
             .config
             .background_auto_review_budget
             .max_scope_bytes;
-        if let Some(error_summary) =
-            background_auto_review_size_limit_summary(&turn_diff, None, max_scope_bytes)
-        {
+        if let Some(error_summary) = background_auto_review_size_limit_summary(
+            &turn_diff,
+            /*resolved_prompt*/ None,
+            max_scope_bytes,
+        ) {
             debug!(%error_summary, "background auto review skipped: oversized diff");
             self.record_scope_budget_skipped_background_auto_review(
                 &persistence,
@@ -285,7 +283,7 @@ impl Session {
             .await;
             return;
         }
-        let resolved = match resolve_review_request(review_request, cwd) {
+        let resolved = match resolve_review_request(review_request, &cwd) {
             Ok(resolved) => resolved,
             Err(err) => {
                 warn!(error = %err, "background auto review request resolution failed");
@@ -371,7 +369,9 @@ impl Session {
             Arc::clone(&turn_context),
             sub_id,
             resolved,
-            Some(ReviewPersistenceSpec::Context(persistence.clone())),
+            Some(ReviewPersistenceSpec::Context(Box::new(
+                persistence.clone(),
+            ))),
         )
         .await;
         let Some(persistence) = prepared.task.persistence_context() else {
@@ -473,13 +473,13 @@ impl Session {
             {
                 return;
             }
-            let mut scopes = vec![state.session_configuration.cwd.clone()];
+            let mut scopes = vec![state.session_configuration.cwd().clone()];
             scopes.extend(
                 state
                     .session_configuration
-                    .environments
+                    .environment_selections()
                     .iter()
-                    .map(|environment| environment.cwd.clone()),
+                    .filter_map(|environment| environment.cwd.to_abs_path().ok()),
             );
             (state.session_configuration.codex_home().clone(), scopes)
         };
@@ -931,7 +931,7 @@ async fn acquire_background_auto_review_lock(
 
 async fn background_review_fingerprint(turn_context: &TurnContext) -> Option<String> {
     let cwd = turn_context.environments.single_local_environment_cwd()?;
-    background_review_fingerprint_for_cwd(cwd).await
+    background_review_fingerprint_for_cwd(&cwd).await
 }
 
 fn background_auto_review_control_summary(

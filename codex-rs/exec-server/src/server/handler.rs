@@ -3,8 +3,9 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use codex_app_server_protocol::JSONRPCErrorError;
-use codex_app_server_protocol::RequestId;
+use codex_exec_server_protocol::JSONRPCErrorError;
+use codex_exec_server_protocol::RequestId;
+use codex_http_client::HttpClientFactory;
 use serde_json::to_value;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
@@ -12,29 +13,38 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::ExecServerRuntimePaths;
-use crate::client::http_client::PendingReqwestHttpBodyStream;
-use crate::client::http_client::ReqwestHttpRequestRunner;
+use crate::client::http_client::PendingRouteAwareHttpBodyStream;
+use crate::client::http_client::RouteAwareHttpClient;
+use crate::client::http_client::RouteAwareHttpRequestRunner;
+use crate::protocol::CapabilityRootsDiscoverParams;
+use crate::protocol::CapabilityRootsDiscoverResponse;
 use crate::protocol::EnvironmentInfo;
+use crate::protocol::EnvironmentStatus;
+use crate::protocol::EnvironmentStatusKind;
 use crate::protocol::ExecParams;
 use crate::protocol::ExecResponse;
 use crate::protocol::FsCanonicalizeParams;
 use crate::protocol::FsCanonicalizeResponse;
+use crate::protocol::FsCloseParams;
+use crate::protocol::FsCloseResponse;
 use crate::protocol::FsCopyParams;
 use crate::protocol::FsCopyResponse;
 use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsCreateDirectoryResponse;
 use crate::protocol::FsGetMetadataParams;
 use crate::protocol::FsGetMetadataResponse;
-use crate::protocol::FsJoinParams;
-use crate::protocol::FsJoinResponse;
-use crate::protocol::FsParentParams;
-use crate::protocol::FsParentResponse;
+use crate::protocol::FsOpenParams;
+use crate::protocol::FsOpenResponse;
+use crate::protocol::FsReadBlockParams;
+use crate::protocol::FsReadBlockResponse;
 use crate::protocol::FsReadDirectoryParams;
 use crate::protocol::FsReadDirectoryResponse;
 use crate::protocol::FsReadFileParams;
 use crate::protocol::FsReadFileResponse;
 use crate::protocol::FsRemoveParams;
 use crate::protocol::FsRemoveResponse;
+use crate::protocol::FsWalkParams;
+use crate::protocol::FsWalkResponse;
 use crate::protocol::FsWriteFileParams;
 use crate::protocol::FsWriteFileResponse;
 use crate::protocol::HttpRequestParams;
@@ -42,6 +52,8 @@ use crate::protocol::InitializeParams;
 use crate::protocol::InitializeResponse;
 use crate::protocol::ReadParams;
 use crate::protocol::ReadResponse;
+use crate::protocol::SignalParams;
+use crate::protocol::SignalResponse;
 use crate::protocol::TerminateParams;
 use crate::protocol::TerminateResponse;
 use crate::protocol::WriteParams;
@@ -62,6 +74,8 @@ pub(crate) struct ExecServerHandler {
     background_task_shutdown: CancellationToken,
     background_tasks: TaskTracker,
     file_system: FileSystemHandler,
+    runtime_paths: ExecServerRuntimePaths,
+    http_client: RouteAwareHttpClient,
     initialize_requested: AtomicBool,
     initialized: AtomicBool,
 }
@@ -71,6 +85,7 @@ impl ExecServerHandler {
         session_registry: Arc<SessionRegistry>,
         notifications: RpcNotificationSender,
         runtime_paths: ExecServerRuntimePaths,
+        http_client_factory: HttpClientFactory,
     ) -> Self {
         Self {
             session_registry,
@@ -79,7 +94,9 @@ impl ExecServerHandler {
             active_body_stream_ids: Mutex::new(HashSet::new()),
             background_task_shutdown: CancellationToken::new(),
             background_tasks: TaskTracker::new(),
-            file_system: FileSystemHandler::new(runtime_paths),
+            file_system: FileSystemHandler::new(runtime_paths.clone()),
+            runtime_paths,
+            http_client: RouteAwareHttpClient::new(http_client_factory),
             initialize_requested: AtomicBool::new(false),
             initialized: AtomicBool::new(false),
         }
@@ -89,6 +106,7 @@ impl ExecServerHandler {
         self.background_task_shutdown.cancel();
         self.background_tasks.close();
         self.background_tasks.wait().await;
+        self.file_system.shutdown().await;
         if let Some(session) = self.session() {
             session.detach().await;
         }
@@ -111,7 +129,11 @@ impl ExecServerHandler {
 
         let session = match self
             .session_registry
-            .attach(params.resume_session_id.clone(), self.notifications.clone())
+            .attach(
+                params.resume_session_id.clone(),
+                self.notifications.clone(),
+                self.runtime_paths.clone(),
+            )
             .await
         {
             Ok(session) => session,
@@ -153,6 +175,13 @@ impl ExecServerHandler {
         Ok(EnvironmentInfo::local())
     }
 
+    pub(crate) fn environment_status(&self) -> Result<EnvironmentStatus, JSONRPCErrorError> {
+        self.require_initialized_for("environment status")?;
+        Ok(EnvironmentStatus {
+            status: EnvironmentStatusKind::Ready,
+        })
+    }
+
     pub(crate) async fn exec_read(
         &self,
         params: ReadParams,
@@ -169,6 +198,14 @@ impl ExecServerHandler {
     ) -> Result<WriteResponse, JSONRPCErrorError> {
         let session = self.require_initialized_for("exec")?;
         session.process().exec_write(params).await
+    }
+
+    pub(crate) async fn signal(
+        &self,
+        params: SignalParams,
+    ) -> Result<SignalResponse, JSONRPCErrorError> {
+        let session = self.require_initialized_for("exec")?;
+        session.process().signal(params).await
     }
 
     pub(crate) async fn terminate(
@@ -190,7 +227,9 @@ impl ExecServerHandler {
         if stream_response {
             self.reserve_http_body_stream(&http_request_id).await?;
         }
-        let response = ReqwestHttpRequestRunner::new(params.timeout_ms)?
+        let response = self
+            .http_client
+            .runner(params.redirect_policy)
             .run(params)
             .await;
         if response.is_err() && stream_response {
@@ -228,6 +267,38 @@ impl ExecServerHandler {
         self.file_system.read_file(params).await
     }
 
+    pub(crate) async fn discover_capability_roots(
+        &self,
+        params: CapabilityRootsDiscoverParams,
+    ) -> Result<CapabilityRootsDiscoverResponse, JSONRPCErrorError> {
+        self.require_initialized_for("capability discovery")?;
+        self.file_system.discover_capability_roots(params).await
+    }
+
+    pub(crate) async fn fs_open(
+        &self,
+        params: FsOpenParams,
+    ) -> Result<FsOpenResponse, JSONRPCErrorError> {
+        self.require_initialized_for("filesystem")?;
+        self.file_system.open(params).await
+    }
+
+    pub(crate) async fn fs_read_block(
+        &self,
+        params: FsReadBlockParams,
+    ) -> Result<FsReadBlockResponse, JSONRPCErrorError> {
+        self.require_initialized_for("filesystem")?;
+        self.file_system.read_block(params).await
+    }
+
+    pub(crate) async fn fs_close(
+        &self,
+        params: FsCloseParams,
+    ) -> Result<FsCloseResponse, JSONRPCErrorError> {
+        self.require_initialized_for("filesystem")?;
+        self.file_system.close(params).await
+    }
+
     pub(crate) async fn fs_write_file(
         &self,
         params: FsWriteFileParams,
@@ -260,28 +331,20 @@ impl ExecServerHandler {
         self.file_system.canonicalize(params).await
     }
 
-    pub(crate) async fn fs_join(
-        &self,
-        params: FsJoinParams,
-    ) -> Result<FsJoinResponse, JSONRPCErrorError> {
-        self.require_initialized_for("filesystem")?;
-        self.file_system.join(params).await
-    }
-
-    pub(crate) async fn fs_parent(
-        &self,
-        params: FsParentParams,
-    ) -> Result<FsParentResponse, JSONRPCErrorError> {
-        self.require_initialized_for("filesystem")?;
-        self.file_system.parent(params).await
-    }
-
     pub(crate) async fn fs_read_directory(
         &self,
         params: FsReadDirectoryParams,
     ) -> Result<FsReadDirectoryResponse, JSONRPCErrorError> {
         self.require_initialized_for("filesystem")?;
         self.file_system.read_directory(params).await
+    }
+
+    pub(crate) async fn fs_walk(
+        &self,
+        params: FsWalkParams,
+    ) -> Result<FsWalkResponse, JSONRPCErrorError> {
+        self.require_initialized_for("filesystem")?;
+        self.file_system.walk(params).await
     }
 
     pub(crate) async fn fs_remove(
@@ -342,7 +405,7 @@ impl ExecServerHandler {
 
     async fn start_http_body_stream(
         self: &Arc<Self>,
-        pending_stream: PendingReqwestHttpBodyStream,
+        pending_stream: PendingRouteAwareHttpBodyStream,
     ) {
         let request_id = pending_stream.request_id.clone();
         if self.background_task_shutdown.is_cancelled() {
@@ -356,7 +419,7 @@ impl ExecServerHandler {
         self.background_tasks.spawn(async move {
             tokio::select! {
                 _ = shutdown.cancelled() => {}
-                _ = ReqwestHttpRequestRunner::stream_body(pending_stream, notifications) => {}
+                _ = RouteAwareHttpRequestRunner::stream_body(pending_stream, notifications) => {}
             }
             handler.release_http_body_stream(&finished_request_id).await;
         });

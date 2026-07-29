@@ -64,6 +64,7 @@ async fn retries_on_early_close() {
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_standalone_web_search: false,
     };
 
     let TestCodex { codex, .. } = test_codex()
@@ -76,7 +77,6 @@ async fn retries_on_early_close() {
 
     codex
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: "hello".into(),
                 text_elements: Vec::new(),

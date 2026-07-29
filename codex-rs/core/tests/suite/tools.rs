@@ -1,13 +1,16 @@
 #![cfg(not(target_os = "windows"))]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
 
 use std::fs;
+use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
 use codex_code_bridge_client::CodeBridgeClient;
+use codex_code_bridge_client::CodeBridgeEventStream;
+use codex_code_bridge_client::CodeBridgeSession;
 use codex_code_bridge_client::ControlResponse;
 use codex_code_bridge_client::ScreenshotResponse;
 use codex_code_bridge_protocol::BridgePayload;
@@ -28,23 +31,31 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::TurnEnvironmentSelection;
 use core_test_support::assert_regex_match;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_custom_tool_call;
+use core_test_support::responses::ev_custom_tool_call_with_namespace;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
+use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
+
+/// A real, decodable 1x1 PNG. It must be a genuinely valid image (correct chunk CRCs included):
+/// the model-visible image pipeline replaces payloads it cannot decode with a text placeholder,
+/// which would silently hide the metadata/image separation this test proves.
+const SCREENSHOT_FIXTURE_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
 fn tool_names(body: &Value) -> Vec<String> {
     body.get("tools")
@@ -61,6 +72,42 @@ fn tool_names(body: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Spawns a Code Bridge service rooted at the test's `CODEX_HOME` so the `code_bridge` tool
+/// handler discovers the same descriptor the producer fixture registers against.
+async fn start_test_bridge(
+    codex_home: &Path,
+) -> Result<(
+    codex_code_bridge_service::BridgeServiceHandle,
+    CodeBridgeClient,
+)> {
+    let bridge = codex_code_bridge_service::start(
+        codex_code_bridge_service::BridgeServiceConfig::new(codex_home.to_path_buf()),
+    )
+    .await?;
+    let client = CodeBridgeClient::from_descriptor_path(bridge.descriptor_path())?;
+    Ok((bridge, client))
+}
+
+async fn producer_session(
+    client: &CodeBridgeClient,
+    capabilities: CapabilitySet,
+) -> Result<(CodeBridgeSession, CodeBridgeEventStream)> {
+    let session = client
+        .hello(
+            "producer-1",
+            ClientRole::Producer,
+            capabilities,
+            ClientMetadata {
+                source_kind: SourceKind::TestFixture,
+                label: Some("core-suite-producer".to_string()),
+                provenance: None,
+            },
+        )
+        .await?;
+    let events = client.events(&session, /*last_event_id*/ 0).await?;
+    Ok((session, events))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -91,37 +138,26 @@ async fn code_bridge_screenshot_returns_bounded_metadata_and_image_output() -> R
 
     let mut builder = test_codex();
     let test = builder.build(&server).await?;
-    let bridge = codex_code_bridge_service::start(
-        codex_code_bridge_service::BridgeServiceConfig::new(test.codex_home_path().to_path_buf()),
+    let (bridge, bridge_client) = start_test_bridge(test.codex_home_path()).await?;
+    let (session, mut events) = producer_session(
+        &bridge_client,
+        CapabilitySet {
+            provide_screenshot: true,
+            ..CapabilitySet::default()
+        },
     )
     .await?;
-    let bridge_client = CodeBridgeClient::from_descriptor_path(bridge.descriptor_path())?;
-    let producer_session = bridge_client
-        .hello(
-            "producer-1",
-            ClientRole::Producer,
-            CapabilitySet {
-                provide_screenshot: true,
-                ..CapabilitySet::default()
-            },
-            ClientMetadata {
-                source_kind: SourceKind::TestFixture,
-                label: Some("core-suite-producer".to_string()),
-                provenance: None,
-            },
-        )
-        .await?;
-    let mut producer_events = bridge_client.events(&producer_session, 0).await?;
     let producer_client = bridge_client.clone();
     let producer_task = tokio::spawn(async move {
         loop {
-            let message = producer_events.next_message().await?;
+            let message = events.next_message().await?;
             let BridgePayload::ScreenshotRequest(request) = message.envelope.payload else {
                 continue;
             };
+            assert_eq!(request.target_client_id, "producer-1");
             producer_client
                 .respond_screenshot(
-                    &producer_session,
+                    &session,
                     ScreenshotResponse {
                         request_id: request.request_id,
                         status: ControlStatus::Ok,
@@ -129,7 +165,7 @@ async fn code_bridge_screenshot_returns_bounded_metadata_and_image_output() -> R
                             width: 1,
                             height: 1,
                             media_type: ScreenshotMediaType::Png,
-                            data_base64: "iVBORw0KGgo=".to_string(),
+                            data_base64: SCREENSHOT_FIXTURE_BASE64.to_string(),
                         }),
                         error: None,
                     },
@@ -153,14 +189,45 @@ async fn code_bridge_screenshot_returns_bounded_metadata_and_image_output() -> R
     let items = output
         .as_array()
         .context("screenshot output should be structured content")?;
-    assert_eq!(items.len(), 2);
-    let metadata = items[0]["text"].as_str().context("metadata text item")?;
-    let metadata: Value = serde_json::from_str(metadata)?;
+
+    let metadata_text = items[0]["text"]
+        .as_str()
+        .context("screenshot metadata text item")?;
+    let metadata: Value = serde_json::from_str(metadata_text)?;
     assert_eq!(metadata["status"], "ok");
     assert_eq!(metadata["screenshot"]["mediaType"], "image/png");
-    assert!(metadata["screenshot"].get("dataBase64").is_none());
-    assert_eq!(items[1]["type"], "input_image");
-    assert_eq!(items[1]["image_url"], "data:image/png;base64,iVBORw0KGgo=");
+    assert_eq!(metadata["screenshot"]["width"], 1);
+    assert_eq!(metadata["screenshot"]["height"], 1);
+    // Raw pixel data must never ride along in the model-visible text fragment; it is either a
+    // separate image item or safely omitted.
+    assert!(
+        !metadata_text.contains(SCREENSHOT_FIXTURE_BASE64),
+        "screenshot base64 must not appear in model-visible metadata text: {metadata_text}"
+    );
+
+    // The context-safety lane may omit oversized screenshots instead of inlining them. Accept
+    // either bounded outcome, but require the two shapes stay mutually exclusive and described.
+    if metadata["screenshot"]["imageOmitted"].is_null() {
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1]["type"], "input_image");
+        // The prompt image pipeline re-encodes the payload, so assert the transport shape rather
+        // than byte equality with the fixture.
+        let image_url = items[1]["image_url"].as_str().context("image_url")?;
+        assert!(
+            image_url.starts_with("data:image/png;base64,"),
+            "screenshot image must be an inline png data URL: {image_url}"
+        );
+        assert!(
+            image_url.len() > "data:image/png;base64,".len(),
+            "screenshot image data URL must carry a payload: {image_url}"
+        );
+    } else {
+        assert_eq!(items.len(), 1);
+        assert!(
+            metadata["screenshot"]["imageOmitted"]["reason"].is_string(),
+            "omitted screenshots must explain themselves: {metadata}"
+        );
+    }
 
     Ok(())
 }
@@ -190,6 +257,7 @@ async fn code_bridge_status_tool_is_model_visible_and_bounded_when_unavailable()
     let mut builder = test_codex();
     let test = builder.build(&server).await?;
 
+    // No bridge service is started, so the handler must report the unavailable path.
     test.submit_turn("check Code Bridge status").await?;
 
     let requests = responses.requests();
@@ -241,32 +309,20 @@ async fn code_bridge_javascript_returns_bounded_control_output() -> Result<()> {
 
     let mut builder = test_codex();
     let test = builder.build(&server).await?;
-    let bridge = codex_code_bridge_service::start(
-        codex_code_bridge_service::BridgeServiceConfig::new(test.codex_home_path().to_path_buf()),
+    let (bridge, bridge_client) = start_test_bridge(test.codex_home_path()).await?;
+    let (session, mut events) = producer_session(
+        &bridge_client,
+        CapabilitySet {
+            provide_control: true,
+            provide_javascript_execution: true,
+            ..CapabilitySet::default()
+        },
     )
     .await?;
-    let bridge_client = CodeBridgeClient::from_descriptor_path(bridge.descriptor_path())?;
-    let producer_session = bridge_client
-        .hello(
-            "producer-1",
-            ClientRole::Producer,
-            CapabilitySet {
-                provide_control: true,
-                provide_javascript_execution: true,
-                ..CapabilitySet::default()
-            },
-            ClientMetadata {
-                source_kind: SourceKind::TestFixture,
-                label: Some("core-suite-producer".to_string()),
-                provenance: None,
-            },
-        )
-        .await?;
-    let mut producer_events = bridge_client.events(&producer_session, 0).await?;
     let producer_client = bridge_client.clone();
     let producer_task = tokio::spawn(async move {
         loop {
-            let message = producer_events.next_message().await?;
+            let message = events.next_message().await?;
             let BridgePayload::ControlRequest(request) = message.envelope.payload else {
                 continue;
             };
@@ -279,7 +335,7 @@ async fn code_bridge_javascript_returns_bounded_control_output() -> Result<()> {
             );
             producer_client
                 .respond_control_with_result(
-                    &producer_session,
+                    &session,
                     ControlResponse {
                         request_id: request.request_id,
                         status: ControlStatus::Ok,
@@ -375,10 +431,7 @@ async fn turn_environment_selection_keeps_environment_backed_tools() -> Result<(
 
     test.submit_turn_with_environments(
         "which tools are available?",
-        Some(vec![TurnEnvironmentSelection {
-            environment_id: "local".to_string(),
-            cwd: test.config.cwd.clone(),
-        }]),
+        Some(vec![local(test.config.cwd.clone())]),
     )
     .await?;
 
@@ -434,6 +487,83 @@ async fn custom_tool_unknown_returns_custom_output_error() -> Result<()> {
         .unwrap_or_default();
     let expected = format!("unsupported custom tool call: {tool_name}");
     assert_eq!(output, expected);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn namespaced_custom_tool_call_preserves_namespace_through_dispatch_and_replay() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+
+    let call_id = "custom-namespaced";
+    let namespace = "test_namespace::";
+    let tool_name = "unsupported_tool";
+    let input = "\"payload\"";
+
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_custom_tool_call_with_namespace(call_id, namespace, tool_name, input),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn_with_approval_and_permission_profile(
+        "invoke namespaced custom tool",
+        AskForApproval::Never,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let request = mock.single_request();
+    let custom_tool_calls = request.inputs_of_type("custom_tool_call");
+    let turn_id = custom_tool_calls
+        .first()
+        .and_then(|item| item.pointer("/internal_chat_message_metadata_passthrough/turn_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .expect("custom tool call should include turn metadata");
+    assert_eq!(
+        (
+            strip_response_item_ids_from_json(Value::Array(custom_tool_calls)),
+            strip_response_item_ids_from_json(request.custom_tool_call_output(call_id)),
+        ),
+        (
+            Value::Array(vec![json!({
+                "type": "custom_tool_call",
+                "call_id": call_id,
+                "namespace": namespace,
+                "name": tool_name,
+                "input": input,
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": turn_id,
+                },
+            })]),
+            json!({
+                "type": "custom_tool_call_output",
+                "call_id": call_id,
+                "output": format!("unsupported custom tool call: {namespace}{tool_name}"),
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": turn_id,
+                },
+            }),
+        )
+    );
 
     Ok(())
 }
@@ -639,6 +769,7 @@ async fn shell_command_enforces_glob_deny_read_policy() -> Result<()> {
                         pattern: format!("{}/**/*.env", config.cwd.as_path().display()),
                     },
                     access: FileSystemAccessMode::Deny,
+                    missing_path_behavior: None,
                 });
             config
                 .permissions

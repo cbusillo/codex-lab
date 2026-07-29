@@ -11,9 +11,18 @@ use anyhow::Result;
 #[cfg(not(unix))]
 use anyhow::bail;
 #[cfg(unix)]
+use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientFactory;
+#[cfg(unix)]
+use codex_http_client::RouteAwareClientPool;
+#[cfg(unix)]
+use codex_utils_home_dir::find_codex_home;
+#[cfg(unix)]
 use futures::FutureExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::path::Path;
 #[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
@@ -41,8 +50,6 @@ use crate::managed_install::ExecutableIdentity;
 use crate::managed_install::executable_identity;
 #[cfg(unix)]
 use crate::managed_install::resolved_managed_codex_bin;
-#[cfg(unix)]
-use codex_utils_home_dir::find_codex_home;
 
 #[cfg(unix)]
 const INITIAL_UPDATE_DELAY: Duration = Duration::from_secs(5 * 60);
@@ -50,17 +57,23 @@ const INITIAL_UPDATE_DELAY: Duration = Duration::from_secs(5 * 60);
 const RESTART_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(unix)]
 const UPDATE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+#[cfg(unix)]
+const INSTALL_URL: &str = "https://chatgpt.com/codex/install.sh";
 
 #[cfg(unix)]
-pub(crate) async fn run() -> Result<()> {
+pub(crate) async fn run(http_client_factory: HttpClientFactory) -> Result<()> {
     let mut terminate =
         signal(SignalKind::terminate()).context("failed to install updater shutdown handler")?;
     let running_updater_identity = current_updater_identity().await?;
+    let http = RouteAwareClientPool::new_without_request_logging(
+        http_client_factory,
+        ClientRouteClass::Other,
+    );
     if sleep_or_terminate(INITIAL_UPDATE_DELAY, &mut terminate).await {
         return Ok(());
     }
     loop {
-        match update_once(&running_updater_identity, &mut terminate).await {
+        match update_once(&http, &running_updater_identity, &mut terminate).await {
             Ok(UpdateLoopControl::Continue) | Err(_) => {}
             Ok(UpdateLoopControl::Stop) => return Ok(()),
         }
@@ -71,7 +84,7 @@ pub(crate) async fn run() -> Result<()> {
 }
 
 #[cfg(not(unix))]
-pub(crate) async fn run() -> Result<()> {
+pub(crate) async fn run(_http_client_factory: HttpClientFactory) -> Result<()> {
     bail!("pid-managed updater loop is unsupported on this platform")
 }
 
@@ -91,10 +104,11 @@ enum UpdateLoopControl {
 
 #[cfg(unix)]
 async fn update_once(
+    http: &RouteAwareClientPool,
     running_updater_identity: &ExecutableIdentity,
     terminate: &mut Signal,
 ) -> Result<UpdateLoopControl> {
-    install_latest_standalone().await?;
+    install_latest_standalone(http).await?;
 
     let daemon = Daemon::from_environment()?;
     let managed_codex_bin = resolved_managed_codex_bin(&daemon.managed_codex_bin).await?;
@@ -156,27 +170,34 @@ pub(crate) fn reexec_managed_updater(managed_codex_bin: &std::path::Path) -> Res
 }
 
 #[cfg(unix)]
-async fn install_latest_standalone() -> Result<()> {
+async fn install_latest_standalone(http: &RouteAwareClientPool) -> Result<()> {
     let codex_lab_home = find_codex_home().context("failed to resolve CODEX_LAB_HOME")?;
-    let script = reqwest::get("https://chatgpt.com/codex/install.sh")
-        .await
-        .context("failed to fetch standalone Codex updater")?
-        .error_for_status()
-        .context("standalone Codex updater request failed")?
-        .bytes()
-        .await
-        .context("failed to read standalone Codex updater")?;
+    let script = fetch_installer_script(http).await?;
+    run_installer_script(installer_shell_command(codex_lab_home.as_path()), &script).await
+}
 
-    let mut child = Command::new("/bin/sh")
+/// Builds the shell invocation that runs the standalone installer script.
+///
+/// The upstream standalone installer only understands `CODEX_HOME`. Scope the translation to this
+/// child process so Codex Lab still uses `CODEX_LAB_HOME` as its public home selector everywhere
+/// else, and drop the legacy `CODE_HOME` selector so an inherited value cannot redirect the
+/// install.
+#[cfg(unix)]
+fn installer_shell_command(codex_lab_home: &Path) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-s")
-        // The upstream standalone installer only understands CODEX_HOME. Scope
-        // the translation to this child process so Codex Lab still uses
-        // CODEX_LAB_HOME as its public home selector everywhere else.
-        .env("CODEX_HOME", codex_lab_home.as_path())
+        .env("CODEX_HOME", codex_lab_home)
         .env_remove("CODE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[cfg(unix)]
+async fn run_installer_script(mut command: Command, script: &[u8]) -> Result<()> {
+    let mut child = command
         .spawn()
         .context("failed to invoke standalone Codex updater")?;
     let mut stdin = child
@@ -184,7 +205,7 @@ async fn install_latest_standalone() -> Result<()> {
         .take()
         .context("standalone Codex updater stdin was unavailable")?;
     stdin
-        .write_all(&script)
+        .write_all(script)
         .await
         .context("failed to pass standalone Codex updater to shell")?;
     drop(stdin);
@@ -197,6 +218,56 @@ async fn install_latest_standalone() -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!("standalone Codex updater exited with status {status}")
+    }
+}
+
+#[cfg(unix)]
+async fn fetch_installer_script(http: &impl InstallerHttp) -> Result<Vec<u8>> {
+    match http.get(INSTALL_URL).await? {
+        InstallerResponse::Success(body) => Ok(body),
+        InstallerResponse::Unsuccessful { status } => {
+            anyhow::bail!("standalone Codex updater request failed with status {status}")
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InstallerResponse {
+    Success(Vec<u8>),
+    Unsuccessful { status: u16 },
+}
+
+#[cfg(unix)]
+/// HTTP boundary used to download the standalone installer.
+///
+/// Implementations must issue a GET for the supplied URL, return exact response bytes for a
+/// successful status, and report a non-success status without buffering its response body.
+trait InstallerHttp: Send + Sync {
+    fn get<'a>(
+        &'a self,
+        url: &'a str,
+    ) -> impl std::future::Future<Output = Result<InstallerResponse>> + Send + 'a;
+}
+
+#[cfg(unix)]
+impl InstallerHttp for RouteAwareClientPool {
+    async fn get(&self, url: &str) -> Result<InstallerResponse> {
+        let response = RouteAwareClientPool::get(self, url)
+            .send()
+            .await
+            .context("failed to fetch standalone Codex updater")?;
+        if !response.status().is_success() {
+            return Ok(InstallerResponse::Unsuccessful {
+                status: response.status().as_u16(),
+            });
+        }
+        let body = response
+            .bytes()
+            .await
+            .context("failed to read standalone Codex updater")?
+            .to_vec();
+        Ok(InstallerResponse::Success(body))
     }
 }
 

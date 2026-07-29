@@ -1,5 +1,4 @@
 #![cfg(not(target_os = "windows"))]
-#![allow(clippy::expect_used)]
 use anyhow::Result;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
@@ -37,6 +36,7 @@ use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -103,7 +103,12 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
         provider,
     );
 
-    manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
 
     let model_info = manager
         .get_model_info("gpt-5.3-codex-test", &config.to_models_manager_config())
@@ -158,7 +163,6 @@ async fn remote_models_config_context_window_override_clamps_to_max_context_wind
                 text: "check context window".into(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -226,7 +230,6 @@ async fn remote_models_config_override_above_max_uses_max_context_window() -> Re
                 text: "check context window".into(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -293,7 +296,6 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
                 text: "check context window".into(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -319,31 +321,31 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gpt_5_6_luna_uses_compatible_headers_and_maps_ultra_to_max() -> Result<()> {
+async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
     let server = MockServer::start().await;
-    let requested_model = "gpt-5.6-luna";
-    let prefix_model = requested_model;
+    let requested_model = "gpt-5.3-codex-test";
+    let prefix_model = "gpt-5.3-codex";
     let mut remote_model = test_remote_model_with_policy(
         prefix_model,
         ModelVisibility::List,
         /*priority*/ 1_000,
         TruncationPolicyConfig::bytes(/*limit*/ 10_000),
     );
-    remote_model.default_reasoning_level = Some(ReasoningEffort::Ultra);
+    let custom_reasoning_effort = ReasoningEffort::Custom("future".to_string());
+    remote_model.default_reasoning_level = Some(custom_reasoning_effort.clone());
     remote_model.supported_reasoning_levels = vec![
         ReasoningEffortPreset {
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         },
         ReasoningEffortPreset {
-            effort: ReasoningEffort::Ultra,
-            description: ReasoningEffort::Ultra.to_string(),
+            effort: custom_reasoning_effort.clone(),
+            description: custom_reasoning_effort.to_string(),
         },
     ];
-    remote_model.supports_reasoning_summaries = true;
     remote_model.default_reasoning_summary = ReasoningSummary::Detailed;
     mount_models_once(
         &server,
@@ -373,7 +375,6 @@ async fn gpt_5_6_luna_uses_compatible_headers_and_maps_ultra_to_max() -> Result<
                 text: "check model slug".into(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -394,15 +395,8 @@ async fn gpt_5_6_luna_uses_compatible_headers_and_maps_ultra_to_max() -> Result<
         .and_then(|reasoning| reasoning.get("summary"))
         .and_then(|value| value.as_str());
     assert_eq!(body["model"].as_str(), Some(requested_model));
-    assert_eq!(reasoning_effort, Some("max"));
+    assert_eq!(reasoning_effort, Some("future"));
     assert_eq!(reasoning_summary, Some("detailed"));
-    assert_eq!(request.header("version"), Some("0.144.0".to_string()));
-    assert_eq!(
-        request.header("user-agent"),
-        Some(codex_login::default_client::get_codex_user_agent_for_model(
-            requested_model
-        ))
-    );
 
     Ok(())
 }
@@ -431,7 +425,6 @@ async fn namespaced_model_slug_uses_catalog_metadata_without_fallback_warning() 
                 text: "check namespaced model metadata".into(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -496,7 +489,8 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         upgrade: None,
         base_instructions: "base instructions".to_string(),
         model_messages: None,
-        supports_reasoning_summaries: false,
+        include_skills_usage_instructions: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -509,6 +503,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         context_window: Some(272_000),
         max_context_window: None,
         auto_compact_token_limit: None,
+        comp_hash: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
     };
@@ -589,12 +584,11 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
                 text: "run call".into(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(cwd_path),
+                environments: Some(local_selections(cwd_path)),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -749,7 +743,8 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
         upgrade: None,
         base_instructions: remote_base.to_string(),
         model_messages: None,
-        supports_reasoning_summaries: false,
+        include_skills_usage_instructions: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -762,6 +757,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
         context_window: Some(272_000),
         max_context_window: None,
         auto_compact_token_limit: None,
+        comp_hash: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
     };
@@ -817,12 +813,11 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
                 text: "hello remote".into(),
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(cwd_path),
+                environments: Some(local_selections(cwd_path)),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -873,7 +868,12 @@ async fn remote_models_do_not_append_removed_builtin_presets() -> Result<()> {
         provider,
     );
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     let remote = available
         .iter()
         .find(|model| model.model == "remote-alpha")
@@ -934,7 +934,12 @@ async fn remote_models_merge_adds_new_high_priority_first() -> Result<()> {
         provider,
     );
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     assert_eq!(
         available.first().map(|model| model.model.as_str()),
         Some("remote-top")
@@ -981,7 +986,12 @@ async fn remote_models_merge_replaces_overlapping_model() -> Result<()> {
         provider,
     );
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     let overridden = available
         .iter()
         .find(|model| model.model == slug)
@@ -1025,7 +1035,12 @@ async fn remote_models_merge_preserves_bundled_models_on_empty_response() -> Res
         provider,
     );
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     let bundled_slug = bundled_model_slug();
     assert!(
         available.iter().any(|model| model.model == bundled_slug),
@@ -1070,7 +1085,12 @@ async fn remote_models_request_times_out_after_5s() -> Result<()> {
     let start = Instant::now();
     let model = timeout(
         Duration::from_secs(7),
-        manager.get_default_model(&None, RefreshStrategy::OnlineIfUncached),
+        manager.get_default_model(
+            &None,
+            /*allow_provider_model_fallback*/ false,
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        ),
     )
     .await;
     let elapsed = start.elapsed();
@@ -1138,11 +1158,21 @@ async fn remote_models_hide_picker_only_models() -> Result<()> {
     );
 
     let selected = manager
-        .get_default_model(&None, RefreshStrategy::OnlineIfUncached)
+        .get_default_model(
+            &None,
+            /*allow_provider_model_fallback*/ false,
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
         .await;
     assert_eq!(selected, bundled_default_model_slug());
 
-    let available = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let available = manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
     let hidden = available
         .iter()
         .find(|model| model.model == "codex-auto-balanced")
@@ -1163,7 +1193,12 @@ async fn wait_for_model_available(manager: &SharedModelsManager, slug: &str) -> 
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(model) = {
-            let guard = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+            let guard = manager
+                .list_models(
+                    RefreshStrategy::OnlineIfUncached,
+                    codex_core::test_support::default_http_client_factory(),
+                )
+                .await;
             guard.iter().find(|model| model.model == slug).cloned()
         } {
             return model;
@@ -1176,8 +1211,7 @@ async fn wait_for_model_available(manager: &SharedModelsManager, slug: &str) -> 
 }
 
 fn bundled_model_slug() -> String {
-    let response = bundled_models_response()
-        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let response = bundled_models_response().expect("bundled models.json should parse");
     response
         .models
         .first()
@@ -1236,7 +1270,8 @@ fn test_remote_model_with_policy(
         upgrade: None,
         base_instructions: "base instructions".to_string(),
         model_messages: None,
-        supports_reasoning_summaries: false,
+        include_skills_usage_instructions: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -1249,6 +1284,7 @@ fn test_remote_model_with_policy(
         context_window: Some(272_000),
         max_context_window: None,
         auto_compact_token_limit: None,
+        comp_hash: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
     }

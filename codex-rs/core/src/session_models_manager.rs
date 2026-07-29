@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use async_trait::async_trait;
+use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::ModelsManager;
+use codex_models_manager::manager::ModelsManagerFuture;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::config_types::CollaborationModeMask;
@@ -29,32 +30,47 @@ struct LeaseAwareModelsManager {
     provider: ModelProviderInfo,
     codex_home: PathBuf,
     config_model_catalog: Option<ModelsResponse>,
+    control_models_manager: SharedModelsManager,
     state: Mutex<(u64, SharedModelsManager)>,
 }
 
 pub(crate) fn models_manager_for_execution_account(
     config: &Config,
     lease: ExecutionAccountLease,
+    control_models_manager: SharedModelsManager,
 ) -> SharedModelsManager {
-    Arc::new(LeaseAwareModelsManager::new(config, lease))
+    Arc::new(LeaseAwareModelsManager::new(
+        config,
+        lease,
+        control_models_manager,
+    ))
 }
 
 impl LeaseAwareModelsManager {
-    fn new(config: &Config, lease: ExecutionAccountLease) -> Self {
+    fn new(
+        config: &Config,
+        lease: ExecutionAccountLease,
+        control_models_manager: SharedModelsManager,
+    ) -> Self {
         let models_context = lease.models_context();
-        let manager = Self::build_manager(
-            config.codex_home.as_path(),
-            &config.model_provider_id,
-            &config.model_provider,
-            config.model_catalog.clone(),
-            &models_context,
-        );
+        let manager = if lease.models_manager_auth_matches(control_models_manager.auth_manager()) {
+            Arc::clone(&control_models_manager)
+        } else {
+            Self::build_manager(
+                config.codex_home.as_path(),
+                &config.model_provider_id,
+                &config.model_provider,
+                config.model_catalog.clone(),
+                &models_context,
+            )
+        };
         Self {
             lease,
             provider_id: config.model_provider_id.clone(),
             provider: config.model_provider.clone(),
             codex_home: config.codex_home.to_path_buf(),
             config_model_catalog: config.model_catalog.clone(),
+            control_models_manager,
             state: Mutex::new((models_context.generation, manager)),
         }
     }
@@ -66,13 +82,20 @@ impl LeaseAwareModelsManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.0 != models_context.generation {
-            state.1 = Self::build_manager(
-                &self.codex_home,
-                &self.provider_id,
-                &self.provider,
-                self.config_model_catalog.clone(),
-                &models_context,
-            );
+            state.1 = if self
+                .lease
+                .models_manager_auth_matches(self.control_models_manager.auth_manager())
+            {
+                Arc::clone(&self.control_models_manager)
+            } else {
+                Self::build_manager(
+                    &self.codex_home,
+                    &self.provider_id,
+                    &self.provider,
+                    self.config_model_catalog.clone(),
+                    &models_context,
+                )
+            };
             state.0 = models_context.generation;
         }
         Arc::clone(&state.1)
@@ -101,16 +124,43 @@ impl LeaseAwareModelsManager {
     }
 }
 
-#[async_trait]
 impl ModelsManager for LeaseAwareModelsManager {
-    async fn raw_model_catalog(&self, refresh_strategy: RefreshStrategy) -> ModelsResponse {
-        self.current_manager()
-            .raw_model_catalog(refresh_strategy)
-            .await
+    fn get_default_model<'a>(
+        &'a self,
+        model: &'a Option<String>,
+        allow_provider_model_fallback: bool,
+        refresh_strategy: RefreshStrategy,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'a, String> {
+        let manager = self.current_manager();
+        Box::pin(async move {
+            manager
+                .get_default_model(
+                    model,
+                    allow_provider_model_fallback,
+                    refresh_strategy,
+                    http_client_factory,
+                )
+                .await
+        })
     }
 
-    async fn get_remote_models(&self) -> Vec<ModelInfo> {
-        self.current_manager().get_remote_models().await
+    fn raw_model_catalog(
+        &self,
+        refresh_strategy: RefreshStrategy,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ModelsResponse> {
+        let manager = self.current_manager();
+        Box::pin(async move {
+            manager
+                .raw_model_catalog(refresh_strategy, http_client_factory)
+                .await
+        })
+    }
+
+    fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>> {
+        let manager = self.current_manager();
+        Box::pin(async move { manager.get_remote_models().await })
     }
 
     fn try_get_remote_models(&self) -> Result<Vec<ModelInfo>, TryLockError> {
@@ -134,8 +184,15 @@ impl ModelsManager for LeaseAwareModelsManager {
         self.current_manager().list_collaboration_modes()
     }
 
-    async fn refresh_if_new_etag(&self, etag: String) {
-        self.current_manager().refresh_if_new_etag(etag).await;
+    fn refresh_if_new_etag(
+        &self,
+        etag: String,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        let manager = self.current_manager();
+        Box::pin(async move {
+            manager.refresh_if_new_etag(etag, http_client_factory).await;
+        })
     }
 }
 

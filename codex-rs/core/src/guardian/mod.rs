@@ -19,7 +19,6 @@ mod review_session;
 
 use std::time::Duration;
 
-use codex_protocol::protocol::GuardianAssessmentDecisionSource;
 use codex_protocol::protocol::GuardianAssessmentOutcome;
 use serde::Deserialize;
 use serde::Serialize;
@@ -29,15 +28,15 @@ pub(crate) use approval_request::GuardianMcpAnnotations;
 pub(crate) use approval_request::GuardianNetworkAccessTrigger;
 #[cfg(test)]
 pub(crate) use approval_request::guardian_approval_request_to_json;
-pub(crate) use review::guardian_rejection_message;
+pub(crate) use review::GuardianReviewOptions;
 pub(crate) use review::guardian_timeout_message;
 pub(crate) use review::is_guardian_reviewer_source;
 pub(crate) use review::new_guardian_review_id;
 #[cfg(test)]
 pub(crate) use review::record_guardian_denial_for_test;
 pub(crate) use review::review_approval_request;
-#[cfg(test)]
 pub(crate) use review::review_approval_request_with_cancel;
+pub(crate) use review::routes_approval_policy_to_guardian;
 pub(crate) use review::routes_approval_to_guardian;
 pub(crate) use review::routes_approval_to_guardian_with_reviewer;
 pub(crate) use review::spawn_approval_request_review;
@@ -66,12 +65,6 @@ pub(crate) struct GuardianAssessment {
     pub(crate) user_authorization: codex_protocol::protocol::GuardianUserAuthorization,
     pub(crate) outcome: GuardianAssessmentOutcome,
     pub(crate) rationale: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GuardianRejection {
-    pub(crate) rationale: String,
-    pub(crate) source: GuardianAssessmentDecisionSource,
 }
 
 #[derive(Debug, Default)]
@@ -156,10 +149,6 @@ use prompt::collect_guardian_transcript_entries;
 #[cfg(test)]
 use prompt::guardian_output_schema;
 #[cfg(test)]
-pub(crate) use prompt::guardian_policy_prompt;
-#[cfg(test)]
-pub(crate) use prompt::guardian_policy_prompt_with_config;
-#[cfg(test)]
 use prompt::guardian_truncate_text;
 #[cfg(test)]
 use prompt::parse_guardian_assessment;
@@ -168,7 +157,7 @@ use prompt::render_guardian_transcript_entries;
 #[cfg(test)]
 use review::GuardianReviewOutcome;
 #[cfg(test)]
-use review::run_guardian_review_session as run_guardian_review_session_for_test;
+use review::run_guardian_review_session_with_retry as run_guardian_review_session_for_test;
 #[cfg(test)]
 use review_session::build_guardian_review_session_config as build_guardian_review_session_config_for_test;
 

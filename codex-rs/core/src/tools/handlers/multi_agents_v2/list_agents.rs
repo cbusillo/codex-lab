@@ -5,7 +5,6 @@ use codex_tools::ToolSpec;
 
 pub(crate) struct Handler;
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for Handler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("list_agents")
@@ -15,7 +14,13 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_list_agents_tool()
     }
 
-    async fn handle(
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl Handler {
+    async fn handle_call(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
@@ -45,6 +50,13 @@ impl ToolExecutor<ToolInvocation> for Handler {
         } else {
             agents
         };
+        // Agent completion messages and external-agent failure text are agent/process-authored and
+        // otherwise unbounded. `list_agents` output is model-visible, so it carries the same
+        // completion-payload budget as inter-agent notifications.
+        let agents = agents
+            .into_iter()
+            .map(ListedAgent::bounded_for_model)
+            .collect();
 
         Ok(boxed_tool_output(ListAgentsResult { agents }))
     }

@@ -34,13 +34,8 @@ CLAUDE.md
 .claude/
 AGENTS.override.md
 
-# Local operator/runtime scratch. Codex Lab repo-owned metadata belongs in
-# `.codex/`; private agent output and tool state must not be committed.
-.code/
-
 # caches
 .cache/
-.tmp/
 .turbo/
 .parcel-cache/
 .eslintcache
@@ -65,6 +60,8 @@ yarn-error.log*
 # ci
 .vercel/
 .netlify/
+/.tmp/sdk-ci/
+/upstream-rusty-v8/
 
 # patches
 apply_patch/
@@ -97,4 +94,3 @@ CHANGELOG.ignore.md
 # Python bytecode files
 __pycache__/
 *.pyc
-/handoff*.md

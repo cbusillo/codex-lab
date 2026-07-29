@@ -18,9 +18,12 @@ pub(crate) use codex_app_server_transport::ConnectionId;
 pub(crate) use codex_app_server_transport::ConnectionOrigin;
 pub(crate) use codex_app_server_transport::OutgoingMessage;
 pub(crate) use codex_app_server_transport::QueuedOutgoingMessage;
+pub(crate) use codex_app_server_transport::RemoteControlEnableError;
 pub(crate) use codex_app_server_transport::RemoteControlHandle;
+pub(crate) use codex_app_server_transport::RemoteControlPolicy;
 pub(crate) use codex_app_server_transport::RemoteControlReconnectUnavailable;
 pub(crate) use codex_app_server_transport::RemoteControlStartConfig;
+pub use codex_app_server_transport::RemoteControlStartupMode;
 pub(crate) use codex_app_server_transport::RemoteControlUnavailable;
 pub(crate) use codex_app_server_transport::TransportEvent;
 pub(crate) use codex_app_server_transport::acquire_app_server_startup_lock;
@@ -32,6 +35,7 @@ pub(crate) use codex_app_server_transport::start_control_socket_acceptor;
 pub(crate) use codex_app_server_transport::start_remote_control;
 pub(crate) use codex_app_server_transport::start_stdio_connection;
 pub(crate) use codex_app_server_transport::start_websocket_acceptor;
+pub use codex_app_server_transport::take_remote_control_disabled_env;
 
 pub(crate) struct ConnectionState {
     pub(crate) outbound_initialized: Arc<AtomicBool>,
@@ -102,15 +106,15 @@ fn should_skip_notification_for_connection(
         return false;
     };
     match message {
-        OutgoingMessage::AppServerNotification(notification) => {
-            if notification.experimental_reason().is_some()
+        OutgoingMessage::AppServerNotification(envelope) => {
+            if envelope.notification.experimental_reason().is_some()
                 && !connection_state
                     .experimental_api_enabled
                     .load(Ordering::Acquire)
             {
                 return true;
             }
-            let method = notification.to_string();
+            let method = envelope.notification.to_string();
             opted_out_notification_methods.contains(method.as_str())
         }
         _ => false,

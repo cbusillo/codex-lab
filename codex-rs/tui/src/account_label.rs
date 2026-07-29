@@ -1,5 +1,5 @@
-use codex_app_server_protocol::AuthMode;
 use codex_login::StoredAccount;
+use codex_protocol::auth::AuthMode;
 
 const KEY_SUFFIX_LEN: usize = 8;
 
@@ -18,7 +18,11 @@ pub(crate) fn account_display_label(account: &StoredAccount) -> String {
                         return trimmed.to_string();
                     }
                 }
-                AuthMode::ApiKey | AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => {
+                AuthMode::ApiKey
+                | AuthMode::Headers
+                | AuthMode::AgentIdentity
+                | AuthMode::PersonalAccessToken
+                | AuthMode::BedrockApiKey => {
                     return trimmed.to_string();
                 }
             }
@@ -39,6 +43,8 @@ pub(crate) fn account_display_label(account: &StoredAccount) -> String {
             .unwrap_or_else(|| "API key".to_string()),
         AuthMode::AgentIdentity => "Agent identity".to_string(),
         AuthMode::PersonalAccessToken => "Personal access token".to_string(),
+        AuthMode::Headers => "Request headers".to_string(),
+        AuthMode::BedrockApiKey => "Bedrock API key".to_string(),
     }
 }
 
@@ -51,12 +57,15 @@ pub(crate) fn key_suffix(text: &str) -> String {
 }
 
 /// Returns an ordering priority for stored accounts.
+#[cfg(test)]
 pub(crate) fn account_mode_priority(mode: AuthMode) -> u8 {
     match mode {
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => 0,
         AuthMode::ApiKey => 1,
         AuthMode::AgentIdentity => 2,
         AuthMode::PersonalAccessToken => 3,
+        AuthMode::Headers => 4,
+        AuthMode::BedrockApiKey => 5,
     }
 }
 

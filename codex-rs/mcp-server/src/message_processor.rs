@@ -6,7 +6,8 @@ use codex_core::StateDbHandle;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_exec_server::EnvironmentManager;
-use codex_extension_api::empty_extension_registry;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
 use codex_login::default_client::USER_AGENT_SUFFIX;
 use codex_login::default_client::get_codex_user_agent;
@@ -62,17 +63,36 @@ impl MessageProcessor {
             /*enable_codex_api_key_env*/ false,
         )
         .await;
+        let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
+            config.codex_home.clone(),
+        ));
+        let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+        codex_git_attribution::install(
+            &mut extensions,
+            auth_manager.clone(),
+            config.chatgpt_base_url.clone(),
+            config.http_client_factory(),
+        );
+        codex_image_generation_extension::install(
+            &mut extensions,
+            auth_manager.clone(),
+            |config: &Config| Some(config.codex_home.clone()),
+        );
         let thread_manager = Arc::new(ThreadManager::new(
             config.as_ref(),
-            auth_manager,
+            Arc::clone(&auth_manager),
+            codex_core::build_models_manager(config.as_ref(), auth_manager),
+            codex_core::CodexAppsToolsCache::default(),
             SessionSource::Mcp,
             environment_manager,
-            empty_extension_registry(),
+            Arc::new(extensions.build()),
+            user_instructions_provider,
             /*analytics_events_client*/ None,
             codex_core::thread_store_from_config(config.as_ref(), state_db.clone()),
-            state_db.clone(),
+            codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,
             /*attestation_provider*/ None,
+            /*external_time_provider*/ None,
         ));
         Self {
             outgoing,

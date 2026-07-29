@@ -12,13 +12,13 @@ pub enum ApprovalModeCliArg {
     /// is not in the "trusted" set.
     Untrusted,
 
-    /// DEPRECATED: Run all commands without asking for user approval.
-    /// Only asks for approval if a command fails to execute, in which case it
-    /// will escalate to the user to ask for un-sandboxed execution.
-    /// Prefer `on-request` for interactive runs or `never` for non-interactive runs.
-    OnFailure,
-
     /// The model decides when to ask the user for approval.
+    ///
+    /// `on-failure` is a deprecated alias kept for backward compatibility with
+    /// older command lines. It is accepted but intentionally hidden from help,
+    /// mirroring the `on-failure` serde alias on
+    /// [`AskForApproval::OnRequest`].
+    #[value(alias = "on-failure")]
     OnRequest,
 
     /// Never ask for user approval
@@ -26,11 +26,14 @@ pub enum ApprovalModeCliArg {
     Never,
 }
 
+#[cfg(test)]
+#[path = "approval_mode_cli_arg_tests.rs"]
+mod tests;
+
 impl From<ApprovalModeCliArg> for AskForApproval {
     fn from(value: ApprovalModeCliArg) -> Self {
         match value {
             ApprovalModeCliArg::Untrusted => AskForApproval::UnlessTrusted,
-            ApprovalModeCliArg::OnFailure => AskForApproval::OnFailure,
             ApprovalModeCliArg::OnRequest => AskForApproval::OnRequest,
             ApprovalModeCliArg::Never => AskForApproval::Never,
         }

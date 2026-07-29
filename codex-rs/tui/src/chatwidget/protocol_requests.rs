@@ -30,13 +30,23 @@ impl ChatWidget {
                 self.on_elicitation_request(request_id, params);
             }
             ServerRequest::PermissionsRequestApproval { params, .. } => {
-                self.on_request_permissions(request_permissions_from_params(params));
+                // TODO(anp): Remove this native-path localization error path once core permission
+                // paths remain PathUri after crossing the app-server boundary.
+                match request_permissions_from_params(params) {
+                    Ok(event) => self.on_request_permissions(event),
+                    Err(err) => {
+                        self.add_error_message(format!(
+                            "failed to localize requested filesystem paths: {err}"
+                        ));
+                    }
+                }
             }
             ServerRequest::ToolRequestUserInput { params, .. } => {
                 self.on_request_user_input(params);
             }
             ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
+            | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. }
             | ServerRequest::ApplyPatchApproval { .. }
             | ServerRequest::ExecCommandApproval { .. } => {
@@ -99,6 +109,17 @@ impl ChatWidget {
         completion: Option<(i64, codex_app_server_protocol::AutoReviewDecisionSource)>,
         action: GuardianApprovalReviewAction,
     ) {
+        // TODO(anp): Remove this native-path localization error path once core permission paths
+        // remain PathUri after crossing the app-server boundary.
+        let action = match action.try_into() {
+            Ok(action) => action,
+            Err(err) => {
+                self.add_error_message(format!(
+                    "failed to localize guardian filesystem paths: {err}"
+                ));
+                return;
+            }
+        };
         let (completed_at_ms, decision_source) = match completion {
             Some((completed_at_ms, decision_source)) => {
                 (Some(completed_at_ms), Some(decision_source))
@@ -109,6 +130,8 @@ impl ChatWidget {
         self.on_guardian_assessment(GuardianAssessmentEvent {
             id,
             target_item_id: None,
+            plugin_id: None,
+            script_path: None,
             turn_id,
             started_at_ms,
             completed_at_ms,
@@ -165,7 +188,7 @@ impl ChatWidget {
                     GuardianAssessmentDecisionSource::Agent
                 }
             }),
-            action: action.into(),
+            action,
         });
     }
 
@@ -221,8 +244,6 @@ fn auto_review_summary_contains_run(
 fn background_auto_review_status_needs_history(
     notification: &codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
 ) -> bool {
-    // Progress and normal completion live in status state; transcript history is
-    // reserved for terminal statuses that carry a reason the user should see.
     match notification.status {
         codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
         | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled

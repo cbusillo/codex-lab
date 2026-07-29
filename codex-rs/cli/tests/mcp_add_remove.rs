@@ -93,11 +93,8 @@ async fn add_uses_codex_lab_home_when_legacy_homes_are_set() -> Result<()> {
 
     let codex_lab_servers = load_global_mcp_servers(codex_lab_home.path()).await?;
     assert!(codex_lab_servers.contains_key("docs"));
-
-    let codex_home_servers = load_global_mcp_servers(codex_home.path()).await?;
-    assert!(codex_home_servers.is_empty());
-    let code_home_servers = load_global_mcp_servers(code_home.path()).await?;
-    assert!(code_home_servers.is_empty());
+    assert!(load_global_mcp_servers(codex_home.path()).await?.is_empty());
+    assert!(load_global_mcp_servers(code_home.path()).await?.is_empty());
 
     Ok(())
 }

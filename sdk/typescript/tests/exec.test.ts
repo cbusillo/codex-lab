@@ -113,7 +113,7 @@ describe("CodexExec", () => {
 
     try {
       const exec = new CodexExec("codex", {
-        CODEX_LAB_HOME: "/tmp/codex-lab-home",
+        CODEX_LAB_HOME: "/tmp/codex-home",
         CUSTOM_ENV: "custom",
       });
 
@@ -134,7 +134,7 @@ describe("CodexExec", () => {
         throw new Error("Spawn args missing");
       }
 
-      expect(spawnEnv.CODEX_LAB_HOME).toBe("/tmp/codex-lab-home");
+      expect(spawnEnv.CODEX_HOME).toBe("/tmp/codex-home");
       expect(spawnEnv.CUSTOM_ENV).toBe("custom");
       expect(spawnEnv.CODEX_ENV_SHOULD_NOT_LEAK).toBeUndefined();
       expect(spawnEnv.CODEX_API_KEY).toBe("test");

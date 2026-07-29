@@ -38,7 +38,6 @@ use codex_shell_escalation::EscalationExecution;
 use codex_shell_escalation::EscalationPermissions;
 use codex_shell_escalation::ExecResult;
 use codex_shell_escalation::ResolvedPermissionProfile;
-use codex_shell_escalation::ShellCommandExecutor;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -70,6 +69,7 @@ fn read_only_file_system_sandbox_policy() -> FileSystemSandboxPolicy {
             value: FileSystemSpecialPath::Root,
         },
         access: FileSystemAccessMode::Read,
+        missing_path_behavior: None,
     }])
 }
 
@@ -80,12 +80,14 @@ fn denied_read_file_system_sandbox_policy() -> FileSystemSandboxPolicy {
                 value: FileSystemSpecialPath::Root,
             },
             access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::GlobPattern {
                 pattern: "**/*.env".to_string(),
             },
             access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ])
 }
@@ -300,12 +302,14 @@ fn shell_request_escalation_execution_is_explicit() {
                 path: AbsolutePathBuf::from_absolute_path("/tmp/original/output").unwrap(),
             },
             access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::Path {
                 path: AbsolutePathBuf::from_absolute_path("/tmp/secret").unwrap(),
             },
             access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ]);
     let network_sandbox_policy = NetworkSandboxPolicy::Restricted;
@@ -367,6 +371,7 @@ async fn unsandboxed_intercepted_exec_strips_managed_network_env() -> anyhow::Re
         sandbox: SandboxType::None,
         env: HashMap::new(),
         network: None,
+        network_environment_id: None,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
         arg0: None,
         sandbox_policy_cwd: workdir.clone(),
@@ -410,7 +415,9 @@ async fn preapproved_additional_permissions_escalate_intercepted_exec() -> anyho
     let requested_permissions = AdditionalPermissionProfile {
         file_system: Some(FileSystemPermissions::from_read_write_roots(
             /*read*/ None,
-            Some(vec![AbsolutePathBuf::from_absolute_path("/tmp/output")?]),
+            Some(vec![
+                AbsolutePathBuf::from_absolute_path("/tmp/output").unwrap(),
+            ]),
         )),
         ..Default::default()
     };
@@ -424,6 +431,7 @@ async fn preapproved_additional_permissions_escalate_intercepted_exec() -> anyho
         session: Arc::new(session),
         turn: Arc::new(turn_context),
         call_id: "preapproved-additional-permissions".to_string(),
+        environment_id: "local".to_string(),
         tool_name: GuardianCommandSource::Shell,
         approval_policy: AskForApproval::OnRequest,
         permission_profile: permission_profile.clone(),
@@ -525,7 +533,7 @@ async fn execve_permission_request_hook_short_circuits_prompt() -> anyhow::Resul
             },
         }))
         .context("build trusted hook state")?,
-    );
+    )?;
 
     let mut hook_shell_argv = session
         .user_shell()
@@ -559,6 +567,7 @@ async fn execve_permission_request_hook_short_circuits_prompt() -> anyhow::Resul
         session: std::sync::Arc::new(session),
         turn: std::sync::Arc::new(turn_context),
         call_id: "execve-hook-call".to_string(),
+        environment_id: "local".to_string(),
         tool_name: GuardianCommandSource::Shell,
         approval_policy: AskForApproval::OnRequest,
         permission_profile: PermissionProfile::read_only(),
@@ -769,6 +778,7 @@ prefix_rule(pattern = ["{cat_path_literal}"], decision = "allow")
         session: Arc::new(session),
         turn: Arc::new(turn_context),
         call_id: "deny-read-prefix-allow".to_string(),
+        environment_id: "local".to_string(),
         tool_name: GuardianCommandSource::Shell,
         approval_policy: AskForApproval::OnRequest,
         permission_profile,
@@ -805,6 +815,7 @@ async fn denied_reads_keep_granular_sandbox_rejection_for_escalation() -> anyhow
         session: Arc::new(session),
         turn: Arc::new(turn_context),
         call_id: "deny-read-granular-sandbox-reject".to_string(),
+        environment_id: "local".to_string(),
         tool_name: GuardianCommandSource::Shell,
         approval_policy: AskForApproval::Granular(GranularApprovalConfig {
             sandbox_approval: false,

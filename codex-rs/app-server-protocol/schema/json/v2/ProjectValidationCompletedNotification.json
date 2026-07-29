@@ -70,6 +70,12 @@
         "null"
       ]
     },
+    "itemId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "output": {
       "type": "string"
     },

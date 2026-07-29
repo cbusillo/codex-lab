@@ -8,8 +8,9 @@ use crate::token_data::IdTokenInfo;
 use crate::token_data::TokenData;
 use base64::Engine;
 use chrono::Utc;
-use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthKeyringBackendKind;
+use codex_protocol::auth::AuthMode;
 use pretty_assertions::assert_eq;
 use serde::Serialize;
 use std::fs;
@@ -86,8 +87,10 @@ fn save_api_key_auth(codex_home: &std::path::Path, api_key: &str) {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("save api key auth");
 }
@@ -102,8 +105,10 @@ fn save_chatgpt_auth(codex_home: &std::path::Path, account_id: &str, email: &str
             last_refresh: Some(Utc::now()),
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("save chatgpt auth");
 }
@@ -118,8 +123,10 @@ fn save_pat_auth(codex_home: &std::path::Path) {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: Some("pat-token".to_string()),
+            bedrock_api_key: None,
         },
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("save pat auth");
 }
@@ -399,8 +406,10 @@ fn import_reports_parseable_auth_missing_credentials_as_invalid() {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("save api key auth without key");
 
@@ -421,8 +430,10 @@ fn import_reports_parseable_auth_missing_credentials_as_invalid() {
             last_refresh: None,
             agent_identity: None,
             personal_access_token: None,
+            bedrock_api_key: None,
         },
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("save chatgpt auth without tokens");
 

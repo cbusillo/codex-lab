@@ -1,5 +1,5 @@
 use super::*;
-use crate::transport::remote_control::enroll::REMOTE_CONTROL_ACCOUNT_ID_HEADER;
+use crate::transport::remote_control::auth::REMOTE_CONTROL_ACCOUNT_ID_HEADER;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
@@ -14,14 +14,18 @@ pub(super) async fn auth_manager_for_account(
     save_auth(
         codex_home.path(),
         &remote_control_auth_dot_json_for_account(account_id, access_token),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("test auth should save");
     AuthManager::shared(
         codex_home.path().to_path_buf(),
         /*enable_codex_api_key_env*/ false,
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
+        TEST_AUTH_KEYRING_BACKEND,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await
 }
@@ -34,7 +38,7 @@ async fn active_remote_control_websocket(
 ) -> (
     RemoteControlWebsocket,
     CancellationToken,
-    watch::Sender<bool>,
+    Arc<watch::Sender<RemoteControlDesiredState>>,
     mpsc::Sender<u64>,
 ) {
     let remote_control_url = remote_control_url_for_listener(listener);
@@ -46,7 +50,7 @@ async fn active_remote_control_websocket(
     let (transport_event_tx, _transport_event_rx) = mpsc::channel(/*buffer*/ 1);
     let (status_publisher, _status_rx) = remote_control_status_channel();
     let shutdown_token = CancellationToken::new();
-    let (enabled_tx, enabled_rx) = watch::channel(/*init*/ true);
+    let desired_state_tx = Arc::new(enabled_desired_state_sender());
     let (reconnect_tx, reconnect_rx) = mpsc::channel(/*buffer*/ 1);
     let websocket = RemoteControlWebsocket::new(
         RemoteControlWebsocketConfig {
@@ -62,12 +66,13 @@ async fn active_remote_control_websocket(
             status_publisher,
             current_enrollment: test_current_enrollment(Some(enrollment)),
             pairing_persistence_key: watch::channel(None).0,
+            desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
         },
         shutdown_token.clone(),
-        enabled_rx,
+        Arc::clone(&desired_state_tx),
         reconnect_rx,
     );
-    (websocket, shutdown_token, enabled_tx, reconnect_tx)
+    (websocket, shutdown_token, desired_state_tx, reconnect_tx)
 }
 
 async fn reconnect_after_control_auth_change(
@@ -172,7 +177,8 @@ async fn active_relay_reconnects_under_new_control_account() {
     save_auth(
         codex_home.path(),
         &remote_control_auth_dot_json_for_account("account-b", "access-b"),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("replacement control auth should save");
     control_auth_manager.reload().await;
@@ -261,7 +267,8 @@ async fn active_relay_stays_connected_after_same_control_identity_token_refresh(
     save_auth(
         codex_home.path(),
         &remote_control_auth_dot_json_for_account("account-a", "access-fresh"),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("refreshed control auth should save");
     control_auth_manager.reload().await;
@@ -315,7 +322,8 @@ async fn active_relay_ignores_execution_auth_manager_changes() {
     save_auth(
         execution_home.path(),
         &remote_control_auth_dot_json_for_account("account-execution-failover", "access-failover"),
-        AuthCredentialsStoreMode::File,
+        TEST_AUTH_STORE_MODE,
+        TEST_AUTH_KEYRING_BACKEND,
     )
     .expect("replacement execution auth should save");
     execution_auth_manager.reload().await;

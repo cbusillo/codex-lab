@@ -87,6 +87,7 @@ pub enum NonSteerableTurnKind {
 #[ts(export_to = "v2/")]
 pub enum CodexErrorInfo {
     ContextWindowExceeded,
+    SessionBudgetExceeded,
     UsageLimitExceeded,
     ServerOverloaded,
     CyberPolicy,
@@ -132,6 +133,7 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
     fn from(value: CoreCodexErrorInfo) -> Self {
         match value {
             CoreCodexErrorInfo::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
+            CoreCodexErrorInfo::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
             CoreCodexErrorInfo::UsageLimitExceeded => CodexErrorInfo::UsageLimitExceeded,
             CoreCodexErrorInfo::ServerOverloaded => CodexErrorInfo::ServerOverloaded,
             CoreCodexErrorInfo::CyberPolicy => CodexErrorInfo::CyberPolicy,
@@ -180,7 +182,6 @@ pub enum AskForApproval {
     #[serde(rename = "untrusted")]
     #[ts(rename = "untrusted")]
     UnlessTrusted,
-    OnFailure,
     OnRequest,
     #[experimental("askForApproval.granular")]
     Granular {
@@ -199,7 +200,6 @@ impl AskForApproval {
     pub fn to_core(self) -> CoreAskForApproval {
         match self {
             AskForApproval::UnlessTrusted => CoreAskForApproval::UnlessTrusted,
-            AskForApproval::OnFailure => CoreAskForApproval::OnFailure,
             AskForApproval::OnRequest => CoreAskForApproval::OnRequest,
             AskForApproval::Granular {
                 sandbox_approval,
@@ -223,7 +223,6 @@ impl From<CoreAskForApproval> for AskForApproval {
     fn from(value: CoreAskForApproval) -> Self {
         match value {
             CoreAskForApproval::UnlessTrusted => AskForApproval::UnlessTrusted,
-            CoreAskForApproval::OnFailure => AskForApproval::OnFailure,
             CoreAskForApproval::OnRequest => AskForApproval::OnRequest,
             CoreAskForApproval::Granular(granular_config) => AskForApproval::Granular {
                 sandbox_approval: granular_config.sandbox_approval,

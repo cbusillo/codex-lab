@@ -11,7 +11,7 @@ use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_head_commit_hash;
 use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_git_utils::resolve_root_git_project_for_trust;
-use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::models::SandboxPermissions;
@@ -103,7 +103,7 @@ pub(crate) async fn project_validation_worktree_fingerprint(
         return None;
     }
     let cwd = turn_context.environments.single_local_environment_cwd()?;
-    capture_worktree_fingerprint(cwd).await
+    capture_worktree_fingerprint(&cwd).await
 }
 
 pub(crate) async fn run_project_validation(
@@ -117,9 +117,9 @@ pub(crate) async fn run_project_validation(
         return ProjectValidationRun::Skipped(skipped_event(
             turn_context,
             Vec::new(),
-            None,
+            /*cwd*/ None,
             ProjectValidationSkipReason::NonRootAgent,
-            None,
+            /*changed_file_count*/ None,
         ));
     }
 
@@ -134,16 +134,13 @@ pub(crate) async fn run_project_validation(
     if project_command.is_none()
         && !automatic_validation_provider_enabled(&turn_context.config.validation)
     {
-        let cwd = turn_context
-            .environments
-            .single_local_environment_cwd()
-            .cloned();
+        let cwd = turn_context.environments.single_local_environment_cwd();
         if cancellation_token.is_cancelled() {
             return ProjectValidationRun::Cancelled(cancelled_event(
                 turn_context,
                 Vec::new(),
                 cwd,
-                None,
+                /*changed_file_count*/ None,
             ));
         }
         return ProjectValidationRun::Skipped(skipped_event(
@@ -151,38 +148,28 @@ pub(crate) async fn run_project_validation(
             Vec::new(),
             cwd,
             ProjectValidationSkipReason::ValidationDisabled,
-            None,
+            /*changed_file_count*/ None,
         ));
     }
 
-    let Some(cwd) = turn_context
-        .environments
-        .single_local_environment_cwd()
-        .cloned()
-    else {
+    let Some(cwd) = turn_context.environments.single_local_environment_cwd() else {
         if let Some(command) = project_command {
             return ProjectValidationRun::Completed(completed_event(
                 turn_context,
                 command,
-                None,
+                /*cwd*/ None,
                 ProjectValidationStatus::InfrastructureFailure,
-                None,
+                /*exit_code*/ None,
                 "project validation requires exactly one local turn environment".to_string(),
                 Duration::ZERO,
             ));
         }
         return ProjectValidationRun::Skipped(skipped_event(
             turn_context,
-            turn_context
-                .config
-                .validation
-                .providers
-                .shellcheck
-                .command
-                .clone(),
-            None,
+            Vec::new(),
+            /*cwd*/ None,
             ProjectValidationSkipReason::UnsupportedEnvironment,
-            None,
+            /*changed_file_count*/ None,
         ));
     };
 
@@ -191,11 +178,14 @@ pub(crate) async fn run_project_validation(
             turn_context,
             project_command.clone().unwrap_or_default(),
             Some(cwd),
-            None,
+            /*changed_file_count*/ None,
         ));
     }
 
-    let env = create_env(&turn_context.shell_environment_policy, Some(sess.thread_id));
+    let env = create_env(
+        &turn_context.config.permissions.shell_environment_policy,
+        Some(sess.thread_id),
+    );
     let search_path = env
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
@@ -206,7 +196,7 @@ pub(crate) async fn run_project_validation(
         return ProjectValidationRun::Completed(configuration_error(
             turn_context,
             command.clone(),
-            None,
+            /*cwd*/ None,
             "project validation executable was not found or is not executable",
         ));
     }
@@ -218,7 +208,7 @@ pub(crate) async fn run_project_validation(
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
                 ProjectValidationSkipReason::UnchangedFingerprint,
-                None,
+                /*changed_file_count*/ None,
             ));
         }
         Some(false) => {}
@@ -227,7 +217,7 @@ pub(crate) async fn run_project_validation(
                 turn_context,
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
-                None,
+                /*changed_file_count*/ None,
             ));
         }
     }
@@ -244,7 +234,7 @@ pub(crate) async fn run_project_validation(
                 turn_context,
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
-                None,
+                /*changed_file_count*/ None,
             ));
         };
         Some(lease)
@@ -259,7 +249,7 @@ pub(crate) async fn run_project_validation(
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
                 ProjectValidationSkipReason::UnchangedFingerprint,
-                None,
+                /*changed_file_count*/ None,
             ));
         }
         Some(false) => {}
@@ -268,7 +258,7 @@ pub(crate) async fn run_project_validation(
                 turn_context,
                 project_command.clone().unwrap_or_default(),
                 Some(cwd),
-                None,
+                /*changed_file_count*/ None,
             ));
         }
     }
@@ -278,7 +268,7 @@ pub(crate) async fn run_project_validation(
             turn_context,
             project_command.clone().unwrap_or_default(),
             Some(cwd),
-            None,
+            /*changed_file_count*/ None,
         ));
     }
 
@@ -289,7 +279,7 @@ pub(crate) async fn run_project_validation(
                 Vec::new(),
                 Some(cwd),
                 ProjectValidationStatus::InfrastructureFailure,
-                None,
+                /*exit_code*/ None,
                 "validated project command was unavailable".to_string(),
                 Duration::ZERO,
             ));
@@ -315,13 +305,7 @@ pub(crate) async fn run_project_validation(
             Ok(AutomaticValidationProviderResolution::Skipped(skip)) => {
                 return ProjectValidationRun::Skipped(skipped_event(
                     turn_context,
-                    turn_context
-                        .config
-                        .validation
-                        .providers
-                        .shellcheck
-                        .command
-                        .clone(),
+                    Vec::new(),
                     Some(cwd),
                     automatic_provider_skip_reason(skip.reason),
                     skip.changed_file_count,
@@ -378,8 +362,7 @@ pub(crate) async fn run_project_validation(
             let canonical_program =
                 dunce::canonicalize(&resolved_program).unwrap_or_else(|_| resolved_program.clone());
             if checkout_root.as_ref().is_some_and(|repo_root| {
-                resolved_program.starts_with(&repo_root)
-                    || canonical_program.starts_with(&repo_root)
+                resolved_program.starts_with(repo_root) || canonical_program.starts_with(repo_root)
             }) || lease_root.as_ref().is_some_and(|repo_root| {
                 resolved_program.starts_with(repo_root) || canonical_program.starts_with(repo_root)
             }) {
@@ -396,7 +379,7 @@ pub(crate) async fn run_project_validation(
                     automatic.command,
                     Some(automatic.cwd),
                     ProjectValidationStatus::InfrastructureFailure,
-                    None,
+                    /*exit_code*/ None,
                     "cargo validation requires an isolated execution directory".to_string(),
                     Duration::ZERO,
                 ));
@@ -412,7 +395,7 @@ pub(crate) async fn run_project_validation(
                     automatic.command,
                     Some(automatic.cwd),
                     ProjectValidationStatus::InfrastructureFailure,
-                    None,
+                    /*exit_code*/ None,
                     "cargo validation execution directory must be outside the repository"
                         .to_string(),
                     Duration::ZERO,
@@ -478,6 +461,10 @@ pub(crate) async fn run_project_validation(
         capture_policy: ExecCapturePolicy::ShellTool,
         env,
         network: turn_context.network.clone(),
+        network_environment_id: turn_context
+            .environments
+            .single_local_environment()
+            .map(|environment| environment.environment_id.clone()),
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: turn_context.windows_sandbox_level,
         windows_sandbox_private_desktop: turn_context
@@ -492,9 +479,9 @@ pub(crate) async fn run_project_validation(
         &turn_context.permission_profile,
         &plan.cwd,
         &turn_context.config.effective_workspace_roots(),
-        &turn_context.codex_linux_sandbox_exe,
-        turn_context.features.use_legacy_landlock(),
-        None,
+        &turn_context.config.codex_linux_sandbox_exe,
+        turn_context.config.features.use_legacy_landlock(),
+        /*stdout_stream*/ None,
     )
     .await;
 
@@ -545,50 +532,54 @@ pub(crate) async fn run_project_validation(
                 plan.changed_file_count,
             )
         }
-        Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => completed_from_output(
-            turn_context,
-            plan.command,
-            plan.cwd,
-            plan.kind,
-            ProjectValidationStatus::TimedOut,
-            *output,
-            plan.changed_file_count,
-        ),
-        Err(CodexErr::Sandbox(SandboxErr::Denied { output, .. })) => completed_from_output(
-            turn_context,
-            plan.command,
-            plan.cwd,
-            plan.kind,
-            ProjectValidationStatus::InfrastructureFailure,
-            *output,
-            plan.changed_file_count,
-        ),
-        Err(CodexErr::TurnAborted) => {
-            return ProjectValidationRun::Cancelled(cancelled_event(
+        Err(error) => match error.details() {
+            CodexErrorDetails::Sandbox(SandboxErr::Timeout { output }) => completed_from_output(
+                turn_context,
+                plan.command,
+                plan.cwd,
+                plan.kind,
+                ProjectValidationStatus::TimedOut,
+                output.as_ref().clone(),
+                plan.changed_file_count,
+            ),
+            CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => completed_from_output(
+                turn_context,
+                plan.command,
+                plan.cwd,
+                plan.kind,
+                ProjectValidationStatus::InfrastructureFailure,
+                output.as_ref().clone(),
+                plan.changed_file_count,
+            ),
+            CodexErrorDetails::TurnAborted => {
+                return ProjectValidationRun::Cancelled(cancelled_event(
+                    turn_context,
+                    plan.command,
+                    Some(plan.cwd),
+                    plan.changed_file_count,
+                ));
+            }
+            CodexErrorDetails::Io(io_error) if is_configuration_io_error(io_error) => {
+                configuration_error(
+                    turn_context,
+                    plan.command,
+                    Some(plan.cwd),
+                    format!(
+                        "failed to start {}: {error}",
+                        plan.kind.start_failure_label()
+                    ),
+                )
+            }
+            _ => completed_event(
                 turn_context,
                 plan.command,
                 Some(plan.cwd),
-                plan.changed_file_count,
-            ));
-        }
-        Err(CodexErr::Io(error)) if is_configuration_io_error(&error) => configuration_error(
-            turn_context,
-            plan.command,
-            Some(plan.cwd),
-            format!(
-                "failed to start {}: {error}",
-                plan.kind.start_failure_label()
+                ProjectValidationStatus::InfrastructureFailure,
+                /*exit_code*/ None,
+                format!("{} infrastructure failure: {error}", plan.kind.label()),
+                Duration::ZERO,
             ),
-        ),
-        Err(error) => completed_event(
-            turn_context,
-            plan.command,
-            Some(plan.cwd),
-            ProjectValidationStatus::InfrastructureFailure,
-            None,
-            format!("{} infrastructure failure: {error}", plan.kind.label()),
-            Duration::ZERO,
-        ),
+        },
     };
     if event.status == ProjectValidationStatus::Passed
         && let Some(key) = successful_validation_key
@@ -613,7 +604,7 @@ fn validate_project_command(
         return Err(configuration_error(
             turn_context,
             command,
-            None,
+            /*cwd*/ None,
             "validation.project_command.command must include a non-empty executable",
         ));
     }
@@ -624,7 +615,7 @@ fn validate_project_command(
         return Err(configuration_error(
             turn_context,
             command,
-            None,
+            /*cwd*/ None,
             format!(
                 "validation.project_command.command must not exceed {PROJECT_VALIDATION_COMMAND_MAX_BYTES} bytes"
             ),
@@ -634,7 +625,7 @@ fn validate_project_command(
         return Err(configuration_error(
             turn_context,
             command,
-            None,
+            /*cwd*/ None,
             format!(
                 "validation.project_command.timeout_ms must be between 1 and {MAX_PROJECT_VALIDATION_TIMEOUT_MS}"
             ),
@@ -694,7 +685,7 @@ fn provider_error_event(
             error.command,
             error.cwd,
             ProjectValidationStatus::InfrastructureFailure,
-            None,
+            /*exit_code*/ None,
             error.message,
             Duration::ZERO,
         ),
@@ -702,7 +693,7 @@ fn provider_error_event(
 }
 
 impl ValidationCommandKind {
-    fn label(&self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             Self::Cargo => "cargo validation",
             Self::ProjectCommand => "project validation",
@@ -710,7 +701,7 @@ impl ValidationCommandKind {
         }
     }
 
-    fn start_failure_label(&self) -> &'static str {
+    fn start_failure_label(self) -> &'static str {
         match self {
             Self::Cargo => "cargo validation command",
             Self::ProjectCommand => "project validation command",
@@ -720,7 +711,7 @@ impl ValidationCommandKind {
 }
 
 impl AutomaticValidationProviderKind {
-    fn label(&self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             Self::Cargo => "cargo validation",
             Self::Shellcheck => "shellcheck validation",
@@ -925,7 +916,7 @@ fn configuration_error(
         command,
         cwd,
         ProjectValidationStatus::ConfigurationError,
-        None,
+        /*exit_code*/ None,
         message.into(),
         Duration::ZERO,
     )
@@ -1089,6 +1080,7 @@ fn terminal_event(
     let (output, output_truncated) = truncate_output(&output);
     ProjectValidationCompletedEvent {
         turn_id: turn_context.sub_id.clone(),
+        item_id: Some(uuid::Uuid::new_v4().to_string()),
         command,
         command_truncated,
         cwd,

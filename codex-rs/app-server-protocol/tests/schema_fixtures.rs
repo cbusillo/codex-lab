@@ -16,6 +16,14 @@ fn typescript_schema_fixtures_match_generated() -> Result<()> {
         .context("generate in-memory typescript schema fixtures")?;
 
     assert_schema_trees_match("typescript", &fixture_tree, &generated_tree)?;
+    let config_requirements = generated_tree
+        .get(Path::new("v2/ConfigRequirements.ts"))
+        .context("generated ConfigRequirements.ts should exist")?;
+    anyhow::ensure!(
+        !String::from_utf8_lossy(config_requirements).contains("../PathUri")
+            || generated_tree.contains_key(Path::new("PathUri.ts")),
+        "stable ConfigRequirements.ts imports PathUri but PathUri.ts was not generated"
+    );
 
     Ok(())
 }
@@ -105,6 +113,16 @@ Run `just write-app-server-schema` to overwrite with your changes.\n\n{diff}",
 }
 
 fn schema_root() -> Result<PathBuf> {
+    if let Some(workspace_root) = std::env::var_os("INSTA_WORKSPACE_ROOT") {
+        let schema_root = PathBuf::from(workspace_root).join("app-server-protocol/schema");
+        anyhow::ensure!(
+            schema_root.is_dir(),
+            "runtime schema root does not exist: {}",
+            schema_root.display()
+        );
+        return Ok(schema_root);
+    }
+
     // In Bazel runfiles (especially manifest-only mode), resolving directories is not
     // reliable. Resolve a known file, then walk up to the schema root.
     let typescript_index = codex_utils_cargo_bin::find_resource!("schema/typescript/index.ts")

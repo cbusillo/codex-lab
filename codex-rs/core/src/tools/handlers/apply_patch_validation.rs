@@ -2,13 +2,12 @@ use codex_apply_patch::AppliedPatchChange;
 use codex_apply_patch::AppliedPatchDelta;
 use codex_apply_patch::AppliedPatchFileChange;
 use codex_config::ValidationConfig;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::path::PathBuf;
 
 const MAX_ISSUES: usize = 12;
 const MAX_FILE_BYTES: usize = 240;
@@ -16,11 +15,12 @@ const MAX_FILE_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_MESSAGE_BYTES: usize = 800;
 const MAX_SUMMARY_BYTES: usize = 4 * 1024;
 const MAX_TOTAL_INPUT_BYTES: usize = 4 * 1024 * 1024;
+const TRUNCATION_MARKER: &str = "... [truncated]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ValidationFinding {
     tool: &'static str,
-    file: Option<String>,
+    file: String,
     message: String,
 }
 
@@ -35,7 +35,7 @@ pub(super) fn append_validation_feedback(
     mut content: String,
     delta: Option<&AppliedPatchDelta>,
     config: &ValidationConfig,
-    cwd: &AbsolutePathBuf,
+    cwd: &PathUri,
 ) -> String {
     let Some(delta) = delta else {
         return content;
@@ -57,7 +57,7 @@ pub(super) fn append_validation_feedback(
 fn render_validation_summary(
     changes: &[AppliedPatchChange],
     config: &ValidationConfig,
-    cwd: &AbsolutePathBuf,
+    cwd: &PathUri,
 ) -> Option<String> {
     if !config.groups.functional {
         return None;
@@ -67,7 +67,7 @@ fn render_validation_summary(
     let mut checks = BTreeSet::new();
     let mut findings = Vec::new();
     let mut remaining_input_bytes = MAX_TOTAL_INPUT_BYTES;
-    for (path, content) in &files {
+    for (path, content) in files.values() {
         validate_file(
             path,
             content,
@@ -119,15 +119,18 @@ fn render_validation_summary(
     }
 }
 
-fn final_file_contents(changes: &[AppliedPatchChange]) -> BTreeMap<PathBuf, &str> {
+fn final_file_contents(changes: &[AppliedPatchChange]) -> BTreeMap<String, (PathUri, &str)> {
     let mut files = BTreeMap::new();
     for change in changes {
         match &change.change {
             AppliedPatchFileChange::Add { content, .. } => {
-                files.insert(change.path.clone(), content.as_str());
+                files.insert(
+                    change.path.to_string(),
+                    (change.path.clone(), content.as_str()),
+                );
             }
             AppliedPatchFileChange::Delete { .. } => {
-                files.remove(&change.path);
+                files.remove(&change.path.to_string());
             }
             AppliedPatchFileChange::Update {
                 move_path,
@@ -135,10 +138,16 @@ fn final_file_contents(changes: &[AppliedPatchChange]) -> BTreeMap<PathBuf, &str
                 ..
             } => {
                 if let Some(move_path) = move_path {
-                    files.remove(&change.path);
-                    files.insert(move_path.clone(), new_content.as_str());
+                    files.remove(&change.path.to_string());
+                    files.insert(
+                        move_path.to_string(),
+                        (move_path.clone(), new_content.as_str()),
+                    );
                 } else {
-                    files.insert(change.path.clone(), new_content.as_str());
+                    files.insert(
+                        change.path.to_string(),
+                        (change.path.clone(), new_content.as_str()),
+                    );
                 }
             }
         }
@@ -147,14 +156,17 @@ fn final_file_contents(changes: &[AppliedPatchChange]) -> BTreeMap<PathBuf, &str
 }
 
 fn validate_file(
-    path: &Path,
+    path: &PathUri,
     content: &str,
-    cwd: &AbsolutePathBuf,
+    cwd: &PathUri,
     remaining_input_bytes: &mut usize,
     checks: &mut BTreeSet<&'static str>,
     findings: &mut Vec<ValidationFinding>,
 ) {
-    let extension = path
+    let display_name = path
+        .basename()
+        .unwrap_or_else(|| path.inferred_native_path_string());
+    let extension = Path::new(&display_name)
         .extension()
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase);
@@ -206,27 +218,25 @@ fn validate_file(
     }
 }
 
-fn display_path(path: &Path, cwd: &AbsolutePathBuf) -> Option<String> {
-    let display_path = if path.is_relative() {
-        path
-    } else {
-        path.strip_prefix(cwd.as_path()).ok()?
-    };
-    Some(truncate_utf8(
-        &display_path.display().to_string(),
-        MAX_FILE_BYTES,
-    ))
+fn display_path(path: &PathUri, cwd: &PathUri) -> String {
+    path.relative_path_from(cwd)
+        .or_else(|| path.basename())
+        .map_or_else(
+            || "<unavailable-path>".to_string(),
+            |path| truncate_utf8(&path, MAX_FILE_BYTES),
+        )
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();
     }
-    let mut end = max_bytes;
+    debug_assert!(max_bytes >= TRUNCATION_MARKER.len());
+    let mut end = max_bytes.saturating_sub(TRUNCATION_MARKER.len());
     while !value.is_char_boundary(end) {
         end -= 1;
     }
-    value[..end].to_string()
+    format!("{}{TRUNCATION_MARKER}", &value[..end])
 }
 
 #[cfg(test)]

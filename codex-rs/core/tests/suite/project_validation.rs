@@ -20,7 +20,6 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use codex_protocol::protocol::ProjectValidationSkipReason;
@@ -28,8 +27,10 @@ use codex_protocol::protocol::ProjectValidationStatus;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use codex_utils_string::approx_token_count;
 use core_test_support::responses;
 use core_test_support::responses::ResponsesRequest;
@@ -98,16 +99,10 @@ async fn run_validation_turn_with_source_and_response_count(
     let test = build_validation_codex(&server, command).await?;
     let codex = if let Some(session_source) = session_source {
         test.thread_manager
-            .start_thread_with_options(StartThreadOptions {
-                config: test.config.clone(),
-                initial_history: InitialHistory::New,
+            .start_thread(StartThreadOptions {
                 session_source: Some(session_source),
-                session_provenance: None,
-                thread_source: None,
-                dynamic_tools: Vec::new(),
-                metrics_service_name: None,
-                parent_trace: None,
-                environments: Vec::new(),
+                environments: Some(Vec::new()),
+                ..StartThreadOptions::new(test.config.clone())
             })
             .await?
             .thread
@@ -252,6 +247,23 @@ async fn submit_user_input(codex: &CodexThread, test: &TestCodex, text: &str) ->
     submit_user_input_at_cwd(codex, test, text, test.config.cwd.clone()).await
 }
 
+async fn submit_user_input_with_permission_profile(
+    codex: &CodexThread,
+    test: &TestCodex,
+    text: &str,
+    permission_profile: PermissionProfile,
+) -> Result<()> {
+    submit_user_input_with_environment_override(
+        codex,
+        test,
+        text,
+        test.config.cwd.clone(),
+        TestTurnEnvironmentOverride::Inherit,
+        permission_profile,
+    )
+    .await
+}
+
 async fn steer_user_input(codex: &CodexThread, text: &str) -> Result<()> {
     codex
         .steer_input(
@@ -287,6 +299,7 @@ async fn submit_user_input_at_cwd(
         text,
         cwd,
         TestTurnEnvironmentOverride::Inherit,
+        PermissionProfile::Disabled,
     )
     .await
 }
@@ -302,6 +315,7 @@ async fn submit_user_input_without_environments(
         text,
         test.config.cwd.clone(),
         TestTurnEnvironmentOverride::NoEnvironments,
+        PermissionProfile::Disabled,
     )
     .await
 }
@@ -312,13 +326,16 @@ async fn submit_user_input_with_environment_override(
     text: &str,
     cwd: AbsolutePathBuf,
     environment_override: TestTurnEnvironmentOverride,
+    permission_profile: PermissionProfile,
 ) -> Result<()> {
     let (sandbox_policy, permission_profile) =
-        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
+        turn_permission_fields(permission_profile, cwd.as_path());
     let session_model = test.session_configured.model.clone();
     let environments = match environment_override {
         TestTurnEnvironmentOverride::Inherit => None,
-        TestTurnEnvironmentOverride::NoEnvironments => Some(Vec::new()),
+        TestTurnEnvironmentOverride::NoEnvironments => {
+            Some(TurnEnvironmentSelections::new(cwd.clone(), Vec::new()))
+        }
     };
     codex
         .submit(Op::UserInput {
@@ -326,12 +343,11 @@ async fn submit_user_input_with_environment_override(
                 text: text.to_string(),
                 text_elements: Vec::new(),
             }],
-            environments,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(cwd),
+                environments,
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -373,7 +389,11 @@ async fn start_root_thread_with_validation_command(
 ) -> Result<Arc<CodexThread>> {
     let mut config = test.config.clone();
     config.validation.project_command = Some(command);
-    Ok(test.thread_manager.start_thread(config).await?.thread)
+    Ok(test
+        .thread_manager
+        .start_thread(StartThreadOptions::new(config))
+        .await?
+        .thread)
 }
 
 async fn start_root_thread_with_cwd_and_validation_command(
@@ -384,13 +404,21 @@ async fn start_root_thread_with_cwd_and_validation_command(
     let mut config = test.config.clone();
     config.cwd = AbsolutePathBuf::from_absolute_path(cwd).context("test cwd should be absolute")?;
     config.validation.project_command = Some(command);
-    Ok(test.thread_manager.start_thread(config).await?.thread)
+    Ok(test
+        .thread_manager
+        .start_thread(StartThreadOptions::new(config))
+        .await?
+        .thread)
 }
 
 async fn start_root_thread_with_cwd(test: &TestCodex, cwd: &Path) -> Result<Arc<CodexThread>> {
     let mut config = test.config.clone();
     config.cwd = AbsolutePathBuf::from_absolute_path(cwd).context("test cwd should be absolute")?;
-    Ok(test.thread_manager.start_thread(config).await?.thread)
+    Ok(test
+        .thread_manager
+        .start_thread(StartThreadOptions::new(config))
+        .await?
+        .thread)
 }
 
 async fn wait_for_path(path: &Path) -> Result<()> {
@@ -1245,9 +1273,17 @@ async fn project_validation_retries_unchanged_skip_after_pending_input() -> Resu
 
     assert!(test.workspace_path("ignored-by-git.txt").exists());
     let validation_events = validation_events(&events);
-    assert_eq!(validation_events.len(), 1);
-    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
-    assert_eq!(validation_events[0].output, "validation-pass");
+    assert_eq!(validation_events.len(), 2);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::Skipped
+    );
+    assert_eq!(
+        validation_events[0].skip_reason,
+        Some(ProjectValidationSkipReason::UnchangedFingerprint)
+    );
+    assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[1].output, "validation-pass");
     assert_eq!(server.requests().await.len(), 3);
     server.shutdown().await;
     Ok(())
@@ -1302,9 +1338,11 @@ async fn project_validation_retries_pass_after_pending_input() -> Result<()> {
     assert!(test.workspace_path("first.rs").exists());
     assert!(test.workspace_path("second.rs").exists());
     let validation_events = validation_events(&events);
-    assert_eq!(validation_events.len(), 1);
+    assert_eq!(validation_events.len(), 2);
     assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
-    assert_eq!(validation_events[0].output, "validation-pass-2");
+    assert_eq!(validation_events[0].output, "validation-pass-1");
+    assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[1].output, "validation-pass-2");
     assert_eq!(std::fs::read_to_string(&count_path)?, "2");
     assert_eq!(server.requests().await.len(), 4);
     server.shutdown().await;
@@ -1416,6 +1454,7 @@ async fn project_validation_runs_after_untracked_change_outside_session_cwd() ->
             config.validation.project_command = Some(command);
         })
         .with_workspace_setup(|cwd, fs| async move {
+            let cwd = PathUri::from_host_native_path(cwd)?;
             fs.create_directory(
                 &cwd,
                 CreateDirectoryOptions { recursive: true },
@@ -1532,7 +1571,11 @@ async fn project_validation_owned_rerun_ignores_unchanged_worktree_gate() -> Res
 async fn project_validation_non_git_workspace_fails_open_before_turn_completion() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let events = run_validation_turn(shell_command("printf validation-pass", 5_000)).await?;
+    let events = run_validation_turn(shell_command(
+        "printf validation-pass",
+        /*timeout_ms*/ 5_000,
+    ))
+    .await?;
     let validation_events = validation_events(&events);
     assert_eq!(validation_events.len(), 1);
     let event = validation_events[0];
@@ -1609,7 +1652,8 @@ async fn project_validation_reports_bounded_actionable_failure() -> Result<()> {
         "i=0; while [ $i -lt 12000 ]; do printf x; i=$((i + 1)); done; ",
         "printf '\\nvalidation-end\\n' >&2; exit 7"
     );
-    let (events, requests) = run_validation_correction_turn(shell_command(script, 5_000)).await?;
+    let (events, requests) =
+        run_validation_correction_turn(shell_command(script, /*timeout_ms*/ 5_000)).await?;
     let validation_events = validation_events(&events);
     assert_eq!(validation_events.len(), 2);
     for event in &validation_events {
@@ -1771,7 +1815,7 @@ async fn automatic_shellcheck_provider_runs_one_correction_cycle() -> Result<()>
         &server,
         repo.path(),
         vec!["/bin/sh".to_string(), "fake-shellcheck".to_string()],
-        None,
+        /*project_command*/ None,
     )
     .await?;
 
@@ -1807,6 +1851,108 @@ async fn automatic_shellcheck_provider_runs_one_correction_cycle() -> Result<()>
             .count(),
         1
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    std::fs::write(
+        repo.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.95.0\"\n",
+    )?;
+    init_git_repo(repo.path())?;
+    let provider = tempdir()?;
+    let fake_cargo = provider.path().join("cargo");
+    let canonical_repo = dunce::canonicalize(repo.path())?;
+    write_executable(
+        &fake_cargo,
+        &format!(
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "manifest=''\n",
+                "target_dir=''\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  case \"$1\" in\n",
+                "    --manifest-path) manifest=$2; shift 2 ;;\n",
+                "    --target-dir) target_dir=$2; shift 2 ;;\n",
+                "    *) shift ;;\n",
+                "  esac\n",
+                "done\n",
+                "test \"$manifest\" = '{manifest}' || exit 71\n",
+                "case \"$PWD\" in '{repo}'|'{repo}'/*) exit 64 ;; esac\n",
+                "test \"${{target_dir##*/}}\" = 'target' || exit 72\n",
+                "target_parent=${{target_dir%/target}}\n",
+                "test \"$(cd \"$target_parent\" && pwd -P)\" = \"$(pwd -P)\" || exit 72\n",
+                "grep -Fq 'channel = \"1.95.0\"' \"$PWD/rust-toolchain.toml\" || exit 73\n",
+                "if [ \"$(uname -s)\" = 'Darwin' ] && [ \"${{CODEX_SANDBOX:-}}\" != 'seatbelt' ]; then exit 70; fi\n",
+                "mkdir -p \"$target_dir\" || exit 75\n",
+                "printf allowed > \"$target_dir/probe\" || exit 76\n",
+            ),
+            manifest = canonical_repo.join("Cargo.toml").display(),
+            repo = canonical_repo.display(),
+        ),
+    )?;
+    let patch = "*** Begin Patch\n*** Add File: src/lib.rs\n+pub fn value() {}\n*** End Patch\n";
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-cargo-sandbox-1"),
+                ev_apply_patch_custom_tool_call("cargo-sandbox-patch", patch),
+                ev_completed("resp-cargo-sandbox-1"),
+            ]),
+            sse_completed("resp-cargo-sandbox-2"),
+        ],
+    )
+    .await;
+    let test = build_cargo_provider_codex(
+        &server,
+        repo.path(),
+        fake_cargo
+            .to_str()
+            .context("fake cargo path should be UTF-8")?
+            .to_string(),
+        /*timeout_ms*/ 5_000,
+    )
+    .await?;
+
+    submit_user_input_with_permission_profile(
+        &test.codex,
+        &test,
+        "add the Rust fixture",
+        PermissionProfile::workspace_write(),
+    )
+    .await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::Passed,
+        "exit code {:?}: {}",
+        validation_events[0].exit_code,
+        validation_events[0].output,
+    );
+    assert_eq!(validation_events[0].output, "cargo check passed");
+    let target_dir = validation_events[0]
+        .command
+        .iter()
+        .position(|argument| argument == "--target-dir")
+        .and_then(|index| validation_events[0].command.get(index + 1))
+        .context("cargo validation command should include a target directory")?;
+    assert!(!Path::new(target_dir).starts_with(&canonical_repo));
+    assert!(!Path::new(target_dir).exists());
+    assert_eq!(response_mock.requests().len(), 2);
     Ok(())
 }
 
@@ -2306,7 +2452,7 @@ async fn automatic_validation_reports_no_changed_files() -> Result<()> {
         &server,
         repo.path(),
         vec!["/usr/bin/true".to_string()],
-        None,
+        /*project_command*/ None,
     )
     .await?;
 
@@ -2314,6 +2460,7 @@ async fn automatic_validation_reports_no_changed_files() -> Result<()> {
     let events = collect_events_until_terminal(&test.codex).await?;
 
     let event = assert_single_validation_skip(&events, ProjectValidationSkipReason::NoChangedFiles);
+    assert!(event.command.is_empty());
     assert_eq!(event.changed_file_count, Some(0));
     assert_eq!(response_mock.requests().len(), 2);
     Ok(())
@@ -2344,7 +2491,7 @@ async fn automatic_validation_reports_no_applicable_provider() -> Result<()> {
         &server,
         repo.path(),
         vec!["/usr/bin/true".to_string()],
-        None,
+        /*project_command*/ None,
     )
     .await?;
 
@@ -2353,6 +2500,7 @@ async fn automatic_validation_reports_no_applicable_provider() -> Result<()> {
 
     let event =
         assert_single_validation_skip(&events, ProjectValidationSkipReason::NoApplicableProvider);
+    assert!(event.command.is_empty());
     assert_eq!(event.changed_file_count, Some(1));
     assert_eq!(response_mock.requests().len(), 2);
     Ok(())
@@ -2380,15 +2528,16 @@ async fn automatic_validation_reports_unsupported_environment() -> Result<()> {
         &server,
         workspace.path(),
         vec!["/usr/bin/true".to_string()],
-        None,
+        /*project_command*/ None,
     )
     .await?;
 
-    submit_user_input(&test.codex, &test, "inspect this workspace").await?;
+    submit_user_input_without_environments(&test.codex, &test, "inspect this workspace").await?;
     let events = collect_events_until_terminal(&test.codex).await?;
 
     let event =
         assert_single_validation_skip(&events, ProjectValidationSkipReason::UnsupportedEnvironment);
+    assert!(event.command.is_empty());
     assert_eq!(event.changed_file_count, None);
     assert_eq!(response_mock.requests().len(), 2);
     Ok(())
@@ -2400,7 +2549,7 @@ async fn explicit_project_command_preserves_unsupported_environment_failure() ->
 
     let server = start_mock_server().await;
     responses::mount_sse_once(&server, sse_completed("resp-unsupported-command")).await;
-    let test = build_validation_codex(&server, shell_command("true", 5_000)).await?;
+    let test = build_validation_codex(&server, shell_command("true", /*timeout_ms*/ 5_000)).await?;
 
     submit_user_input_without_environments(&test.codex, &test, "finish the work").await?;
     let events = collect_events_until_terminal(&test.codex).await?;
@@ -2592,12 +2741,18 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
         ProjectValidationStatus::ActionableFailure
     );
     assert_eq!(validation_events[0].output, "validation-fail-1");
-    assert_eq!(
-        validation_events[1].status,
-        ProjectValidationStatus::ActionableFailure
-    );
-    assert_eq!(validation_events[1].output, "validation-fail-3");
-    assert_eq!(std::fs::read_to_string(&count_path)?, "3");
+    assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[1].output, "validation-pass-2");
+    let first_item_id = validation_events[0]
+        .item_id
+        .as_deref()
+        .expect("first validation should have an item id");
+    let second_item_id = validation_events[1]
+        .item_id
+        .as_deref()
+        .expect("second validation should have an item id");
+    assert_ne!(first_item_id, second_item_id);
+    assert_eq!(std::fs::read_to_string(&count_path)?, "2");
     assert_eq!(server.requests().await.len(), 5);
     server.shutdown().await;
     Ok(())
@@ -2645,9 +2800,8 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         matches!(event, EventMsg::TurnAborted(_))
     })
     .await;
-    server
-        .assert_request_count_stays(/*count*/ 2, Duration::from_millis(100))
-        .await;
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(server.requests().await.len(), 2);
     assert_eq!(std::fs::read_to_string(&count_path)?, "1");
 
     server.shutdown().await;
@@ -2829,7 +2983,7 @@ async fn project_validation_is_skipped_for_non_root_agents() -> Result<()> {
 async fn project_validation_reports_timeout_and_completes_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let events = run_validation_turn(shell_command("sleep 5", 50)).await?;
+    let events = run_validation_turn(shell_command("sleep 5", /*timeout_ms*/ 50)).await?;
     let validation_events = validation_events(&events);
     assert_eq!(validation_events.len(), 1);
     let event = validation_events[0];

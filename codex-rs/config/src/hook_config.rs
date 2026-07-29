@@ -16,6 +16,11 @@ pub struct HooksFile {
     pub hooks: HookEventsToml,
 }
 
+/// `hooks.json` files in the wild carry extension keys (`$schema`, editor
+/// metadata, plugin-specific annotations). Rejecting every unknown key breaks
+/// those files, but silently accepting unknown keys hides the common mistake of
+/// writing event tables at the top level (or misspelling their casing) instead
+/// of nesting them under `hooks`. Only the latter is rejected.
 impl<'de> Deserialize<'de> for HooksFile {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -33,7 +38,7 @@ impl<'de> Deserialize<'de> for HooksFile {
 
         let wire = HooksFileWire::deserialize(deserializer)?;
         for key in wire.extra.keys() {
-            if is_top_level_hook_event_key(key) {
+            if is_hook_event_key_regardless_of_casing(key) {
                 return Err(serde::de::Error::unknown_field(key, HOOKS_FILE_FIELDS));
             }
         }
@@ -47,20 +52,26 @@ impl<'de> Deserialize<'de> for HooksFile {
 
 const HOOKS_FILE_FIELDS: &[&str] = &["description", "hooks"];
 
-fn is_top_level_hook_event_key(key: &str) -> bool {
-    matches!(
-        key,
-        "PreToolUse"
-            | "PermissionRequest"
-            | "PostToolUse"
-            | "PreCompact"
-            | "PostCompact"
-            | "SessionStart"
-            | "UserPromptSubmit"
-            | "SubagentStart"
-            | "SubagentStop"
-            | "Stop"
-    )
+const HOOK_EVENT_KEYS: &[&str] = &[
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+];
+
+/// Matches event names case-insensitively so `pretooluse` is reported as a
+/// misplaced event table rather than accepted as an unrelated extension key.
+fn is_hook_event_key_regardless_of_casing(key: &str) -> bool {
+    HOOK_EVENT_KEYS
+        .iter()
+        .any(|event_key| event_key.eq_ignore_ascii_case(key))
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -93,6 +104,8 @@ pub struct HookEventsToml {
     pub post_compact: Vec<MatcherGroup>,
     #[serde(rename = "SessionStart", default)]
     pub session_start: Vec<MatcherGroup>,
+    #[serde(rename = "SessionEnd", default)]
+    pub session_end: Vec<MatcherGroup>,
     #[serde(rename = "UserPromptSubmit", default)]
     pub user_prompt_submit: Vec<MatcherGroup>,
     #[serde(rename = "SubagentStart", default)]
@@ -112,6 +125,7 @@ impl HookEventsToml {
             pre_compact,
             post_compact,
             session_start,
+            session_end,
             user_prompt_submit,
             subagent_start,
             subagent_stop,
@@ -123,6 +137,7 @@ impl HookEventsToml {
             && pre_compact.is_empty()
             && post_compact.is_empty()
             && session_start.is_empty()
+            && session_end.is_empty()
             && user_prompt_submit.is_empty()
             && subagent_start.is_empty()
             && subagent_stop.is_empty()
@@ -137,6 +152,7 @@ impl HookEventsToml {
             pre_compact,
             post_compact,
             session_start,
+            session_end,
             user_prompt_submit,
             subagent_start,
             subagent_stop,
@@ -149,6 +165,7 @@ impl HookEventsToml {
             pre_compact,
             post_compact,
             session_start,
+            session_end,
             user_prompt_submit,
             subagent_start,
             subagent_stop,
@@ -160,7 +177,7 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 10] {
+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 11] {
         [
             (HookEventName::PreToolUse, self.pre_tool_use),
             (HookEventName::PermissionRequest, self.permission_request),
@@ -168,6 +185,7 @@ impl HookEventsToml {
             (HookEventName::PreCompact, self.pre_compact),
             (HookEventName::PostCompact, self.post_compact),
             (HookEventName::SessionStart, self.session_start),
+            (HookEventName::SessionEnd, self.session_end),
             (HookEventName::UserPromptSubmit, self.user_prompt_submit),
             (HookEventName::SubagentStart, self.subagent_start),
             (HookEventName::SubagentStop, self.subagent_stop),
@@ -189,6 +207,9 @@ pub struct MatcherGroup {
 pub enum HookHandlerConfig {
     #[serde(rename = "command")]
     Command {
+        /// Stable identifier for this handler. When present it anchors the
+        /// persisted hook-state key (enable/disable and `trusted_hash`) so
+        /// reordering handlers does not silently drop the user's decisions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         command: String,
@@ -200,6 +221,16 @@ pub enum HookHandlerConfig {
         r#async: bool,
         #[serde(default, rename = "statusMessage")]
         status_message: Option<String>,
+        /// Approximate token threshold for spilling this hook's `additionalContext` to disk.
+        /// Unset uses 2,500 tokens; `0` disables spilling for this hook. The threshold is
+        /// evaluated against the original context; a spilled preview also includes recovery
+        /// metadata.
+        #[serde(
+            default,
+            rename = "additionalContextLimit",
+            skip_serializing_if = "Option::is_none"
+        )]
+        additional_context_limit: Option<usize>,
     },
     #[serde(rename = "prompt")]
     Prompt {},

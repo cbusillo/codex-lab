@@ -6,6 +6,7 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::Path;
 
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -20,10 +21,15 @@ pub(crate) enum RolloutOrdinalState {
 }
 
 impl RolloutOrdinalState {
-    pub(crate) fn for_new_rollout(history_mode: ThreadHistoryMode) -> Self {
+    pub(crate) fn for_new_rollout(
+        history_mode: ThreadHistoryMode,
+        history_base: Option<HistoryPosition>,
+    ) -> Self {
         match history_mode {
             ThreadHistoryMode::Legacy => Self::Legacy,
-            ThreadHistoryMode::Paginated => Self::Paginated { next: Some(0) },
+            ThreadHistoryMode::Paginated => Self::Paginated {
+                next: Some(history_base.map_or(0, |base| base.end_ordinal_exclusive)),
+            },
         }
     }
 
@@ -51,7 +57,8 @@ pub(crate) fn ordinal_state_for_rollout(
     file: &mut File,
     path: &Path,
 ) -> io::Result<RolloutOrdinalState> {
-    let Some(history_mode) = read_history_mode(file, path)? else {
+    let Some((history_mode, subagent_history_start_ordinal)) = read_history_metadata(file, path)?
+    else {
         return Ok(RolloutOrdinalState::Legacy);
     };
     if matches!(history_mode, ThreadHistoryMode::Legacy) {
@@ -77,12 +84,26 @@ pub(crate) fn ordinal_state_for_rollout(
             path.display()
         ))
     })?;
+    // Child records must start at `subagent_history_start_ordinal`. If initialization died while
+    // copying the inherited parent records, resuming would append child records before that
+    // boundary.
+    if let Some(prefix_end) = subagent_history_start_ordinal.and_then(|start| start.checked_sub(1))
+        && ordinal < prefix_end
+    {
+        return Err(io::Error::other(format!(
+            "paginated subagent rollout at {} is incomplete: expected inherited prefix through ordinal {prefix_end}, found final durable ordinal {ordinal}",
+            path.display()
+        )));
+    }
     Ok(RolloutOrdinalState::Paginated {
         next: ordinal.checked_add(1),
     })
 }
 
-fn read_history_mode(file: &mut File, path: &Path) -> io::Result<Option<ThreadHistoryMode>> {
+fn read_history_metadata(
+    file: &mut File,
+    path: &Path,
+) -> io::Result<Option<(ThreadHistoryMode, Option<u64>)>> {
     file.seek(SeekFrom::Start(0))?;
     let reader = BufReader::new(file);
     for line in reader.lines() {
@@ -102,7 +123,10 @@ fn read_history_mode(file: &mut File, path: &Path) -> io::Result<Option<ThreadHi
                 path.display()
             )));
         };
-        return Ok(Some(session_meta.meta.history_mode));
+        return Ok(Some((
+            session_meta.meta.history_mode,
+            session_meta.meta.subagent_history_start_ordinal,
+        )));
     }
     Ok(None)
 }

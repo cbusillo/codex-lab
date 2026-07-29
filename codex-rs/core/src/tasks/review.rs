@@ -6,7 +6,9 @@ use codex_auto_review::AutoReviewTerminalReason;
 use codex_auto_review::AutoReviewUsage;
 use codex_prompts::render_review_exit_interrupted;
 use codex_prompts::render_review_exit_success;
+use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::items::ExitedReviewModeItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -16,21 +18,19 @@ use codex_protocol::protocol::BackgroundAutoReviewStatus;
 use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::review_format::format_review_findings_block;
+use codex_protocol::review_format::render_review_output_text;
 use tokio_util::sync::CancellationToken;
 
 use crate::codex_delegate::run_codex_thread_one_shot;
 use crate::config::Constrained;
-use crate::review_format::format_review_findings_block;
-use crate::review_format::render_review_output_text;
 use crate::review_persistence::ReviewInterruptionStatus;
 use crate::review_persistence::ReviewPersistenceContext;
 use crate::review_persistence::SavedReviewInterruption;
-use crate::session::Codex;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -40,6 +40,7 @@ use codex_protocol::user_input::UserInput;
 
 use super::SessionTask;
 use super::SessionTaskContext;
+use super::SessionTaskResult;
 
 const BACKGROUND_AUTO_REVIEW_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -52,6 +53,11 @@ struct ReviewExecution {
     token_usage: Option<TokenUsage>,
     usage: AutoReviewUsage,
     terminal_reason: Option<AutoReviewTerminalReason>,
+}
+
+struct ReviewConversation {
+    session: Arc<Session>,
+    receiver: async_channel::Receiver<Event>,
 }
 
 impl ReviewTask {
@@ -90,7 +96,7 @@ impl SessionTask for ReviewTask {
         ctx: Arc<TurnContext>,
         input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
-    ) -> Option<String> {
+    ) -> SessionTaskResult {
         run_review_task(
             self.persistence.clone(),
             session,
@@ -129,7 +135,7 @@ async fn run_review_task(
     ctx: Arc<TurnContext>,
     input: Vec<TurnInput>,
     cancellation_token: CancellationToken,
-) -> Option<String> {
+) -> SessionTaskResult {
     session
         .session
         .services
@@ -140,7 +146,7 @@ async fn run_review_task(
     for item in input {
         match item {
             TurnInput::UserInput { mut content, .. } => user_input.append(&mut content),
-            TurnInput::ResponseItem(_) => {}
+            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => {}
         }
     }
 
@@ -151,7 +157,7 @@ async fn run_review_task(
                 session.clone_session(),
                 persistence,
                 BackgroundAutoReviewStatus::Running,
-                None,
+                /*error_summary*/ None,
             )
             .await;
         }
@@ -171,35 +177,36 @@ async fn run_review_task(
         user_input,
         cancellation_token.clone(),
     ));
-    let start_result: Result<Option<Codex>, ReviewExecution> = if let Some(budget) = &budget {
-        let remaining =
-            Duration::from_millis(budget.max_elapsed_ms).saturating_sub(review_started.elapsed());
-        tokio::select! {
-            biased;
-            review_codex = start_conversation => Ok(review_codex),
-            _ = tokio::time::sleep(remaining) => {
-                cancellation_token.cancel();
-                Err(ReviewExecution {
-                    output: None,
-                    token_usage: None,
-                    usage: AutoReviewUsage {
-                        elapsed_ms: Some(elapsed_millis(review_started.elapsed())),
-                        ..Default::default()
-                    },
-                    terminal_reason: Some(AutoReviewTerminalReason::BudgetElapsed),
-                })
+    let start_result: Result<Option<ReviewConversation>, ReviewExecution> =
+        if let Some(budget) = &budget {
+            let remaining = Duration::from_millis(budget.max_elapsed_ms)
+                .saturating_sub(review_started.elapsed());
+            tokio::select! {
+                biased;
+                review_codex = start_conversation => Ok(review_codex),
+                _ = tokio::time::sleep(remaining) => {
+                    cancellation_token.cancel();
+                    Err(ReviewExecution {
+                        output: None,
+                        token_usage: None,
+                        usage: AutoReviewUsage {
+                            elapsed_ms: Some(elapsed_millis(review_started.elapsed())),
+                            ..Default::default()
+                        },
+                        terminal_reason: Some(AutoReviewTerminalReason::BudgetElapsed),
+                    })
+                }
             }
-        }
-    } else {
-        Ok(start_conversation.await)
-    };
+        } else {
+            Ok(start_conversation.await)
+        };
     let execution = match start_result {
         Err(execution) => execution,
-        Ok(Some(review_codex)) => {
+        Ok(Some(review_conversation)) => {
             Box::pin(execute_review_conversation(
                 session.clone(),
                 ctx.clone(),
-                &review_codex,
+                &review_conversation,
                 persistence.as_ref(),
                 &codex_home,
                 budget.as_ref(),
@@ -255,7 +262,7 @@ async fn run_review_task(
                     session.clone_session(),
                     &persistence,
                     BackgroundAutoReviewStatus::Completed,
-                    None,
+                    /*error_summary*/ None,
                 )
                 .await;
             }
@@ -304,7 +311,7 @@ async fn run_review_task(
             }
         }
     }
-    None
+    Ok(None)
 }
 
 async fn send_interrupted_background_auto_review_status(
@@ -357,7 +364,7 @@ async fn start_review_conversation(
     ctx: Arc<TurnContext>,
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
-) -> Option<Codex> {
+) -> Option<ReviewConversation> {
     let config = ctx.config.clone();
     let mut sub_agent_config = config.as_ref().clone();
     // Carry over review-only feature restrictions so the delegate cannot
@@ -394,15 +401,19 @@ async fn start_review_conversation(
     )
     .await)
         .ok()
+        .map(|(session, io)| ReviewConversation {
+            session,
+            receiver: io.rx_event,
+        })
 }
 
 async fn process_review_events(
     session: Arc<SessionTaskContext>,
     ctx: Arc<TurnContext>,
-    review_codex: &Codex,
+    review_conversation: &ReviewConversation,
 ) -> Option<String> {
     let mut prev_agent_message: Option<Event> = None;
-    while let Ok(event) = review_codex.next_event().await {
+    while let Ok(event) = review_conversation.receiver.recv().await {
         match event.clone().msg {
             EventMsg::AgentMessage(_) => {
                 if let Some(prev) = prev_agent_message.take() {
@@ -425,6 +436,7 @@ async fn process_review_events(
                 return task_complete.last_agent_message;
             }
             EventMsg::TurnAborted(_) => {
+                // Cancellation or abort: consumer will finalize with None.
                 return None;
             }
             other => {
@@ -438,20 +450,21 @@ async fn process_review_events(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_review_conversation(
     session: Arc<SessionTaskContext>,
     ctx: Arc<TurnContext>,
-    review_codex: &Codex,
+    review_conversation: &ReviewConversation,
     persistence: Option<&ReviewPersistenceContext>,
     codex_home: &std::path::Path,
     budget: Option<&AutoReviewBudget>,
     started: tokio::time::Instant,
     cancellation_token: CancellationToken,
 ) -> ReviewExecution {
-    let events = Box::pin(process_review_events(session, ctx, review_codex));
+    let events = Box::pin(process_review_events(session, ctx, review_conversation));
     let raw_output = if let Some(budget) = budget {
         let monitor = Box::pin(wait_for_review_budget(
-            review_codex,
+            review_conversation,
             persistence,
             codex_home,
             budget,
@@ -468,7 +481,7 @@ async fn execute_review_conversation(
     } else {
         events.await
     };
-    let token_usage = review_codex
+    let token_usage = review_conversation
         .session
         .token_usage_info()
         .await
@@ -558,7 +571,7 @@ async fn execute_review_conversation(
 }
 
 async fn wait_for_review_budget(
-    review_codex: &Codex,
+    review_conversation: &ReviewConversation,
     persistence: Option<&ReviewPersistenceContext>,
     codex_home: &std::path::Path,
     budget: &AutoReviewBudget,
@@ -569,7 +582,7 @@ async fn wait_for_review_budget(
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let elapsed_ms = elapsed_millis(started.elapsed());
-        let token_usage = review_codex
+        let token_usage = review_conversation
             .session
             .token_usage_info()
             .await
@@ -684,114 +697,6 @@ fn background_review_budget_summary(
     }
 }
 
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-    use codex_protocol::protocol::ReviewCodeLocation;
-    use codex_protocol::protocol::ReviewFinding;
-    use codex_protocol::protocol::ReviewLineRange;
-    use std::path::PathBuf;
-
-    #[test]
-    fn oversized_output_exceeds_budget() {
-        let budget = test_budget();
-        assert!(raw_output_exceeds_budget(
-            &"x".repeat(budget.max_output_bytes + 1),
-            &budget
-        ));
-        assert!(!raw_output_exceeds_budget(
-            &"x".repeat(budget.max_output_bytes),
-            &budget
-        ));
-    }
-
-    #[test]
-    fn excess_findings_exceed_budget() {
-        let budget = AutoReviewBudget {
-            max_findings: 1,
-            ..test_budget()
-        };
-        let finding = ReviewFinding {
-            title: "[P1] Finding".to_string(),
-            body: "body".to_string(),
-            confidence_score: 0.9,
-            priority: 1,
-            code_location: ReviewCodeLocation {
-                absolute_file_path: PathBuf::from("/tmp/src/lib.rs"),
-                line_range: ReviewLineRange { start: 1, end: 1 },
-            },
-        };
-        let output = ReviewOutputEvent {
-            findings: vec![finding.clone(), finding],
-            ..Default::default()
-        };
-
-        assert!(findings_exceed_budget(&output, &budget));
-    }
-
-    #[test]
-    fn budget_summary_is_structured_and_bounded() {
-        let summary = background_review_budget_summary(
-            AutoReviewTerminalReason::BudgetTotalTokens,
-            Some(&test_budget()),
-            &AutoReviewUsage {
-                total_tokens: Some(250_001),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            summary,
-            "background review exceeded token budget: 250001 tokens >= 250000 tokens"
-        );
-    }
-
-    #[test]
-    fn elapsed_budget_is_enforced_at_the_deadline() {
-        let budget = test_budget();
-        assert!(!elapsed_reaches_budget(budget.max_elapsed_ms - 1, &budget));
-        assert!(elapsed_reaches_budget(budget.max_elapsed_ms, &budget));
-        assert!(!elapsed_exceeds_budget(budget.max_elapsed_ms, &budget));
-        assert!(elapsed_exceeds_budget(budget.max_elapsed_ms + 1, &budget));
-    }
-
-    #[test]
-    fn token_count_includes_cached_input() {
-        let token_usage = TokenUsage {
-            input_tokens: 100,
-            cached_input_tokens: 90,
-            output_tokens: 10,
-            reasoning_output_tokens: 0,
-            total_tokens: 20,
-        };
-
-        assert_eq!(review_token_count(&token_usage), Some(110));
-    }
-
-    #[test]
-    fn completed_output_at_exact_token_limit_is_allowed() {
-        let budget = test_budget();
-        assert!(total_tokens_reach_budget(budget.max_total_tokens, &budget));
-        assert!(!total_tokens_exceed_budget(
-            budget.max_total_tokens,
-            &budget
-        ));
-        assert!(total_tokens_exceed_budget(
-            budget.max_total_tokens + 1,
-            &budget
-        ));
-    }
-
-    fn test_budget() -> AutoReviewBudget {
-        AutoReviewBudget {
-            max_scope_bytes: 120_000,
-            max_elapsed_ms: 300_000,
-            max_total_tokens: 250_000,
-            max_output_bytes: 64,
-            max_findings: 20,
-        }
-    }
-}
-
 /// Parse a ReviewOutputEvent from a text blob returned by the reviewer model.
 /// If the text is valid JSON matching ReviewOutputEvent, deserialize it.
 /// Otherwise, attempt to extract the first JSON object substring and parse it.
@@ -814,15 +719,13 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
     }
 }
 
-/// Emits an ExitedReviewMode Event with optional ReviewOutput,
-/// and records a developer message with the review output.
+/// Emits ExitedReviewMode item lifecycle with optional ReviewOutput,
+/// and records the review output back into conversation history.
 pub(crate) async fn exit_review_mode(
     session: Arc<Session>,
     review_output: Option<ReviewOutputEvent>,
     ctx: Arc<TurnContext>,
 ) {
-    const REVIEW_USER_MESSAGE_ID: &str = "review_rollout_user";
-    const REVIEW_ASSISTANT_MESSAGE_ID: &str = "review_rollout_assistant";
     let (user_message, assistant_message) = if let Some(out) = review_output.clone() {
         let mut findings_str = String::new();
         let text = out.overall_explanation.trim();
@@ -848,30 +751,32 @@ pub(crate) async fn exit_review_mode(
         .record_conversation_items(
             &ctx,
             &[ResponseItem::Message {
-                id: Some(REVIEW_USER_MESSAGE_ID.to_string()),
+                id: Some(ResponseItemId::new("msg")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: user_message }],
                 phase: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
         )
         .await;
 
-    session
-        .send_event(
-            ctx.as_ref(),
-            EventMsg::ExitedReviewMode(ExitedReviewModeEvent { review_output }),
-        )
-        .await;
+    let item = TurnItem::ExitedReviewMode(ExitedReviewModeItem {
+        id: uuid::Uuid::now_v7().to_string(),
+        review_output,
+    });
+    session.emit_turn_item_started(ctx.as_ref(), &item).await;
+    session.emit_turn_item_completed(ctx.as_ref(), item).await;
     session
         .record_response_item_and_emit_turn_item(
             ctx.as_ref(),
             ResponseItem::Message {
-                id: Some(REVIEW_ASSISTANT_MESSAGE_ID.to_string()),
+                id: Some(ResponseItemId::new("msg")),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: assistant_message,
                 }],
                 phase: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         )
         .await;
@@ -881,3 +786,7 @@ pub(crate) async fn exit_review_mode(
     // file creation + git metadata collection cannot delay client-facing items.
     session.ensure_rollout_materialized().await;
 }
+
+#[cfg(test)]
+#[path = "review_tests.rs"]
+mod review_tests;

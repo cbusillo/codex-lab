@@ -102,10 +102,9 @@ remote_codex_rs="$remote_repo_root/codex-rs"
 
 cd "${remote_codex_rs}"
 cargo build -p codex-cli --bin codex
-target_root="${CARGO_TARGET_DIR:-./target}"
 
 rm -f "${remote_exec_server_log_path}" "${remote_exec_server_pid_path}"
-nohup "${target_root}/debug/codex" exec-server --listen ws://127.0.0.1:0 \
+nohup ./target/debug/codex exec-server --listen ws://127.0.0.1:0 \
   >"${remote_exec_server_log_path}" 2>&1 &
 remote_exec_server_pid="$!"
 echo "${remote_exec_server_pid}" >"${remote_exec_server_pid_path}"

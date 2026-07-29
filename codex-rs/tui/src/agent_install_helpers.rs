@@ -87,7 +87,7 @@ fn command_exists_on_path(command: &str) -> bool {
 
     #[cfg(windows)]
     {
-        return which::which(command).is_ok();
+        which::which(command).is_ok()
     }
 
     #[cfg(not(windows))]
@@ -131,7 +131,7 @@ pub(crate) fn install_hint_for_command(command: &str) -> String {
     #[cfg(target_os = "macos")]
     {
         let formula = macos_brew_formula_for_command(trimmed);
-        return format!("Install {formula} and make sure `{trimmed}` is on PATH.");
+        format!("Install {formula} and make sure `{trimmed}` is on PATH.")
     }
 
     #[cfg(not(target_os = "macos"))]

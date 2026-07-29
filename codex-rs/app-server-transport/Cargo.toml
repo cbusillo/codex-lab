@@ -36,8 +36,10 @@ constant_time_eq = { workspace = true }
 futures = { workspace = true }
 gethostname = { workspace = true }
 hmac = { workspace = true }
+httpdate = { workspace = true }
 jsonwebtoken = { workspace = true }
 owo-colors = { workspace = true, features = ["supports-colors"] }
+rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -56,5 +58,13 @@ uuid = { workspace = true, features = ["serde", "v7"] }
 [dev-dependencies]
 chrono = { workspace = true }
 codex-config = { workspace = true }
+codex-protocol = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[package.metadata.cargo-shear]
+ignored-paths = [
+    "src/transport/remote_control/websocket/tests/auth_change_tests.rs",
+    "src/transport/remote_control/websocket/tests/outer_loop_tests.rs",
+]
