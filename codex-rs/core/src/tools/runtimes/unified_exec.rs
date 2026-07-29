@@ -40,6 +40,7 @@ use crate::unified_exec::NoopSpawnLifecycle;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcess;
 use crate::unified_exec::UnifiedExecProcessManager;
+use codex_exec_server::EnvironmentCapabilities;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::error::CodexErr;
@@ -110,6 +111,19 @@ fn unified_exec_options(
     ExecOptions {
         expiration,
         capture_policy: ExecCapturePolicy::ShellTool,
+    }
+}
+
+fn require_remote_network_proxy_capability(
+    capabilities: &EnvironmentCapabilities,
+) -> Result<(), ToolError> {
+    if capabilities.network_proxy_launch {
+        Ok(())
+    } else {
+        Err(ToolError::Rejected(
+            "selected exec-server does not support executor-local network proxy launches"
+                .to_string(),
+        ))
     }
 }
 
@@ -348,12 +362,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                                     "failed to query exec-server capabilities: {err}"
                                 ))))
                             })?;
-                    if !environment_info.capabilities.network_proxy_launch {
-                        return Err(ToolError::Rejected(
-                            "selected exec-server does not support executor-local network proxy launches"
-                                .to_string(),
-                        ));
-                    }
+                    require_remote_network_proxy_capability(&environment_info.capabilities)?;
                     (env, None, Some(launch))
                 }
             }
@@ -565,6 +574,25 @@ mod tests {
             }
             other => panic!("expected timeout-or-cancellation expiration, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn legacy_exec_server_capabilities_fail_fast_for_remote_proxy_launch() {
+        let error = require_remote_network_proxy_capability(&EnvironmentCapabilities::default())
+            .expect_err("legacy exec-server capabilities must reject remote proxy launch");
+        assert!(matches!(
+            error,
+            ToolError::Rejected(message)
+                if message
+                    == "selected exec-server does not support executor-local network proxy launches"
+        ));
+
+        assert!(
+            require_remote_network_proxy_capability(&EnvironmentCapabilities {
+                network_proxy_launch: true,
+            })
+            .is_ok()
+        );
     }
 
     #[tokio::test]

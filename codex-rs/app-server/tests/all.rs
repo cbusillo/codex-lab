@@ -2,12 +2,22 @@
 
 // Single integration test binary that aggregates all test modules.
 // The submodules live in `tests/suite/`.
-#[cfg(debug_assertions)]
 use ctor::ctor;
 #[cfg(debug_assertions)]
 use ctor::dtor;
-#[cfg(debug_assertions)]
 use std::io::Write;
+
+#[cfg(not(debug_assertions))]
+#[ctor]
+fn reject_unisolated_release_profile() {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "codex-app-server integration tests require debug assertions so the hermetic keyring override cannot be compiled out"
+    );
+    drop(stderr);
+    std::process::abort();
+}
 
 #[cfg(debug_assertions)]
 #[ctor]
