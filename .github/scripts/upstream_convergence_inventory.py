@@ -448,6 +448,12 @@ GOVERNANCE_RULES = (
 
 POST_ANCHOR_RULES = (
     Rule(
+        patterns=feature_paths("apply_patch_validation"),
+        lane="intentionally_owned",
+        contracts=("VALIDATION-1",),
+        reason="bounded structural validation feedback restored after the upstream anchor",
+    ),
+    Rule(
         patterns=(
             "codex-rs/tui/Cargo.toml",
             "codex-rs/tui/src/debug_config.rs",

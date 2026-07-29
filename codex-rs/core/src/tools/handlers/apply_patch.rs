@@ -55,6 +55,11 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 
 const APPLY_PATCH_ARGUMENT_DIFF_BUFFER_INTERVAL: Duration = Duration::from_millis(500);
+
+#[path = "apply_patch_validation.rs"]
+mod validation;
+use validation::append_validation_feedback;
+
 /// Handles freeform `apply_patch` requests and routes verified patches to the
 /// selected environment filesystem.
 #[derive(Default)]
@@ -467,6 +472,12 @@ impl ApplyPatchHandler {
                             Some(&tracker),
                         );
                         let content = emitter.finish(event_ctx, out, delta.as_ref()).await?;
+                        let content = append_validation_feedback(
+                            content,
+                            delta.as_ref(),
+                            &turn.config.validation,
+                            turn_environment.cwd(),
+                        );
                         Ok(boxed_tool_output(ApplyPatchToolOutput::from_text(content)))
                     }
                 }
@@ -631,6 +642,12 @@ pub(crate) async fn intercept_apply_patch(
                         tracker.as_ref().copied(),
                     );
                     let content = emitter.finish(event_ctx, out, delta.as_ref()).await?;
+                    let content = append_validation_feedback(
+                        content,
+                        delta.as_ref(),
+                        &turn.config.validation,
+                        cwd,
+                    );
                     Ok(Some(FunctionToolOutput::from_text(content, Some(true))))
                 }
             }

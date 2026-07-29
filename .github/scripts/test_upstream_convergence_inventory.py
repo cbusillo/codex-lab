@@ -214,6 +214,8 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
 
     def test_project_validation_implementation_and_proofs_are_owned(self) -> None:
         for path in (
+            "codex-rs/core/src/tools/handlers/apply_patch_validation.rs",
+            "codex-rs/core/src/tools/handlers/apply_patch_validation_tests.rs",
             "codex-rs/core/src/session/project_validation.rs",
             "codex-rs/core/src/session/project_validation_coordinator.rs",
             "codex-rs/core/src/session/validation_provider.rs",
