@@ -47,6 +47,8 @@ async fn explicit_executor_skill_can_read_referenced_file() -> Result<()> {
 async fn exercise_executor_skill(scenario: ExecutorSkillScenario) -> Result<()> {
     let server = responses::start_mock_server().await;
     let codex_home = TempDir::new()?;
+    let isolated_home = TempDir::new()?;
+    let isolated_home_env = isolated_home.path().to_string_lossy().into_owned();
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
@@ -79,6 +81,10 @@ stream_max_retries = 0
     )?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_env_overrides(&[
+            ("HOME", Some(isolated_home_env.as_str())),
+            ("USERPROFILE", Some(isolated_home_env.as_str())),
+        ])
         .build()
         .await?;
     let auto_env = app_server.auto_env()?;

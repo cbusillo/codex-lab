@@ -231,6 +231,10 @@ POLICY_V1_RULES = (
             "codex-rs/external-agent-migration/**",
             "codex-rs/external-agent-sessions/**",
             "codex-rs/core/src/agent/**",
+            # The skill catalog always appends Every Code's binding routing
+            # policy, including for models whose upstream base instructions
+            # already carry generic skill usage guidance.
+            "codex-rs/core-skills/src/render.rs",
             "codex-rs/core/src/review_persistence.rs",
             # Implementation and integration proofs for owned orchestration and
             # review behavior, including the explicit external-agent preflight and

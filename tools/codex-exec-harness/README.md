@@ -12,9 +12,9 @@ resume the captured Codex thread id.
 ## Restored proof set
 
 Anchor merge `9d2eea2238` took the upstream tree, so this harness disappeared
-from the #428 candidate along with the behavior it proves. Only the scenarios
-that cover project validation, Background Review, provider routing, and
-external integration were restored:
+from the #428 candidate along with the behavior it proves. Restored scenarios
+now cover project validation, Background Review, provider routing, external
+integration, and the skill-routing/context contracts audited in #83:
 
 | Contract surface     | Scenario                                                                             |
 | -------------------- | ------------------------------------------------------------------------------------ |
@@ -23,6 +23,8 @@ external integration were restored:
 | Provider routing     | `provider-routing-high-risk-external.json`                                            |
 | External integration | `third-party-agent-current-binary-lifecycle.json`                                     |
 | Model-facing tools   | `external-tools-model-facing-contract.json`                                           |
+| Skill routing        | `skills-guidance-binding-triggers.json`, `skills-cache-continuity.json`                |
+| Context continuity   | `project-doc-skill-dedup.json`, `multi-turn-resume.json`                              |
 
 Every scenario still recorded in `upstream/convergence-guard.json` but not
 restored here carries a `pending_restore` waiver in
@@ -144,10 +146,11 @@ changed-file selection, fixed argv, one bounded correction cycle, and the final
 passing rerun.
 
 `third-party-agent-current-binary-lifecycle.json` provides the deterministic
-current-binary gate for issue #312. It configures a fixture external-command
-agent, then proves native spawn, parent-visible completion output, terminal
-status listing, and V2 interrupt cleanup without using a paid provider or
-inherited credentials.
+current-binary gate for issue #312 and the file-backed handoff proof for #83.
+It configures a fixture external-command agent, then proves native spawn,
+bounded parent-visible completion output, full first/last-marker recovery from
+a large workspace context file, terminal status listing, and V2 interrupt
+cleanup without using a paid provider or inherited credentials.
 
 `provider-routing-high-risk-external.json` proves issue #370's significance-aware
 automatic routing with a deterministic external-command fixture.
