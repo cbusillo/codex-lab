@@ -480,14 +480,21 @@ POST_ANCHOR_RULES = (
     Rule(
         patterns=(
             "scripts/local/cargo-build-env.sh",
-            "scripts/local/cleanup-space.sh",
-            "scripts/local/exec-harness-env.sh",
             "scripts/local/install-codex-lab-dev.sh",
             "scripts/local/test_install_codex_lab_dev.py",
         ),
         lane="intentionally_owned",
         contracts=("RELEASE-1",),
-        reason="Every Code distribution and rebuildable artifact lifecycle",
+        reason="Every Code distribution authority",
+    ),
+    Rule(
+        patterns=(
+            "scripts/local/cleanup-space.sh",
+            "scripts/local/exec-harness-env.sh",
+        ),
+        lane="intentionally_owned",
+        contracts=("RELEASE-1",),
+        reason="bounded rebuildable artifact lifecycle",
     ),
     Rule(
         patterns=("tools/codex-exec-harness/test_local_cleanup.py",),
