@@ -279,7 +279,9 @@ fn background_review_target_matches_only_the_completed_turn_diff() {
         &stale,
         Some("sha256:matching")
     ));
-    assert!(!background_review_target_matches_turn(&matching, None));
+    assert!(!background_review_target_matches_turn(
+        &matching, /*turn_review_fingerprint*/ None,
+    ));
 }
 
 #[test]

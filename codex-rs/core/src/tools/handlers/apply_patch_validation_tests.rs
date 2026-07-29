@@ -117,8 +117,8 @@ fn assert_skipped(changes: &[AppliedPatchChange], cwd: &AbsolutePathBuf, file: &
         cwd,
         vec![finding("json-parse", file, msg)],
         &["json-parse"],
-        1,
-        false,
+        /*issue_count*/ 1,
+        /*truncated*/ false,
     );
 }
 
@@ -150,8 +150,8 @@ fn structural_parsers_report_checks_and_findings() {
             finding("yaml-parse", "invalid.yaml", yaml_message),
         ],
         &["json-parse", "toml-parse", "yaml-parse"],
-        2,
-        false,
+        /*issue_count*/ 2,
+        /*truncated*/ false,
     );
 }
 
@@ -176,7 +176,14 @@ fn invalid_json_findings_are_deterministic_and_bounded() {
         })
         .collect();
 
-    assert_summary(&changes, &cwd, issues, &["json-parse"], 13, true);
+    assert_summary(
+        &changes,
+        &cwd,
+        issues,
+        &["json-parse"],
+        /*issue_count*/ 13,
+        /*truncated*/ true,
+    );
 }
 
 #[test]
