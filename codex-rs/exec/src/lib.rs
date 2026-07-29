@@ -73,6 +73,7 @@ use codex_core::find_thread_meta_by_name_str;
 use codex_core::format_exec_policy_error_with_source;
 use codex_core::path_utils;
 use codex_feedback::CodexFeedback;
+use codex_git_utils::diff_fingerprint;
 use codex_git_utils::get_git_repo_root;
 use codex_login::AuthConfig;
 use codex_login::default_client::set_default_client_residency_requirement;
@@ -145,11 +146,13 @@ pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use supports_color::Stream;
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -167,6 +170,118 @@ use crate::event_processor::EventProcessor;
 
 const DEFAULT_ANALYTICS_ENABLED: bool = true;
 const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
+const BACKGROUND_REVIEW_SCHEDULE_GRACE: Duration = Duration::from_secs(/*secs*/ 10);
+const BACKGROUND_REVIEW_COMPLETION_SLACK: Duration = Duration::from_secs(/*secs*/ 30);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackgroundReviewDeadlineKind {
+    Schedule,
+    Completion,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BackgroundReviewDeadline {
+    at: tokio::time::Instant,
+    kind: BackgroundReviewDeadlineKind,
+}
+
+#[derive(Default)]
+struct BackgroundReviewWaitState {
+    active_run_ids: HashSet<String>,
+    completed_for_turn: bool,
+    turn_review_fingerprint: Option<String>,
+    waiting: bool,
+    deadline: Option<BackgroundReviewDeadline>,
+}
+
+impl BackgroundReviewWaitState {
+    fn record_turn_diff(&mut self, diff: &str) {
+        self.turn_review_fingerprint = diff_fingerprint(diff);
+    }
+
+    fn begin_wait(&mut self, now: tokio::time::Instant, completion_grace: Duration) -> bool {
+        if self.completed_for_turn
+            || (self.turn_review_fingerprint.is_none() && self.active_run_ids.is_empty())
+        {
+            return false;
+        }
+
+        self.waiting = true;
+        self.deadline = Some(if self.active_run_ids.is_empty() {
+            BackgroundReviewDeadline {
+                at: now + BACKGROUND_REVIEW_SCHEDULE_GRACE,
+                kind: BackgroundReviewDeadlineKind::Schedule,
+            }
+        } else {
+            BackgroundReviewDeadline {
+                at: now + completion_grace,
+                kind: BackgroundReviewDeadlineKind::Completion,
+            }
+        });
+        true
+    }
+
+    fn record_status(
+        &mut self,
+        target: &ApiReviewTarget,
+        run_id: &str,
+        status: &codex_app_server_protocol::BackgroundAutoReviewStatus,
+        now: tokio::time::Instant,
+        completion_grace: Duration,
+    ) {
+        if !background_review_target_matches_turn(target, self.turn_review_fingerprint.as_deref()) {
+            return;
+        }
+
+        match status {
+            codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Running => {
+                self.active_run_ids.insert(run_id.to_string());
+                if self.waiting
+                    && !matches!(
+                        self.deadline,
+                        Some(BackgroundReviewDeadline {
+                            kind: BackgroundReviewDeadlineKind::Completion,
+                            ..
+                        })
+                    )
+                {
+                    self.deadline = Some(BackgroundReviewDeadline {
+                        at: now + completion_grace,
+                        kind: BackgroundReviewDeadlineKind::Completion,
+                    });
+                }
+            }
+            codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => {
+                let observed_run = self.active_run_ids.remove(run_id);
+                let resolves_without_active_run = matches!(
+                    status,
+                    codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped
+                );
+                if (observed_run || resolves_without_active_run) && self.active_run_ids.is_empty() {
+                    self.completed_for_turn = true;
+                    self.deadline = None;
+                }
+            }
+        }
+    }
+
+    fn should_shutdown(&self) -> bool {
+        self.waiting && self.completed_for_turn && self.active_run_ids.is_empty()
+    }
+
+    fn is_waiting(&self) -> bool {
+        self.waiting
+    }
+
+    fn deadline(&self) -> Option<BackgroundReviewDeadline> {
+        self.deadline
+    }
+}
 
 enum InitialOperation {
     UserTurn {
@@ -996,6 +1111,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // exit with a non-zero status for automation-friendly signaling.
     let mut error_seen = false;
     let mut interrupt_channel_open = true;
+    let mut background_review_wait = BackgroundReviewWaitState::default();
+    let background_review_completion_grace =
+        Duration::from_millis(config.background_auto_review_budget.max_elapsed_ms)
+            .saturating_add(BACKGROUND_REVIEW_COMPLETION_SLACK);
     let primary_thread_id_for_requests = primary_thread_id.to_string();
     loop {
         let server_event = tokio::select! {
@@ -1003,6 +1122,18 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 if maybe_interrupt.is_none() {
                     interrupt_channel_open = false;
                     continue;
+                }
+                if background_review_wait.is_waiting() {
+                    if let Err(err) = request_shutdown(
+                        &client,
+                        &mut request_ids,
+                        &primary_thread_id_for_requests,
+                    )
+                    .await
+                    {
+                        warn!("thread/unsubscribe failed during shutdown: {err}");
+                    }
+                    break;
                 }
                 if let Err(err) = send_request_with_response::<TurnInterruptResponse>(
                     &client,
@@ -1022,6 +1153,24 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 continue;
             }
             maybe_event = client.next_event() => maybe_event,
+            deadline_kind = wait_for_background_review_deadline(
+                background_review_wait.deadline()
+            ), if background_review_wait.deadline().is_some() => {
+                let Some(deadline_kind) = deadline_kind else {
+                    continue;
+                };
+                event_processor.process_warning(background_review_deadline_warning(deadline_kind));
+                if let Err(err) = request_shutdown(
+                    &client,
+                    &mut request_ids,
+                    &primary_thread_id_for_requests,
+                )
+                .await
+                {
+                    warn!("thread/unsubscribe failed during shutdown: {err}");
+                }
+                break;
+            }
         };
 
         let Some(server_event) = server_event else {
@@ -1033,6 +1182,32 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 handle_server_request(&client, request, &mut error_seen).await;
             }
             InProcessServerEvent::ServerNotification(mut notification) => {
+                if let ServerNotification::TurnDiffUpdated(payload) = &notification
+                    && payload.thread_id == primary_thread_id_for_requests
+                    && payload.turn_id == task_id
+                {
+                    background_review_wait.record_turn_diff(&payload.diff);
+                }
+                let completed_primary_turn = matches!(
+                    &notification,
+                    ServerNotification::TurnCompleted(payload)
+                        if payload.thread_id == primary_thread_id_for_requests
+                            && payload.turn.id == task_id
+                            && payload.turn.status
+                                == codex_app_server_protocol::TurnStatus::Completed
+                );
+                if let ServerNotification::BackgroundAutoReviewStatusChanged(payload) =
+                    &notification
+                    && payload.thread_id == primary_thread_id_for_requests
+                {
+                    background_review_wait.record_status(
+                        &payload.review_target,
+                        &payload.run_id,
+                        &payload.status,
+                        tokio::time::Instant::now(),
+                        background_review_completion_grace,
+                    );
+                }
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
                         && payload.turn_id == task_id
@@ -1068,6 +1243,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     match event_processor.process_server_notification(notification) {
                         CodexStatus::Running => {}
                         CodexStatus::InitiateShutdown => {
+                            if completed_primary_turn
+                                && background_review_wait.begin_wait(
+                                    tokio::time::Instant::now(),
+                                    background_review_completion_grace,
+                                )
+                            {
+                                continue;
+                            }
                             if let Err(err) = request_shutdown(
                                 &client,
                                 &mut request_ids,
@@ -1081,11 +1264,29 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         }
                     }
                 }
+                if background_review_wait.should_shutdown() {
+                    if let Err(err) =
+                        request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests)
+                            .await
+                    {
+                        warn!("thread/unsubscribe failed during shutdown: {err}");
+                    }
+                    break;
+                }
             }
             InProcessServerEvent::Lagged { skipped } => {
                 let message = lagged_event_warning_message(skipped);
                 warn!("{message}");
                 event_processor.process_warning(message);
+                if background_review_wait.is_waiting() {
+                    if let Err(err) =
+                        request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests)
+                            .await
+                    {
+                        warn!("thread/unsubscribe failed during shutdown: {err}");
+                    }
+                    break;
+                }
             }
         }
     }
@@ -1326,6 +1527,43 @@ fn session_configured_from_thread_response(
 
 fn lagged_event_warning_message(skipped: usize) -> String {
     format!("in-process app-server event stream lagged; dropped {skipped} events")
+}
+
+async fn wait_for_background_review_deadline(
+    deadline: Option<BackgroundReviewDeadline>,
+) -> Option<BackgroundReviewDeadlineKind> {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline.at).await;
+        Some(deadline.kind)
+    } else {
+        None
+    }
+}
+
+fn background_review_deadline_warning(kind: BackgroundReviewDeadlineKind) -> String {
+    match kind {
+        BackgroundReviewDeadlineKind::Schedule => {
+            "Background Review did not schedule before the bounded exec grace period elapsed; exiting without waiting for it."
+                .to_string()
+        }
+        BackgroundReviewDeadlineKind::Completion => {
+            "Background Review did not reach a terminal status within its configured execution budget; exiting."
+                .to_string()
+        }
+    }
+}
+
+fn background_review_target_matches_turn(
+    target: &ApiReviewTarget,
+    turn_review_fingerprint: Option<&str>,
+) -> bool {
+    matches!(
+        (target, turn_review_fingerprint),
+        (
+            ApiReviewTarget::CurrentTurnDiff { fingerprint },
+            Some(turn_review_fingerprint)
+        ) if fingerprint == turn_review_fingerprint
+    )
 }
 
 fn should_process_notification(
