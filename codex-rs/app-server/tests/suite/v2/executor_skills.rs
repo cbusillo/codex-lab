@@ -110,7 +110,7 @@ stream_max_retries = 0
     let reference_path = reference_dir.join("details.md")?;
     let reference_size = match scenario {
         ExecutorSkillScenario::VisibleWithBudgetWarning => 600 * 1024,
-        ExecutorSkillScenario::ExplicitOnly => 40 * 1024,
+        ExecutorSkillScenario::ExplicitOnly => 4 * 1024,
     };
     let allow_implicit_invocation = scenario == ExecutorSkillScenario::VisibleWithBudgetWarning;
     let reference_contents = format!("{REFERENCE_MARKER}\n{}", "x".repeat(reference_size));
