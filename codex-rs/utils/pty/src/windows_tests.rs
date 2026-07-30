@@ -236,14 +236,13 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
     );
     let expected = "cafeé 漢字";
     let expected_marker = format!("{VALUE_MARKER}{}", utf8_hex(expected));
-    let cmd_child_command = format!("\"\"{}\" -u -c \"{code}\"\"", python.replace('"', "\"\""));
+    let cmd_child_command = format!("{python} -u -c \"{code}\"");
     let mut shells = vec![WindowsShell {
         name: "cmd",
         program: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
         args: vec![
             "/D".to_string(),
             "/Q".to_string(),
-            "/S".to_string(),
             "/C".to_string(),
             cmd_child_command,
         ],
