@@ -48,7 +48,8 @@ fn create_env_from_core_vars() -> HashMap<String, String> {
 }
 
 fn codex_linux_sandbox_exe() -> PathBuf {
-    let sandbox_program = PathBuf::from(env!("CARGO_BIN_EXE_codex-linux-sandbox"));
+    let sandbox_program = codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox")
+        .expect("should find binary for codex-linux-sandbox");
     match sandbox_program.canonicalize() {
         Ok(path) => path,
         Err(_) => sandbox_program,

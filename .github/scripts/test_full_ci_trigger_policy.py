@@ -8,6 +8,10 @@ FULL_CI_WORKFLOW = ROOT / ".github/workflows/full-ci.yml"
 LEGACY_POSTMERGE_WORKFLOW = ROOT / ".github/workflows/postmerge-ci.yml"
 BLOCKING_CI_WORKFLOW = ROOT / ".github/workflows/blocking-ci.yml"
 RUST_FULL_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci-full.yml"
+RUST_NEXTEST_PLATFORM_WORKFLOW = (
+    ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml"
+)
+REMOTE_ENV_SCRIPT = ROOT / "scripts/test-remote-env.sh"
 RUST_BLOCKING_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci.yml"
 V8_CANARY_WORKFLOW = ROOT / ".github/workflows/v8-canary.yml"
 CODEX_LAB_RELEASE_WORKFLOW = ROOT / ".github/workflows/codex-lab-release.yml"
@@ -241,7 +245,34 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         )
         self.assertIn(
             "--no-fail-fast",
-            (ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml").read_text(),
+            RUST_NEXTEST_PLATFORM_WORKFLOW.read_text(),
+        )
+
+    def test_linux_x64_runs_native_suite_before_curated_remote_tests(self) -> None:
+        workflow = RUST_FULL_CI_WORKFLOW.read_text()
+        platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
+
+        self.assertIn("remote_test_filter: >-", workflow)
+        self.assertIn("test(suite::remote_env::)", workflow)
+        self.assertIn(
+            "test(=suite::skills::user_turn_includes_skill_instructions)",
+            workflow,
+        )
+        self.assertLess(
+            platform_workflow.index('run_nextest "${nextest_args[@]}"'),
+            platform_workflow.index(
+                'source "${GITHUB_WORKSPACE}/scripts/test-remote-env.sh"'
+            ),
+        )
+        self.assertIn(
+            'export CODEX_TEST_REMOTE_CODEX_BINARY="${helper_dir}/codex"',
+            platform_workflow,
+        )
+        remote_env_script = REMOTE_ENV_SCRIPT.read_text()
+        self.assertIn("CODEX_TEST_REMOTE_CODEX_BINARY", remote_env_script)
+        self.assertIn(
+            'if [[ -z "${CODEX_TEST_REMOTE_CODEX_BINARY:-}" ]]; then',
+            remote_env_script,
         )
 
     def test_argument_comment_lint_has_bounded_local_fallback(self) -> None:

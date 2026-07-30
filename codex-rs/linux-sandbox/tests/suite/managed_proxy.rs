@@ -17,6 +17,7 @@ use std::io::Read;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::Output;
 use std::process::Stdio;
 use std::time::Duration;
@@ -54,6 +55,11 @@ const PROXY_ENV_KEYS: &[&str] = &[
 fn create_env_from_core_vars() -> HashMap<String, String> {
     let policy = ShellEnvironmentPolicy::default();
     create_env(&policy, /*thread_id*/ None)
+}
+
+fn codex_linux_sandbox_exe() -> PathBuf {
+    codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox")
+        .expect("should find binary for codex-linux-sandbox")
 }
 
 fn strip_proxy_env(env: &mut HashMap<String, String>) {
@@ -144,7 +150,7 @@ async fn run_linux_sandbox_direct(
     args.push("--".to_string());
     args.extend(command.iter().map(|entry| (*entry).to_string()));
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_codex-linux-sandbox"));
+    let mut cmd = Command::new(codex_linux_sandbox_exe());
     cmd.args(args)
         .current_dir(cwd)
         .env_clear()
@@ -223,7 +229,8 @@ async fn managed_proxy_mode_routes_through_bridge_and_blocks_direct_egress() {
         format!("http://127.0.0.1:{proxy_port}"),
     );
 
-    let sandbox_helper_dir = std::path::Path::new(env!("CARGO_BIN_EXE_codex-linux-sandbox"))
+    let sandbox_helper = codex_linux_sandbox_exe();
+    let sandbox_helper_dir = sandbox_helper
         .parent()
         .expect("sandbox helper should have a parent");
     let file_system_sandbox_policy =

@@ -44,6 +44,7 @@ use core_test_support::skip_if_no_remote_env;
 use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_target_windows;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
@@ -1080,7 +1081,7 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
     skip_if_no_remote_env!(Ok(()));
 
     let server = start_mock_server().await;
-    let test = managed_network_unified_exec_test(&server).await?;
+    let test = managed_network_unified_exec_test_with_remote_and_local_env(&server).await?;
     let local_cwd = TempDir::new()?;
     let remote_cwd = PathBuf::from(format!(
         "/tmp/codex-network-approval-{}",
@@ -1174,6 +1175,20 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
 }
 
 async fn managed_network_unified_exec_test(server: &wiremock::MockServer) -> Result<TestCodex> {
+    let mut builder = managed_network_unified_exec_test_builder()?;
+    let test = builder.build(server).await?;
+    Ok(validate_managed_network_unified_exec_test(test))
+}
+
+async fn managed_network_unified_exec_test_with_remote_and_local_env(
+    server: &wiremock::MockServer,
+) -> Result<TestCodex> {
+    let mut builder = managed_network_unified_exec_test_builder()?;
+    let test = builder.build_with_remote_and_local_env(server).await?;
+    Ok(validate_managed_network_unified_exec_test(test))
+}
+
+fn managed_network_unified_exec_test_builder() -> Result<TestCodexBuilder> {
     let home = Arc::new(TempDir::new()?);
     fs::write(
         home.path().join("config.toml"),
@@ -1189,14 +1204,13 @@ allow_local_binding = true
 "#,
     )?;
     let approval_policy = AskForApproval::OnRequest;
-    let permission_profile = PermissionProfile::workspace_write_with(
+    let permission_profile_for_config = PermissionProfile::workspace_write_with(
         &[],
         NetworkSandboxPolicy::Enabled,
         /*exclude_tmpdir_env_var*/ false,
         /*exclude_slash_tmp*/ false,
     );
-    let permission_profile_for_config = permission_profile.clone();
-    let mut builder = test_codex()
+    Ok(test_codex()
         .with_home(home)
         .with_cloud_config_bundle(managed_network_requirements_loader())
         .with_config(move |config| {
@@ -1210,8 +1224,10 @@ allow_local_binding = true
                 .permissions
                 .set_permission_profile(permission_profile_for_config)
                 .expect("set permission profile");
-        });
-    let test = builder.build_with_remote_and_local_env(server).await?;
+        }))
+}
+
+fn validate_managed_network_unified_exec_test(test: TestCodex) -> TestCodex {
     assert!(
         test.config.managed_network_requirements_enabled(),
         "expected managed network requirements to be enabled"
@@ -1225,7 +1241,7 @@ allow_local_binding = true
         .as_ref()
         .expect("expected runtime managed network proxy addresses");
 
-    Ok(test)
+    test
 }
 
 async fn mount_exec_network_turn(

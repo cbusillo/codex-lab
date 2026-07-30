@@ -34,6 +34,15 @@ async fn local_mcp_startup_and_refresh_use_configured_http_client() -> Result<()
         for &key in codex_network_proxy::PROXY_ENV_KEYS {
             command.env_remove(key);
         }
+        command.env("CODEX_TEST_ENVIRONMENT", "local");
+        for key in [
+            "CODEX_TEST_REMOTE_ENV",
+            "CODEX_TEST_REMOTE_ENV_CONTAINER_NAME",
+            "CODEX_TEST_REMOTE_EXEC_SERVER_PID",
+            "CODEX_TEST_REMOTE_EXEC_SERVER_URL",
+        ] {
+            command.env_remove(key);
+        }
         command
             .env(PROXY_TEST_SUBPROCESS_ENV_VAR, "1")
             .env("HTTP_PROXY", proxy.uri())
@@ -119,7 +128,7 @@ async fn local_mcp_startup_and_refresh_use_configured_http_client() -> Result<()
                 .set(servers)
                 .expect("test MCP servers should accept any configuration");
         })
-        .build_with_auto_env(&responses_server)
+        .build(&responses_server)
         .await?;
     wait_for_mcp_server(&fixture.codex, SERVER_NAME).await?;
 

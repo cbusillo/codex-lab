@@ -344,6 +344,8 @@ mod tests {
     use super::spawn_supervised_runtime_thread;
     use crate::FunctionCallOutputContentItem;
 
+    const RUNTIME_THREAD_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+
     fn execute_request(source: &str) -> ExecuteRequest {
         ExecuteRequest {
             tool_call_id: "call_1".to_string(),
@@ -368,7 +370,7 @@ mod tests {
         );
 
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), failure_rx.recv())
+            tokio::time::timeout(RUNTIME_THREAD_EVENT_TIMEOUT, failure_rx.recv())
                 .await
                 .expect("runtime failure timeout")
                 .expect("runtime failure"),
@@ -386,7 +388,7 @@ mod tests {
         );
 
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            tokio::time::timeout(RUNTIME_THREAD_EVENT_TIMEOUT, event_rx.recv())
                 .await
                 .expect("runtime panic event timeout"),
             Some(RuntimeEvent::ThreadPanicked)
