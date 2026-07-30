@@ -18,7 +18,7 @@ class SetupCiActionTests(unittest.TestCase):
         prepare_bazel = Path(
             ".github/actions/prepare-bazel-ci/action.yml"
         ).read_text(encoding="utf-8")
-        full_ci = Path(".github/workflows/rust-ci-full.yml").read_text(
+        lint_build = Path(".github/workflows/rust-ci-full-lint-build.yml").read_text(
             encoding="utf-8"
         )
         nextest = Path(
@@ -27,10 +27,10 @@ class SetupCiActionTests(unittest.TestCase):
 
         self.assertIn("bazel-cache-v2-${CACHE_RUNNER_SCOPE}", prepare_bazel)
         self.assertIn(
-            "cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}", full_ci
+            "cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}", lint_build
         )
         self.assertIn(
-            "sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}", full_ci
+            "sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}", lint_build
         )
         self.assertIn(
             "cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}", nextest

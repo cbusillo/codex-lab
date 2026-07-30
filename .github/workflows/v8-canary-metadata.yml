@@ -1,0 +1,71 @@
+name: v8-canary-metadata
+
+on:
+  workflow_call:
+    outputs:
+      canary_required:
+        value: ${{ jobs.metadata.outputs.canary_required }}
+      v8_version:
+        value: ${{ jobs.metadata.outputs.v8_version }}
+      windows_source_required:
+        value: ${{ jobs.metadata.outputs.windows_source_required }}
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      # A stale PR head can contain the old detector, which does not emit this
+      # output. Missing must mean "run" so older branches cannot silently skip
+      # the expensive V8 coverage while reporting success.
+      canary_required: ${{ steps.changes.outputs.canary_required || 'true' }}
+      v8_version: ${{ steps.v8_version.outputs.version }}
+      windows_source_required: ${{ steps.changes.outputs.windows_source_required || 'true' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Resolve exact v8 crate version
+        id: v8_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 .github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Detect V8 canary changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Manual and scheduled runs have no meaningful before/after range.
+          # Force every V8 variant so both entrypoints remain reliable.
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${EVENT_NAME}" == "schedule" ]]; then
+            output="$(python3 .github/scripts/v8_canary_changes.py --force)"
+          else
+            output="$(python3 .github/scripts/v8_canary_changes.py \
+              --base "${BASE_SHA}" \
+              --head "${HEAD_SHA}")"
+          fi
+          echo "${output}"
+          echo "${output}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree

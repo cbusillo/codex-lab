@@ -36,28 +36,36 @@ verification runs on a nightly or explicitly requested cadence.
   release-build verification on the trusted persistent Linux runner. Runtime
   tests stay in `rust-ci-full.yml`, where each platform has the dependencies
   and isolation expected by the test suite.
-- `rust-ci-full.yml` is the full Cargo-native verification workflow.
-  It keeps the heavier checks off the PR and per-merge paths while still
-  validating them in the full suite:
+- `rust-ci-full.yml` is the macOS/Linux Cargo-native verification workflow used
+  by both full CI and the current dogfood release gate. It keeps the heavier
+  checks off the PR and per-merge paths while validating the supported targets:
   - the full Cargo `clippy` matrix
   - the full Cargo `nextest` matrix via per-platform archive-backed shards
-  - Windows ARM64 nextest archives cross-compiled on Windows x64, then replayed on native Windows ARM64 shards
   - release-profile Cargo builds
   - cross-platform `argument-comment-lint`
   - Linux remote-env tests
+- `rust-ci-full-windows.yml` retains Windows x64/ARM64 clippy, nextest, release
+  builds, and argument-comment-lint in nightly/manual full CI and on explicit
+  `**full-ci**` branches. Windows failures remain visible but do not block the
+  first macOS/Linux dogfood release.
 - `sdk-integration.yml` builds Codex with Bazel and runs the TypeScript SDK
   integration tests against that real binary on the trusted Linux runner.
-- `v8-canary.yml` keeps the upstream V8 artifact and source-build matrix visible
-  in the full suite and on relevant pull requests.
+- `v8-canary.yml` keeps the macOS/Linux upstream V8 artifact matrix visible in
+  the release gate, full suite, and relevant pull requests.
+- `v8-canary-windows.yml` retains the Windows source-build matrix in full CI and
+  relevant pull requests without making it release-blocking.
 - Bazel, Rust, SDK integration, and V8 remain independent top-level suites and
   start in parallel. Full verification optimizes for diagnostic completeness;
   the bounded pull-request gate is responsible for fast rejection.
 
 ## Release Gate
 
-- `codex-lab-release.yml` runs the same Bazel, Rust, SDK integration, and V8
-  reusable workflows on the exact selected release ref after validating release
-  metadata and before building release artifacts.
+- `codex-lab-release.yml` runs Bazel, SDK integration, and the supported
+  macOS/Linux Rust and V8 workflows on the exact selected release ref after
+  validating release metadata and before building release artifacts.
+- Windows remains part of nightly/manual `full-ci.yml`, but it is intentionally
+  outside the release critical path until Windows becomes a supported Codex Lab
+  dogfood target.
 - A recent nightly is useful evidence but never substitutes for this exact-ref
   release gate. Publishing remains downstream of both full verification and
   artifact validation.
@@ -95,8 +103,9 @@ verification runs on a nightly or explicitly requested cadence.
   runner-managed temporary storage on Unix and the fresh per-job Dev Drive on
   Windows, so jobs cannot accumulate per-run archives in lane caches.
 - Upstream Windows Bazel jobs require authenticated RBE and custom Windows exec
-  toolchains, so they are not part of public-fork blocking CI. `rust-ci-full.yml`
-  retains Windows validation in the full suite on GitHub-hosted Windows runners.
+  toolchains, so they are not part of public-fork blocking CI.
+  `rust-ci-full-windows.yml` retains Windows validation in the full suite on
+  GitHub-hosted Windows runners.
 - `.github/scripts/verify_blocking_ci_runner_routing.py` follows the reusable
   workflow graph from `blocking-ci.yml` and rejects organization runner groups,
   persistent self-hosted runners, billable macOS large runners, and unsupported
@@ -132,9 +141,10 @@ verification runs on a nightly or explicitly requested cadence.
   another repository. Pass `artifact-repository` to opt into a different source;
   `.github/scripts/download-rusty-v8-artifacts.sh` validates that input and
   `GITHUB_SERVER_URL` before either reaches a URL.
-- `rust-ci-full.yml` and its `rust-ci-full-nextest-platform.yml` reusable
-  workflow explicitly read the exact-version, checksummed artifacts from
-  `openai/codex` because they only compile and test source; they publish nothing.
+- `rust-ci-full-argument-comment-lint.yml`, `rust-ci-full-lint-build.yml`, and
+  `rust-ci-full-nextest-platform.yml` explicitly read the exact-version,
+  checksummed artifacts from `openai/codex` because they only compile and test
+  source; they publish nothing.
   `rust-release.yml` deliberately keeps the fail-closed default so a fork
   release cannot redistribute V8 blobs published by another repository.
 - Codex Lab's own releases go through `codex-lab-release.yml`, which builds

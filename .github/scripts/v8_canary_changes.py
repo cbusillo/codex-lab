@@ -30,6 +30,8 @@ CANARY_PATH_PATTERNS = {
     ".github/workflows/full-ci.yml",
     ".github/workflows/rusty-v8-release.yml",
     ".github/workflows/v8-canary.yml",
+    ".github/workflows/v8-canary-metadata.yml",
+    ".github/workflows/v8-canary-windows.yml",
     "MODULE.bazel",
     "MODULE.bazel.lock",
     "codex-rs/Cargo.toml",
@@ -49,6 +51,8 @@ WINDOWS_SOURCE_BUILD_PATHS = {
     ".github/scripts/v8_canary_changes.py",
     ".github/workflows/rusty-v8-release.yml",
     ".github/workflows/v8-canary.yml",
+    ".github/workflows/v8-canary-metadata.yml",
+    ".github/workflows/v8-canary-windows.yml",
 }
 
 
