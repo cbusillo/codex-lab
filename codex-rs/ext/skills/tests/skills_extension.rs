@@ -628,7 +628,7 @@ async fn skills_list_only_returns_model_visible_bounded_metadata() -> TestResult
             tool_name: list_tool.tool_name(),
             model: "gpt-test".to_string(),
             codex_turn_metadata: None,
-            truncation_policy: TruncationPolicy::Bytes(1_024),
+            truncation_policy: TruncationPolicy::Bytes(/*limit*/ 64 * 1_024),
             conversation_history: ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
             environments: Vec::new(),

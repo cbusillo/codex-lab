@@ -4,6 +4,7 @@ use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolExecutorFuture;
 use codex_extension_api::ToolName;
 use codex_extension_api::ToolSpec;
+use codex_protocol::protocol::TruncationPolicy;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -17,7 +18,7 @@ use super::SkillToolContext;
 use super::pagination_cursor;
 use super::parse_args;
 use super::parse_pagination_cursor;
-use super::serialized_len;
+use super::serialized_fits_output_budget;
 use super::skill_function_tool;
 use super::skill_json_output;
 use super::skill_tool_name;
@@ -147,7 +148,12 @@ impl ToolExecutor<ToolCall> for ReadTool {
                     "skills.read cursor is invalid".to_string(),
                 ));
             }
-            let response = page_response(result.resource.as_str(), &result.contents, start)?;
+            let response = page_response(
+                result.resource.as_str(),
+                &result.contents,
+                start,
+                call.truncation_policy,
+            )?;
             skill_json_output(&response, output_authority)
         })
     }
@@ -157,6 +163,7 @@ fn page_response(
     resource: &str,
     contents: &str,
     start: usize,
+    truncation_policy: TruncationPolicy,
 ) -> Result<ReadResponse, FunctionCallError> {
     let response = |end, next_cursor| ReadResponse {
         resource: resource.to_string(),
@@ -164,22 +171,128 @@ fn page_response(
         next_cursor,
     };
     let complete = response(contents.len(), None);
-    if serialized_len(&complete)? <= MAX_READ_RESPONSE_BYTES {
+    if serialized_fits_output_budget(&complete, truncation_policy, MAX_READ_RESPONSE_BYTES)? {
         return Ok(complete);
     }
 
-    let mut end = contents.len();
-    while end > start {
-        end = start + (end - start) / 2;
-        while !contents.is_char_boundary(end) {
+    let mut low = start;
+    let mut high = contents.len();
+    let mut best = None;
+    while high.saturating_sub(low) > 1 {
+        let midpoint = low + (high - low) / 2;
+        let mut end = midpoint;
+        while end > low && !contents.is_char_boundary(end) {
             end -= 1;
         }
+        if end == low {
+            end = midpoint;
+            while end < high && !contents.is_char_boundary(end) {
+                end += 1;
+            }
+            if end == high {
+                break;
+            }
+        }
         let candidate = response(end, Some(pagination_cursor(contents, end)));
-        if serialized_len(&candidate)? <= MAX_READ_RESPONSE_BYTES {
-            return Ok(candidate);
+        if serialized_fits_output_budget(&candidate, truncation_policy, MAX_READ_RESPONSE_BYTES)? {
+            low = end;
+            best = Some(candidate);
+        } else {
+            high = end;
         }
     }
-    Err(FunctionCallError::Fatal(
-        "skill resource handle leaves no room for contents".to_string(),
-    ))
+    best.ok_or_else(|| {
+        FunctionCallError::RespondToModel(
+            "skill resource handle leaves no room for contents".to_string(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_utils_string::approx_token_count;
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn pages_reconstruct_resource_within_model_output_budgets() {
+        let contents = "abcd💡".repeat(8_000);
+
+        for truncation_policy in [
+            TruncationPolicy::Bytes(/*limit*/ 10_000),
+            TruncationPolicy::Tokens(/*limit*/ 2_500),
+        ] {
+            let mut start = 0;
+            let mut reconstructed = String::new();
+            let mut page_count = 0;
+            loop {
+                let response = page_response(
+                    "skill://demo-plugin@1/skills/deploy/references/details.md",
+                    &contents,
+                    start,
+                    truncation_policy,
+                )
+                .expect("skills.read page should fit the model output budget");
+                let serialized =
+                    serde_json::to_string(&response).expect("read response should serialize");
+                match truncation_policy {
+                    TruncationPolicy::Bytes(limit) => assert!(serialized.len() <= limit),
+                    TruncationPolicy::Tokens(limit) => {
+                        assert!(approx_token_count(&serialized) <= limit)
+                    }
+                }
+                assert!(!response.contents.is_empty());
+                reconstructed.push_str(&response.contents);
+                page_count += 1;
+
+                let Some(cursor) = response.next_cursor else {
+                    break;
+                };
+                start = parse_pagination_cursor(Some(&cursor), &contents, "skills.read")
+                    .expect("skills.read cursor should remain valid");
+            }
+
+            assert!(page_count > 1);
+            assert_eq!(reconstructed, contents);
+        }
+    }
+
+    #[test]
+    fn tiny_budget_does_not_emit_nonadvancing_page() {
+        let error = page_response(
+            "skill://demo-plugin@1/skills/deploy/SKILL.md",
+            "x",
+            /*start*/ 0,
+            TruncationPolicy::Bytes(/*limit*/ 1),
+        )
+        .expect_err("tiny budget should return a recoverable tool error");
+        assert!(matches!(error, FunctionCallError::RespondToModel(_)));
+    }
+
+    #[test]
+    fn page_search_tries_the_next_unicode_boundary() {
+        let resource = "skill://demo-plugin@1/skills/deploy/SKILL.md";
+        let contents = format!("{}💡{}", "a".repeat(100), "b".repeat(100));
+        let expected_contents = format!("{}💡", "a".repeat(100));
+        let expected = ReadResponse {
+            resource: resource.to_string(),
+            contents: expected_contents.clone(),
+            next_cursor: Some(pagination_cursor(&contents, expected_contents.len())),
+        };
+        let budget = serde_json::to_string(&expected)
+            .expect("expected read response should serialize")
+            .len();
+
+        assert_eq!(
+            page_response(
+                resource,
+                &contents,
+                /*start*/ 0,
+                TruncationPolicy::Bytes(budget),
+            )
+            .expect("one complete Unicode scalar should fit"),
+            expected
+        );
+    }
 }
