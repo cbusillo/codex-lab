@@ -13,6 +13,7 @@ RUST_NEXTEST_PLATFORM_WORKFLOW = (
 )
 REMOTE_ENV_SCRIPT = ROOT / "scripts/test-remote-env.sh"
 RUST_BLOCKING_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci.yml"
+BAZEL_WORKFLOW = ROOT / ".github/workflows/bazel.yml"
 V8_CANARY_WORKFLOW = ROOT / ".github/workflows/v8-canary.yml"
 CODEX_LAB_RELEASE_WORKFLOW = ROOT / ".github/workflows/codex-lab-release.yml"
 FULL_CI_MATRIX_WORKFLOWS = (
@@ -247,6 +248,12 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             "--no-fail-fast",
             RUST_NEXTEST_PLATFORM_WORKFLOW.read_text(),
         )
+
+    def test_bazel_jobs_have_cold_cache_headroom(self) -> None:
+        workflow = BAZEL_WORKFLOW.read_text()
+
+        self.assertEqual(workflow.count("timeout-minutes: 90"), 3)
+        self.assertNotIn("timeout-minutes: 60", workflow)
 
     def test_linux_x64_runs_native_suite_before_curated_remote_tests(self) -> None:
         workflow = RUST_FULL_CI_WORKFLOW.read_text()

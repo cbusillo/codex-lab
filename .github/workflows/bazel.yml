@@ -23,7 +23,9 @@ jobs:
     # Bazel compilation runs only in trusted full-suite/manual contexts. Runtime
     # tests are owned by rust-ci-full, where each platform has the dependencies
     # and isolation its test suite expects.
-    timeout-minutes: 60
+    # Cold-cache V8 compilation reached the former 60-minute ceiling while
+    # still making steady progress on the shared self-hosted build machine.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -117,7 +119,8 @@ jobs:
 
   clippy:
     needs: authorize_self_hosted
-    timeout-minutes: 60
+    # Match the build job's cold-cache headroom for the V8-heavy lint graph.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -194,7 +197,8 @@ jobs:
 
   verify-release-build:
     needs: authorize_self_hosted
-    timeout-minutes: 60
+    # Release-mode V8 compilation needs the same bounded cold-cache headroom.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
