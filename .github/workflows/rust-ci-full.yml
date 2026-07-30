@@ -492,7 +492,7 @@ jobs:
     secrets: inherit
 
   tests_linux_x64_remote:
-    name: Tests — codex-lab-linux - x86_64-unknown-linux-gnu (remote)
+    name: Tests — codex-lab-linux - x86_64-unknown-linux-gnu (native + remote)
     needs: authorize_self_hosted
     uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
     with:
@@ -501,6 +501,18 @@ jobs:
       profile: ci-test
       artifact_id: linux-x64-remote
       remote_env: true
+      # The complete workspace runs natively first. Keep remote execution as a
+      # positive, reviewable set until the parity gaps tracked in #505 close.
+      remote_test_filter: >-
+        package(codex-core) & (
+          test(suite::remote_env::) |
+          test(=suite::agents_md::multi_environment_thread_loads_every_project_and_keeps_creation_snapshot) |
+          test(=suite::apply_patch_cli::apply_patch_turn_diff_emits_portable_paths_for_remote_cwd) |
+          test(=suite::apply_patch_cli::apply_patch_turn_diff_tracks_local_and_remote_environment_paths) |
+          test(=suite::rmcp_client::remote_stdio_env_var_source_does_not_copy_local_env) |
+          test(=suite::skills::user_turn_includes_skill_instructions) |
+          test(=suite::view_image::view_image_routes_to_selected_remote_environment)
+        )
       test_threads: 4
       use_sccache: true
     secrets: inherit

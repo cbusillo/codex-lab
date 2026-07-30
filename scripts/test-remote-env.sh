@@ -25,7 +25,7 @@ setup_remote_env() {
   local remote_exec_server_stdout_path
 
   container_name="${CODEX_TEST_REMOTE_ENV_CONTAINER_NAME:-codex-remote-test-env-local-$(date +%s)-${RANDOM}}"
-  codex_binary_path="${CARGO_TARGET_DIR:-${REPO_ROOT}/codex-rs/target}/debug/codex"
+  codex_binary_path="${CODEX_TEST_REMOTE_CODEX_BINARY:-${CARGO_TARGET_DIR:-${REPO_ROOT}/codex-rs/target}/debug/codex}"
 
   if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required (Colima or Docker Desktop)" >&2
@@ -37,15 +37,17 @@ setup_remote_env() {
     return 1
   fi
 
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "cargo is required to build codex" >&2
-    return 1
-  fi
+  if [[ -z "${CODEX_TEST_REMOTE_CODEX_BINARY:-}" ]]; then
+    if ! command -v cargo >/dev/null 2>&1; then
+      echo "cargo is required to build codex" >&2
+      return 1
+    fi
 
-  (
-    cd "${REPO_ROOT}/codex-rs"
-    cargo build -p codex-cli --bin codex
-  )
+    (
+      cd "${REPO_ROOT}/codex-rs"
+      cargo build -p codex-cli --bin codex
+    )
+  fi
 
   if [[ ! -f "${codex_binary_path}" ]]; then
     echo "codex binary not found at ${codex_binary_path}" >&2
@@ -99,7 +101,7 @@ wait_for_remote_exec_server_port() {
   local stdout_path="$3"
   local deadline=$((SECONDS + 5))
 
-  while (( SECONDS < deadline )); do
+  while ((SECONDS < deadline)); do
     if docker exec "${container_name}" python3 -c "import socket; socket.create_connection(('127.0.0.1', ${port}), timeout=0.2).close()" >/dev/null 2>&1; then
       return 0
     fi
