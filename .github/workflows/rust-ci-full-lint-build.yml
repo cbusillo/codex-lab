@@ -149,7 +149,6 @@ jobs:
           path: |
             /var/cache/apt
           key: apt-${{ inputs.runner }}-${{ inputs.target }}-v1
-
       - if: ${{ inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl'}}
         name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -256,4 +255,3 @@ jobs:
           path: |
             /var/cache/apt
           key: apt-${{ inputs.runner }}-${{ inputs.target }}-v1
-
