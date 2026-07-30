@@ -1680,6 +1680,14 @@ async fn apply_patch_turn_diff_tracks_local_and_remote_environment_paths() -> Re
             /*sandbox*/ None,
         )
         .await?;
+    fs::create_dir_all(shared_cwd.join(".git"))?;
+    test.fs()
+        .create_directory(
+            &shared_cwd_uri.join(".git")?,
+            CreateDirectoryOptions { recursive: true },
+            /*sandbox*/ None,
+        )
+        .await?;
 
     let local_patch = format!(
         "*** Begin Patch\n*** Environment ID: {LOCAL_ENVIRONMENT_ID}\n*** Add File: {file_name}\n+local\n*** End Patch"
