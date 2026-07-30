@@ -25,11 +25,14 @@ const NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS: u64 = 30;
 /// exit code, which reports a harness timeout instead of the real behavior.
 const NORMAL_EXIT_ROOT_TIMEOUT_MS: u64 = 45_000;
 
+/// How long an interactive Windows shell may take to start a foreground child
+/// on a loaded CI worker.
+const FOREGROUND_CHILD_READY_TIMEOUT_MS: u64 = 30_000;
+
 struct WindowsShell {
     name: &'static str,
     program: String,
     args: Vec<String>,
-    child_command: String,
 }
 
 fn find_powershell() -> Option<String> {
@@ -233,18 +236,31 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
     );
     let expected = "cafeé 漢字";
     let expected_marker = format!("{VALUE_MARKER}{}", utf8_hex(expected));
+    let cmd_child_command = format!("\"\"{}\" -u -c \"{code}\"\"", python.replace('"', "\"\""));
     let mut shells = vec![WindowsShell {
         name: "cmd",
         program: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
-        args: vec!["/D".to_string(), "/Q".to_string()],
-        child_command: format!("\"{}\" -u -c \"{code}\"", python.replace('"', "\"\"")),
+        args: vec![
+            "/D".to_string(),
+            "/Q".to_string(),
+            "/S".to_string(),
+            "/C".to_string(),
+            cmd_child_command,
+        ],
     }];
     if let Some(program) = find_powershell() {
         shells.push(WindowsShell {
             name: "PowerShell",
             program,
-            args: vec!["-NoLogo".to_string(), "-NoProfile".to_string()],
-            child_command: format!("& '{}' -u -c \"{code}\"", python.replace('\'', "''")),
+            args: vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                format!(
+                    "& '{}' -u -c \"{code}\"; exit $LASTEXITCODE",
+                    python.replace('\'', "''")
+                ),
+            ],
         });
     }
     let env: HashMap<String, String> = std::env::vars().collect();
@@ -262,12 +278,13 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
         .await?;
         let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
         let writer = session.writer_sender();
-        writer
-            .send(format!("{}\n", shell.child_command).into_bytes())
-            .await?;
-        wait_for_output_contains(&mut output_rx, READY_MARKER, /*timeout_ms*/ 10_000)
-            .await
-            .map_err(|err| anyhow::anyhow!("{} child did not become ready: {err}", shell.name))?;
+        wait_for_output_contains(
+            &mut output_rx,
+            READY_MARKER,
+            /*timeout_ms*/ FOREGROUND_CHILD_READY_TIMEOUT_MS,
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("{} child did not become ready: {err}", shell.name))?;
 
         writer
             .send(format!("{expected}X\u{8}\n").into_bytes())
@@ -279,7 +296,6 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
                     anyhow::anyhow!("{} child received incorrect input: {err}", shell.name)
                 })?;
 
-        writer.send(b"exit 0\n".to_vec()).await?;
         let (remaining, exit_code) =
             collect_output_until_exit(output_rx, exit_rx, /*timeout_ms*/ 10_000).await;
         output.extend_from_slice(&remaining);
