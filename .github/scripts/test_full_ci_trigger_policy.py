@@ -8,6 +8,10 @@ FULL_CI_WORKFLOW = ROOT / ".github/workflows/full-ci.yml"
 LEGACY_POSTMERGE_WORKFLOW = ROOT / ".github/workflows/postmerge-ci.yml"
 BLOCKING_CI_WORKFLOW = ROOT / ".github/workflows/blocking-ci.yml"
 RUST_FULL_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci-full.yml"
+RUST_WINDOWS_FULL_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci-full-windows.yml"
+RUST_ARGUMENT_COMMENT_LINT_WORKFLOW = (
+    ROOT / ".github/workflows/rust-ci-full-argument-comment-lint.yml"
+)
 RUST_NEXTEST_PLATFORM_WORKFLOW = (
     ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml"
 )
@@ -15,20 +19,31 @@ REMOTE_ENV_SCRIPT = ROOT / "scripts/test-remote-env.sh"
 RUST_BLOCKING_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci.yml"
 BAZEL_WORKFLOW = ROOT / ".github/workflows/bazel.yml"
 V8_CANARY_WORKFLOW = ROOT / ".github/workflows/v8-canary.yml"
+V8_CANARY_WINDOWS_WORKFLOW = ROOT / ".github/workflows/v8-canary-windows.yml"
+V8_CANARY_METADATA_WORKFLOW = ROOT / ".github/workflows/v8-canary-metadata.yml"
 CODEX_LAB_RELEASE_WORKFLOW = ROOT / ".github/workflows/codex-lab-release.yml"
 FULL_CI_MATRIX_WORKFLOWS = (
     ROOT / ".github/workflows/sdk-integration.yml",
     ROOT / ".github/workflows/bazel.yml",
     ROOT / ".github/workflows/rust-ci-full.yml",
+    ROOT / ".github/workflows/rust-ci-full-windows.yml",
     ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml",
     ROOT / ".github/workflows/v8-canary.yml",
+    ROOT / ".github/workflows/v8-canary-windows.yml",
 )
-FULL_VERIFICATION_WORKFLOWS = {
+RELEASE_VERIFICATION_WORKFLOWS = {
     "bazel.yml",
     "rust-ci-full.yml",
     "sdk-integration.yml",
     "v8-canary.yml",
 }
+WINDOWS_FULL_VERIFICATION_WORKFLOWS = {
+    "rust-ci-full-windows.yml",
+    "v8-canary-windows.yml",
+}
+FULL_VERIFICATION_WORKFLOWS = (
+    RELEASE_VERIFICATION_WORKFLOWS | WINDOWS_FULL_VERIFICATION_WORKFLOWS
+)
 LOCAL_WORKFLOW_CALL = re.compile(
     r"uses:\s+\./\.github/workflows/([A-Za-z0-9_.-]+\.ya?ml)"
 )
@@ -93,19 +108,28 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertIn("workspace_check,", workflow)
 
     def test_opt_in_rust_full_ci_cancels_superseded_runs(self) -> None:
-        workflow_header = RUST_FULL_CI_WORKFLOW.read_text().split(
-            "\njobs:\n", maxsplit=1
-        )[0]
-        self.assertIn(
-            "\n  group: rust-ci-full::${{ github.workflow }}::${{ github.ref }}",
-            workflow_header,
-        )
-        self.assertIn("\n  cancel-in-progress: true", workflow_header)
+        for workflow_path, group in (
+            (RUST_FULL_CI_WORKFLOW, "rust-ci-full"),
+            (RUST_WINDOWS_FULL_CI_WORKFLOW, "rust-ci-full-windows"),
+        ):
+            with self.subTest(workflow=workflow_path.name):
+                workflow_header = workflow_path.read_text().split(
+                    "\njobs:\n", maxsplit=1
+                )[0]
+                self.assertIn(
+                    f"\n  group: {group}::${{{{ github.workflow }}}}::${{{{ github.ref }}}}",
+                    workflow_header,
+                )
+                self.assertIn("\n  cancel-in-progress: true", workflow_header)
 
     def test_scheduled_v8_canary_forces_a_complete_run(self) -> None:
-        workflow = V8_CANARY_WORKFLOW.read_text()
+        workflow = V8_CANARY_METADATA_WORKFLOW.read_text()
         self.assertIn(
             '"${EVENT_NAME}" == "workflow_dispatch" || "${EVENT_NAME}" == "schedule"',
+            workflow,
+        )
+        self.assertIn(
+            "windows_source_required: ${{ steps.changes.outputs.windows_source_required || 'true' }}",
             workflow,
         )
 
@@ -202,10 +226,28 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             workflow.index("Full verification / Bazel"),
         )
 
-    def test_nightly_and_release_use_the_same_full_verification_components(self) -> None:
+    def test_nightly_keeps_windows_outside_the_release_gate(self) -> None:
         self.assertEqual(called_workflows(FULL_CI_WORKFLOW), FULL_VERIFICATION_WORKFLOWS)
         release_calls = called_workflows(CODEX_LAB_RELEASE_WORKFLOW)
-        self.assertTrue(FULL_VERIFICATION_WORKFLOWS.issubset(release_calls))
+        self.assertTrue(RELEASE_VERIFICATION_WORKFLOWS.issubset(release_calls))
+        self.assertTrue(WINDOWS_FULL_VERIFICATION_WORKFLOWS.isdisjoint(release_calls))
+        self.assertEqual(
+            FULL_VERIFICATION_WORKFLOWS - release_calls,
+            WINDOWS_FULL_VERIFICATION_WORKFLOWS,
+        )
+
+    def test_release_verification_workflows_have_no_windows_jobs(self) -> None:
+        release_rust = RUST_FULL_CI_WORKFLOW.read_text()
+        windows_rust = RUST_WINDOWS_FULL_CI_WORKFLOW.read_text()
+        release_v8 = V8_CANARY_WORKFLOW.read_text()
+        windows_v8 = V8_CANARY_WINDOWS_WORKFLOW.read_text()
+
+        for marker in ("windows-2025", "windows-11-arm", "windows-msvc"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, release_rust)
+                self.assertIn(marker, windows_rust)
+        self.assertNotIn("build-windows-source", release_v8)
+        self.assertIn("build-windows-source", windows_v8)
 
     def test_v8_callers_allow_nested_actions_reads(self) -> None:
         permissions = (
@@ -283,7 +325,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         )
 
     def test_argument_comment_lint_has_bounded_local_fallback(self) -> None:
-        workflow = RUST_FULL_CI_WORKFLOW.read_text()
+        workflow = RUST_ARGUMENT_COMMENT_LINT_WORKFLOW.read_text()
 
         self.assertIn(
             'if [[ -z "${BUILDBUDDY_API_KEY}" && "${RUNNER_OS}" != "Windows" ]]',
@@ -296,6 +338,15 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertIn("rustup toolchain install nightly-2025-09-18", workflow)
         self.assertIn("argument-comment-workspace-${{ runner.os }}", workflow)
         self.assertIn("uses: ./.github/actions/setup-rusty-v8", workflow)
+
+    def test_argument_comment_lint_workflow_changes_invalidate_ci_state(self) -> None:
+        workflow_path = ".github/workflows/rust-ci-full-argument-comment-lint.yml"
+        blocking_workflow = RUST_BLOCKING_CI_WORKFLOW.read_text()
+        full_workflow = RUST_FULL_CI_WORKFLOW.read_text()
+
+        self.assertIn(f"$f == {workflow_path}", blocking_workflow)
+        self.assertIn(f"'{workflow_path}'", blocking_workflow)
+        self.assertIn(f"'{workflow_path}'", full_workflow)
 
 
 if __name__ == "__main__":

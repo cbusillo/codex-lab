@@ -260,7 +260,8 @@ class WorkflowArtifactSourceTest(unittest.TestCase):
 
     def test_full_ci_reads_upstream_artifacts_explicitly(self) -> None:
         for workflow_name in (
-            "rust-ci-full.yml",
+            "rust-ci-full-argument-comment-lint.yml",
+            "rust-ci-full-lint-build.yml",
             "rust-ci-full-nextest-platform.yml",
         ):
             with self.subTest(workflow_name=workflow_name):

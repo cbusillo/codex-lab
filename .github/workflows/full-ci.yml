@@ -25,6 +25,11 @@ jobs:
     uses: ./.github/workflows/rust-ci-full.yml
     secrets: inherit
 
+  rust-ci-full-windows:
+    name: rust-ci-full-windows
+    uses: ./.github/workflows/rust-ci-full-windows.yml
+    secrets: inherit
+
   sdk-integration:
     name: sdk-integration
     uses: ./.github/workflows/sdk-integration.yml
@@ -38,13 +43,23 @@ jobs:
     uses: ./.github/workflows/v8-canary.yml
     secrets: inherit
 
+  v8-canary-windows:
+    name: v8-canary-windows
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/v8-canary-windows.yml
+    secrets: inherit
+
   results:
     name: Full CI results
     needs:
       - bazel
       - rust-ci-full
+      - rust-ci-full-windows
       - sdk-integration
       - v8-canary
+      - v8-canary-windows
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:

@@ -81,7 +81,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: argument-comment-lint-${{ runner.os }}-${{ env.CARGO_DYLINT_VERSION }}-${{ env.DYLINT_LINK_VERSION }}-${{ hashFiles('tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain', '.github/workflows/rust-ci.yml', '.github/workflows/rust-ci-full.yml') }}
+          key: argument-comment-lint-${{ runner.os }}-${{ env.CARGO_DYLINT_VERSION }}-${{ env.DYLINT_LINK_VERSION }}-${{ hashFiles('tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain', '.github/workflows/rust-ci.yml', '.github/workflows/rust-ci-full.yml', '.github/workflows/rust-ci-full-argument-comment-lint.yml') }}
       - name: Install cargo-dylint tooling
         if: ${{ steps.cargo_dylint_cache.outputs.cache-hit != 'true' }}
         shell: bash
@@ -99,109 +99,26 @@ jobs:
           RUST_MIN_STACK: "8388608" # 8 MiB
 
   argument_comment_lint_prebuilt:
-    name: Argument comment lint - ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    # BuildBuddy-backed and Windows-local Bazel runs can exceed 60 minutes on a
-    # cold cache. The Unix no-key fallback remains bounded by the same limit.
-    timeout-minutes: 90
-    environment:
-      name: bazel
-      deployment: false
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
+          - platform_name: Linux
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - name: macOS
+          - platform_name: macOS
             runner: macos-26
             target: aarch64-apple-darwin
-          - name: Windows
-            runner: windows-2025
-            target: x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bazel-ci
-        with:
-          target: ${{ runner.os }}
-      - name: Install Linux sandbox build dependencies
-        if: ${{ runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-      - name: Restore Cargo dependency cache
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: argument-comment-workspace-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
-          restore-keys: |
-            argument-comment-workspace-${{ runner.os }}-
-      - name: Configure rusty_v8 artifact overrides
-        if: ${{ runner.os != 'Windows' }}
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: ${{ matrix.target }}
-          artifact-repository: openai/codex
-      - name: Run argument comment lint on codex-rs
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${BUILDBUDDY_API_KEY}" && "${RUNNER_OS}" != "Windows" ]]; then
-            echo "::notice::BuildBuddy is unavailable; using the packaged Cargo/Dylint runner instead of a local full Bazel build"
-            rustup toolchain install nightly-2025-09-18 \
-              --profile minimal \
-              --component llvm-tools-preview \
-              --component rustc-dev \
-              --component rust-src \
-              --no-self-update
-            # The packaged Dylint library is ABI-coupled to this nightly. Cargo
-            # still fails if a dependency actually uses unsupported language
-            # features, but newer rust-version metadata alone must not block it.
-            python3 ./tools/argument-comment-lint/run-prebuilt-linter.py -- --ignore-rust-version
-            exit 0
-          fi
-
-          if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            ./.github/scripts/run-argument-comment-lint-bazel.sh \
-              --config=argument-comment-lint \
-              --platforms=//:local_windows \
-              --build_metadata=COMMIT_SHA=${GITHUB_SHA}
-          else
-            bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
-            ./.github/scripts/run-bazel-ci.sh \
-              -- \
-              build \
-              --config=argument-comment-lint \
-              --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
-              -- \
-              ${bazel_targets}
-          fi
+    uses: ./.github/workflows/rust-ci-full-argument-comment-lint.yml
+    with:
+      platform_name: ${{ matrix.platform_name }}
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+    secrets: inherit
 
   # --- CI to validate on different os/targets --------------------------------
   lint_build:
-    name: Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
     needs: authorize_self_hosted
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    defaults:
-      run:
-        working-directory: codex-rs
-    env:
-      # Speed up repeated builds across CI runs by caching compiled objects.
-      # Keep Windows on its native Cargo cache path.
-      USE_SCCACHE: ${{ startsWith(matrix.runner, 'windows') && 'false' || 'true' }}
-      CARGO_INCREMENTAL: "0"
-      SCCACHE_CACHE_SIZE: 10G
-
     strategy:
       fail-fast: false
       matrix:
@@ -224,12 +141,6 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             profile: dev
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            profile: dev
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            profile: dev
 
           # Also run representative release builds on Mac and Linux because
           # there could be release-only build errors we want to catch.
@@ -244,241 +155,11 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             profile: release
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            profile: release
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            profile: release
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - id: setup_ci
-        uses: ./.github/actions/setup-ci
-      - name: Install Linux build dependencies
-        if: ${{ runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if command -v apt-get >/dev/null 2>&1; then
-            if [[ "$(id -u)" -eq 0 ]]; then
-              apt_prefix=()
-            elif sudo -n true 2>/dev/null; then
-              apt_prefix=(sudo)
-            else
-              echo "No passwordless sudo; assuming Linux runner dependencies are preinstalled."
-              exit 0
-            fi
-            "${apt_prefix[@]}" apt-get update -y
-            "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-          fi
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          targets: ${{ matrix.target }}
-          components: clippy
-
-      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
-        name: Use hermetic Cargo home (musl)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
-          mkdir -p "${cargo_home}/bin"
-          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
-          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
-          : > "${cargo_home}/config.toml"
-
-      - name: Compute lockfile hash
-        id: lockhash
-        working-directory: codex-rs
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      # Explicit cache restore: split cargo home vs target, so we can
-      # avoid caching the large target dir on the gnu-dev job.
-      - name: Restore cargo home cache
-        id: cache_cargo_home_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ${{ github.workspace }}/.cargo-home/bin/
-            ${{ github.workspace }}/.cargo-home/registry/index/
-            ${{ github.workspace }}/.cargo-home/registry/cache/
-            ${{ github.workspace }}/.cargo-home/git/db/
-          key: cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
-          restore-keys: |
-            cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
-
-      # Install and restore sccache cache
-      - name: Install sccache
-        if: ${{ env.USE_SCCACHE == 'true' }}
-        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: sccache
-          version: 0.7.5
-
-      - name: Configure sccache backend
-        if: ${{ env.USE_SCCACHE == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-            echo "Using sccache GitHub backend"
-          else
-            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
-            echo "Using sccache local disk + actions/cache fallback"
-          fi
-
-      - name: Enable sccache wrapper
-        if: ${{ env.USE_SCCACHE == 'true' }}
-        shell: bash
-        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-
-      - name: Restore sccache cache (fallback)
-        if: ${{ env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' }}
-        id: cache_sccache_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ github.workspace }}/.sccache/
-          key: sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
-          restore-keys: |
-            sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-
-            sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
-
-      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
-        name: Prepare APT cache directories (musl)
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo mkdir -p /var/cache/apt/archives /var/lib/apt/lists
-          sudo chown -R "$USER:$USER" /var/cache/apt /var/lib/apt/lists
-
-      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
-        name: Restore APT cache (musl)
-        id: cache_apt_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            /var/cache/apt
-          key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
-
-      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
-        name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.14.0
-
-      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
-        name: Install musl build tools
-        env:
-          DEBIAN_FRONTEND: noninteractive
-          TARGET: ${{ matrix.target }}
-          APT_UPDATE_ARGS: -o Acquire::Retries=3
-          APT_INSTALL_ARGS: --no-install-recommends
-        shell: bash
-        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
-
-      - if: ${{ !contains(matrix.target, 'windows') }}
-        name: Configure rusty_v8 artifact overrides and verify checksums
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: ${{ matrix.target }}
-          # Full CI only compiles and tests this repository; it publishes no
-          # artifacts. Read the exact-version V8 inputs from the repository
-          # that builds them. rust-release.yml intentionally keeps the
-          # fail-closed default so fork releases cannot redistribute V8 blobs
-          # published by another repository.
-          artifact-repository: openai/codex
-
-      - name: Install cargo-chef
-        if: ${{ matrix.profile == 'release' }}
-        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: cargo-chef
-          version: 0.1.71
-
-      - name: Pre-warm dependency cache (cargo-chef)
-        if: ${{ matrix.profile == 'release' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          RECIPE="${RUNNER_TEMP}/chef-recipe.json"
-          cargo chef prepare --recipe-path "$RECIPE"
-          cargo chef cook --recipe-path "$RECIPE" --target ${{ matrix.target }} --release
-
-      - name: cargo clippy
-        run: cargo clippy --target ${{ matrix.target }} --tests --profile ${{ matrix.profile }} --timings -- -D warnings
-
-      - name: Upload Cargo timings (clippy)
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: cargo-timings-rust-ci-clippy-${{ matrix.target }}-${{ matrix.profile }}
-          path: ${{ env.CARGO_TARGET_DIR }}/**/cargo-timings/cargo-timing.html
-          if-no-files-found: warn
-
-      # Save caches explicitly; make non-fatal so cache packaging
-      # never fails the overall job. Only save when key wasn't hit.
-      - name: Save cargo home cache
-        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ${{ github.workspace }}/.cargo-home/bin/
-            ${{ github.workspace }}/.cargo-home/registry/index/
-            ${{ github.workspace }}/.cargo-home/registry/cache/
-            ${{ github.workspace }}/.cargo-home/git/db/
-          key: cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
-
-      - name: Save sccache cache (fallback)
-        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ github.workspace }}/.sccache/
-          key: sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
-
-      - name: sccache stats
-        if: always() && env.USE_SCCACHE == 'true'
-        continue-on-error: true
-        run: sccache --show-stats || true
-
-      - name: sccache summary
-        if: always() && env.USE_SCCACHE == 'true'
-        shell: bash
-        run: |
-          {
-            echo "### sccache stats — ${{ matrix.target }} (${{ matrix.profile }})";
-            echo;
-            echo '```';
-            sccache --show-stats || true;
-            echo '```';
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Save APT cache (musl)
-        if: always() && !cancelled() && (matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl') && steps.cache_apt_restore.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            /var/cache/apt
-          key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
+    uses: ./.github/workflows/rust-ci-full-lint-build.yml
+    with:
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+      profile: ${{ matrix.profile }}
 
   tests_macos_aarch64:
     name: Tests — macos-26 - aarch64-apple-darwin
@@ -528,32 +209,6 @@ jobs:
       use_sccache: true
     secrets: inherit
 
-  tests_windows_x64:
-    name: Tests — windows-2025 - x86_64-pc-windows-msvc
-    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
-    with:
-      runner: windows-2025
-      target: x86_64-pc-windows-msvc
-      profile: ci-test
-      artifact_id: windows-x64
-      # 8 threads oversubscribes the 4-vCPU hosted Windows x64 runner: process
-      # spawn-heavy suites time out at the 60s per-test limit under that load.
-      test_threads: 4
-    secrets: inherit
-
-  tests_windows_arm64:
-    name: Tests — windows-11-arm - aarch64-pc-windows-msvc
-    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
-    with:
-      runner: windows-11-arm
-      target: aarch64-pc-windows-msvc
-      profile: ci-test
-      artifact_id: windows-arm64
-      # Match the hosted runner's 4-vCPU capacity to avoid process-heavy test
-      # timeouts from oversubscription, as on the Windows x64 lane above.
-      test_threads: 4
-    secrets: inherit
-
   # --- Gatherer job for the full Rust workflow --------------------------------
   results:
     name: Full Rust CI results
@@ -567,8 +222,6 @@ jobs:
         tests_macos_aarch64,
         tests_linux_x64_remote,
         tests_linux_arm64,
-        tests_windows_x64,
-        tests_windows_arm64,
       ]
     if: always()
     runs-on: ubuntu-24.04
