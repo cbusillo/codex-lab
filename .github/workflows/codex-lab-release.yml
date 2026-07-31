@@ -275,8 +275,24 @@ jobs:
             exit 1
           fi
           symbols_archive="${symbols_dir}/codex-symbols-${SYMBOLS_ARTIFACT_NAME}.tar.gz"
-          tar -tzf "$symbols_archive" |
-            grep -F "codex-symbols-${SYMBOLS_ARTIFACT_NAME}/codex-lab.dSYM/Contents/Resources/DWARF/codex-lab"
+          dwarf_prefix="codex-symbols-${SYMBOLS_ARTIFACT_NAME}/codex-lab.dSYM/Contents/Resources/DWARF/"
+          dwarf_file_count="$(
+            tar -tzf "$symbols_archive" |
+              awk -v prefix="$dwarf_prefix" '
+                index($0, prefix) == 1 {
+                  suffix = substr($0, length(prefix) + 1)
+                  if (suffix != "" && suffix !~ /\//) {
+                    count++
+                  }
+                }
+                END { print count + 0 }
+              '
+          )"
+          if [[ "$dwarf_file_count" != "1" ]]; then
+            echo "Expected one archived dSYM DWARF file below ${dwarf_prefix}, found ${dwarf_file_count}" >&2
+            tar -tzf "$symbols_archive" >&2
+            exit 1
+          fi
           # Every later step -- bundle, smoke, signing, archiving -- must consume
           # the stripped engine, so repoint CODEX_LAB_BIN before they run.
           echo "CODEX_LAB_BIN=${staged_dir}/codex-lab" >> "$GITHUB_ENV"
