@@ -2,7 +2,7 @@
 set -euo pipefail
 
 workflow_leaf="${1:?usage: configure-codex-lab-bazel-cache.sh <workflow-cache-leaf> [disk-cache-max-size]}"
-disk_cache_max_size="${2:-100G}"
+disk_cache_max_size="${2:-80G}"
 cache_mode="ephemeral"
 
 if [[ ! "$workflow_leaf" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then

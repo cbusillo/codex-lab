@@ -41,12 +41,12 @@ class ConfigureCodexLabBazelCacheTest(unittest.TestCase):
             self.assertTrue(repository_cache.is_dir())
             self.assertEqual(
                 f"BAZEL_DISK_CACHE={disk_cache}\n"
-                "BAZEL_DISK_CACHE_GC_MAX_SIZE=100G\n"
+                "BAZEL_DISK_CACHE_GC_MAX_SIZE=80G\n"
                 f"BAZEL_REPOSITORY_CACHE={repository_cache}\n"
                 "CODEX_LAB_BAZEL_CACHE_MODE=persistent\n",
                 env_file.read_text(),
             )
-            self.assertIn("disk cache limit: `100G`", summary_file.read_text())
+            self.assertIn("disk cache limit: `80G`", summary_file.read_text())
             self.assertNotIn(str(artifact_root), completed.stdout)
             self.assertNotIn(str(artifact_root), summary_file.read_text())
 

@@ -187,7 +187,8 @@ when the artifact root is configured and available.
 The trusted Apple Silicon V8 canary and release jobs use separate persistent
 Bazel repository and disk caches through
 `scripts/github/configure-codex-lab-bazel-cache.sh`. Each disk cache is capped
-at 100 GB so it cannot consume the artifact volume without bound.
+at 80 GB so both caches fit within the artifact volume quota with room for
+repository caches and normal artifact growth.
 
 ## Distribution Contract
 
