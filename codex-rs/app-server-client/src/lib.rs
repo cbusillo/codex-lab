@@ -99,8 +99,8 @@ pub type RequestResult = std::result::Result<JsonRpcResult, JSONRPCErrorError>;
 #[derive(Debug, Clone)]
 pub enum AppServerEvent {
     Lagged { skipped: usize },
-    ServerNotification(ServerNotification),
-    ServerRequest(ServerRequest),
+    ServerNotification(Box<ServerNotification>),
+    ServerRequest(Box<ServerRequest>),
     Disconnected { message: String },
 }
 
@@ -207,7 +207,7 @@ where
                     *skipped_events = skipped_events.saturating_add(1);
                     warn!("dropping in-process app-server event because consumer queue is full");
                     if let InProcessServerEvent::ServerRequest(request) = event {
-                        reject_server_request(request);
+                        reject_server_request(*request);
                     }
                     return ForwardEventResult::Continue;
                 }
@@ -233,7 +233,7 @@ where
             *skipped_events = skipped_events.saturating_add(1);
             warn!("dropping in-process app-server event because consumer queue is full");
             if let InProcessServerEvent::ServerRequest(request) = event {
-                reject_server_request(request);
+                reject_server_request(*request);
             }
             ForwardEventResult::Continue
         }
@@ -527,9 +527,9 @@ impl InProcessAppServerClient {
                         let Some(event) = event else {
                             break;
                         };
-                        if let InProcessServerEvent::ServerRequest(
-                            ServerRequest::ChatgptAuthTokensRefresh { request_id, .. }
-                        ) = &event
+                        if let InProcessServerEvent::ServerRequest(request) = &event
+                            && let ServerRequest::ChatgptAuthTokensRefresh { request_id, .. } =
+                                request.as_ref()
                         {
                             let send_result = request_sender.fail_server_request(
                                 request_id.clone(),
@@ -1346,9 +1346,9 @@ mod tests {
     async fn forward_in_process_event_preserves_transcript_notifications_under_backpressure() {
         let (event_tx, mut event_rx) = mpsc::channel(1);
         event_tx
-            .send(InProcessServerEvent::ServerNotification(
+            .send(InProcessServerEvent::ServerNotification(Box::new(
                 command_execution_output_delta_notification("stdout-1"),
-            ))
+            )))
             .await
             .expect("initial event should enqueue");
 
@@ -1356,8 +1356,8 @@ mod tests {
         let result = forward_in_process_event(
             &event_tx,
             &mut skipped_events,
-            InProcessServerEvent::ServerNotification(command_execution_output_delta_notification(
-                "stdout-2",
+            InProcessServerEvent::ServerNotification(Box::new(
+                command_execution_output_delta_notification("stdout-2"),
             )),
             |_| {},
         )
@@ -1386,7 +1386,7 @@ mod tests {
             let result = forward_in_process_event(
                 &event_tx,
                 &mut skipped_events,
-                InProcessServerEvent::ServerNotification(notification),
+                InProcessServerEvent::ServerNotification(Box::new(notification)),
                 |_| {},
             )
             .await;
@@ -1399,9 +1399,12 @@ mod tests {
             .expect("receiver task should join successfully");
         assert!(matches!(
             &events[0],
-            InProcessServerEvent::ServerNotification(
-                ServerNotification::CommandExecutionOutputDelta(notification)
-            ) if notification.delta == "stdout-1"
+            InProcessServerEvent::ServerNotification(notification)
+                if matches!(
+                    notification.as_ref(),
+                    ServerNotification::CommandExecutionOutputDelta(notification)
+                        if notification.delta == "stdout-1"
+                )
         ));
         assert!(matches!(
             &events[1],
@@ -1409,24 +1412,35 @@ mod tests {
         ));
         assert!(matches!(
             &events[2],
-            InProcessServerEvent::ServerNotification(ServerNotification::AgentMessageDelta(
-                notification
-            )) if notification.delta == "hello"
+            InProcessServerEvent::ServerNotification(notification)
+                if matches!(
+                    notification.as_ref(),
+                    ServerNotification::AgentMessageDelta(notification)
+                        if notification.delta == "hello"
+                )
         ));
         assert!(matches!(
             &events[3],
-            InProcessServerEvent::ServerNotification(ServerNotification::ItemCompleted(
-                notification
-            )) if matches!(
-                &notification.item,
-                codex_app_server_protocol::ThreadItem::AgentMessage { text, .. } if text == "hello"
-            )
+            InProcessServerEvent::ServerNotification(notification)
+                if matches!(
+                    notification.as_ref(),
+                    ServerNotification::ItemCompleted(notification)
+                        if matches!(
+                            &notification.item,
+                            codex_app_server_protocol::ThreadItem::AgentMessage { text, .. }
+                                if text == "hello"
+                        )
+                )
         ));
         assert!(matches!(
             &events[4],
-            InProcessServerEvent::ServerNotification(ServerNotification::TurnCompleted(
-                notification
-            )) if notification.turn.status == codex_app_server_protocol::TurnStatus::Completed
+            InProcessServerEvent::ServerNotification(notification)
+                if matches!(
+                    notification.as_ref(),
+                    ServerNotification::TurnCompleted(notification)
+                        if notification.turn.status
+                            == codex_app_server_protocol::TurnStatus::Completed
+                )
         ));
     }
 
@@ -1767,7 +1781,8 @@ mod tests {
         let event = client.next_event().await.expect("event should arrive");
         assert!(matches!(
             event,
-            AppServerEvent::ServerNotification(ServerNotification::AccountUpdated(_))
+            AppServerEvent::ServerNotification(notification)
+                if matches!(notification.as_ref(), ServerNotification::AccountUpdated(_))
         ));
 
         client.shutdown().await.expect("shutdown should complete");
@@ -1813,9 +1828,12 @@ mod tests {
             .expect("event stream should stay open");
         assert!(matches!(
             first_event,
-            AppServerEvent::ServerNotification(ServerNotification::CommandExecutionOutputDelta(
-                notification
-            )) if notification.delta == "stdout-1"
+            AppServerEvent::ServerNotification(notification)
+                if matches!(
+                    notification.as_ref(),
+                    ServerNotification::CommandExecutionOutputDelta(notification)
+                        if notification.delta == "stdout-1"
+                )
         ));
 
         let mut remaining_events = Vec::new();
@@ -1832,30 +1850,31 @@ mod tests {
         for event in &remaining_events {
             match event {
                 AppServerEvent::Lagged { skipped: 1 } => {}
-                AppServerEvent::ServerNotification(
-                    ServerNotification::CommandExecutionOutputDelta(notification),
-                ) if notification.delta == "stdout-2" => {}
-                AppServerEvent::ServerNotification(ServerNotification::AgentMessageDelta(
-                    notification,
-                )) if notification.delta == "hello" => {
-                    transcript_event_names.push("agent_message_delta");
-                }
-                AppServerEvent::ServerNotification(ServerNotification::ItemCompleted(
-                    notification,
-                )) if matches!(
-                    &notification.item,
-                    codex_app_server_protocol::ThreadItem::AgentMessage { text, .. } if text == "hello"
-                ) =>
-                {
-                    transcript_event_names.push("item_completed");
-                }
-                AppServerEvent::ServerNotification(ServerNotification::TurnCompleted(
-                    notification,
-                )) if notification.turn.status
-                    == codex_app_server_protocol::TurnStatus::Completed =>
-                {
-                    transcript_event_names.push("turn_completed");
-                }
+                AppServerEvent::ServerNotification(notification) => match notification.as_ref() {
+                    ServerNotification::CommandExecutionOutputDelta(notification)
+                        if notification.delta == "stdout-2" => {}
+                    ServerNotification::AgentMessageDelta(notification)
+                        if notification.delta == "hello" =>
+                    {
+                        transcript_event_names.push("agent_message_delta");
+                    }
+                    ServerNotification::ItemCompleted(notification)
+                        if matches!(
+                            &notification.item,
+                            codex_app_server_protocol::ThreadItem::AgentMessage { text, .. }
+                                if text == "hello"
+                        ) =>
+                    {
+                        transcript_event_names.push("item_completed");
+                    }
+                    ServerNotification::TurnCompleted(notification)
+                        if notification.turn.status
+                            == codex_app_server_protocol::TurnStatus::Completed =>
+                    {
+                        transcript_event_names.push("turn_completed");
+                    }
+                    _ => panic!("unexpected remaining event: {event:?}"),
+                },
                 _ => panic!("unexpected remaining event: {event:?}"),
             }
         }
@@ -2117,7 +2136,7 @@ mod tests {
     #[test]
     fn event_requires_delivery_marks_transcript_and_terminal_events() {
         assert!(event_requires_delivery(
-            &InProcessServerEvent::ServerNotification(
+            &InProcessServerEvent::ServerNotification(Box::new(
                 codex_app_server_protocol::ServerNotification::TurnCompleted(
                     codex_app_server_protocol::TurnCompletedNotification {
                         thread_id: "thread".to_string(),
@@ -2133,10 +2152,10 @@ mod tests {
                         },
                     }
                 )
-            )
+            ))
         ));
         assert!(event_requires_delivery(
-            &InProcessServerEvent::ServerNotification(
+            &InProcessServerEvent::ServerNotification(Box::new(
                 codex_app_server_protocol::ServerNotification::AgentMessageDelta(
                     codex_app_server_protocol::AgentMessageDeltaNotification {
                         thread_id: "thread".to_string(),
@@ -2145,10 +2164,10 @@ mod tests {
                         delta: "hello".to_string(),
                     }
                 )
-            )
+            ))
         ));
         assert!(event_requires_delivery(
-            &InProcessServerEvent::ServerNotification(
+            &InProcessServerEvent::ServerNotification(Box::new(
                 codex_app_server_protocol::ServerNotification::ItemCompleted(
                     codex_app_server_protocol::ItemCompletedNotification {
                         thread_id: "thread".to_string(),
@@ -2162,23 +2181,23 @@ mod tests {
                         },
                     }
                 )
-            )
+            ))
         ));
         assert!(event_requires_delivery(
-            &InProcessServerEvent::ServerNotification(
+            &InProcessServerEvent::ServerNotification(Box::new(
                 codex_app_server_protocol::ServerNotification::ExternalAgentConfigImportCompleted(
                     codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification {
                         import_id: "import".to_string(),
                         item_type_results: Vec::new(),
                     },
                 )
-            )
+            ))
         ));
         assert!(!event_requires_delivery(&InProcessServerEvent::Lagged {
             skipped: 1
         }));
         assert!(!event_requires_delivery(
-            &InProcessServerEvent::ServerNotification(
+            &InProcessServerEvent::ServerNotification(Box::new(
                 codex_app_server_protocol::ServerNotification::CommandExecutionOutputDelta(
                     codex_app_server_protocol::CommandExecutionOutputDeltaNotification {
                         thread_id: "thread".to_string(),
@@ -2187,7 +2206,7 @@ mod tests {
                         delta: "stdout".to_string(),
                     }
                 )
-            )
+            ))
         ));
     }
 

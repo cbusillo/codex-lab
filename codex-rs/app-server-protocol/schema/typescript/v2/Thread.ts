@@ -6,6 +6,7 @@ import type { GitInfo } from "./GitInfo";
 import type { SessionProvenance } from "./SessionProvenance";
 import type { SessionSource } from "./SessionSource";
 import type { ThreadHistoryMode } from "./ThreadHistoryMode";
+import type { ThreadSection } from "./ThreadSection";
 import type { ThreadSource } from "./ThreadSource";
 import type { ThreadStatus } from "./ThreadStatus";
 import type { Turn } from "./Turn";
@@ -29,9 +30,12 @@ preview: string, /**
  * Whether the thread is ephemeral and should not be materialized on disk.
  */
 ephemeral: boolean, /**
- * Whether the thread has been pinned by the user.
+ * The independently persisted section selected for this thread, if any.
  */
-isPinned: boolean, /**
+section: ThreadSection | null, /**
+ * Unix timestamp in seconds when the thread entered its current section.
+ */
+sectionEnteredAt: number | null, /**
  * Persisted thread history contract selected when this thread was created.
  *
  * This field is part of the published stable `Thread` surface; keep it

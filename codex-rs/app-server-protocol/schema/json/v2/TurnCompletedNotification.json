@@ -220,7 +220,7 @@
               "type": "string"
             },
             "path": {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -1065,6 +1065,12 @@
             "pluginId": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "readOnlyHint": {
+              "type": [
+                "boolean",
                 "null"
               ]
             },

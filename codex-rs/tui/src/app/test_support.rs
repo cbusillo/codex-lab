@@ -66,6 +66,7 @@ pub(super) async fn make_test_app_with_event_rx()
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
         side_threads: HashMap::new(),
+        abandoned_side_threads: HashSet::new(),
         active_thread_id: None,
         active_thread_rx: None,
         primary_thread_id: None,

@@ -78,8 +78,13 @@ pub(super) async fn spawn_review_thread(
         sess.abort_all_tasks(TurnAbortReason::Replaced).await;
         sess.clear_connector_selection().await;
         let turn_context = Arc::clone(&prepared.turn_context);
-        sess.start_task(prepared.turn_context, prepared.input, prepared.task)
-            .await;
+        sess.start_task(
+            prepared.turn_context,
+            prepared.input,
+            prepared.task,
+            crate::tasks::MailboxParentProvenance::Ignore,
+        )
+        .await;
         let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
             id: uuid::Uuid::now_v7().to_string(),
             target: review_request.target,
@@ -249,6 +254,7 @@ pub(super) async fn prepare_review_thread(
         sub_id: review_turn_id.clone(),
         trace_id: current_span_trace_id(),
         realtime_active: parent_turn_context.realtime_active,
+        code_mode_available: parent_turn_context.code_mode_available,
         config: per_turn_config,
         auth_manager: auth_manager_for_context,
         model_info: model_info.clone(),

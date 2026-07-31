@@ -138,13 +138,13 @@ async fn next_turn_started(
         .await
         .expect("app-server should emit a turn/start event")
         .expect("app-server event stream should remain open");
-        let started_turn_id = match &event {
-            AppServerEvent::ServerNotification(ServerNotification::TurnStarted(notification))
-                if notification.thread_id == thread_id.to_string() =>
-            {
-                Some(notification.turn.id.clone())
-            }
-            _ => None,
+        let started_turn_id = if let AppServerEvent::ServerNotification(notification) = &event
+            && let ServerNotification::TurnStarted(notification) = notification.as_ref()
+            && notification.thread_id == thread_id.to_string()
+        {
+            Some(notification.turn.id.clone())
+        } else {
+            None
         };
         app.handle_app_server_event(app_server, event).await;
         drain_active_thread_events(app);
@@ -169,8 +169,12 @@ async fn wait_for_turn_completed(
         .expect("app-server event stream should remain open");
         let completed = matches!(
             &event,
-            AppServerEvent::ServerNotification(ServerNotification::TurnCompleted(notification))
-                if notification.thread_id == thread_id.to_string()
+            AppServerEvent::ServerNotification(notification)
+                if matches!(
+                    notification.as_ref(),
+                    ServerNotification::TurnCompleted(notification)
+                        if notification.thread_id == thread_id.to_string()
+                )
         );
         app.handle_app_server_event(app_server, event).await;
         drain_active_thread_events(app);
@@ -268,12 +272,12 @@ stream_max_retries = 0
     }
 
     while app_event_rx.try_recv().is_ok() {}
-    app.handle_thread_event_now(ThreadBufferedEvent::Notification(
+    app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
         ServerNotification::Warning(WarningNotification {
             thread_id: Some(thread_id.to_string()),
             message: "event handled while interrupt is pending".to_string(),
         }),
-    ));
+    )));
     assert!(matches!(
         app_event_rx.try_recv(),
         Ok(AppEvent::InsertHistoryCell(_))
@@ -540,16 +544,18 @@ goals = true
 
     app.handle_app_server_event(
         &app_server,
-        AppServerEvent::ServerNotification(ServerNotification::ModelSafetyBufferingUpdated(
-            ModelSafetyBufferingUpdatedNotification {
-                thread_id: source_thread_id.to_string(),
-                turn_id: active_turn_id.clone(),
-                model: CURRENT_MODEL.to_string(),
-                use_cases: Vec::new(),
-                reasons: Vec::new(),
-                show_buffering_ui: true,
-                faster_model: Some(FASTER_MODEL.to_string()),
-            },
+        AppServerEvent::ServerNotification(Box::new(
+            ServerNotification::ModelSafetyBufferingUpdated(
+                ModelSafetyBufferingUpdatedNotification {
+                    thread_id: source_thread_id.to_string(),
+                    turn_id: active_turn_id.clone(),
+                    model: CURRENT_MODEL.to_string(),
+                    use_cases: Vec::new(),
+                    reasons: Vec::new(),
+                    show_buffering_ui: true,
+                    faster_model: Some(FASTER_MODEL.to_string()),
+                },
+            ),
         )),
     )
     .await;
@@ -617,16 +623,18 @@ goals = true
         .await;
         app.handle_app_server_event(
             &app_server,
-            AppServerEvent::ServerNotification(ServerNotification::ModelSafetyBufferingUpdated(
-                ModelSafetyBufferingUpdatedNotification {
-                    thread_id: first_retry_thread_id.to_string(),
-                    turn_id: first_retry_turn_id.clone(),
-                    model: FASTER_MODEL.to_string(),
-                    use_cases: Vec::new(),
-                    reasons: Vec::new(),
-                    show_buffering_ui: true,
-                    faster_model: Some(FASTER_MODEL.to_string()),
-                },
+            AppServerEvent::ServerNotification(Box::new(
+                ServerNotification::ModelSafetyBufferingUpdated(
+                    ModelSafetyBufferingUpdatedNotification {
+                        thread_id: first_retry_thread_id.to_string(),
+                        turn_id: first_retry_turn_id.clone(),
+                        model: FASTER_MODEL.to_string(),
+                        use_cases: Vec::new(),
+                        reasons: Vec::new(),
+                        show_buffering_ui: true,
+                        faster_model: Some(FASTER_MODEL.to_string()),
+                    },
+                ),
             )),
         )
         .await;

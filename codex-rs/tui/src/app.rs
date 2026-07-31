@@ -217,6 +217,7 @@ fn background_auto_review_status_has_summary(status: BackgroundAutoReviewStatus)
 }
 mod agent_message_consolidation;
 mod agent_navigation;
+mod agent_picker;
 mod agent_status_feed;
 mod app_server_event_targets;
 mod app_server_events;
@@ -592,6 +593,7 @@ pub(crate) struct App {
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     side_threads: HashMap<ThreadId, SideThreadState>,
+    abandoned_side_threads: HashSet<ThreadId>,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
     primary_thread_id: Option<ThreadId>,
@@ -1138,6 +1140,7 @@ See the Codex keymap documentation for supported actions and examples."
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             side_threads: HashMap::new(),
+            abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,

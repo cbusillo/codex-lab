@@ -348,7 +348,7 @@ impl RemoteAppServerClient {
                                             Ok(request) => {
                                                 if let Err(err) = deliver_event(
                                                     &event_tx,
-                                                    AppServerEvent::ServerRequest(request),
+                                                    AppServerEvent::ServerRequest(Box::new(request)),
                                                 )
                                                 {
                                                     warn!(%err, "failed to deliver remote app-server server request");
@@ -855,7 +855,8 @@ where
                             let method = request.method.clone();
                             match ServerRequest::try_from(request) {
                                 Ok(request) => {
-                                    pending_events.push(AppServerEvent::ServerRequest(request));
+                                    pending_events
+                                        .push(AppServerEvent::ServerRequest(Box::new(request)));
                                 }
                                 Err(err) => {
                                     warn!(%err, method, "rejecting unknown remote app-server request during initialize");
@@ -955,7 +956,7 @@ fn version_from_user_agent(user_agent: &str) -> Option<&str> {
 
 fn app_server_event_from_notification(notification: JSONRPCNotification) -> Option<AppServerEvent> {
     match ServerNotification::try_from(notification) {
-        Ok(notification) => Some(AppServerEvent::ServerNotification(notification)),
+        Ok(notification) => Some(AppServerEvent::ServerNotification(Box::new(notification))),
         Err(_) => None,
     }
 }

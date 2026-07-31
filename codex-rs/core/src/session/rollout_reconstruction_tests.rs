@@ -165,7 +165,8 @@ async fn record_initial_history_restores_world_state_baseline() {
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
 
     assert_eq!(
         session.clone_history().await.raw_items(),
@@ -2005,6 +2006,7 @@ async fn legacy_turn_context_environments_seed_the_world_state_baseline() {
                 "cwd": cwd.to_string_lossy(),
                 "status": "available",
                 "shell": "bash",
+                "is_primary": true,
             },
             "remote": {
                 "cwd": cwd.join("remote").to_string_lossy(),

@@ -796,7 +796,12 @@ async fn send_completion_to_parent(
         launch.thread_id,
     );
     let _ = control
-        .send_inter_agent_communication(launch.parent_thread_id, communication, context)
+        .send_inter_agent_communication(
+            launch.parent_thread_id,
+            communication,
+            context,
+            /*parent_turn_id*/ None,
+        )
         .await;
 }
 

@@ -73,6 +73,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) parent_thread_id: Option<ThreadId>,
+    pub(crate) parent_turn_id: Option<String>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) external_agent_provider: Option<ExternalAgentProviderProvenance>,
 }
@@ -153,6 +154,7 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         input: Vec<UserInput>,
+        parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
         if self.state.external_agent_status(agent_id).is_some() {
             return Err(CodexErr::UnsupportedOperation(
@@ -162,7 +164,7 @@ impl AgentControl {
         let state = self.upgrade()?;
         self.ensure_execution_capacity_for_turn_start(agent_id, /*starts_turn*/ true)
             .await?;
-        self.send_input_after_capacity_check(agent_id, &state, input)
+        self.send_input_after_capacity_check(agent_id, &state, input, parent_turn_id)
             .await
     }
 
@@ -171,11 +173,12 @@ impl AgentControl {
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
         input: Vec<UserInput>,
+        parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
         self.handle_thread_request_result(
             agent_id,
             state,
-            state.send_op(agent_id, input.into()).await,
+            state.send_op(agent_id, input.into(), parent_turn_id).await,
         )
         .await
     }
@@ -185,6 +188,7 @@ impl AgentControl {
         agent_id: ThreadId,
         communication: InterAgentCommunication,
         agent_communication_context: AgentCommunicationContext,
+        parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
         if self.state.external_agent_status(agent_id).is_some() {
             return Err(CodexErr::UnsupportedOperation(
@@ -199,6 +203,7 @@ impl AgentControl {
             &state,
             communication,
             agent_communication_context,
+            parent_turn_id,
         )
         .await
     }
@@ -209,9 +214,16 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
+        parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
-        self.submit_inter_agent_communication(agent_id, state, communication, context)
-            .await
+        self.submit_inter_agent_communication(
+            agent_id,
+            state,
+            communication,
+            context,
+            parent_turn_id,
+        )
+        .await
     }
 
     async fn submit_inter_agent_communication(
@@ -220,15 +232,21 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
+        parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
+        let parent_turn_id = parent_turn_id.filter(|_| communication.trigger_turn);
         let result = self
             .handle_thread_request_result(
                 agent_id,
                 state,
                 state
-                    .send_op(agent_id, Op::InterAgentCommunication { communication })
+                    .send_op(
+                        agent_id,
+                        Op::InterAgentCommunication { communication },
+                        parent_turn_id,
+                    )
                     .await,
             )
             .await;
@@ -259,7 +277,9 @@ impl AgentControl {
         self.handle_thread_request_result(
             agent_id,
             &state,
-            state.send_op(agent_id, Op::Interrupt).await,
+            state
+                .send_op(agent_id, Op::Interrupt, /*parent_turn_id*/ None)
+                .await,
         )
         .await
     }
@@ -560,7 +580,12 @@ impl AgentControl {
                 let context =
                     AgentCommunicationContext::new(AgentCommunicationKind::Result, child_thread_id);
                 let _ = control
-                    .send_inter_agent_communication(parent_thread_id, communication, context)
+                    .send_inter_agent_communication(
+                        parent_thread_id,
+                        communication,
+                        context,
+                        /*parent_turn_id*/ None,
+                    )
                     .await;
                 return;
             }
