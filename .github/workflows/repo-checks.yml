@@ -133,8 +133,8 @@ jobs:
           PYTHONPATH: scripts
         run: python3 -m unittest discover -s scripts/codex_lab_package -p 'test_*.py'
 
-      - name: Test Codex Lab Cargo cache helper
-        run: python3 -m unittest discover -s scripts/github -p 'test_configure_codex_lab_cargo_cache.py'
+      - name: Test Codex Lab GitHub helpers
+        run: python3 -m unittest discover -s scripts/github -p 'test_*.py'
 
       - name: Test standalone installer
         run: python3 -m unittest discover -s scripts/install -p 'test_*.py'

@@ -184,6 +184,11 @@ cache directory. `codex-lab-app.yml`, for example, uses
 `github-actions/cache/<owner>/<repo>/codex-lab-app/` as its Cargo target cache
 when the artifact root is configured and available.
 
+The trusted Apple Silicon V8 canary and release jobs use separate persistent
+Bazel repository and disk caches through
+`scripts/github/configure-codex-lab-bazel-cache.sh`. Each disk cache is capped
+at 100 GB so it cannot consume the artifact volume without bound.
+
 ## Distribution Contract
 
 `codex-lab-app.yml` uploads one artifact containing:

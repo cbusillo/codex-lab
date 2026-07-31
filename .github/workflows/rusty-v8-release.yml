@@ -101,6 +101,12 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      - name: Configure persistent Bazel cache
+        env:
+          CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT: ${{ vars.CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT }}
+        shell: bash
+        run: scripts/github/configure-codex-lab-bazel-cache.sh rusty-v8-release
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:

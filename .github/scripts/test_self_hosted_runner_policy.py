@@ -25,6 +25,7 @@ SELF_HOSTED_JOBS = {
     "rust-release.yml": ("build", "package-macos", "finalize-macos"),
     "rusty-v8-release.yml": ("build",),
     "sdk-integration.yml": ("typescript-sdk-integration",),
+    "v8-canary.yml": ("build",),
 }
 
 
@@ -123,13 +124,14 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
                     self.assertIn(job_name, blocks)
                     self.assertTrue(depends_on_authorization(job_name, blocks))
 
-    def test_only_the_host_hook_protected_app_workflow_uses_pull_request(self) -> None:
-        trigger = re.compile(r"^  pull_request:$", re.MULTILINE)
+    def test_pull_request_workflows_require_same_repository_heads(self) -> None:
+        trigger = re.compile(r"^  pull_request:(?: \{\})?$", re.MULTILINE)
+        pull_request_workflows = {"codex-lab-app.yml", "v8-canary.yml"}
 
         for path in persistent_runner_workflows():
             with self.subTest(workflow=path.name):
                 contents = path.read_text(encoding="utf-8")
-                if path.name == "codex-lab-app.yml":
+                if path.name in pull_request_workflows:
                     self.assertRegex(contents, trigger)
                     self.assertIn(
                         "github.event.pull_request.head.repo.full_name == github.repository",
