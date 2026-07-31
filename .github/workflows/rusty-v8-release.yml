@@ -107,10 +107,16 @@ jobs:
         shell: bash
         run: scripts/github/configure-codex-lab-bazel-cache.sh rusty-v8-release
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.12"
+      - name: Verify Python
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import sys
+
+          if sys.version_info < (3, 12):
+              raise SystemExit(f"Python 3.12 or newer is required, got {sys.version}")
+          print(sys.version)
+          PY
 
       - name: Set up Rust toolchain for Cargo smoke
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0

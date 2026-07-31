@@ -124,6 +124,16 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
                     self.assertIn(job_name, blocks)
                     self.assertTrue(depends_on_authorization(job_name, blocks))
 
+    def test_v8_self_hosted_builds_use_the_host_python(self) -> None:
+        for workflow_name in ("rusty-v8-release.yml", "v8-canary.yml"):
+            blocks = workflow_job_blocks(
+                (WORKFLOWS / workflow_name).read_text(encoding="utf-8")
+            )
+            build = "\n".join(blocks["build"])
+            with self.subTest(workflow=workflow_name):
+                self.assertNotIn("actions/setup-python@", build)
+                self.assertIn("Python 3.12 or newer is required", build)
+
     def test_pull_request_workflows_require_same_repository_heads(self) -> None:
         trigger = re.compile(r"^  pull_request:(?: \{\})?$", re.MULTILINE)
         pull_request_workflows = {"codex-lab-app.yml", "v8-canary.yml"}
