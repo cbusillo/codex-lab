@@ -51,6 +51,15 @@ else
 fi
 
 echo "Installing missing apt packages: ${missing[*]}"
-run_privileged DEBIAN_FRONTEND=noninteractive apt-get update "${apt_update_args[@]}"
-run_privileged DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  "${apt_install_args[@]}" "${missing[@]}"
+if [[ "${#apt_update_args[@]}" -gt 0 ]]; then
+  run_privileged DEBIAN_FRONTEND=noninteractive apt-get update "${apt_update_args[@]}"
+else
+  run_privileged DEBIAN_FRONTEND=noninteractive apt-get update
+fi
+
+if [[ "${#apt_install_args[@]}" -gt 0 ]]; then
+  run_privileged DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    "${apt_install_args[@]}" "${missing[@]}"
+else
+  run_privileged DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+fi
