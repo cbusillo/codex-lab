@@ -137,6 +137,7 @@ fn invalid_response_becomes_remote_control_jsonrpc_error() {
                 id: RequestId::Integer(7),
                 result: Box::new(ClientResponsePayload::Initialize(InitializeResponse {
                     user_agent: "codex-test-agent".to_string(),
+                    server_build: None,
                     codex_home,
                     platform_family: "unix".to_string(),
                     platform_os: "linux".to_string(),

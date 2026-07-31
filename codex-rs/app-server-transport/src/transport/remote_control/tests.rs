@@ -1979,6 +1979,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                     codex_app_server_protocol::ClientResponsePayload::Initialize(
                         codex_app_server_protocol::InitializeResponse {
                             user_agent: "codex-test-agent".to_string(),
+                            server_build: None,
                             codex_home: codex_home.path().abs(),
                             platform_family: "test-family".to_string(),
                             platform_os: "test-os".to_string(),
@@ -1999,6 +2000,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                 "id": 11,
                 "result": {
                     "userAgent": "codex-test-agent",
+                    "serverBuild": null,
                     "codexHome": codex_home.path(),
                     "platformFamily": "test-family",
                     "platformOs": "test-os",
