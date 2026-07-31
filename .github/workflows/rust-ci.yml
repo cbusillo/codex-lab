@@ -7,7 +7,7 @@ jobs:
   # --- Detect what changed so the fast PR workflow only runs relevant jobs ----
   changed:
     name: Detect changed areas
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     outputs:
       argument_comment_lint_package: ${{ steps.detect.outputs.argument_comment_lint_package }}
       codex: ${{ steps.detect.outputs.codex }}
@@ -29,7 +29,10 @@ jobs:
             HEAD_SHA='${{ github.event.pull_request.head.sha }}'
             echo "Base SHA: $BASE_SHA"
             echo "Head SHA: $HEAD_SHA"
-            mapfile -t files < <(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA")
+            files=()
+            while IFS= read -r file; do
+              files+=("$file")
+            done < <(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA")
           else
             # On manual runs, default to the full fast-PR bundle.
             files=("codex-rs/force" "tools/argument-comment-lint/force" ".github/force")
@@ -57,7 +60,7 @@ jobs:
   # --- Fast Cargo-native PR checks -------------------------------------------
   general:
     name: Format / etc
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
     defaults:
@@ -83,7 +86,7 @@ jobs:
 
   cargo_shear:
     name: cargo shear
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
     defaults:
@@ -108,7 +111,7 @@ jobs:
 
   workspace_check:
     name: Rust workspace compile check
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     timeout-minutes: 35
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' }}
@@ -124,11 +127,6 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
-      - name: Install Linux build dependencies
-        shell: bash
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       - name: Restore Cargo dependency cache
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -156,7 +154,7 @@ jobs:
       - name: Configure rusty_v8 artifact overrides
         uses: ./.github/actions/setup-rusty-v8
         with:
-          target: x86_64-unknown-linux-gnu
+          target: aarch64-apple-darwin
           artifact-repository: openai/codex
       - name: Compile Rust workspace and tests
         run: cargo check --workspace --tests --locked
@@ -167,7 +165,7 @@ jobs:
 
   argument_comment_lint_package:
     name: Argument comment lint package
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     needs: changed
     if: ${{ needs.changed.outputs.argument_comment_lint_package == 'true' }}
     env:
@@ -233,7 +231,7 @@ jobs:
         argument_comment_lint_package,
       ]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     steps:
       - name: Summarize
         shell: bash

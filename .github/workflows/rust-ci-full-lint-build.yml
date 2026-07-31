@@ -73,8 +73,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "hash=$(shasum -a 256 Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "toolchain_hash=$(shasum -a 256 rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       # Explicit cache restore: split cargo home vs target, so we can
       # avoid caching the large target dir on the gnu-dev job.

@@ -20,8 +20,6 @@ SELF_HOSTED_JOBS = {
     "codex-lab-app.yml": ("build-macos-aarch64",),
     "codex-lab-release.yml": ("build-macos-aarch64",),
     "exec-harness.yml": ("codex-exec-harness",),
-    "rust-ci-full-nextest-platform.yml": ("archive",),
-    "rust-ci-full.yml": ("lint_build", "tests_linux_x64_remote"),
     "rust-release-argument-comment-lint.yml": ("build",),
     "rust-release-zsh.yml": ("darwin",),
     "rust-release.yml": ("build", "package-macos", "finalize-macos"),

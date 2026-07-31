@@ -30,9 +30,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: codex-lab-linux
-            runs_on: [self-hosted, codex-lab-linux]
-            target: x86_64-unknown-linux-gnu
+          - runner: macos-codex-lab
+            runs_on: macos-codex-lab
+            target: aarch64-apple-darwin
 
     runs-on: ${{ matrix.runs_on }}
 
@@ -56,13 +56,13 @@ jobs:
           cache-scope: bazel-${{ github.job }}
 
       - name: Check rusty_v8 MODULE.bazel checksums
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
         run: |
           python3 .github/scripts/rusty_v8_bazel.py check-module-bazel
 
       - name: Check MODULE.bazel.lock is up to date
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
         run: ./scripts/check-module-bazel-lock.sh
 
@@ -125,9 +125,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: codex-lab-linux
-            runs_on: [self-hosted, codex-lab-linux]
-            target: x86_64-unknown-linux-gnu
+          - runner: macos-codex-lab
+            runs_on: macos-codex-lab
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.runs_on }}
     name: Bazel clippy on ${{ matrix.runner }} for ${{ matrix.target }}
     environment:
@@ -203,9 +203,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: codex-lab-linux
-            runs_on: [self-hosted, codex-lab-linux]
-            target: x86_64-unknown-linux-gnu
+          - runner: macos-codex-lab
+            runs_on: macos-codex-lab
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.runs_on }}
     name: Verify release build on ${{ matrix.runner }} for ${{ matrix.target }}
     environment:

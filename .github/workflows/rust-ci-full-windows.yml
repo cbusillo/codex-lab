@@ -2,12 +2,6 @@ name: rust-ci-full-windows
 
 on:
   workflow_call:
-  push:
-    branches:
-      # Keep Windows in the explicit pre-merge full-suite path while release
-      # verification follows the currently supported macOS and Linux targets.
-      - "**full-ci**"
-  workflow_dispatch:
 
 concurrency:
   group: rust-ci-full-windows::${{ github.workflow }}::${{ github.ref }}

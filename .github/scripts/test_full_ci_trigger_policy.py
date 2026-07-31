@@ -15,7 +15,6 @@ RUST_ARGUMENT_COMMENT_LINT_WORKFLOW = (
 RUST_NEXTEST_PLATFORM_WORKFLOW = (
     ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml"
 )
-REMOTE_ENV_SCRIPT = ROOT / "scripts/test-remote-env.sh"
 RUST_BLOCKING_CI_WORKFLOW = ROOT / ".github/workflows/rust-ci.yml"
 BAZEL_WORKFLOW = ROOT / ".github/workflows/bazel.yml"
 V8_CANARY_WORKFLOW = ROOT / ".github/workflows/v8-canary.yml"
@@ -26,10 +25,8 @@ FULL_CI_MATRIX_WORKFLOWS = (
     ROOT / ".github/workflows/sdk-integration.yml",
     ROOT / ".github/workflows/bazel.yml",
     ROOT / ".github/workflows/rust-ci-full.yml",
-    ROOT / ".github/workflows/rust-ci-full-windows.yml",
     ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml",
     ROOT / ".github/workflows/v8-canary.yml",
-    ROOT / ".github/workflows/v8-canary-windows.yml",
 )
 RELEASE_VERIFICATION_WORKFLOWS = {
     "bazel.yml",
@@ -41,9 +38,7 @@ WINDOWS_FULL_VERIFICATION_WORKFLOWS = {
     "rust-ci-full-windows.yml",
     "v8-canary-windows.yml",
 }
-FULL_VERIFICATION_WORKFLOWS = (
-    RELEASE_VERIFICATION_WORKFLOWS | WINDOWS_FULL_VERIFICATION_WORKFLOWS
-)
+FULL_VERIFICATION_WORKFLOWS = RELEASE_VERIFICATION_WORKFLOWS
 LOCAL_WORKFLOW_CALL = re.compile(
     r"uses:\s+\./\.github/workflows/([A-Za-z0-9_.-]+\.ya?ml)"
 )
@@ -108,19 +103,14 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertIn("workspace_check,", workflow)
 
     def test_opt_in_rust_full_ci_cancels_superseded_runs(self) -> None:
-        for workflow_path, group in (
-            (RUST_FULL_CI_WORKFLOW, "rust-ci-full"),
-            (RUST_WINDOWS_FULL_CI_WORKFLOW, "rust-ci-full-windows"),
-        ):
-            with self.subTest(workflow=workflow_path.name):
-                workflow_header = workflow_path.read_text().split(
-                    "\njobs:\n", maxsplit=1
-                )[0]
-                self.assertIn(
-                    f"\n  group: {group}::${{{{ github.workflow }}}}::${{{{ github.ref }}}}",
-                    workflow_header,
-                )
-                self.assertIn("\n  cancel-in-progress: true", workflow_header)
+        workflow_header = RUST_FULL_CI_WORKFLOW.read_text().split(
+            "\njobs:\n", maxsplit=1
+        )[0]
+        self.assertIn(
+            "\n  group: rust-ci-full::${{ github.workflow }}::${{ github.ref }}",
+            workflow_header,
+        )
+        self.assertIn("\n  cancel-in-progress: true", workflow_header)
 
     def test_scheduled_v8_canary_forces_a_complete_run(self) -> None:
         workflow = V8_CANARY_METADATA_WORKFLOW.read_text()
@@ -226,15 +216,14 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             workflow.index("Full verification / Bazel"),
         )
 
-    def test_nightly_keeps_windows_outside_the_release_gate(self) -> None:
+    def test_full_ci_and_release_use_the_same_apple_silicon_suites(self) -> None:
         self.assertEqual(called_workflows(FULL_CI_WORKFLOW), FULL_VERIFICATION_WORKFLOWS)
         release_calls = called_workflows(CODEX_LAB_RELEASE_WORKFLOW)
-        self.assertTrue(RELEASE_VERIFICATION_WORKFLOWS.issubset(release_calls))
-        self.assertTrue(WINDOWS_FULL_VERIFICATION_WORKFLOWS.isdisjoint(release_calls))
         self.assertEqual(
-            FULL_VERIFICATION_WORKFLOWS - release_calls,
-            WINDOWS_FULL_VERIFICATION_WORKFLOWS,
+            release_calls,
+            RELEASE_VERIFICATION_WORKFLOWS | {"authorize-self-hosted.yml"},
         )
+        self.assertTrue(WINDOWS_FULL_VERIFICATION_WORKFLOWS.isdisjoint(release_calls))
 
     def test_release_verification_workflows_have_no_windows_jobs(self) -> None:
         release_rust = RUST_FULL_CI_WORKFLOW.read_text()
@@ -297,32 +286,15 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertEqual(workflow.count("timeout-minutes: 90"), 3)
         self.assertNotIn("timeout-minutes: 60", workflow)
 
-    def test_linux_x64_runs_native_suite_before_curated_remote_tests(self) -> None:
+    def test_macos_aarch64_runs_the_native_nextest_suite(self) -> None:
         workflow = RUST_FULL_CI_WORKFLOW.read_text()
         platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
 
-        self.assertIn("remote_test_filter: >-", workflow)
-        self.assertIn("test(suite::remote_env::)", workflow)
-        self.assertIn(
-            "test(=suite::skills::user_turn_includes_skill_instructions)",
-            workflow,
-        )
-        self.assertLess(
-            platform_workflow.index('run_nextest "${nextest_args[@]}"'),
-            platform_workflow.index(
-                'source "${GITHUB_WORKSPACE}/scripts/test-remote-env.sh"'
-            ),
-        )
-        self.assertIn(
-            'export CODEX_TEST_REMOTE_CODEX_BINARY="${helper_dir}/codex"',
-            platform_workflow,
-        )
-        remote_env_script = REMOTE_ENV_SCRIPT.read_text()
-        self.assertIn("CODEX_TEST_REMOTE_CODEX_BINARY", remote_env_script)
-        self.assertIn(
-            'if [[ -z "${CODEX_TEST_REMOTE_CODEX_BINARY:-}" ]]; then',
-            remote_env_script,
-        )
+        self.assertIn("  tests_macos_aarch64:\n", workflow)
+        self.assertIn("      runner: macos-26\n", workflow)
+        self.assertIn("      target: aarch64-apple-darwin\n", workflow)
+        self.assertNotIn("remote_test_filter:", workflow)
+        self.assertIn('run_nextest "${nextest_args[@]}"', platform_workflow)
 
     def test_argument_comment_lint_has_bounded_local_fallback(self) -> None:
         workflow = RUST_ARGUMENT_COMMENT_LINT_WORKFLOW.read_text()
