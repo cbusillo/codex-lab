@@ -22,6 +22,10 @@ EXPRESSION = re.compile(r"^\$\{\{.*\}\}$")
 APPLE_RUNNERS = frozenset({"macos-26", "macos-codex-lab"})
 APPLE_TARGET = "aarch64-apple-darwin"
 APPLE_PLATFORMS = frozenset({"macos_arm64", "macos-aarch64"})
+LINUX_CONTAINER_ACTIONS = (
+    "EmbarkStudios/cargo-deny-action@",
+    "codespell-project/actions-codespell@",
+)
 OUT_OF_SCOPE_ENTRYPOINTS = frozenset(
     {
         "cla.yml",
@@ -159,6 +163,11 @@ def selector_violations(path: Path, contents: str) -> list[Violation]:
             block_scalar_indent = indent
             continue
         if stripped.startswith("#"):
+            continue
+        if any(action in stripped for action in LINUX_CONTAINER_ACTIONS):
+            violations.append(
+                Violation(path, line_number, "Linux container action in active workflow")
+            )
             continue
         if re.match(r"^\s*container\s*:", line):
             violations.append(

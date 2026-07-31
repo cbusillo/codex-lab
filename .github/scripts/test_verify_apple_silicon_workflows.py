@@ -55,6 +55,17 @@ class AppleSiliconWorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("non-Apple-Silicon target", violations[0].reason)
 
+    def test_linux_container_action_is_rejected(self) -> None:
+        path = Path("workflow.yml")
+        violations = selector_violations(
+            path,
+            "jobs:\n  test:\n    runs-on: macos-26\n    steps:\n"
+            "      - uses: codespell-project/actions-codespell@pinned\n",
+        )
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("Linux container action", violations[0].reason)
+
     def test_multiline_self_hosted_apple_labels_are_allowed(self) -> None:
         path = Path("workflow.yml")
         violations = selector_violations(
