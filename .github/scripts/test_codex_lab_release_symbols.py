@@ -59,6 +59,18 @@ class CodexLabReleaseSymbolsTest(unittest.TestCase):
             "later steps must consume the stripped engine",
         )
 
+    def test_symbols_archive_accepts_cargo_hashed_dwarf_filename(self) -> None:
+        self.assertIn(
+            'dwarf_prefix="codex-symbols-${SYMBOLS_ARTIFACT_NAME}/codex-lab.dSYM/Contents/Resources/DWARF/"',
+            self.contents,
+        )
+        self.assertIn('suffix !~ /\\//', self.contents)
+        self.assertNotIn(
+            "Contents/Resources/DWARF/codex-lab\"",
+            self.contents,
+            "Cargo names the packed DWARF file after its hashed crate artifact",
+        )
+
     def test_symbols_are_archived_before_signing_and_packaging(self) -> None:
         order = step_order(self.contents)
         missing = [name for name in BUILD_STEPS if name not in order]
