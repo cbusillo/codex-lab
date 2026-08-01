@@ -17,12 +17,21 @@ jobs:
   metadata:
     uses: ./.github/workflows/v8-canary-metadata.yml
 
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    needs: metadata
+    if: ${{ needs.metadata.outputs.canary_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   build:
     name: Build ${{ matrix.variant }} ${{ matrix.target }}
-    needs: metadata
+    needs:
+      - authorize_self_hosted
+      - metadata
     # Metadata always runs; only relevant changes pay for the large matrix.
-    if: ${{ needs.metadata.outputs.canary_required == 'true' }}
+    if: ${{ needs.metadata.outputs.canary_required == 'true' && needs.authorize_self_hosted.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
     permissions:
       contents: read
       actions: read
@@ -33,88 +42,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64
-            sandbox: false
-            target: x86_64-unknown-linux-gnu
-            v8_cpu: x64
-            variant: release
-          - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64
-            sandbox: true
-            target: x86_64-unknown-linux-gnu
-            v8_cpu: x64
-            variant: ptrcomp-sandbox
-          - runner: ubuntu-24.04-arm
-            bazel_config: ci-v8
-            platform: linux_arm64
-            sandbox: false
-            target: aarch64-unknown-linux-gnu
-            v8_cpu: arm64
-            variant: release
-          - runner: ubuntu-24.04-arm
-            bazel_config: ci-v8
-            platform: linux_arm64
-            sandbox: true
-            target: aarch64-unknown-linux-gnu
-            v8_cpu: arm64
-            variant: ptrcomp-sandbox
-          - runner: macos-26-intel
-            bazel_config: ci-macos
-            platform: macos_amd64
-            sandbox: false
-            target: x86_64-apple-darwin
-            v8_cpu: x64
-            variant: release
-          - runner: macos-26-intel
-            bazel_config: ci-macos
-            platform: macos_amd64
-            sandbox: true
-            target: x86_64-apple-darwin
-            v8_cpu: x64
-            variant: ptrcomp-sandbox
-          - runner: macos-26
+          - runner: macos-codex-lab
             bazel_config: ci-macos
             platform: macos_arm64
             sandbox: false
             target: aarch64-apple-darwin
             v8_cpu: arm64
             variant: release
-          - runner: macos-26
+          - runner: macos-codex-lab
             bazel_config: ci-macos
             platform: macos_arm64
             sandbox: true
             target: aarch64-apple-darwin
-            v8_cpu: arm64
-            variant: ptrcomp-sandbox
-          - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64_musl
-            sandbox: false
-            target: x86_64-unknown-linux-musl
-            v8_cpu: x64
-            variant: release
-          - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64_musl
-            sandbox: true
-            target: x86_64-unknown-linux-musl
-            v8_cpu: x64
-            variant: ptrcomp-sandbox
-          - runner: ubuntu-24.04-arm
-            bazel_config: ci-v8
-            platform: linux_arm64_musl
-            sandbox: false
-            target: aarch64-unknown-linux-musl
-            v8_cpu: arm64
-            variant: release
-          - runner: ubuntu-24.04-arm
-            bazel_config: ci-v8
-            platform: linux_arm64_musl
-            sandbox: true
-            target: aarch64-unknown-linux-musl
             v8_cpu: arm64
             variant: ptrcomp-sandbox
     steps:
@@ -128,10 +67,22 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.12"
+      - name: Configure persistent Bazel cache
+        env:
+          CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT: ${{ vars.CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT }}
+        shell: bash
+        run: scripts/github/configure-codex-lab-bazel-cache.sh v8-canary
+
+      - name: Verify Python
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import sys
+
+          if sys.version_info < (3, 12):
+              raise SystemExit(f"Python 3.12 or newer is required, got {sys.version}")
+          print(sys.version)
+          PY
 
       - name: Set up Rust toolchain for Cargo smoke
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -209,14 +160,10 @@ jobs:
           set -euo pipefail
 
           host_arch="$(uname -m)"
-          case "${TARGET}:${host_arch}" in
-            x86_64-apple-darwin:x86_64|aarch64-apple-darwin:arm64|x86_64-unknown-linux-gnu:x86_64|aarch64-unknown-linux-gnu:aarch64)
-              ;;
-            *)
-              echo "Skipping non-native Cargo smoke for ${TARGET} on ${host_arch}."
-              exit 0
-              ;;
-          esac
+          if [[ "${TARGET}" != "aarch64-apple-darwin" || "${host_arch}" != "arm64" ]]; then
+            echo "Expected Apple Silicon host/target, got ${host_arch}/${TARGET}." >&2
+            exit 1
+          fi
 
           archive="$(find "dist/${TARGET}" -maxdepth 1 -type f -name 'librusty_v8_*.a.gz' -print -quit)"
           binding="$(find "dist/${TARGET}" -maxdepth 1 -type f -name 'src_binding_*.rs' -print -quit)"

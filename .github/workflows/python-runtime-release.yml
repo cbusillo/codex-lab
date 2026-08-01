@@ -1,7 +1,8 @@
 name: python-runtime-release
 
 on:
-  workflow_dispatch:
+  # Temporarily unreachable while the Linux-only runtime wheel build is paused.
+  workflow_call:
     inputs:
       runtime_version:
         description: "Runtime version to publish before updating the SDK pin, for example 0.136.0, 0.136.0a2, or 0.136.0a2.post1."

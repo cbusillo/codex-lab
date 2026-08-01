@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   metadata:
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     outputs:
       # A stale PR head can contain the old detector, which does not emit this
       # output. Missing must mean "run" so older branches cannot silently skip

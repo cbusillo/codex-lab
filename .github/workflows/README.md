@@ -1,17 +1,38 @@
 # Workflow Strategy
 
 The workflows in this directory are split so that pull requests and `main`
-pushes get fast, review-friendly signal while comprehensive cross-platform
-verification runs on a nightly or explicitly requested cadence.
+pushes get fast, review-friendly signal while comprehensive verification runs
+on a nightly or explicitly requested cadence.
+
+## Temporary Apple Silicon-Only Mode
+
+As of July 31, 2026, every active CI, canary, app-build, and release execution
+path is limited to macOS ARM64. Linux, Windows, and Intel macOS workflows are
+temporarily unreachable while Codex Lab prioritizes Apple Silicon development.
+
+- `verify_apple_silicon_workflows.py` follows every active workflow entrypoint
+  through its local reusable-workflow calls and rejects non-Apple runners,
+  targets, containers, and release platforms.
+- Windows-only reusable workflows remain `workflow_call`-only with no active
+  callers so the old implementation is recoverable without consuming CI.
+- The upstream multi-platform Rust and Python release entrypoints are also
+  `workflow_call`-only. Codex Lab release publishing remains active through
+  `codex-lab-release.yml`.
+- Issue, contributor, translation, and CLA automation is outside this platform
+  policy because it does not build, test, package, or release product code.
+
+Restore another platform only by updating its workflow lanes, this document,
+and the policy verifier together. Track the temporary mode and recovery decision
+in [#517](https://github.com/cbusillo/codex-lab/issues/517).
 
 ## Pull Requests
 
 - `blocking-ci.yml` is a bounded, public-fork-safe merge gate. Everything in
-  its reusable-workflow graph runs on standard GitHub-hosted runners.
+  its reusable-workflow graph runs on GitHub-hosted Apple Silicon runners.
 - `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
   - `cargo fmt --check`
   - `cargo shear`
-  - one hosted Linux `cargo check --workspace --tests` compile gate
+  - one hosted macOS ARM64 `cargo check --workspace --tests` compile gate
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
 - `sdk.yml` runs the Python SDK suite plus TypeScript SDK build and lint checks.
   The TypeScript tests that spawn a real Codex binary run in the full suite
@@ -33,27 +54,20 @@ verification runs on a nightly or explicitly requested cadence.
   Matrices and inner test/build tools continue after individual failures so one
   run returns the complete actionable failure inventory.
 - `bazel.yml` compiles the full Bazel graph and runs Bazel clippy plus
-  release-build verification on the trusted persistent Linux runner. Runtime
+  release-build verification on the trusted persistent Apple Silicon runner. Runtime
   tests stay in `rust-ci-full.yml`, where each platform has the dependencies
   and isolation expected by the test suite.
-- `rust-ci-full.yml` is the macOS/Linux Cargo-native verification workflow used
+- `rust-ci-full.yml` is the macOS ARM64 Cargo-native verification workflow used
   by both full CI and the current dogfood release gate. It keeps the heavier
-  checks off the PR and per-merge paths while validating the supported targets:
-  - the full Cargo `clippy` matrix
-  - the full Cargo `nextest` matrix via per-platform archive-backed shards
+  checks off the PR and per-merge paths while validating the active target:
+  - Cargo `clippy` in development and release profiles
+  - the Cargo `nextest` suite via archive-backed shards
   - release-profile Cargo builds
-  - cross-platform `argument-comment-lint`
-  - Linux remote-env tests
-- `rust-ci-full-windows.yml` retains Windows x64/ARM64 clippy, nextest, release
-  builds, and argument-comment-lint in nightly/manual full CI and on explicit
-  `**full-ci**` branches. Windows failures remain visible but do not block the
-  first macOS/Linux dogfood release.
+  - Apple Silicon `argument-comment-lint`
 - `sdk-integration.yml` builds Codex with Bazel and runs the TypeScript SDK
-  integration tests against that real binary on the trusted Linux runner.
-- `v8-canary.yml` keeps the macOS/Linux upstream V8 artifact matrix visible in
+  integration tests against that real binary on the trusted Apple Silicon runner.
+- `v8-canary.yml` keeps the Apple Silicon upstream V8 artifact pair visible in
   the release gate, full suite, and relevant pull requests.
-- `v8-canary-windows.yml` retains the Windows source-build matrix in full CI and
-  relevant pull requests without making it release-blocking.
 - Bazel, Rust, SDK integration, and V8 remain independent top-level suites and
   start in parallel. Full verification optimizes for diagnostic completeness;
   the bounded pull-request gate is responsible for fast rejection.
@@ -61,21 +75,18 @@ verification runs on a nightly or explicitly requested cadence.
 ## Release Gate
 
 - `codex-lab-release.yml` runs Bazel, SDK integration, and the supported
-  macOS/Linux Rust and V8 workflows on the exact selected release ref after
+  macOS ARM64 Rust and V8 workflows on the exact selected release ref after
   validating release metadata and before building release artifacts.
-- Windows remains part of nightly/manual `full-ci.yml`, but it is intentionally
-  outside the release critical path until Windows becomes a supported Codex Lab
-  dogfood target.
 - A recent nightly is useful evidence but never substitutes for this exact-ref
   release gate. Publishing remains downstream of both full verification and
   artifact validation.
 
 ## Runner Ownership
 
-- Merge-blocking workflows use standard GitHub-hosted runners so public fork
-  pull requests never execute on persistent Codex Lab machines.
+- Merge-blocking workflows use GitHub-hosted Apple Silicon runners so public
+  fork pull requests never execute on persistent Codex Lab machines.
 - Trusted full-suite, app, and release workflows may use the repository-scoped
-  `[self-hosted, codex-lab-linux]`, `macos-codex-lab`, or
+  `macos-codex-lab` or
   `[self-hosted, macOS, ARM64, codex-lab-app]` labels. These fork-owned labels
   are intentionally explicit instead of imitating upstream organization runner
   groups or renaming a persistent runner to an upstream alias.
@@ -155,8 +166,8 @@ verification runs on a nightly or explicitly requested cadence.
 - Keep the hosted PR graph cold-start bounded; a check that requires the full
   Bazel/V8 graph belongs in trusted full CI.
 - Keep `rust-ci.yml` and `sdk.yml` fast enough that they do not dominate PR latency.
-- Preserve heavy Bazel, Cargo matrix, and real-binary SDK coverage in the
-  scheduled and manually dispatched full suite rather than deleting it.
+- Preserve heavy Bazel, Cargo, and real-binary SDK coverage in the scheduled
+  and manually dispatched Apple Silicon suite.
 
 ## Developer Artifacts
 
@@ -172,6 +183,12 @@ Workflow-specific caches add owner, repository, and workflow leaves under the
 cache directory. `codex-lab-app.yml`, for example, uses
 `github-actions/cache/<owner>/<repo>/codex-lab-app/` as its Cargo target cache
 when the artifact root is configured and available.
+
+The trusted Apple Silicon V8 canary and release jobs use separate persistent
+Bazel repository and disk caches through
+`scripts/github/configure-codex-lab-bazel-cache.sh`. Each disk cache is capped
+at 80 GB so both caches fit within the artifact volume quota with room for
+repository caches and normal artifact growth.
 
 ## Distribution Contract
 
@@ -193,7 +210,7 @@ unsigned and are packaging-validation inputs, not publishable releases.
 
 `codex-lab-release.yml` is the Codex Lab-owned release authority. It builds the
 macOS ARM64 app, shim, and engine, signs and verifies the engine on the trusted
-macOS runner, validates the staged distribution on `ubuntu-latest`, and grants
+macOS runner, validates the staged distribution on `macos-26`, and grants
 `contents: write` only to the separate publication job.
 
 The signed engine contract pins the executable digest, source commit, version,

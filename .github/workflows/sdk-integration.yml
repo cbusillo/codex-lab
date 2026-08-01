@@ -11,7 +11,7 @@ jobs:
 
   typescript-sdk-integration:
     needs: authorize_self_hosted
-    runs-on: [self-hosted, codex-lab-linux]
+    runs-on: macos-codex-lab
     timeout-minutes: 120
     environment:
       name: bazel
@@ -22,24 +22,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-
-      - name: Install Linux bwrap build dependencies
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          if [[ "${RUNNER_ENVIRONMENT}" == "github-hosted" ]]; then
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-            exit 0
-          fi
-
-          command -v pkg-config >/dev/null
-          if ! pkg-config --exists libcap; then
-            echo "::error::Self-hosted Linux runner requires the libcap development package"
-            exit 1
-          fi
 
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
@@ -56,7 +38,7 @@ jobs:
         id: prepare_bazel
         uses: ./.github/actions/prepare-bazel-ci
         with:
-          target: x86_64-unknown-linux-gnu
+          target: aarch64-apple-darwin
           cache-scope: sdk-integration
 
       - name: Build codex with Bazel

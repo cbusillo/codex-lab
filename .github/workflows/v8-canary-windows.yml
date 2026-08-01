@@ -4,8 +4,6 @@ name: v8-canary-windows
 # nightly/manual full suite, but they do not gate the macOS/Linux dogfood release.
 on:
   workflow_call:
-  pull_request: {}
-  workflow_dispatch:
 
 concurrency:
   group: v8-canary-windows::${{ github.workflow }}::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}

@@ -20,13 +20,12 @@ SELF_HOSTED_JOBS = {
     "codex-lab-app.yml": ("build-macos-aarch64",),
     "codex-lab-release.yml": ("build-macos-aarch64",),
     "exec-harness.yml": ("codex-exec-harness",),
-    "rust-ci-full-nextest-platform.yml": ("archive",),
-    "rust-ci-full.yml": ("lint_build", "tests_linux_x64_remote"),
     "rust-release-argument-comment-lint.yml": ("build",),
     "rust-release-zsh.yml": ("darwin",),
     "rust-release.yml": ("build", "package-macos", "finalize-macos"),
     "rusty-v8-release.yml": ("build",),
     "sdk-integration.yml": ("typescript-sdk-integration",),
+    "v8-canary.yml": ("build",),
 }
 
 
@@ -125,13 +124,24 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
                     self.assertIn(job_name, blocks)
                     self.assertTrue(depends_on_authorization(job_name, blocks))
 
-    def test_only_the_host_hook_protected_app_workflow_uses_pull_request(self) -> None:
-        trigger = re.compile(r"^  pull_request:$", re.MULTILINE)
+    def test_v8_self_hosted_builds_use_the_host_python(self) -> None:
+        for workflow_name in ("rusty-v8-release.yml", "v8-canary.yml"):
+            blocks = workflow_job_blocks(
+                (WORKFLOWS / workflow_name).read_text(encoding="utf-8")
+            )
+            build = "\n".join(blocks["build"])
+            with self.subTest(workflow=workflow_name):
+                self.assertNotIn("actions/setup-python@", build)
+                self.assertIn("Python 3.12 or newer is required", build)
+
+    def test_pull_request_workflows_require_same_repository_heads(self) -> None:
+        trigger = re.compile(r"^  pull_request:(?: \{\})?$", re.MULTILINE)
+        pull_request_workflows = {"codex-lab-app.yml", "v8-canary.yml"}
 
         for path in persistent_runner_workflows():
             with self.subTest(workflow=path.name):
                 contents = path.read_text(encoding="utf-8")
-                if path.name == "codex-lab-app.yml":
+                if path.name in pull_request_workflows:
                     self.assertRegex(contents, trigger)
                     self.assertIn(
                         "github.event.pull_request.head.repo.full_name == github.repository",

@@ -25,7 +25,7 @@ jobs:
   release-metadata:
     name: Resolve Codex Lab release metadata
     needs: authorize_self_hosted
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     timeout-minutes: 5
     permissions:
       contents: read
@@ -114,7 +114,7 @@ jobs:
       - full-sdk-integration
       - full-v8-canary
     if: ${{ always() }}
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -487,7 +487,7 @@ jobs:
   validate-release-artifacts:
     name: Validate staged release artifacts
     needs: build-macos-aarch64
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     timeout-minutes: 10
     permissions:
       contents: read
@@ -506,7 +506,7 @@ jobs:
           test -f dist/codex-lab-engine-aarch64-apple-darwin.zip
           test -f dist/SHA256SUMS
           test -f dist/codex-lab-distribution.json
-          (cd dist && sha256sum -c SHA256SUMS)
+          (cd dist && shasum -a 256 -c SHA256SUMS)
           jq -e \
             --arg tag "${{ needs.build-macos-aarch64.outputs.release_tag }}" \
             --arg version "${{ needs.build-macos-aarch64.outputs.release_version }}" \
@@ -552,7 +552,7 @@ jobs:
       - build-macos-aarch64
       - validate-release-artifacts
     if: ${{ inputs.publish }}
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     timeout-minutes: 10
     permissions:
       contents: write

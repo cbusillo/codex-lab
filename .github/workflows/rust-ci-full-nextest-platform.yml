@@ -33,13 +33,8 @@ on:
         type: boolean
 
 jobs:
-  authorize_self_hosted:
-    name: Authorize self-hosted execution
-    uses: ./.github/workflows/authorize-self-hosted.yml
-
   archive:
     name: Build nextest archive
-    needs: authorize_self_hosted
     runs-on: ${{ inputs.runner }}
     # Run 30205457451 cancelled the Linux ARM64 archive at exactly 60 minutes;
     # cold-cache archive builds need headroom above that.
@@ -110,8 +105,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "hash=$(shasum -a 256 Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "toolchain_hash=$(shasum -a 256 rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Restore cargo home cache
         id: cache_cargo_home_restore
@@ -555,7 +550,7 @@ jobs:
     name: Platform result
     needs: shard
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     steps:
       - name: Confirm test shards passed
         shell: bash

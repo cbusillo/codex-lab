@@ -10,9 +10,9 @@
 
 name: rust-release
 on:
-  push:
-    tags:
-      - "rust-v*.*.*"
+  # Temporarily unreachable while Codex Lab operates Apple Silicon-only.
+  # Keep the reusable definition intact for an explicit cross-platform restore.
+  workflow_call:
 
 env:
   CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0

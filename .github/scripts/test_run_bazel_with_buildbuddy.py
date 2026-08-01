@@ -216,6 +216,8 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
 
     def test_bazel_command_uses_configured_local_caches(self) -> None:
         env = {
+            "BAZEL_DISK_CACHE": "/tmp/bazel-disk",
+            "BAZEL_DISK_CACHE_GC_MAX_SIZE": "100G",
             "BAZEL_REPO_CONTENTS_CACHE": "/tmp/bazel-repo-contents",
             "BAZEL_REPOSITORY_CACHE": "/tmp/bazel-repository",
         }
@@ -234,7 +236,19 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
                 "//codex-rs/...",
                 "--repo_contents_cache=/tmp/bazel-repo-contents",
                 "--repository_cache=/tmp/bazel-repository",
+                "--disk_cache=/tmp/bazel-disk",
+                "--experimental_disk_cache_gc_max_size=100G",
             ],
+        )
+
+    def test_bazel_command_ignores_disk_cache_gc_without_disk_cache(self) -> None:
+        self.assertEqual(
+            run_bazel_with_buildbuddy.bazel_command(
+                "build",
+                "//codex-rs/...",
+                env={"BAZEL_DISK_CACHE_GC_MAX_SIZE": "100G"},
+            ),
+            ["bazel", "build", "//codex-rs/..."],
         )
 
     def test_bazel_command_adds_local_caches_before_separator(self) -> None:

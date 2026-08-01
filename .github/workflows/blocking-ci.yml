@@ -52,7 +52,7 @@ jobs:
       - repo-checks
       - rust-ci
       - sdk
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     steps:
       # Keep the helper on the same revision as the caller and child workflows.
       # CI workflow uploads are restricted, so this repository does not need a

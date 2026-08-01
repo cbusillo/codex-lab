@@ -14,14 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  authorize_self_hosted:
-    name: Authorize self-hosted execution
-    uses: ./.github/workflows/authorize-self-hosted.yml
-
   # --- CI that doesn't need specific targets ---------------------------------
   general:
     name: Format / etc
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     defaults:
       run:
         working-directory: codex-rs
@@ -40,7 +36,7 @@ jobs:
 
   cargo_shear:
     name: cargo shear
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     defaults:
       run:
         working-directory: codex-rs
@@ -58,7 +54,7 @@ jobs:
 
   argument_comment_lint_package:
     name: Argument comment lint package
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     env:
       CARGO_DYLINT_VERSION: 5.0.0
       DYLINT_LINK_VERSION: 5.0.0
@@ -103,9 +99,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform_name: Linux
-            runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
           - platform_name: macOS
             runner: macos-26
             target: aarch64-apple-darwin
@@ -118,7 +111,6 @@ jobs:
 
   # --- CI to validate on different os/targets --------------------------------
   lint_build:
-    needs: authorize_self_hosted
     strategy:
       fail-fast: false
       matrix:
@@ -126,34 +118,8 @@ jobs:
           - runner: macos-26
             target: aarch64-apple-darwin
             profile: dev
-          - runner: macos-26-intel
-            target: x86_64-apple-darwin
-            profile: dev
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            profile: dev
-          - runner: codex-lab-linux
-            target: x86_64-unknown-linux-gnu
-            profile: dev
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            profile: dev
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            profile: dev
-
-          # Also run representative release builds on Mac and Linux because
-          # there could be release-only build errors we want to catch.
-          # Hopefully this also pre-populates the build cache to speed up
-          # releases.
           - runner: macos-26
             target: aarch64-apple-darwin
-            profile: release
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            profile: release
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
             profile: release
     uses: ./.github/workflows/rust-ci-full-lint-build.yml
     with:
@@ -172,43 +138,6 @@ jobs:
       use_sccache: true
     secrets: inherit
 
-  tests_linux_x64_remote:
-    name: Tests — codex-lab-linux - x86_64-unknown-linux-gnu (native + remote)
-    needs: authorize_self_hosted
-    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
-    with:
-      runner: codex-lab-linux
-      target: x86_64-unknown-linux-gnu
-      profile: ci-test
-      artifact_id: linux-x64-remote
-      remote_env: true
-      # The complete workspace runs natively first. Keep remote execution as a
-      # positive, reviewable set until the parity gaps tracked in #505 close.
-      remote_test_filter: >-
-        package(codex-core) & (
-          test(suite::remote_env::) |
-          test(=suite::agents_md::multi_environment_thread_loads_every_project_and_keeps_creation_snapshot) |
-          test(=suite::apply_patch_cli::apply_patch_turn_diff_emits_portable_paths_for_remote_cwd) |
-          test(=suite::apply_patch_cli::apply_patch_turn_diff_tracks_local_and_remote_environment_paths) |
-          test(=suite::rmcp_client::remote_stdio_env_var_source_does_not_copy_local_env) |
-          test(=suite::skills::user_turn_includes_skill_instructions) |
-          test(=suite::view_image::view_image_routes_to_selected_remote_environment)
-        )
-      test_threads: 4
-      use_sccache: true
-    secrets: inherit
-
-  tests_linux_arm64:
-    name: Tests — ubuntu-24.04-arm - aarch64-unknown-linux-gnu
-    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
-    with:
-      runner: ubuntu-24.04-arm
-      target: aarch64-unknown-linux-gnu
-      profile: ci-test
-      artifact_id: linux-arm64
-      use_sccache: true
-    secrets: inherit
-
   # --- Gatherer job for the full Rust workflow --------------------------------
   results:
     name: Full Rust CI results
@@ -220,11 +149,9 @@ jobs:
         argument_comment_lint_prebuilt,
         lint_build,
         tests_macos_aarch64,
-        tests_linux_x64_remote,
-        tests_linux_arm64,
       ]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
