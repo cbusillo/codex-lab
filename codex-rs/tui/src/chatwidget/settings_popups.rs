@@ -93,7 +93,12 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) fn open_settings_popup(&mut self) {
+    pub(crate) fn open_settings_popup(&mut self, automatic_validation_enabled: bool) {
+        let validation_status = if automatic_validation_enabled {
+            "Enabled"
+        } else {
+            "Disabled"
+        };
         let items = vec![
             SelectionItem {
                 name: "Manage accounts".to_string(),
@@ -114,6 +119,17 @@ impl ChatWidget {
                 ..Default::default()
             },
             SelectionItem {
+                name: "Automatic Validation".to_string(),
+                description: Some(format!(
+                    "Current: {validation_status}. Configure trusted patch-time and end-of-turn checks."
+                )),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenAutomaticValidationSettings);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
                 name: "Agents".to_string(),
                 description: Some("Check third-party agent CLIs used by spawn_agent.".to_string()),
                 actions: vec![Box::new(|tx| {
@@ -127,6 +143,54 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Settings".to_string()),
             subtitle: Some("Configure settings for Codex.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_automatic_validation_settings_popup(&mut self, enabled: bool) {
+        let project_command_note = self
+            .config
+            .validation
+            .project_command
+            .as_ref()
+            .map(|_| " A configured project command is unchanged by this setting.")
+            .unwrap_or_default();
+        let items = [
+            (
+                true,
+                "Enabled",
+                format!(
+                    "Check JSON, TOML, and YAML patches as they are applied, then run applicable bounded Cargo or ShellCheck validation after changed turns, with at most one correction cycle.{project_command_note}"
+                ),
+            ),
+            (
+                false,
+                "Disabled",
+                format!(
+                    "Skip built-in patch-time structural checks and end-of-turn Cargo or ShellCheck validation.{project_command_note}"
+                ),
+            ),
+        ]
+        .into_iter()
+        .map(|(value, name, description)| SelectionItem {
+            name: name.to_string(),
+            description: Some(description),
+            is_current: enabled == value,
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::SetAutomaticValidationEnabled(value));
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        })
+        .collect();
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Automatic Validation".to_string()),
+            subtitle: Some(
+                "Run trusted checks during patches and after changed turns.".to_string(),
+            ),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             ..Default::default()

@@ -1858,6 +1858,9 @@ disabled_tools = [
   { type = "connector", id = " calendar " },
   { type = "plugin", id = "slack@openai-curated" },
 ]
+
+[validation.groups]
+functional = true
 "#,
     )
     .expect("write user config");
@@ -1866,6 +1869,10 @@ disabled_tools = [
     let mut next_config = load_latest_config_for_session(&session).await;
     next_config.model = Some("gpt-5.4".to_string());
     next_config.notify = Some(vec!["echo".to_string()]);
+    next_config.validation.project_command = Some(codex_config::ProjectValidationCommand {
+        command: vec!["unsafe-runtime-refresh".to_string()],
+        timeout_ms: 1,
+    });
 
     session.refresh_runtime_config(next_config).await;
 
@@ -1888,6 +1895,13 @@ disabled_tools = [
     assert_eq!(app.destructive_enabled, Some(false));
     assert_eq!(config.model, original.model);
     assert_eq!(config.notify, original.notify);
+    assert!(config.validation.groups.functional);
+    assert_eq!(
+        config.validation.project_command,
+        original.validation.project_command
+    );
+    let next_turn = session.new_default_turn().await;
+    assert!(next_turn.config.validation.groups.functional);
     assert_eq!(
         config.tool_suggest.disabled_tools,
         vec![

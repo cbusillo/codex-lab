@@ -15,16 +15,28 @@ use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_shell_command_sse_response;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ConfigBatchWriteParams;
+use codex_app_server_protocol::ConfigEdit;
+use codex_app_server_protocol::ConfigWriteResponse;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCMessage;
+use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::ProjectValidationCompletedNotification;
+use codex_app_server_protocol::ProjectValidationSkipReason;
 use codex_app_server_protocol::ProjectValidationStatus;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
+use codex_app_server_protocol::WriteStatus;
+use codex_core::config::set_project_trust_level;
+use codex_protocol::config_types::TrustLevel;
 use pretty_assertions::assert_eq;
+use serde_json::json;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -171,6 +183,308 @@ async fn project_validation_completion_reaches_a_client_without_experimental_api
     assert!(
         !completed.turn_id.is_empty(),
         "validation must be attributed to the turn that triggered it"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn automatic_validation_config_write_applies_to_the_next_turn() -> Result<()> {
+    let server =
+        create_mock_responses_server_sequence(vec![create_final_assistant_message_sse_response(
+            "done",
+        )?])
+        .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let workspace = TempDir::new()?;
+    let workspace_path = std::fs::canonicalize(workspace.path())?;
+    init_git_repo(&workspace_path)?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+
+    let ThreadStartResponse { thread, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                model: Some("mock-model".to_string()),
+                cwd: Some(workspace_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let request_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            edits: vec![ConfigEdit {
+                key_path: "validation.groups.functional".to_string(),
+                value: json!(true),
+                merge_strategy: MergeStrategy::Replace,
+            }],
+            file_path: None,
+            expected_version: None,
+            reload_user_config: true,
+        })
+        .await?;
+    let write_response: ConfigWriteResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+    assert_eq!(write_response.status, WriteStatus::Ok);
+
+    let ThreadReadResponse { thread } = mcp
+        .request(|request_id| ClientRequest::ThreadRead {
+            request_id,
+            params: ThreadReadParams {
+                thread_id: thread.id.clone(),
+                include_turns: false,
+            },
+        })
+        .await?;
+    assert_eq!(
+        thread.extra.map(|extra| extra.automatic_validation_enabled),
+        Some(true)
+    );
+
+    let _: TurnStartResponse = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                client_user_message_id: None,
+                input: vec![UserInput::Text {
+                    text: "respond without changing files".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let notification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("validation/completed"),
+    )
+    .await??;
+    let completed: ProjectValidationCompletedNotification = serde_json::from_value(
+        notification
+            .params
+            .context("validation/completed must carry params")?,
+    )?;
+    assert_eq!(completed.status, ProjectValidationStatus::Skipped);
+    assert_eq!(
+        completed.skip_reason,
+        Some(ProjectValidationSkipReason::UnchangedFingerprint)
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn automatic_validation_config_write_respects_project_override() -> Result<()> {
+    let server =
+        create_mock_responses_server_sequence(vec![create_final_assistant_message_sse_response(
+            "done",
+        )?])
+        .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let workspace = TempDir::new()?;
+    let workspace_path = std::fs::canonicalize(workspace.path())?;
+    init_git_repo(&workspace_path)?;
+    let project_config_dir = workspace_path.join(".codex");
+    std::fs::create_dir_all(&project_config_dir)?;
+    std::fs::write(
+        project_config_dir.join("config.toml"),
+        "[validation.groups]\nfunctional = false\n",
+    )?;
+    set_project_trust_level(codex_home.path(), &workspace_path, TrustLevel::Trusted)?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+
+    let ThreadStartResponse { thread, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                model: Some("mock-model".to_string()),
+                cwd: Some(workspace_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let request_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            edits: vec![ConfigEdit {
+                key_path: "validation.groups.functional".to_string(),
+                value: json!(true),
+                merge_strategy: MergeStrategy::Replace,
+            }],
+            file_path: None,
+            expected_version: None,
+            reload_user_config: true,
+        })
+        .await?;
+    let write_response: ConfigWriteResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+    assert_eq!(write_response.status, WriteStatus::Ok);
+
+    let ThreadReadResponse { thread } = mcp
+        .request(|request_id| ClientRequest::ThreadRead {
+            request_id,
+            params: ThreadReadParams {
+                thread_id: thread.id.clone(),
+                include_turns: false,
+            },
+        })
+        .await?;
+    assert_eq!(
+        thread.extra.map(|extra| extra.automatic_validation_enabled),
+        Some(false)
+    );
+
+    let _: TurnStartResponse = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                client_user_message_id: None,
+                input: vec![UserInput::Text {
+                    text: "respond without changing files".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let notification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("validation/completed"),
+    )
+    .await??;
+    let completed: ProjectValidationCompletedNotification = serde_json::from_value(
+        notification
+            .params
+            .context("validation/completed must carry params")?,
+    )?;
+    assert_eq!(completed.status, ProjectValidationStatus::Skipped);
+    assert_eq!(
+        completed.skip_reason,
+        Some(ProjectValidationSkipReason::ValidationDisabled)
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn automatic_validation_config_write_respects_thread_override() -> Result<()> {
+    let server =
+        create_mock_responses_server_sequence(vec![create_final_assistant_message_sse_response(
+            "done",
+        )?])
+        .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let workspace = TempDir::new()?;
+    let workspace_path = std::fs::canonicalize(workspace.path())?;
+    init_git_repo(&workspace_path)?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+
+    let ThreadStartResponse { thread, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                model: Some("mock-model".to_string()),
+                cwd: Some(workspace_path.to_string_lossy().into_owned()),
+                config: Some(HashMap::from([(
+                    "validation.groups.functional".to_string(),
+                    json!(false),
+                )])),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let request_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            edits: vec![ConfigEdit {
+                key_path: "validation.groups.functional".to_string(),
+                value: json!(true),
+                merge_strategy: MergeStrategy::Replace,
+            }],
+            file_path: None,
+            expected_version: None,
+            reload_user_config: true,
+        })
+        .await?;
+    let write_response: ConfigWriteResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+    assert_eq!(write_response.status, WriteStatus::Ok);
+
+    let ThreadReadResponse { thread } = mcp
+        .request(|request_id| ClientRequest::ThreadRead {
+            request_id,
+            params: ThreadReadParams {
+                thread_id: thread.id.clone(),
+                include_turns: false,
+            },
+        })
+        .await?;
+    assert_eq!(
+        thread.extra.map(|extra| extra.automatic_validation_enabled),
+        Some(false)
+    );
+
+    let _: TurnStartResponse = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                client_user_message_id: None,
+                input: vec![UserInput::Text {
+                    text: "respond without changing files".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let notification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("validation/completed"),
+    )
+    .await??;
+    let completed: ProjectValidationCompletedNotification = serde_json::from_value(
+        notification
+            .params
+            .context("validation/completed must carry params")?,
+    )?;
+    assert_eq!(completed.status, ProjectValidationStatus::Skipped);
+    assert_eq!(
+        completed.skip_reason,
+        Some(ProjectValidationSkipReason::ValidationDisabled)
     );
 
     Ok(())

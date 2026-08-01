@@ -20073,6 +20073,13 @@
       },
       "ThreadExtra": {
         "description": "Extra app-server data for a thread.",
+        "properties": {
+          "automaticValidationEnabled": {
+            "default": false,
+            "description": "Effective functional Automatic Validation state for subsequent turns.",
+            "type": "boolean"
+          }
+        },
         "type": "object"
       },
       "ThreadForkParams": {

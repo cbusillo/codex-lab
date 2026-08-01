@@ -2237,6 +2237,32 @@ async fn update_memory_settings_persists_and_updates_widget_config() -> Result<(
     Ok(())
 }
 
+#[tokio::test]
+async fn update_automatic_validation_persists_and_updates_widget_config() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = Box::pin(make_test_app_with_channels()).await;
+    let codex_home = tempdir()?;
+    app.config.codex_home = codex_home.path().to_path_buf().abs();
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+
+    Box::pin(app.update_automatic_validation_enabled(&mut app_server, /*enabled*/ true)).await;
+
+    assert!(app.config.validation.groups.functional);
+    assert!(app.chat_widget.config_ref().validation.groups.functional);
+
+    let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+    let config_value = toml::from_str::<TomlValue>(&config)?;
+    let functional = config_value
+        .as_table()
+        .and_then(|table| table.get("validation"))
+        .and_then(TomlValue::as_table)
+        .and_then(|validation| validation.get("groups"))
+        .and_then(TomlValue::as_table)
+        .and_then(|groups| groups.get("functional"));
+    assert_eq!(functional, Some(&TomlValue::Boolean(true)));
+    app_server.shutdown().await?;
+    Ok(())
+}
+
 #[test]
 fn update_memory_settings_updates_current_thread_memory_mode() -> Result<()> {
     const WORKER_THREADS: usize = 1;

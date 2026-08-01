@@ -494,7 +494,7 @@ impl ChatWidget {
                 self.app_event_tx.send(AppEvent::ShowLoginAccounts);
             }
             SlashCommand::Settings => {
-                self.open_settings_popup();
+                self.app_event_tx.send(AppEvent::OpenSettings);
             }
             SlashCommand::Copy => {
                 self.copy_last_agent_markdown();

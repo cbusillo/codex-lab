@@ -5,4 +5,8 @@
 /**
  * Extra app-server data for a thread.
  */
-export type ThreadExtra = Record<string, never>;
+export type ThreadExtra = {
+/**
+ * Effective functional Automatic Validation state for subsequent turns.
+ */
+automaticValidationEnabled: boolean, };

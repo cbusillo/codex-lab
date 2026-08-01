@@ -1778,6 +1778,7 @@ impl Session {
                 .with_user_layer_from(&next_config.config_layer_stack);
             config.tool_suggest =
                 resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
+            config.validation.groups = next_config.validation.groups.clone();
             config.mcp_servers = next_config.mcp_servers.clone();
             config.mcp_oauth_credentials_store_mode = next_config.mcp_oauth_credentials_store_mode;
             if let Err(err) = config.features.set_enabled(

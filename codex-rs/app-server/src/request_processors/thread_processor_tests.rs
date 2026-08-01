@@ -784,6 +784,7 @@ mod thread_processor_behavior_tests {
                     developer_instructions: None,
                 },
             },
+            automatic_validation_enabled: false,
             session_source: SessionSource::Cli,
             session_provenance: None,
             history_mode: Default::default(),

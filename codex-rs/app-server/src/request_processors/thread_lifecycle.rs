@@ -1,3 +1,4 @@
+use super::thread_processor::thread_extra_from_snapshot;
 use super::*;
 use crate::extensions::send_thread_warning;
 use codex_protocol::config_types::MultiAgentMode;
@@ -677,6 +678,7 @@ pub(super) async fn handle_pending_thread_resume_request(
     };
 
     let config_snapshot = pending.config_snapshot;
+    thread.extra = Some(thread_extra_from_snapshot(&config_snapshot));
     let sandbox = config_snapshot.sandbox_policy().into();
     let cwd = config_snapshot.cwd().clone();
     let ThreadConfigSnapshot {

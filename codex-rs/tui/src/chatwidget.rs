@@ -1147,6 +1147,10 @@ impl ChatWidget {
         self.config.api_key_fallback_on_all_accounts_limited = enabled;
     }
 
+    pub(crate) fn set_automatic_validation_enabled(&mut self, enabled: bool) {
+        self.config.validation.groups.functional = enabled;
+    }
+
     pub(crate) fn open_memories_enable_prompt(&mut self) {
         let items = vec![
             SelectionItem {
