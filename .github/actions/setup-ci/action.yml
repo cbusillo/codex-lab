@@ -59,8 +59,10 @@ runs:
         [[ -n "$runner_slug" ]] || runner_slug="unnamed"
         if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" ]]; then
           cache_scope="self-hosted-$runner_slug"
+          runner_checksum="$(printf '%s' "$runner_slug" | cksum | awk '{ print $1 }')"
         else
           cache_scope="github-hosted"
+          runner_checksum=""
         fi
 
         # setup-bazel passes output_base explicitly, so keep both it and the
@@ -79,6 +81,16 @@ runs:
           # The Dev Drive is recreated for each Windows job and keeps temp paths
           # short while avoiding antivirus overhead.
           tmp="$CI_BUILD_ROOT/tmp"
+        elif [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && "$RUNNER_OS_NAME" == "macOS" ]]; then
+          job_tmp="$RUNNER_TEMP/codex-ci-tmp"
+          short_tmp="/tmp/codex-ci-$runner_checksum"
+          mkdir -p "$job_tmp"
+          if [[ -e "$short_tmp" && ! -L "$short_tmp" ]]; then
+            echo "Refusing to replace non-symlink CI temp path: $short_tmp" >&2
+            exit 1
+          fi
+          ln -sfn "$job_tmp" "$short_tmp"
+          tmp="$short_tmp"
         else
           # Test extraction trees and other job-scoped files must not share the
           # persistent Cargo/Bazel cache root. GitHub Runner clears RUNNER_TEMP
@@ -110,8 +122,13 @@ runs:
           echo "TMP=$tmp"
           echo "TMPDIR=$tmp"
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && "$RUNNER_OS_NAME" != "Windows" ]]; then
-            runner_checksum="$(printf '%s' "$runner_slug" | cksum | awk '{ print $1 }')"
             echo "SCCACHE_SERVER_PORT=$((20000 + runner_checksum % 10000))"
+            if [[ "$RUNNER_OS_NAME" == "macOS" ]]; then
+              sccache_socket_dir="$HOME/.cache/codex-sccache"
+              mkdir -p "$sccache_socket_dir"
+              chmod 700 "$sccache_socket_dir"
+              echo "SCCACHE_SERVER_UDS=$sccache_socket_dir/$runner_checksum.sock"
+            fi
           fi
         } >> "$GITHUB_ENV"
 
