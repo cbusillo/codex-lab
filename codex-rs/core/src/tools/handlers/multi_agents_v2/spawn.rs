@@ -44,11 +44,13 @@ async fn handle_spawn_agent(
 ) -> Result<SpawnAgentResult, FunctionCallError> {
     let ToolInvocation {
         session,
-        turn,
+        step_context,
         payload,
         call_id,
+        source,
         ..
     } = invocation;
+    let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let explicit_role_name = args
@@ -118,7 +120,13 @@ async fn handle_spawn_agent(
         .session_source
         .get_agent_path()
         .unwrap_or_else(AgentPath::root);
-    let communication = communication_from_tool_message(author, new_agent_path.clone(), message);
+    let communication = communication_from_tool_message(
+        author,
+        new_agent_path.clone(),
+        message,
+        &source,
+        /*trigger_turn*/ true,
+    );
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
     let spawned_agent = Box::pin(
         session
@@ -133,7 +141,8 @@ async fn handle_spawn_agent(
                     fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
                     fork_mode,
                     parent_thread_id: Some(session.thread_id),
-                    environments: Some(turn.environments.to_selections()),
+                    parent_turn_id: Some(turn.sub_id.clone()),
+                    environments: Some(step_context.environments.to_selections()),
                     external_agent_provider: routing.provider().cloned(),
                 },
             ),
@@ -152,7 +161,7 @@ async fn handle_spawn_agent(
         .or(spawned_agent.metadata.agent_nickname);
     emit_sub_agent_activity(
         &session,
-        &turn,
+        turn,
         SubAgentActivityItem {
             id: call_id,
             agent_thread_id: new_thread_id,

@@ -1,11 +1,11 @@
 use super::shared::v2_enum_from_core;
+use crate::JsonSchema;
+use crate::TS;
 use codex_protocol::protocol::ProjectValidationSkipReason as CoreProjectValidationSkipReason;
 use codex_protocol::protocol::ProjectValidationStatus as CoreProjectValidationStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use ts_rs::TS;
 
 v2_enum_from_core!(
     pub enum ProjectValidationStatus from CoreProjectValidationStatus {

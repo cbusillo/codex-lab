@@ -68,6 +68,11 @@ const TASK_COMPACT_METRIC: &str = "codex.task.compact";
 
 pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
 
+pub(crate) enum MailboxParentProvenance {
+    Ignore,
+    Attribute,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptedTurnHistoryMarker {
     Disabled,
@@ -328,7 +333,8 @@ impl Session {
     ) {
         self.abort_all_tasks(TurnAbortReason::Replaced).await;
         self.clear_connector_selection().await;
-        self.start_task(turn_context, input, task).await;
+        self.start_task(turn_context, input, task, MailboxParentProvenance::Ignore)
+            .await;
     }
 
     pub(crate) async fn start_task<T: SessionTask>(
@@ -336,6 +342,7 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
+        mailbox_parent_provenance: MailboxParentProvenance,
     ) {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
@@ -369,7 +376,13 @@ impl Session {
                 .await;
         }
 
-        let pending_items = self.input_queue.get_pending_input(&self.active_turn).await;
+        let (pending_items, parent_turn_id) =
+            self.input_queue.get_pending_input(&self.active_turn).await;
+        if let (MailboxParentProvenance::Attribute, Some(id)) =
+            (mailbox_parent_provenance, parent_turn_id)
+        {
+            turn_context.turn_metadata_state.set_parent_turn_id(id);
+        }
         let turn_state = {
             let mut active = self.active_turn.lock().await;
             let turn = active.get_or_insert_with(ActiveTurn::default);
@@ -522,8 +535,13 @@ impl Session {
         let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
-        self.start_task(turn_context, Vec::new(), RegularTask::new())
-            .await;
+        self.start_task(
+            turn_context,
+            Vec::new(),
+            RegularTask::new(),
+            MailboxParentProvenance::Attribute,
+        )
+        .await;
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
@@ -609,6 +627,17 @@ impl Session {
             }
             Err(err) => {
                 warn!(%err, "session task returned an unexpected error");
+                self.emit_turn_error_lifecycle(
+                    turn_context.as_ref(),
+                    err.to_codex_protocol_error(),
+                )
+                .await;
+                self.track_turn_codex_error(turn_context.as_ref(), &err);
+                self.send_event(
+                    turn_context.as_ref(),
+                    EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
+                )
+                .await;
                 (None, None)
             }
         };

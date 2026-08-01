@@ -17,6 +17,7 @@ pub(super) struct McpDesiredState {
     pub(super) submit_id: String,
     pub(super) originator: String,
     pub(super) environments: TurnEnvironmentSnapshot,
+    pub(super) windows_sandbox_level: WindowsSandboxLevel,
 }
 
 impl McpDesiredState {
@@ -49,6 +50,7 @@ impl Session {
             submit_id: self.next_internal_sub_id(),
             originator: session_configuration.originator.clone(),
             environments,
+            windows_sandbox_level: session_configuration.windows_sandbox_level,
         }
     }
 
@@ -70,6 +72,7 @@ impl Session {
             submit_id: INITIAL_SUBMIT_ID.to_owned(),
             originator: session_configuration.originator.clone(),
             environments: resolved_environments.clone(),
+            windows_sandbox_level: session_configuration.windows_sandbox_level,
         };
         self.publish_mcp_runtime(
             &desired,

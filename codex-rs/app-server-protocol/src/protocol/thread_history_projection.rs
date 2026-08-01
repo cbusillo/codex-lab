@@ -70,6 +70,8 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
             changed_items: vec![ThreadHistoryItemChange {
                 turn_id: event.turn_id.clone(),
                 item: ThreadItem::from(event.item.clone()),
+                started_at_ms: event.started_at_ms,
+                completed_at_ms: (event.completed_at_ms != 0).then_some(event.completed_at_ms),
             }],
             ..Default::default()
         },
@@ -99,6 +101,8 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
                         output_truncated: event.output_truncated,
                         duration_ms: event.duration_ms,
                     },
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 ..Default::default()
             }

@@ -525,7 +525,7 @@
       "additionalProperties": false,
       "properties": {
         "disable_in_process_fallback": {
-          "description": "Fail instead of running embedded V8 when the standalone host is unavailable.",
+          "description": "Keep code mode fail-closed when the standalone host is unavailable.",
           "type": "boolean"
         },
         "enabled": {
@@ -670,6 +670,9 @@
             "exec_permission_approvals": {
               "type": "boolean"
             },
+            "executed_tool_call_metadata": {
+              "type": "boolean"
+            },
             "executor_capability_discovery": {
               "type": "boolean"
             },
@@ -710,6 +713,9 @@
               "type": "boolean"
             },
             "in_app_browser": {
+              "type": "boolean"
+            },
+            "in_app_updates": {
               "type": "boolean"
             },
             "item_ids": {
@@ -767,6 +773,9 @@
               "type": "boolean"
             },
             "realtime_conversation": {
+              "type": "boolean"
+            },
+            "recommended_plugins": {
               "type": "boolean"
             },
             "remote_compaction_v2": {
@@ -1996,6 +2005,10 @@
           "type": "boolean"
         },
         "root_agent_usage_hint_text": {
+          "type": "string"
+        },
+        "subagent_developer_instructions": {
+          "description": "Overrides inherited developer instructions for subagents without role-specific instructions.",
           "type": "string"
         },
         "subagent_usage_hint_text": {
@@ -5399,6 +5412,9 @@
         "exec_permission_approvals": {
           "type": "boolean"
         },
+        "executed_tool_call_metadata": {
+          "type": "boolean"
+        },
         "executor_capability_discovery": {
           "type": "boolean"
         },
@@ -5439,6 +5455,9 @@
           "type": "boolean"
         },
         "in_app_browser": {
+          "type": "boolean"
+        },
+        "in_app_updates": {
           "type": "boolean"
         },
         "item_ids": {
@@ -5496,6 +5515,9 @@
           "type": "boolean"
         },
         "realtime_conversation": {
+          "type": "boolean"
+        },
+        "recommended_plugins": {
           "type": "boolean"
         },
         "remote_compaction_v2": {
