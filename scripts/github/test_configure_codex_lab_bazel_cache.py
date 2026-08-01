@@ -27,11 +27,7 @@ class ConfigureCodexLabBazelCacheTest(unittest.TestCase):
             )
 
             cache_root = (
-                artifact_root
-                / "github-actions"
-                / "cache"
-                / "owner/repo"
-                / "v8-canary"
+                artifact_root / "github-actions" / "cache" / "owner/repo" / "v8-canary"
             )
             disk_cache = cache_root / "bazel-disk-cache"
             repository_cache = cache_root / "bazel-repository-cache"
@@ -83,9 +79,7 @@ class ConfigureCodexLabBazelCacheTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "github-env"
 
-            completed = run_helper(
-                env_file, script_args=("v8-canary", "unbounded")
-            )
+            completed = run_helper(env_file, script_args=("v8-canary", "unbounded"))
 
             self.assertEqual(2, completed.returncode)
             self.assertIn("invalid Bazel disk cache maximum size", completed.stderr)
