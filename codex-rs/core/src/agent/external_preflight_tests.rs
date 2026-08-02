@@ -1,6 +1,26 @@
 use super::*;
+use crate::agent::external_capabilities::ExternalAgentCapabilityFreshness;
+use crate::agent::external_capabilities::ExternalAgentCapabilitySource;
+use crate::agent::external_capabilities::clear_capability_cache;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+
+fn shell_backend(
+    temp_dir: &TempDir,
+    name: &str,
+    family: &str,
+    script: &str,
+) -> ExternalCommandAgentBackendConfig {
+    let script_path = temp_dir.path().join(name);
+    std::fs::write(&script_path, script).expect("write fake external-agent CLI");
+    ExternalCommandAgentBackendConfig {
+        command: format!("/bin/sh {}", script_path.display()),
+        protocol: ExternalCommandProtocol::RawCli,
+        launch_family: Some(family.to_string()),
+        timeout_ms: 5_000,
+        ..Default::default()
+    }
+}
 
 /// The Antigravity workspace guard runs before the private launch directory is
 /// created, so an integration fixture cannot reach it without a session whose
@@ -106,4 +126,274 @@ async fn timed_out_preflight_reports_the_probe_and_command() {
             ),
         )
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn current_claude_capabilities_use_static_models_and_local_flags() {
+    clear_capability_cache();
+    let temp_dir = TempDir::new().expect("tempdir");
+    let backend = shell_backend(
+        &temp_dir,
+        "fake-claude.sh",
+        "claude",
+        r#"if [ "$1" = "--version" ]; then
+  echo "2.1.220 (Claude Code)"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"loggedIn":true}'
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo '--model <model>'
+  echo '--effort <level>'
+  exit 0
+fi
+exit 2
+"#,
+    );
+
+    let capabilities = discover_external_agent_capabilities(&backend, temp_dir.path()).await;
+
+    assert_eq!(
+        capabilities.source,
+        ExternalAgentCapabilitySource::StaticCatalog
+    );
+    assert_eq!(
+        capabilities.cli_version.as_deref(),
+        Some("2.1.220 (Claude Code)")
+    );
+    assert!(capabilities.supports_model_selection);
+    assert!(capabilities.supports_effort_selection);
+    assert!(capabilities.failure.is_none());
+    assert!(
+        capabilities
+            .models
+            .iter()
+            .any(|model| model.selector == "claude-opus-5")
+    );
+    assert!(
+        capabilities
+            .models
+            .iter()
+            .any(|model| { model.selector == "claude-fable-5" && model.explicit_only })
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn current_antigravity_capabilities_are_discovered_and_cached() {
+    clear_capability_cache();
+    let temp_dir = TempDir::new().expect("tempdir");
+    let marker_path = temp_dir.path().join("probe-count");
+    let backend = shell_backend(
+        &temp_dir,
+        "fake-agy.sh",
+        "antigravity",
+        &format!(
+            r#"if [ "$1" = "--version" ]; then
+  echo "1.1.9"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo models >> '{}'
+  echo 'gemini-3.6-flash-high'
+  echo 'gemini-3.1-pro-low'
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo help >> '{}'
+  echo '--model Model'
+  echo '--effort low|medium|high'
+  exit 0
+fi
+exit 2
+"#,
+            marker_path.display(),
+            marker_path.display()
+        ),
+    );
+
+    let fresh = discover_external_agent_capabilities(&backend, temp_dir.path()).await;
+    let cached = discover_external_agent_capabilities(&backend, temp_dir.path()).await;
+
+    assert_eq!(fresh.source, ExternalAgentCapabilitySource::LocalCli);
+    assert_eq!(fresh.freshness, ExternalAgentCapabilityFreshness::Fresh);
+    assert_eq!(cached.freshness, ExternalAgentCapabilityFreshness::Cached);
+    assert_eq!(
+        fresh
+            .models
+            .iter()
+            .map(|model| model.selector.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "antigravity-gemini-3.6-flash-high",
+            "antigravity-gemini-3.1-pro-low",
+        ]
+    );
+    assert!(fresh.supports_model_selection);
+    assert!(fresh.supports_effort_selection);
+    assert_eq!(
+        std::fs::read_to_string(&marker_path)
+            .expect("read capability probe marker")
+            .lines()
+            .count(),
+        2,
+        "models and help should each run once across a cache hit"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn old_antigravity_cli_degrades_to_provider_defaults() {
+    clear_capability_cache();
+    let temp_dir = TempDir::new().expect("tempdir");
+    let backend = shell_backend(
+        &temp_dir,
+        "old-agy.sh",
+        "antigravity",
+        r#"if [ "$1" = "--version" ]; then
+  echo "0.9.0"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo 'gemini-legacy'
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo 'Usage: agy -p prompt'
+  exit 0
+fi
+exit 2
+"#,
+    );
+
+    let capabilities = discover_external_agent_capabilities(&backend, temp_dir.path()).await;
+
+    assert!(!capabilities.supports_model_selection);
+    assert!(!capabilities.supports_effort_selection);
+    assert!(capabilities.failure.is_none());
+    preflight_external_agent_backend(
+        Some("antigravity"),
+        &backend,
+        temp_dir.path(),
+        /*is_read_only*/ true,
+    )
+    .await
+    .expect("provider-default Antigravity launch should survive an old CLI");
+}
+
+#[tokio::test]
+async fn missing_cli_capability_report_is_actionable() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let backend = ExternalCommandAgentBackendConfig {
+        command: "definitely-missing-capability-command".to_string(),
+        protocol: ExternalCommandProtocol::RawCli,
+        launch_family: Some("claude".to_string()),
+        ..Default::default()
+    };
+
+    let capabilities = discover_external_agent_capabilities(&backend, temp_dir.path()).await;
+
+    assert_eq!(
+        capabilities.failure.as_ref().map(|failure| failure.kind),
+        Some(ExternalAgentFailureKind::CommandMissing)
+    );
+    assert!(
+        capabilities
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.to_string().contains("Install claude-code"))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn signed_out_and_malformed_antigravity_results_are_classified() {
+    clear_capability_cache();
+    let temp_dir = TempDir::new().expect("tempdir");
+    let signed_out = shell_backend(
+        &temp_dir,
+        "signed-out-agy.sh",
+        "antigravity",
+        r#"if [ "$1" = "--version" ]; then
+  echo "1.1.9"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo 'Authentication required. Please sign in.' >&2
+  exit 1
+fi
+exit 2
+"#,
+    );
+    let signed_out = discover_external_agent_capabilities(&signed_out, temp_dir.path()).await;
+    assert_eq!(
+        signed_out.failure.as_ref().map(|failure| failure.kind),
+        Some(ExternalAgentFailureKind::AuthenticationRequired)
+    );
+
+    let malformed = shell_backend(
+        &temp_dir,
+        "malformed-agy.sh",
+        "antigravity",
+        r#"if [ "$1" = "--version" ]; then
+  echo "1.1.10"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo 'Gemini 3.1 Pro'
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo '--model Model'
+  exit 0
+fi
+exit 2
+"#,
+    );
+    let malformed = discover_external_agent_capabilities(&malformed, temp_dir.path()).await;
+    assert_eq!(
+        malformed.failure.as_ref().map(|failure| failure.kind),
+        Some(ExternalAgentFailureKind::MalformedOutput)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn oversized_antigravity_model_output_is_rejected() {
+    clear_capability_cache();
+    let temp_dir = TempDir::new().expect("tempdir");
+    let backend = shell_backend(
+        &temp_dir,
+        "oversized-agy.sh",
+        "antigravity",
+        r#"if [ "$1" = "--version" ]; then
+  echo "1.1.11"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  i=0
+  while [ "$i" -lt 500 ]; do
+    echo "gemini-oversized-$i"
+    i=$((i + 1))
+  done
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo '--model Model'
+  exit 0
+fi
+exit 2
+"#,
+    );
+
+    let capabilities = discover_external_agent_capabilities(&backend, temp_dir.path()).await;
+
+    assert_eq!(
+        capabilities.failure.as_ref().map(|failure| failure.kind),
+        Some(ExternalAgentFailureKind::MalformedOutput)
+    );
+    assert!(capabilities.models.is_empty());
 }

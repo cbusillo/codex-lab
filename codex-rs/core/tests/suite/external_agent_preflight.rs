@@ -227,6 +227,43 @@ exit 2
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsupported_antigravity_model_fails_explicit_preflight() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let mut backend = stub_cli(
+        &stub_dir,
+        "fake-agy.sh",
+        r#"if [ "$1" = "--version" ]; then
+  echo "1.1.9"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo "gemini-3.6-flash-high"
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo '--model Model'
+  echo '--effort low|medium|high'
+  exit 0
+fi
+exit 2
+"#,
+    );
+    backend.launch_family = Some("antigravity".to_string());
+    backend.args = vec!["--model".to_string(), "gemini-missing".to_string()];
+
+    let output = spawn_agent_output(backend).await?;
+
+    assert_eq!(
+        output,
+        format!(
+            "Explicit external agent `{ROLE}` failed `unsupported_mode` preflight: antigravity model `gemini-missing` was not reported by the installed CLI. Available models: gemini-3.6-flash-high"
+        )
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_command_agent_routes_through_spawn_agent_with_provider_provenance() -> Result<()>
 {
     let stub_dir = TempDir::new()?;

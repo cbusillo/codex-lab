@@ -1,3 +1,11 @@
+use super::external_capabilities::ExternalAgentCapabilities;
+use super::external_capabilities::ExternalAgentCapabilityCacheKey;
+use super::external_capabilities::antigravity_capabilities;
+use super::external_capabilities::cache_capabilities;
+use super::external_capabilities::cached_capabilities;
+use super::external_capabilities::claude_capabilities;
+use super::external_capabilities::validate_requested_capabilities;
+use super::external_command::EXTERNAL_AGENT_TRUNCATED_MARKER;
 use super::external_command::ExternalAgentChildGuard;
 use super::external_command::MAX_PREFLIGHT_MESSAGE_BYTES;
 use super::external_command::bounded_preflight_output;
@@ -23,54 +31,304 @@ const MAX_CLI_VERSION_BYTES: usize = 200;
 const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
 const CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_DIR";
 
+struct ExternalAgentCapabilityProbe {
+    capabilities: ExternalAgentCapabilities,
+    resolved_command: Option<PathBuf>,
+    command_args: Vec<String>,
+}
+
+/// Discovers bounded local capabilities for a configured external agent.
+pub async fn discover_external_agent_capabilities(
+    backend: &ExternalCommandAgentBackendConfig,
+    workspace: &Path,
+) -> ExternalAgentCapabilities {
+    probe_external_agent_backend(backend, workspace)
+        .await
+        .capabilities
+}
+
 pub(crate) async fn preflight_external_agent_backend(
     agent_type: Option<&str>,
     backend: &ExternalCommandAgentBackendConfig,
     workspace: &Path,
     is_read_only: bool,
 ) -> Result<ExternalAgentProviderProvenance, ExternalAgentFailureDetail> {
-    let (command, command_args) = configured_external_agent_command(backend).map_err(|error| {
-        ExternalAgentFailureDetail::new(ExternalAgentFailureKind::LaunchFailed, error.to_string())
-    })?;
-    let launch_cwd = external_agent_preflight_cwd(backend, workspace);
-    if backend.launch_family.as_deref() == Some("antigravity") {
-        if !workspace.is_dir() {
-            return Err(ExternalAgentFailureDetail::new(
-                ExternalAgentFailureKind::LaunchFailed,
-                format!(
-                    "antigravity workspace directory does not exist: {}",
-                    workspace.display()
-                ),
-            ));
-        }
-        tokio::fs::create_dir_all(&launch_cwd)
-            .await
-            .map_err(|error| {
-                ExternalAgentFailureDetail::new(
-                    ExternalAgentFailureKind::LaunchFailed,
-                    format!(
-                        "failed to prepare Antigravity launch directory `{}`: {error}",
-                        launch_cwd.display()
-                    ),
-                )
-            })?;
+    let probe = probe_external_agent_backend(backend, workspace).await;
+    if let Some(failure) = probe.capabilities.failure.as_ref()
+        && capability_failure_is_fatal(failure.kind)
+    {
+        return Err(failure.clone());
     }
-    let resolved_command =
-        resolve_external_agent_command(backend, command.as_path(), launch_cwd.as_path())?;
-    let cli_version =
-        capture_external_agent_cli_version(backend, &resolved_command, &command_args, &launch_cwd)
-            .await?;
-    verify_external_agent_auth(backend, &resolved_command, &command_args, &launch_cwd).await?;
+    validate_requested_capabilities(
+        backend,
+        &probe.command_args,
+        is_read_only,
+        &probe.capabilities,
+    )?;
+    let resolved_command = probe.resolved_command.ok_or_else(|| {
+        probe.capabilities.failure.clone().unwrap_or_else(|| {
+            ExternalAgentFailureDetail::new(
+                ExternalAgentFailureKind::LaunchFailed,
+                "external agent capability probe did not resolve a command",
+            )
+        })
+    })?;
 
     let mut provenance = ExternalAgentProviderProvenance::new(
         agent_type,
         backend,
         workspace,
         is_read_only,
-        cli_version,
+        probe.capabilities.cli_version,
     );
     provenance.set_resolved_command(resolved_command);
     Ok(provenance)
+}
+
+async fn probe_external_agent_backend(
+    backend: &ExternalCommandAgentBackendConfig,
+    workspace: &Path,
+) -> ExternalAgentCapabilityProbe {
+    let cli_family = backend.launch_family.as_deref().unwrap_or("custom");
+    let (command, command_args) = match configured_external_agent_command(backend) {
+        Ok(command) => command,
+        Err(error) => {
+            return failed_capability_probe(
+                cli_family,
+                None,
+                None,
+                Vec::new(),
+                ExternalAgentFailureDetail::new(
+                    ExternalAgentFailureKind::LaunchFailed,
+                    error.to_string(),
+                ),
+            );
+        }
+    };
+    let launch_cwd = external_agent_preflight_cwd(backend, workspace);
+    if backend.launch_family.as_deref() == Some("antigravity") {
+        if !workspace.is_dir() {
+            return failed_capability_probe(
+                cli_family,
+                None,
+                None,
+                command_args,
+                ExternalAgentFailureDetail::new(
+                    ExternalAgentFailureKind::LaunchFailed,
+                    format!(
+                        "antigravity workspace directory does not exist: {}",
+                        workspace.display()
+                    ),
+                ),
+            );
+        }
+        if let Err(error) = tokio::fs::create_dir_all(&launch_cwd).await {
+            return failed_capability_probe(
+                cli_family,
+                None,
+                None,
+                command_args,
+                ExternalAgentFailureDetail::new(
+                    ExternalAgentFailureKind::LaunchFailed,
+                    format!(
+                        "failed to prepare Antigravity launch directory `{}`: {error}",
+                        launch_cwd.display()
+                    ),
+                ),
+            );
+        }
+    }
+    let resolved_command =
+        match resolve_external_agent_command(backend, command.as_path(), launch_cwd.as_path()) {
+            Ok(command) => command,
+            Err(failure) => {
+                return failed_capability_probe(cli_family, None, None, command_args, failure);
+            }
+        };
+    let cli_version = match capture_external_agent_cli_version(
+        backend,
+        &resolved_command,
+        &command_args,
+        &launch_cwd,
+    )
+    .await
+    {
+        Ok(version) => version,
+        Err(failure) => {
+            return failed_capability_probe(
+                cli_family,
+                None,
+                Some(resolved_command),
+                command_args,
+                failure,
+            );
+        }
+    };
+    let cache_key = ExternalAgentCapabilityCacheKey::new(
+        &resolved_command,
+        &command_args,
+        cli_family,
+        cli_version.as_deref(),
+    );
+    if let Some(capabilities) = cached_capabilities(&cache_key) {
+        return ExternalAgentCapabilityProbe {
+            capabilities,
+            resolved_command: Some(resolved_command),
+            command_args,
+        };
+    }
+
+    let capabilities = match backend.launch_family.as_deref() {
+        Some("claude") => {
+            if let Err(failure) =
+                verify_external_agent_auth(backend, &resolved_command, &command_args, &launch_cwd)
+                    .await
+            {
+                return failed_capability_probe(
+                    cli_family,
+                    cli_version,
+                    Some(resolved_command),
+                    command_args,
+                    failure,
+                );
+            }
+            match run_external_agent_preflight_command(
+                backend,
+                &resolved_command,
+                &command_args,
+                &launch_cwd,
+                &["--help"],
+                "capability",
+            )
+            .await
+            {
+                Ok(output) if output.status.success() => {
+                    claude_capabilities(cli_version, &output.stdout, output_was_truncated(&output))
+                }
+                Ok(output) => ExternalAgentCapabilities::conservative(
+                    cli_family,
+                    cli_version,
+                    capability_failure_from_output(cli_family, "capability", &output),
+                ),
+                Err(failure) => {
+                    ExternalAgentCapabilities::conservative(cli_family, cli_version, failure)
+                }
+            }
+        }
+        Some("antigravity") => {
+            let models_output = match run_external_agent_preflight_command(
+                backend,
+                &resolved_command,
+                &command_args,
+                &launch_cwd,
+                &["models"],
+                "authentication",
+            )
+            .await
+            {
+                Ok(output) if output.status.success() => output,
+                Ok(output) => {
+                    return failed_capability_probe(
+                        cli_family,
+                        cli_version,
+                        Some(resolved_command),
+                        command_args,
+                        authentication_failure_from_output(backend, &output),
+                    );
+                }
+                Err(failure) => {
+                    return failed_capability_probe(
+                        cli_family,
+                        cli_version,
+                        Some(resolved_command),
+                        command_args,
+                        failure,
+                    );
+                }
+            };
+            match run_external_agent_preflight_command(
+                backend,
+                &resolved_command,
+                &command_args,
+                &launch_cwd,
+                &["--help"],
+                "capability",
+            )
+            .await
+            {
+                Ok(help_output) if help_output.status.success() => antigravity_capabilities(
+                    cli_version,
+                    &models_output.stdout,
+                    output_was_truncated(&models_output),
+                    &help_output.stdout,
+                    output_was_truncated(&help_output),
+                ),
+                Ok(output) => ExternalAgentCapabilities::conservative(
+                    cli_family,
+                    cli_version,
+                    capability_failure_from_output(cli_family, "capability", &output),
+                ),
+                Err(failure) => {
+                    ExternalAgentCapabilities::conservative(cli_family, cli_version, failure)
+                }
+            }
+        }
+        _ => ExternalAgentCapabilities::not_probed(cli_family, cli_version),
+    };
+    cache_capabilities(cache_key, &capabilities);
+    ExternalAgentCapabilityProbe {
+        capabilities,
+        resolved_command: Some(resolved_command),
+        command_args,
+    }
+}
+
+fn failed_capability_probe(
+    cli_family: &str,
+    cli_version: Option<String>,
+    resolved_command: Option<PathBuf>,
+    command_args: Vec<String>,
+    failure: ExternalAgentFailureDetail,
+) -> ExternalAgentCapabilityProbe {
+    ExternalAgentCapabilityProbe {
+        capabilities: ExternalAgentCapabilities::conservative(cli_family, cli_version, failure),
+        resolved_command,
+        command_args,
+    }
+}
+
+fn capability_failure_is_fatal(kind: ExternalAgentFailureKind) -> bool {
+    matches!(
+        kind,
+        ExternalAgentFailureKind::CommandMissing
+            | ExternalAgentFailureKind::AuthenticationRequired
+            | ExternalAgentFailureKind::QuotaOrRateLimited
+            | ExternalAgentFailureKind::TimedOut
+            | ExternalAgentFailureKind::LaunchFailed
+            | ExternalAgentFailureKind::ProviderFailed
+    )
+}
+
+fn output_was_truncated(output: &std::process::Output) -> bool {
+    output.stdout.starts_with(EXTERNAL_AGENT_TRUNCATED_MARKER)
+        || output.stderr.starts_with(EXTERNAL_AGENT_TRUNCATED_MARKER)
+}
+
+fn capability_failure_from_output(
+    cli_family: &str,
+    probe_name: &str,
+    output: &std::process::Output,
+) -> ExternalAgentFailureDetail {
+    let output_text = bounded_preflight_output(&output.stdout, &output.stderr);
+    let detail = if output_text.is_empty() {
+        format!(
+            "{cli_family} {probe_name} probe exited with {}",
+            output.status
+        )
+    } else {
+        format!("{cli_family} {probe_name} probe failed: {output_text}")
+    };
+    ExternalAgentFailureDetail::new(ExternalAgentFailureKind::MalformedOutput, detail)
 }
 
 fn configured_external_agent_command(
@@ -170,7 +428,6 @@ async fn verify_external_agent_auth(
 ) -> Result<(), ExternalAgentFailureDetail> {
     let (args, probe_name) = match backend.launch_family.as_deref() {
         Some("claude") => (&["auth", "status"][..], "authentication"),
-        Some("antigravity") => (&["models"][..], "authentication"),
         _ => return Ok(()),
     };
     let output = run_external_agent_preflight_command(
@@ -182,7 +439,6 @@ async fn verify_external_agent_auth(
         probe_name,
     )
     .await?;
-    let output_text = bounded_preflight_output(&output.stdout, &output.stderr);
     let claude_signed_out = backend.launch_family.as_deref() == Some("claude")
         && serde_json::from_slice::<serde_json::Value>(&output.stdout)
             .ok()
@@ -192,7 +448,27 @@ async fn verify_external_agent_auth(
         return Ok(());
     }
 
-    let kind = if claude_signed_out {
+    Err(authentication_failure_from_output_with_signed_out(
+        backend,
+        &output,
+        claude_signed_out,
+    ))
+}
+
+fn authentication_failure_from_output(
+    backend: &ExternalCommandAgentBackendConfig,
+    output: &std::process::Output,
+) -> ExternalAgentFailureDetail {
+    authentication_failure_from_output_with_signed_out(backend, output, false)
+}
+
+fn authentication_failure_from_output_with_signed_out(
+    backend: &ExternalCommandAgentBackendConfig,
+    output: &std::process::Output,
+    signed_out: bool,
+) -> ExternalAgentFailureDetail {
+    let output_text = bounded_preflight_output(&output.stdout, &output.stderr);
+    let kind = if signed_out {
         ExternalAgentFailureKind::AuthenticationRequired
     } else {
         match classify_provider_failure_text(&output_text) {
@@ -209,7 +485,7 @@ async fn verify_external_agent_auth(
     } else {
         format!("{agent_name} authentication preflight failed: {output_text}")
     };
-    Err(ExternalAgentFailureDetail::new(kind, detail))
+    ExternalAgentFailureDetail::new(kind, detail)
 }
 
 async fn run_external_agent_preflight_command(
