@@ -1,0 +1,15 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Automatic Validation
+  Run trusted checks during patches and after changed turns.
+
+  1. Enabled             Check JSON, TOML, and YAML patches as they are
+                         applied, then run applicable bounded Cargo or
+                         ShellCheck validation after changed turns, with at
+                         most one correction cycle.
+› 2. Disabled (current)  Skip built-in patch-time structural checks and end-
+                         of-turn Cargo or ShellCheck validation.
+
+  Press enter to confirm or esc to go back

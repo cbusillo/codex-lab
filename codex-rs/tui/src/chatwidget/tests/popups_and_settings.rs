@@ -3068,6 +3068,57 @@ async fn memories_settings_toggle_saves_on_enter() {
 }
 
 #[tokio::test]
+async fn settings_popup_includes_automatic_validation() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.validation.groups.functional = false;
+
+    chat.open_settings_popup(/*automatic_validation_enabled*/ false);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("settings_popup_with_automatic_validation", popup);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAutomaticValidationSettings));
+}
+
+#[tokio::test]
+async fn automatic_validation_settings_command_requests_effective_state() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command(SlashCommand::Settings);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenSettings));
+}
+
+#[tokio::test]
+async fn automatic_validation_settings_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.validation.groups.functional = false;
+
+    chat.open_automatic_validation_settings_popup(/*enabled*/ false);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("automatic_validation_settings_popup", popup);
+}
+
+#[tokio::test]
+async fn automatic_validation_settings_enables_on_select() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.validation.groups.functional = false;
+
+    chat.open_automatic_validation_settings_popup(/*enabled*/ false);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Up));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetAutomaticValidationEnabled(true))
+    );
+}
+
+#[tokio::test]
 async fn memories_reset_confirmation_sends_event_on_confirm() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::MemoryTool, /*enabled*/ true);

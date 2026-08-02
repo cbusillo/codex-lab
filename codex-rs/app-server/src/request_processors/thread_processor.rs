@@ -4,6 +4,7 @@ use super::turn_processor::can_accept_direct_input;
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_app_server_protocol::ThreadExtra;
 use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionListParams;
 use codex_app_server_protocol::ThreadSectionListResponse;
@@ -2541,6 +2542,7 @@ impl ThreadRequestProcessor {
         }
         let fallback_thread =
             build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread);
+        let extra = fallback_thread.extra.clone();
         let mut thread = if let Some(mut thread) = persisted_thread {
             if thread.path.is_none() {
                 thread.path = fallback_thread.path.clone();
@@ -2552,6 +2554,7 @@ impl ThreadRequestProcessor {
         } else {
             fallback_thread
         };
+        thread.extra = extra;
         self.apply_thread_read_store_fields(thread_id, &mut thread, include_turns, loaded_thread)
             .await?;
         Ok(thread)
@@ -3407,6 +3410,7 @@ impl ThreadRequestProcessor {
                     /*has_live_in_progress_turn*/ false,
                 );
                 let config_snapshot = codex_thread.config_snapshot().await;
+                thread.extra = Some(thread_extra_from_snapshot(&config_snapshot));
                 let (turns_backwards_cursor, items_backwards_cursor) =
                     if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
                         match Self::paginated_resume_backwards_cursors(
@@ -4480,6 +4484,7 @@ impl ThreadRequestProcessor {
         ));
         thread.session_id = session_configured.session_id.to_string();
         thread.thread_source = config_snapshot.thread_source.clone().map(Into::into);
+        thread.extra = Some(thread_extra_from_snapshot(&config_snapshot));
 
         self.thread_watch_manager
             .upsert_thread_silently(&thread.id)
@@ -5452,7 +5457,7 @@ fn build_thread_from_snapshot(
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     Thread {
         id: thread_id.to_string(),
-        extra: None,
+        extra: Some(thread_extra_from_snapshot(config_snapshot)),
         session_id,
         forked_from_id: None,
         parent_thread_id: config_snapshot.parent_thread_id.map(|id| id.to_string()),
@@ -5481,6 +5486,12 @@ fn build_thread_from_snapshot(
         git_info: None,
         name: None,
         turns: Vec::new(),
+    }
+}
+
+pub(super) fn thread_extra_from_snapshot(config_snapshot: &ThreadConfigSnapshot) -> ThreadExtra {
+    ThreadExtra {
+        automatic_validation_enabled: config_snapshot.automatic_validation_enabled,
     }
 }
 

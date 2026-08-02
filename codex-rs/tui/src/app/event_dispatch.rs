@@ -1982,8 +1982,19 @@ impl App {
             AppEvent::OpenAccountSwitchSettings => {
                 self.chat_widget.open_account_switch_settings_popup();
             }
+            AppEvent::OpenSettings => {
+                self.open_settings_with_effective_validation(app_server)
+                    .await;
+            }
+            AppEvent::OpenAutomaticValidationSettings => {
+                self.open_automatic_validation_settings(app_server).await;
+            }
             AppEvent::OpenAgentsSettings => {
                 self.chat_widget.open_agents_settings_popup();
+            }
+            AppEvent::SetAutomaticValidationEnabled(enabled) => {
+                self.update_automatic_validation_enabled(app_server, enabled)
+                    .await;
             }
             AppEvent::SetAutoSwitchAccountsOnRateLimit(enabled) => {
                 self.update_auto_switch_accounts_on_rate_limit(app_server, enabled)

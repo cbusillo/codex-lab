@@ -15,6 +15,12 @@ pub(super) struct WindowsSetupPermissions {
     pub(super) workspace_roots: Vec<AbsolutePathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AutomaticValidationState {
+    configured_enabled: bool,
+    active_thread_enabled: bool,
+}
+
 async fn build_config_on_runtime_worker(
     builder: ConfigBuilder,
     error_context: String,
@@ -730,6 +736,181 @@ impl App {
         }
     }
 
+    async fn read_automatic_validation_state(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<AutomaticValidationState> {
+        let active_thread =
+            if let Some(thread_id) = self.active_thread_id.or(self.chat_widget.thread_id()) {
+                Some(
+                    app_server
+                        .thread_read(thread_id, /*include_turns*/ false)
+                        .await?,
+                )
+            } else {
+                None
+            };
+        let cwd = automatic_validation_config_read_cwd(
+            active_thread.as_ref().map(|thread| &thread.cwd),
+            app_server.uses_remote_workspace(),
+            app_server.remote_cwd_override(),
+            &self.chat_widget.config_ref().cwd,
+        );
+        let effective_config =
+            crate::config_update::read_effective_config_at_cwd(app_server.request_handle(), cwd)
+                .await?;
+        let configured_enabled =
+            automatic_validation_enabled_from_effective_config(&effective_config);
+        let Some(thread) = active_thread else {
+            return Ok(AutomaticValidationState {
+                configured_enabled,
+                active_thread_enabled: configured_enabled,
+            });
+        };
+        let active_thread_enabled = thread
+            .extra
+            .map(|extra| extra.automatic_validation_enabled)
+            .ok_or_else(|| {
+                color_eyre::eyre::eyre!(
+                    "app server did not return the thread-effective Automatic Validation state"
+                )
+            })?;
+        Ok(AutomaticValidationState {
+            configured_enabled,
+            active_thread_enabled,
+        })
+    }
+
+    pub(super) async fn open_settings_with_effective_validation(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        let enabled = match self.read_automatic_validation_state(app_server).await {
+            Ok(state) => state.active_thread_enabled,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to load thread-effective Automatic Validation state"
+                );
+                self.chat_widget.add_error_message(format!(
+                    "Could not verify the current Automatic Validation state: {err}"
+                ));
+                self.chat_widget.config_ref().validation.groups.functional
+            }
+        };
+        self.chat_widget.open_settings_popup(enabled);
+    }
+
+    pub(super) async fn open_automatic_validation_settings(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        let enabled = match self.read_automatic_validation_state(app_server).await {
+            Ok(state) => state.active_thread_enabled,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to load thread-effective Automatic Validation state"
+                );
+                self.chat_widget.add_error_message(format!(
+                    "Could not verify the current Automatic Validation state: {err}"
+                ));
+                self.chat_widget.config_ref().validation.groups.functional
+            }
+        };
+        self.chat_widget
+            .open_automatic_validation_settings_popup(enabled);
+    }
+
+    pub(super) async fn update_automatic_validation_enabled(
+        &mut self,
+        app_server: &mut AppServerSession,
+        enabled: bool,
+    ) {
+        let write_response = match crate::config_update::write_config_batch(
+            app_server.request_handle(),
+            vec![crate::config_update::replace_config_value(
+                "validation.groups.functional",
+                serde_json::json!(enabled),
+            )],
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to persist Automatic Validation setting");
+                self.chat_widget.add_error_message(format!(
+                    "Failed to save Automatic Validation setting: {err}"
+                ));
+                return;
+            }
+        };
+
+        let state = match self.read_automatic_validation_state(app_server).await {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to verify effective Automatic Validation setting"
+                );
+                self.chat_widget.add_error_message(format!(
+                    "Automatic Validation was saved, but Codex could not verify the effective setting: {err}"
+                ));
+                return;
+            }
+        };
+        self.config.validation.groups.functional = state.configured_enabled;
+        self.chat_widget
+            .set_automatic_validation_enabled(state.configured_enabled);
+        if state.configured_enabled != enabled {
+            let effective_state = if state.configured_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let message = write_response
+                .overridden_metadata
+                .as_ref()
+                .map(|_| overridden_write_message(&write_response).to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "a higher-precedence project or managed setting keeps it {effective_state}"
+                    )
+                });
+            tracing::warn!(message, "Automatic Validation config write was overridden");
+            self.chat_widget.add_error_message(format!(
+                "Automatic Validation was saved but not applied: {message}"
+            ));
+            return;
+        }
+
+        if state.active_thread_enabled != enabled {
+            let effective_state = if state.active_thread_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            tracing::warn!(
+                effective_state,
+                "Automatic Validation config write was overridden for the active thread"
+            );
+            self.chat_widget.add_error_message(format!(
+                "Automatic Validation was saved for future threads, but a higher-precedence setting keeps the current thread {effective_state}"
+            ));
+            return;
+        }
+
+        let state = if state.active_thread_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.chat_widget.add_info_message(
+            format!("Automatic Validation {state} for the next and future turns"),
+            /*hint*/ None,
+        );
+    }
+
     pub(super) async fn update_api_key_fallback_on_all_accounts_limited(
         &mut self,
         app_server: &mut AppServerSession,
@@ -1253,6 +1434,36 @@ fn account_switch_bool_from_effective_config(
         .get(key)
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(default)
+}
+
+fn automatic_validation_enabled_from_effective_config(
+    effective_config: &ConfigReadResponse,
+) -> bool {
+    effective_config
+        .config
+        .additional
+        .get("validation")
+        .and_then(|validation| validation.get("groups"))
+        .and_then(|groups| groups.get("functional"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or_default()
+}
+
+fn automatic_validation_config_read_cwd(
+    active_thread_cwd: Option<&AbsolutePathBuf>,
+    uses_remote_workspace: bool,
+    remote_cwd_override: Option<&std::path::Path>,
+    local_cwd: &AbsolutePathBuf,
+) -> Option<String> {
+    if let Some(active_thread_cwd) = active_thread_cwd {
+        return Some(active_thread_cwd.display().to_string());
+    }
+    if !uses_remote_workspace {
+        return Some(local_cwd.display().to_string());
+    }
+    remote_cwd_override
+        .filter(|cwd| cwd.is_absolute())
+        .map(|cwd| cwd.display().to_string())
 }
 
 fn approvals_reviewer_from_effective_config(
@@ -1797,6 +2008,76 @@ terminal_resize_reflow_max_rows = 9000
         assert_eq!(
             app.config.permissions.approval_policy.value(),
             original_policy
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_validation_enabled_reads_nested_effective_config() -> Result<()> {
+        let effective_config: ConfigReadResponse = serde_json::from_value(serde_json::json!({
+            "config": {
+                "validation": {
+                    "groups": {
+                        "functional": true,
+                    },
+                },
+            },
+            "origins": {},
+        }))?;
+
+        assert!(automatic_validation_enabled_from_effective_config(
+            &effective_config
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_validation_config_read_cwd_uses_server_safe_paths() -> Result<()> {
+        let local_dir = tempdir()?;
+        let active_dir = tempdir()?;
+        let local_cwd = local_dir.path().to_path_buf().abs();
+        let active_thread_cwd = active_dir.path().to_path_buf().abs();
+
+        assert_eq!(
+            automatic_validation_config_read_cwd(
+                Some(&active_thread_cwd),
+                /*uses_remote_workspace*/ true,
+                Some(std::path::Path::new("relative/project")),
+                &local_cwd,
+            ),
+            Some(active_thread_cwd.display().to_string())
+        );
+        assert_eq!(
+            automatic_validation_config_read_cwd(
+                /*active_thread_cwd*/ None, /*uses_remote_workspace*/ true,
+                /*remote_cwd_override*/ None, &local_cwd,
+            ),
+            None
+        );
+        assert_eq!(
+            automatic_validation_config_read_cwd(
+                /*active_thread_cwd*/ None,
+                /*uses_remote_workspace*/ true,
+                Some(std::path::Path::new("relative/project")),
+                &local_cwd,
+            ),
+            None
+        );
+        assert_eq!(
+            automatic_validation_config_read_cwd(
+                /*active_thread_cwd*/ None,
+                /*uses_remote_workspace*/ true,
+                Some(active_thread_cwd.as_path()),
+                &local_cwd,
+            ),
+            Some(active_thread_cwd.display().to_string())
+        );
+        assert_eq!(
+            automatic_validation_config_read_cwd(
+                /*active_thread_cwd*/ None, /*uses_remote_workspace*/ false,
+                /*remote_cwd_override*/ None, &local_cwd,
+            ),
+            Some(local_cwd.display().to_string())
         );
         Ok(())
     }

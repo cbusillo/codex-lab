@@ -1019,8 +1019,17 @@ pub(crate) enum AppEvent {
     /// Open account switching settings from the general settings menu.
     OpenAccountSwitchSettings,
 
+    /// Open the general settings menu after resolving thread-effective values.
+    OpenSettings,
+
+    /// Open Automatic Validation settings from the general settings menu.
+    OpenAutomaticValidationSettings,
+
     /// Open third-party agent install/status settings from the general settings menu.
     OpenAgentsSettings,
+
+    /// Update whether built-in functional Automatic Validation is enabled.
+    SetAutomaticValidationEnabled(bool),
 
     /// Update whether Codex should switch accounts after rate or usage limits.
     SetAutoSwitchAccountsOnRateLimit(bool),
