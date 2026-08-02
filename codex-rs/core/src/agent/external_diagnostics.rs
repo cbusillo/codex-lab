@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalAgentFailureKind {
+pub enum ExternalAgentFailureKind {
     CommandMissing,
     AuthenticationRequired,
     QuotaOrRateLimited,
@@ -39,10 +39,10 @@ impl ExternalAgentFailureKind {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct ExternalAgentFailureDetail {
-    pub(crate) kind: ExternalAgentFailureKind,
+pub struct ExternalAgentFailureDetail {
+    pub kind: ExternalAgentFailureKind,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) message: Option<String>,
+    pub message: Option<String>,
 }
 
 impl ExternalAgentFailureDetail {

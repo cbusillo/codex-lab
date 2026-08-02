@@ -197,7 +197,8 @@ mod tests {
             .find(|status| status.family == "claude")
             .expect("claude status");
         assert_eq!(claude.name, "Claude Code");
-        assert!(claude.description.contains("claude-opus-4.8"));
+        assert!(claude.description.contains("claude-opus-5"));
+        assert!(claude.description.contains("claude-fable-5"));
         assert!(claude.description.contains("claude-sonnet-4.6"));
         assert!(claude.description.contains("claude-haiku-4.5"));
         assert!(statuses.iter().any(|status| {

@@ -17,21 +17,17 @@ fn cloud_defaults_carry_model_selection_both_modes() {
 #[test]
 fn default_params_include_model_selection_for_builtin_agents() {
     assert_eq!(
-        default_params_for("claude-opus-4.8", /*read_only*/ true),
+        default_params_for("claude-opus-5", /*read_only*/ true),
         vec![
             "--model",
-            "claude-opus-4-8",
+            "claude-opus-5",
             "--allowedTools",
             CLAUDE_ALLOWED_TOOLS,
         ]
     );
     assert_eq!(
-        default_params_for("claude-opus-4.8", /*read_only*/ false),
-        vec![
-            "--model",
-            "claude-opus-4-8",
-            "--dangerously-skip-permissions",
-        ]
+        default_params_for("claude-opus-5", /*read_only*/ false),
+        vec!["--model", "claude-opus-5", "--dangerously-skip-permissions",]
     );
     assert_eq!(
         default_params_for("qwen3-coder-plus", /*read_only*/ false),
@@ -80,11 +76,26 @@ fn gpt_codex_aliases_resolve() {
 #[test]
 fn claude_opus_aliases_resolve_to_current_opus() {
     let opus = agent_model_spec("claude-opus").expect("opus alias present");
-    assert_eq!(opus.slug, "claude-opus-4.8");
-    assert_eq!(opus.model_args, &["--model", "claude-opus-4-8"]);
+    assert_eq!(opus.slug, "claude-opus-5");
+    assert_eq!(opus.model_args, &["--model", "claude-opus-5"]);
 
-    let legacy = agent_model_spec("claude-opus-4.6").expect("legacy opus alias present");
-    assert_eq!(legacy.slug, "claude-opus-4.8");
+    for legacy in ["claude-opus-4.6", "claude-opus-4.7", "claude-opus-4.8"] {
+        let legacy = agent_model_spec(legacy).expect("legacy opus alias present");
+        assert_eq!(legacy.slug, "claude-opus-5");
+    }
+}
+
+#[test]
+fn fable_is_available_but_explicit_only() {
+    let fable = agent_model_spec("fable").expect("fable alias present");
+    assert_eq!(fable.slug, "claude-fable-5");
+    assert_eq!(fable.model_args, &["--model", "claude-fable-5"]);
+    assert!(!fable.is_frontline);
+    assert_eq!(fable.description, FABLE_AGENT_GUIDANCE);
+
+    let guide = model_guide_markdown();
+    assert!(guide.contains("`claude-fable-5`"));
+    assert!(guide.contains("Do not use Fable for routine work"));
 }
 
 #[test]
@@ -122,11 +133,11 @@ fn default_configs_use_canonical_selector_commands() {
 
     let opus = configs
         .iter()
-        .find(|config| config.name == "claude-opus-4.8")
-        .expect("claude-opus-4.8 should be enabled by default");
+        .find(|config| config.name == "claude-opus-5")
+        .expect("claude-opus-5 should be enabled by default");
     assert_eq!(
         opus.args,
-        vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+        vec!["--model".to_string(), "claude-opus-5".to_string()]
     );
 }
 
@@ -206,7 +217,7 @@ fn default_agent_order_prioritizes_gpt_5_6_and_diverse_families() {
             "code-gpt-5.6-sol",
             "code-gpt-5.5",
             "code-gpt-5.4",
-            "claude-opus-4.8",
+            "claude-opus-5",
             "antigravity",
             "code-gpt-5.6-terra",
             "code-gpt-5.6-luna",

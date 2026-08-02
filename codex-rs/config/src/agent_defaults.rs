@@ -35,6 +35,8 @@ const CLAUDE_SONNET_READ_ONLY: &[&str] = &["--allowedTools", CLAUDE_ALLOWED_TOOL
 const CLAUDE_SONNET_WRITE: &[&str] = &["--dangerously-skip-permissions"];
 const CLAUDE_OPUS_READ_ONLY: &[&str] = &["--allowedTools", CLAUDE_ALLOWED_TOOLS];
 const CLAUDE_OPUS_WRITE: &[&str] = &["--dangerously-skip-permissions"];
+const CLAUDE_FABLE_READ_ONLY: &[&str] = &["--allowedTools", CLAUDE_ALLOWED_TOOLS];
+const CLAUDE_FABLE_WRITE: &[&str] = &["--dangerously-skip-permissions"];
 const CLAUDE_HAIKU_READ_ONLY: &[&str] = &["--allowedTools", CLAUDE_ALLOWED_TOOLS];
 const CLAUDE_HAIKU_WRITE: &[&str] = &["--dangerously-skip-permissions"];
 const ANTIGRAVITY_READ_ONLY: &[&str] = &[];
@@ -47,13 +49,15 @@ const CLOUD_GPT5_CODEX_READ_ONLY: &[&str] = &[];
 const CLOUD_GPT5_CODEX_WRITE: &[&str] = &[];
 const MODELS_MANIFEST: &str = include_str!("../../models-manager/models.json");
 
+pub const FABLE_AGENT_GUIDANCE: &str = "VERY EXPENSIVE Anthropic specialist model. Do not use Fable for routine work or ordinary multi-agent diversity. Select it only when the user explicitly asks for Fable, or as a last resort for a genuinely difficult problem that other capable agents could not solve.";
+
 /// Canonical built-in external agent selectors used when no custom selector
 /// list is configured. Ordering controls default presentation priority.
 pub const DEFAULT_AGENT_NAMES: &[&str] = &[
     "code-gpt-5.6-sol",
     "code-gpt-5.5",
     "code-gpt-5.4",
-    "claude-opus-4.8",
+    "claude-opus-5",
     "antigravity",
     "code-gpt-5.6-terra",
     "code-gpt-5.6-luna",
@@ -62,6 +66,7 @@ pub const DEFAULT_AGENT_NAMES: &[&str] = &[
     "github-copilot",
     "claude-haiku-4.5",
     "qwen3-coder-plus",
+    "claude-fable-5",
     "cloud-gpt-5.1-codex-max",
 ];
 
@@ -229,19 +234,21 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         pro_only: false,
     },
     AgentModelSpec {
-        slug: "claude-opus-4.8",
+        slug: "claude-opus-5",
         family: "claude",
         cli: "claude",
         read_only_args: CLAUDE_OPUS_READ_ONLY,
         write_args: CLAUDE_OPUS_WRITE,
-        model_args: &["--model", "claude-opus-4-8"],
-        description: "Higher-capacity Claude model for complex reasoning; use when you want the strongest Claude.",
+        model_args: &["--model", "claude-opus-5"],
+        description: "Most capable Claude model for sustained agentic work and complex reasoning.",
         enabled_by_default: true,
         aliases: &[
             "claude-opus",
             "claude-opus-4.1",
             "claude-opus-4.5",
             "claude-opus-4.6",
+            "claude-opus-4.7",
+            "claude-opus-4.8",
         ],
         gating_env: None,
         is_frontline: true,
@@ -257,6 +264,20 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         description: "Balanced Claude model for implementation and debugging; a solid default when you want Claude.",
         enabled_by_default: true,
         aliases: &["claude", "claude-sonnet", "claude-sonnet-4.5"],
+        gating_env: None,
+        is_frontline: false,
+        pro_only: false,
+    },
+    AgentModelSpec {
+        slug: "claude-fable-5",
+        family: "claude",
+        cli: "claude",
+        read_only_args: CLAUDE_FABLE_READ_ONLY,
+        write_args: CLAUDE_FABLE_WRITE,
+        model_args: &["--model", "claude-fable-5"],
+        description: FABLE_AGENT_GUIDANCE,
+        enabled_by_default: true,
+        aliases: &["fable", "claude-fable"],
         gating_env: None,
         is_frontline: false,
         pro_only: false,
