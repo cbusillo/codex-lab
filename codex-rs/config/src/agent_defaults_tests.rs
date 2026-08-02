@@ -91,11 +91,21 @@ fn fable_is_available_but_explicit_only() {
     assert_eq!(fable.slug, "claude-fable-5");
     assert_eq!(fable.model_args, &["--model", "claude-fable-5"]);
     assert!(!fable.is_frontline);
+    assert!(fable.explicit_only);
     assert_eq!(fable.description, FABLE_AGENT_GUIDANCE);
 
     let guide = model_guide_markdown();
-    assert!(guide.contains("`claude-fable-5`"));
-    assert!(guide.contains("Do not use Fable for routine work"));
+    assert!(!guide.contains("`claude-fable-5`"));
+    assert!(
+        enabled_agent_model_specs()
+            .iter()
+            .all(|spec| spec.slug != "claude-fable-5")
+    );
+    assert!(
+        default_agent_configs()
+            .iter()
+            .all(|config| config.name != "claude-fable-5")
+    );
 }
 
 #[test]
