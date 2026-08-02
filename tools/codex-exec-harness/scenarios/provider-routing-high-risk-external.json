@@ -18,7 +18,7 @@
           {
             "item": {
               "type": "function_call",
-              "namespace": "collaboration",
+              "namespace": "agents",
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Perform an independent security review and return the fixture completion marker.\",\"task_name\":\"security_review\",\"task_kind\":\"security\",\"task_size\":\"normal\"}",
               "call_id": "call-provider-routing-spawn"
@@ -32,7 +32,7 @@
           {
             "item": {
               "type": "function_call",
-              "namespace": "collaboration",
+              "namespace": "agents",
               "name": "wait_agent",
               "arguments": "{\"timeout_ms\":10000}",
               "call_id": "call-provider-routing-wait"
@@ -46,7 +46,7 @@
           {
             "item": {
               "type": "function_call",
-              "namespace": "collaboration",
+              "namespace": "agents",
               "name": "list_agents",
               "arguments": "{}",
               "call_id": "call-provider-routing-list"

@@ -59,6 +59,24 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     );
 }
 
+#[test]
+fn direct_source_redacts_plaintext_multi_agent_messages_in_any_namespace() {
+    for namespace in [Some("agents"), Some("collaboration"), None] {
+        for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+            let call = ToolCall {
+                tool_name: ToolName::new(namespace.map(str::to_string), tool_name),
+                call_id: "call-plaintext-message".to_string(),
+                payload: ToolPayload::Function {
+                    arguments: json!({"message": "secret message"}).to_string(),
+                },
+                encrypted_function_args: Some(Vec::new()),
+            };
+
+            assert_eq!(call.direct_source(), ToolCallSource::DirectPlaintextMessage);
+        }
+    }
+}
+
 impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
     fn tools(
         &self,

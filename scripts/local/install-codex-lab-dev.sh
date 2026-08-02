@@ -130,12 +130,13 @@ CARGO_TARGET_DIR="\$("\$REPO_ROOT/scripts/local/cargo-build-env.sh")"
 export CARGO_TARGET_DIR
 (
   cd "\$REPO_ROOT/codex-rs"
-  cargo build -p codex-cli --bin codex-lab ${cargo_profile_args[*]-} --manifest-path Cargo.toml >/dev/null
+  cargo build -p codex-cli --bin codex-lab -p codex-code-mode-host --bin codex-code-mode-host ${cargo_profile_args[*]-} --manifest-path Cargo.toml >/dev/null
 )
 TARGET_ROOT="\${CARGO_TARGET_DIR:-\$REPO_ROOT/codex-rs/target}"
 candidate="\$("\$PYTHON_BIN" "\$REPO_ROOT/scripts/local/codex_lab_provenance.py" \\
   --repo-root "\$REPO_ROOT" \\
   --binary "\$TARGET_ROOT/\$TARGET_SUBDIR/codex-lab" \\
+  --companion-binary "\$TARGET_ROOT/\$TARGET_SUBDIR/codex-code-mode-host" \\
   --artifact-root "\$CODEX_LAB_HOME/working")"
 exec "\$candidate" "\$@"
 EOF
