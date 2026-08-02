@@ -24,7 +24,7 @@
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Reply with exactly LIVE_ANTIGRAVITY_AUTO_OK. Do not inspect or change files.\",\"task_name\":\"live_antigravity\",\"task_kind\":\"security\",\"task_size\":\"normal\"}",
               "call_id": "call-live-antigravity-spawn",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -38,7 +38,7 @@
               "name": "wait_agent",
               "arguments": "{\"timeout_ms\":180000}",
               "call_id": "call-live-antigravity-wait",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -52,7 +52,7 @@
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Reply with exactly LIVE_CLAUDE_AUTO_OK. Do not inspect or change files.\",\"task_name\":\"live_claude\",\"task_kind\":\"independent_review\",\"task_size\":\"normal\"}",
               "call_id": "call-live-claude-spawn",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -66,7 +66,7 @@
               "name": "wait_agent",
               "arguments": "{\"timeout_ms\":180000}",
               "call_id": "call-live-claude-wait",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -80,7 +80,7 @@
               "name": "list_agents",
               "arguments": "{}",
               "call_id": "call-live-provider-routing-list",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -94,7 +94,7 @@
               "name": "interrupt_agent",
               "arguments": "{\"target\":\"live_antigravity\"}",
               "call_id": "call-live-antigravity-interrupt",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -108,7 +108,7 @@
               "name": "interrupt_agent",
               "arguments": "{\"target\":\"live_claude\"}",
               "call_id": "call-live-claude-interrupt",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]

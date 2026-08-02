@@ -25,7 +25,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
 
-const COLLABORATION_NAMESPACE: &str = "collaboration";
+const COLLABORATION_NAMESPACE: &str = "agents";
 const SPAWN_CALL_ID: &str = "spawn-worker";
 const NESTED_CALL_ID: &str = "spawn-grandchild";
 const QUEUE_CALL_ID: &str = "queue-worker-message";

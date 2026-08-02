@@ -23,7 +23,7 @@
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Fail with the configured authentication diagnostic.\",\"task_name\":\"provider_failure\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external_failure\",\"fork_turns\":\"none\"}",
               "call_id": "call-provider-failure-spawn",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -37,7 +37,7 @@
               "name": "wait_agent",
               "arguments": "{\"timeout_ms\":10000}",
               "call_id": "call-provider-failure-wait",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -51,7 +51,7 @@
               "name": "list_agents",
               "arguments": "{}",
               "call_id": "call-provider-failure-list",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]
@@ -65,7 +65,7 @@
               "name": "interrupt_agent",
               "arguments": "{\"target\":\"provider_failure\"}",
               "call_id": "call-provider-failure-interrupt",
-              "namespace": "collaboration"
+              "namespace": "agents"
             }
           }
         ]

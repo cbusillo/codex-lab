@@ -111,6 +111,50 @@ class CodexLabProvenanceTest(unittest.TestCase):
             with self.assertRaises(PROVENANCE.ProvenanceError):
                 PROVENANCE.stage_candidate(repo, candidate, root / "linked")
 
+    def test_stage_publishes_companion_in_bundle_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo, commit = self.make_repo(root)
+            source = root / "source-codex-lab"
+            write_fake_binary(source, commit, "clean")
+            companion = root / "codex-code-mode-host"
+            companion.write_text("host-v1\n", encoding="utf-8")
+            companion.chmod(0o755)
+
+            report = PROVENANCE.stage_candidate(
+                repo, source, root / "artifacts", [companion]
+            )
+            candidate = Path(report["binary_path"])
+            staged_companion = candidate.parent / companion.name
+
+            self.assertEqual("current", report["status"])
+            self.assertEqual(candidate.parent.name, report["bundle_sha256"])
+            self.assertFalse(candidate.parent.stat().st_mode & 0o222)
+            self.assertEqual(
+                PROVENANCE.sha256_file(staged_companion),
+                report["companion_sha256"][companion.name],
+            )
+            self.assertFalse(staged_companion.stat().st_mode & 0o222)
+
+            cached = PROVENANCE.stage_candidate(
+                repo, source, root / "artifacts", [companion]
+            )
+            self.assertEqual(candidate, Path(cached["binary_path"]))
+
+            staged_companion.chmod(0o755)
+            writable = PROVENANCE.stage_candidate(
+                repo, source, root / "artifacts", [companion]
+            )
+            self.assertEqual("unverifiable", writable["status"])
+
+            companion.write_text("host-v2\n", encoding="utf-8")
+            replacement = PROVENANCE.stage_candidate(
+                repo, source, root / "artifacts", [companion]
+            )
+            self.assertNotEqual(
+                candidate.parent, Path(replacement["binary_path"]).parent
+            )
+
     def test_prunes_old_candidates_and_preserves_active_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             candidate_root = Path(temp_dir) / "candidates"

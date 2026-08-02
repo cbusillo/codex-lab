@@ -294,17 +294,32 @@ Payload:
 You may also see them addressed as to=/root/..., which indicates your identity is /root/...
 "#;
 const DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT: &str = "Full-history forks (`fork_turns` omitted or `\"all\"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `\"none\"` or a positive integer string.";
-const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
-const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "agents";
+const LEGACY_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
+
+fn default_multi_agent_v2_shared_usage_hint_text(tool_namespace: Option<&str>) -> String {
+    let spawn_agent_recipient = tool_namespace
+        .map(|namespace| format!("functions.{namespace}.spawn_agent"))
+        .unwrap_or_else(|| "functions.spawn_agent".to_string());
+    format!(
+        r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to={spawn_agent_recipient}`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
 
 All agents share the same directory. In detail:
 - All agents have access to the same container and filesystem as you.
 - All agents use the same current working directory.
 - As a result, edits made by one agent are immediately visible to all other agents.
-"#;
-fn default_multi_agent_v2_usage_hint_text(usage_hint_text: &str, max_concurrency: usize) -> String {
+"#
+    )
+}
+
+fn default_multi_agent_v2_usage_hint_text(
+    usage_hint_text: &str,
+    max_concurrency: usize,
+    tool_namespace: Option<&str>,
+) -> String {
+    let shared_usage_hint_text = default_multi_agent_v2_shared_usage_hint_text(tool_namespace);
     format!(
-        "{usage_hint_text}\n{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\nThere are {max_concurrency} available concurrency slots, meaning that up to {max_concurrency} agents can be active at once, including you."
+        "{usage_hint_text}\n{shared_usage_hint_text}\nThere are {max_concurrency} available concurrency slots, meaning that up to {max_concurrency} agents can be active at once, including you."
     )
 }
 
@@ -1321,6 +1336,7 @@ pub struct MultiAgentV2Config {
 
 impl MultiAgentV2Config {
     fn defaults_for_max_concurrency(max_concurrent_threads_per_session: usize) -> Self {
+        let tool_namespace = Some(DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE.to_string());
         Self {
             max_concurrent_threads_per_session,
             min_wait_timeout_ms: DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS,
@@ -1330,14 +1346,16 @@ impl MultiAgentV2Config {
             root_agent_usage_hint_text: Some(default_multi_agent_v2_usage_hint_text(
                 DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT,
                 max_concurrent_threads_per_session,
+                tool_namespace.as_deref(),
             )),
             subagent_usage_hint_text: Some(default_multi_agent_v2_usage_hint_text(
                 DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT,
                 max_concurrent_threads_per_session,
+                tool_namespace.as_deref(),
             )),
             subagent_developer_instructions: None,
             multi_agent_mode_hint_text: None,
-            tool_namespace: Some(DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE.to_string()),
+            tool_namespace,
             hide_spawn_agent_metadata: true,
             expose_spawn_agent_model_overrides: true,
             wait_agent_enabled: true,
@@ -2860,8 +2878,27 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let wait_agent_enabled = base
         .and_then(|config| config.wait_agent_enabled)
         .unwrap_or(default.wait_agent_enabled);
-    let mut default_root_agent_usage_hint_text = default.root_agent_usage_hint_text;
-    let mut default_subagent_usage_hint_text = default.subagent_usage_hint_text;
+    let tool_namespace = base
+        .and_then(|config| config.tool_namespace.as_ref())
+        .cloned()
+        .map(|namespace| {
+            if namespace == LEGACY_MULTI_AGENT_V2_TOOL_NAMESPACE {
+                DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE.to_string()
+            } else {
+                namespace
+            }
+        })
+        .or(default.tool_namespace);
+    let mut default_root_agent_usage_hint_text = Some(default_multi_agent_v2_usage_hint_text(
+        DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT,
+        max_concurrent_threads_per_session,
+        tool_namespace.as_deref(),
+    ));
+    let mut default_subagent_usage_hint_text = Some(default_multi_agent_v2_usage_hint_text(
+        DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT,
+        max_concurrent_threads_per_session,
+        tool_namespace.as_deref(),
+    ));
     if expose_spawn_agent_model_overrides {
         default_root_agent_usage_hint_text = Some(append_usage_hint_text(
             default_root_agent_usage_hint_text.as_deref(),
@@ -2887,10 +2924,6 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         .and_then(|config| config.multi_agent_mode_hint_text.as_ref())
         .cloned()
         .or(default.multi_agent_mode_hint_text);
-    let tool_namespace = base
-        .and_then(|config| config.tool_namespace.as_ref())
-        .cloned()
-        .or(default.tool_namespace);
     let non_code_mode_only = base
         .and_then(|config| config.non_code_mode_only)
         .unwrap_or(default.non_code_mode_only);
@@ -3793,6 +3826,14 @@ impl Config {
             resolve_experimental_request_user_input_enabled(&cfg);
         let update_plan_enabled = resolve_update_plan_enabled(&cfg);
         let code_mode = resolve_code_mode_config(&cfg);
+        if multi_agent_v2_toml_config(cfg.features.as_ref())
+            .and_then(|config| config.tool_namespace.as_deref())
+            == Some(LEGACY_MULTI_AGENT_V2_TOOL_NAMESPACE)
+        {
+            startup_warnings.push(format!(
+                "MultiAgentV2 tool namespace `{LEGACY_MULTI_AGENT_V2_TOOL_NAMESPACE}` is reserved by current models; using `{DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE}` instead. Remove the legacy `features.multi_agent_v2.tool_namespace` override."
+            ));
+        }
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;

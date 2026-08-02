@@ -32,7 +32,7 @@
           {
             "item": {
               "type": "function_call",
-              "namespace": "collaboration",
+              "namespace": "agents",
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Read handoff-context.txt from the workspace and return its byte count plus first and last markers. Do not inline the file into this message.\",\"task_name\":\"fixture_agent\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external\",\"fork_turns\":\"none\"}",
               "call_id": "call-third-party-agent-spawn"
@@ -46,7 +46,7 @@
           {
             "item": {
               "type": "function_call",
-              "namespace": "collaboration",
+              "namespace": "agents",
               "name": "wait_agent",
               "arguments": "{\"timeout_ms\":10000}",
               "call_id": "call-third-party-agent-wait"
@@ -60,7 +60,7 @@
           {
             "item": {
               "type": "function_call",
-              "namespace": "collaboration",
+              "namespace": "agents",
               "name": "list_agents",
               "arguments": "{}",
               "call_id": "call-third-party-agent-list"
@@ -74,7 +74,7 @@
           {
             "item": {
               "type": "function_call",
-              "namespace": "collaboration",
+              "namespace": "agents",
               "name": "interrupt_agent",
               "arguments": "{\"target\":\"fixture_agent\"}",
               "call_id": "call-third-party-agent-interrupt"

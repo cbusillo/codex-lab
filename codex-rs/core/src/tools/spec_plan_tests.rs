@@ -48,7 +48,7 @@ use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::spec_plan::append_source_tool_runtimes;
 use crate::tools::spec_plan::build_core_tool_runtimes;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
 
 #[derive(Default)]
 struct ToolPlanInputs {

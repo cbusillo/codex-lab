@@ -197,6 +197,38 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def normalize_companion_sources(paths: list[Path]) -> dict[str, Path]:
+    companions: dict[str, Path] = {}
+    for path in paths:
+        name = path.name
+        if name == "codex-lab" or SAFE_COMPONENT.fullmatch(name) is None:
+            raise ProvenanceError(f"unsafe companion binary name: {name}")
+        if name in companions:
+            raise ProvenanceError(f"duplicate companion binary name: {name}")
+        source = path.expanduser().resolve(strict=True)
+        if not source.is_file():
+            raise ProvenanceError(f"companion binary is not a file: {source}")
+        if not source.stat().st_mode & 0o111:
+            raise ProvenanceError(f"companion binary is not executable: {source}")
+        companions[name] = source
+    return companions
+
+
+def candidate_bundle_digest(
+    binary_digest: str, companion_digests: dict[str, str]
+) -> str:
+    if not companion_digests:
+        return binary_digest
+    digest = hashlib.sha256()
+    members = {"codex-lab": binary_digest, **companion_digests}
+    for name, member_digest in sorted(members.items()):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(member_digest.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def verify_binary(repo_root: Path, binary_path: Path) -> dict[str, Any]:
     expected = checkout_identity(repo_root)
     binary_path = binary_path.expanduser().resolve(strict=True)
@@ -256,9 +288,24 @@ def prepare_private_root(path: Path) -> None:
 
 
 def verify_published_candidate(
-    repo_root: Path, expected: dict[str, str], binary_path: Path, digest: str
+    repo_root: Path,
+    expected: dict[str, str],
+    binary_path: Path,
+    binary_digest: str,
+    bundle_digest: str,
+    companion_digests: dict[str, str],
 ) -> dict[str, Any]:
     final_dir = binary_path.parent
+    if final_dir.name != bundle_digest:
+        return unavailable_report(
+            binary_path,
+            expected,
+            "immutable candidate path does not match its bundle digest",
+        )
+    if final_dir.stat().st_mode & 0o222:
+        return unavailable_report(
+            binary_path, expected, "immutable candidate directory is still writable"
+        )
     if final_dir.is_symlink() or binary_path.is_symlink() or not binary_path.is_file():
         return unavailable_report(
             binary_path, expected, "immutable candidate is missing or is a symlink"
@@ -267,10 +314,36 @@ def verify_published_candidate(
         return unavailable_report(
             binary_path, expected, "immutable candidate binary is still writable"
         )
-    if sha256_file(binary_path) != digest:
+    if sha256_file(binary_path) != binary_digest:
         return unavailable_report(
             binary_path, expected, "immutable candidate digest does not match its path"
         )
+    for name, expected_digest in companion_digests.items():
+        companion = final_dir / name
+        if companion.is_symlink() or not companion.is_file():
+            return unavailable_report(
+                binary_path,
+                expected,
+                f"immutable candidate companion is missing or is a symlink: {name}",
+            )
+        if companion.stat().st_mode & 0o222:
+            return unavailable_report(
+                binary_path,
+                expected,
+                f"immutable candidate companion is still writable: {name}",
+            )
+        if not companion.stat().st_mode & 0o111:
+            return unavailable_report(
+                binary_path,
+                expected,
+                f"immutable candidate companion is not executable: {name}",
+            )
+        if sha256_file(companion) != expected_digest:
+            return unavailable_report(
+                binary_path,
+                expected,
+                f"immutable candidate companion digest does not match: {name}",
+            )
     report = verification_report(
         expected, binary_path, reported_provenance(binary_path)
     )
@@ -278,7 +351,10 @@ def verify_published_candidate(
         return unavailable_report(
             binary_path, expected, "checkout changed during staging"
         )
-    report["binary_sha256"] = digest
+    report["binary_sha256"] = binary_digest
+    report["bundle_sha256"] = bundle_digest
+    if companion_digests:
+        report["companion_sha256"] = dict(sorted(companion_digests.items()))
     return report
 
 
@@ -346,6 +422,7 @@ def prune_staged_candidates(candidate_root: Path, active_candidate: Path) -> Non
             continue
         state_root = candidate.parent
         commit_root = state_root.parent
+        candidate.chmod(0o700)
         shutil.rmtree(candidate)
         for directory in (state_root, commit_root):
             try:
@@ -359,9 +436,18 @@ def verify_touch_and_prune_candidate(
     expected: dict[str, str],
     candidate_root: Path,
     final_binary: Path,
-    digest: str,
+    binary_digest: str,
+    bundle_digest: str,
+    companion_digests: dict[str, str],
 ) -> dict[str, Any]:
-    report = verify_published_candidate(repo_root, expected, final_binary, digest)
+    report = verify_published_candidate(
+        repo_root,
+        expected,
+        final_binary,
+        binary_digest,
+        bundle_digest,
+        companion_digests,
+    )
     if report["status"] == "current":
         final_dir = final_binary.parent
         os.utime(final_dir, follow_symlinks=False)
@@ -370,7 +456,10 @@ def verify_touch_and_prune_candidate(
 
 
 def stage_candidate(
-    repo_root: Path, binary_path: Path, artifact_root: Path
+    repo_root: Path,
+    binary_path: Path,
+    artifact_root: Path,
+    companion_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     if fcntl is None:
         raise ProvenanceError("content-addressed staging requires POSIX file locking")
@@ -382,6 +471,7 @@ def stage_candidate(
             "dirty checkout cannot produce exact dogfood proof; commit or stash tracked changes",
         )
     source = binary_path.expanduser().resolve(strict=True)
+    companions = normalize_companion_sources(companion_paths or [])
     artifact_root = artifact_root.expanduser().resolve(strict=False)
     prepare_private_root(artifact_root)
     dogfood_root = artifact_root / "dogfood"
@@ -391,25 +481,36 @@ def stage_candidate(
     with (candidate_root / ".stage.lock").open("a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         reap_orphaned_staging_directories(candidate_root)
-        return stage_candidate_locked(repo_root, source, candidate_root, expected)
+        return stage_candidate_locked(
+            repo_root, source, companions, candidate_root, expected
+        )
 
 
 def stage_candidate_locked(
     repo_root: Path,
     source: Path,
+    companions: dict[str, Path],
     candidate_root: Path,
     expected: dict[str, str],
 ) -> dict[str, Any]:
-    digest = sha256_file(source)
+    binary_digest = sha256_file(source)
+    companion_digests = {name: sha256_file(path) for name, path in companions.items()}
+    bundle_digest = candidate_bundle_digest(binary_digest, companion_digests)
     commit_root = candidate_root / expected["source_commit"]
     state_root = commit_root / expected["dirty_state"]
     for directory in (commit_root, state_root):
         ensure_private_directory(directory)
-    final_dir = state_root / digest
+    final_dir = state_root / bundle_digest
     final_binary = final_dir / "codex-lab"
     if final_dir.exists():
         return verify_touch_and_prune_candidate(
-            repo_root, expected, candidate_root, final_binary, digest
+            repo_root,
+            expected,
+            candidate_root,
+            final_binary,
+            binary_digest,
+            bundle_digest,
+            companion_digests,
         )
 
     staging_dir = Path(tempfile.mkdtemp(prefix=".staging-", dir=candidate_root))
@@ -417,11 +518,30 @@ def stage_candidate_locked(
     try:
         shutil.copyfile(source, staged_binary)
         staged_binary.chmod(0o555)
-        if sha256_file(staged_binary) != digest:
+        if sha256_file(staged_binary) != binary_digest:
             return unavailable_report(
                 staged_binary,
                 expected,
                 "mutable build changed while it was being staged",
+            )
+        for name, companion_source in companions.items():
+            staged_companion = staging_dir / name
+            shutil.copyfile(companion_source, staged_companion)
+            staged_companion.chmod(0o555)
+            if sha256_file(staged_companion) != companion_digests[name]:
+                return unavailable_report(
+                    staged_binary,
+                    expected,
+                    f"mutable companion changed while it was being staged: {name}",
+                )
+        if sha256_file(source) != binary_digest or any(
+            sha256_file(path) != companion_digests[name]
+            for name, path in companions.items()
+        ):
+            return unavailable_report(
+                staged_binary,
+                expected,
+                "mutable build bundle changed while it was being staged",
             )
         staged_report = verification_report(
             expected, staged_binary, reported_provenance(staged_binary)
@@ -431,11 +551,23 @@ def stage_candidate_locked(
         try:
             os.rename(staging_dir, final_dir)
             staging_dir = None
+            try:
+                final_dir.chmod(0o500)
+            except OSError:
+                final_dir.chmod(0o700)
+                shutil.rmtree(final_dir)
+                raise
         except OSError:
             if final_dir.is_symlink() or not final_dir.is_dir():
                 raise
         return verify_touch_and_prune_candidate(
-            repo_root, expected, candidate_root, final_binary, digest
+            repo_root,
+            expected,
+            candidate_root,
+            final_binary,
+            binary_digest,
+            bundle_digest,
+            companion_digests,
         )
     finally:
         if staging_dir is not None:
@@ -449,6 +581,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--artifact-root", type=Path)
     mode.add_argument("--verify-only", action="store_true")
+    parser.add_argument(
+        "--companion-binary",
+        type=Path,
+        action="append",
+        default=[],
+        help="Additional executable to stage beside codex-lab (repeatable)",
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
@@ -459,7 +598,12 @@ def main(argv: list[str]) -> int:
         if args.verify_only:
             report = verify_binary(args.repo_root, args.binary)
         else:
-            report = stage_candidate(args.repo_root, args.binary, args.artifact_root)
+            report = stage_candidate(
+                args.repo_root,
+                args.binary,
+                args.artifact_root,
+                args.companion_binary,
+            )
     except (OSError, RuntimeError, TypeError, ValueError, ProvenanceError) as error:
         report = unavailable_report(args.binary, None, str(error))
 

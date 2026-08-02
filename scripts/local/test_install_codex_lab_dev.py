@@ -40,6 +40,8 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertIn("CODEX_LAB_HOME", contents)
             self.assertNotIn("CODEX_HOME", contents)
             self.assertIn("--bin codex-lab", contents)
+            self.assertIn("--bin codex-code-mode-host", contents)
+            self.assertIn("--companion-binary", contents)
             self.assertIn(str(REPO_ROOT), contents)
             self.assertIn(str(lab_home), contents)
             self.assertIn("scripts/local/cargo-build-env.sh", contents)
@@ -120,6 +122,11 @@ class InstallCodexLabDevTest(unittest.TestCase):
                         print(f"candidate={executable}")
                     EOF
                     chmod +x "$CARGO_TARGET_DIR/debug/codex-lab"
+                    cat >"$CARGO_TARGET_DIR/debug/codex-code-mode-host" <<'EOF'
+                    #!/bin/sh
+                    exit 0
+                    EOF
+                    chmod +x "$CARGO_TARGET_DIR/debug/codex-code-mode-host"
                     """
                 ),
                 encoding="utf-8",
@@ -167,6 +174,12 @@ class InstallCodexLabDevTest(unittest.TestCase):
             candidate_root = lab_home / "working" / "dogfood"
             self.assertIn(f"candidate={candidate_root.resolve()}", result.stdout)
             self.assertNotIn("cargo-target", result.stdout)
+            candidate_path = Path(
+                result.stdout.split("candidate=", maxsplit=1)[1].strip()
+            )
+            companion_path = candidate_path.parent / "codex-code-mode-host"
+            self.assertTrue(companion_path.is_file())
+            self.assertFalse(companion_path.stat().st_mode & 0o222)
             self.assertEqual(
                 Path(cargo_pwd_file.read_text(encoding="utf-8").strip()).resolve(),
                 (checkout / "codex-rs").resolve(),
