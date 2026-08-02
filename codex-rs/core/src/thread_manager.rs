@@ -560,6 +560,7 @@ impl ThreadManager {
                 codex_home: codex_home.clone(),
                 sqlite: codex_state::SqliteConfig::new_for_testing(absolute_codex_home),
                 default_model_provider_id: OPENAI_PROVIDER_ID.to_string(),
+                rollout_compression_mode: codex_rollout::RolloutCompressionMode::Disabled,
             },
             state_db.clone(),
         ));

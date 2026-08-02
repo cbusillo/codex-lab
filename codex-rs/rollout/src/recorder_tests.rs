@@ -37,6 +37,7 @@ fn test_config(codex_home: &Path) -> RolloutConfig {
         cwd: codex_home.to_path_buf(),
         model_provider_id: "test-provider".to_string(),
         generate_memories: true,
+        rollout_compression_mode: crate::RolloutCompressionMode::Disabled,
     }
 }
 
@@ -612,6 +613,92 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
 }
 
 #[tokio::test]
+async fn dropping_last_recorder_keeps_lease_until_writer_drains() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let mut config = test_config(home.path());
+    config.rollout_compression_mode = crate::RolloutCompressionMode::Enabled;
+    let thread_id = ThreadId::new();
+    let recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::new(
+            thread_id,
+            /*forked_from_id*/ None,
+            /*parent_thread_id*/ None,
+            SessionSource::Exec,
+            /*thread_source*/ None,
+            "test_originator".to_string(),
+            BaseInstructions::default(),
+            Vec::new(),
+        ),
+    )
+    .await?;
+    recorder.persist().await?;
+    let rollout_path = recorder.rollout_path().to_path_buf();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    recorder
+        .tx
+        .send(RolloutCmd::Block {
+            entered: entered_tx,
+            release: release_rx,
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+    entered_rx.await.map_err(std::io::Error::other)?;
+    recorder
+        .tx
+        .send(RolloutCmd::AddItems(vec![agent_message_item(
+            "drained-after-recorder-drop",
+        )]))
+        .await
+        .map_err(std::io::Error::other)?;
+    drop(recorder);
+
+    assert!(
+        compression::RolloutLease::try_acquire_exclusive(
+            home.path(),
+            crate::RolloutCompressionMode::Enabled,
+            thread_id,
+        )
+        .await?
+        .is_none()
+    );
+    release_tx
+        .send(())
+        .map_err(|_| std::io::Error::other("rollout writer dropped before the test released it"))?;
+    let exclusive_lease = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(lease) = compression::RolloutLease::try_acquire_exclusive(
+                home.path(),
+                crate::RolloutCompressionMode::Enabled,
+                thread_id,
+            )
+            .await?
+            {
+                return Ok::<_, std::io::Error>(lease);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+    drop(exclusive_lease);
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(rollout_path.as_path()).await?;
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 0);
+    assert!(items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::AgentMessage(event))
+                if event.message == "drained-after-recorder-drop"
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> std::io::Result<()>
 {
     let home = TempDir::new().expect("temp dir");
@@ -787,10 +874,16 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
         writer: Some(JsonlWriter {
             file: tokio::fs::File::from_std(read_only_file),
         }),
+        reference_update: None,
+        reference_source_lease: None,
+        rollout_lease: None,
         deferred_log_file_info: None,
         pending_items: Vec::new(),
         meta: None,
         cwd: home.path().to_path_buf(),
+        codex_home: home.path().to_path_buf(),
+        compression_mode: crate::RolloutCompressionMode::Disabled,
+        thread_id: None,
         rollout_path: rollout_path.clone(),
         ordinal_state: RolloutOrdinalState::Legacy,
         last_logged_error: None,
@@ -953,7 +1046,13 @@ async fn append_rollout_item_to_path_assigns_next_paginated_ordinal() -> std::io
     let rollout_path = home.path().join("rollout.jsonl");
     write_paginated_rollout(&rollout_path, ThreadId::new(), &[4])?;
 
-    append_rollout_item_to_path(&rollout_path, &agent_message_item("offline")).await?;
+    append_rollout_item_to_path(
+        home.path(),
+        crate::RolloutCompressionMode::Disabled,
+        &rollout_path,
+        &agent_message_item("offline"),
+    )
+    .await?;
 
     let lines = read_rollout_lines(&rollout_path)?;
     assert_eq!(lines.last().and_then(|line| line.ordinal), Some(5));
