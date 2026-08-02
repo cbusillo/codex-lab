@@ -21,10 +21,11 @@ pub(super) async fn prepare(
         boundary,
     } = params;
     let source_reservation = store.live_writer_locks.reserve_lifecycle(thread_id).await;
+    let rollout_reservations = store.reserve_rollout_storage(&[thread_id]).await?;
     // Keep the source reserved until persistence and lineage materialization finish, even if the
     // caller cancels fork preparation.
     let lineage_store = store.clone();
-    let (lineage, source_reservation) = tokio::spawn(async move {
+    let (lineage, source_reservation, mut rollout_reservations) = tokio::spawn(async move {
         match live_writer::persist_thread(&lineage_store, thread_id).await {
             Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
             Err(err) => return Err(err),
@@ -32,12 +33,23 @@ pub(super) async fn prepare(
         let lineage = lineage_store
             .resolve_rollout_lineage_for_reference(thread_id)
             .await?;
-        Ok::<_, ThreadStoreError>((lineage, source_reservation))
+        Ok::<_, ThreadStoreError>((lineage, source_reservation, rollout_reservations))
     })
     .await
     .map_err(|err| ThreadStoreError::Internal {
         message: format!("failed to resolve fork lineage: {err}"),
     })??;
+    let ancestor_thread_ids = lineage
+        .segments()
+        .iter()
+        .map(super::rollout_lineage::RolloutLineageSegment::thread_id)
+        .filter(|segment_thread_id| *segment_thread_id != thread_id)
+        .collect::<Vec<_>>();
+    rollout_reservations.extend(
+        store
+            .reserve_rollout_storage(ancestor_thread_ids.as_slice())
+            .await?,
+    );
     let source_segment = lineage
         .segments()
         .last()
@@ -157,7 +169,7 @@ pub(super) async fn prepare(
         thread_id,
         history_base,
         model_context,
-        source_reservation,
+        (source_reservation, rollout_reservations),
     ))
 }
 

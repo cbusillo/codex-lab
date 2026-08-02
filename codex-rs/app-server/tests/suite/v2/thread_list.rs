@@ -641,6 +641,7 @@ sqlite = true
         cwd: codex_home.path().to_path_buf(),
         model_provider_id: "mock_provider".to_string(),
         generate_memories: false,
+        rollout_compression_mode: codex_rollout::RolloutCompressionMode::Disabled,
     };
     let repaired_page = codex_core::RolloutRecorder::list_threads(
         Some(state_db.clone()),
@@ -1445,7 +1446,13 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
         let path = rollout_path(codex_home.path(), filename_ts, &thread_id);
         let mut session_meta = read_session_meta_line(&path).await?;
         session_meta.meta.multi_agent_version = Some(version);
-        append_rollout_item_to_path(&path, &RolloutItem::SessionMeta(session_meta)).await?;
+        append_rollout_item_to_path(
+            codex_home.path(),
+            codex_rollout::RolloutCompressionMode::Disabled,
+            &path,
+            &RolloutItem::SessionMeta(session_meta),
+        )
+        .await?;
         if should_resume {
             threads_to_resume.push(thread_id.clone());
         }
@@ -2138,6 +2145,7 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
         cwd: codex_home.path().to_path_buf(),
         model_provider_id: "mock_provider".to_string(),
         generate_memories: false,
+        rollout_compression_mode: codex_rollout::RolloutCompressionMode::Disabled,
     };
     codex_core::RolloutRecorder::list_threads(
         Some(state_db.clone()),

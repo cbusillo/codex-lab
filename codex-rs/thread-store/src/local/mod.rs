@@ -169,6 +169,7 @@ pub struct LocalThreadStoreConfig {
     pub sqlite: SqliteConfig,
     /// Provider used only when older local metadata does not contain one.
     pub default_model_provider_id: String,
+    pub rollout_compression_mode: codex_rollout::RolloutCompressionMode,
 }
 
 impl LocalThreadStoreConfig {
@@ -177,6 +178,7 @@ impl LocalThreadStoreConfig {
             codex_home: config.codex_home().to_path_buf(),
             sqlite: config.sqlite_config().clone(),
             default_model_provider_id: config.model_provider_id().to_string(),
+            rollout_compression_mode: config.rollout_compression_mode(),
         }
     }
 }
@@ -291,6 +293,55 @@ impl LocalThreadStore {
             }
         }
         Ok(writer_locks)
+    }
+
+    async fn reserve_rollout_storage(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> ThreadStoreResult<Vec<codex_rollout::RolloutLease>> {
+        let mut thread_ids = thread_ids.to_vec();
+        thread_ids.sort_unstable_by_key(ToString::to_string);
+        thread_ids.dedup();
+        let mut leases = Vec::new();
+        for thread_id in thread_ids {
+            if let Some(lease) = codex_rollout::RolloutLease::acquire_shared(
+                self.config.codex_home.as_path(),
+                self.config.rollout_compression_mode,
+                thread_id,
+            )
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to reserve rollout storage for {thread_id}: {err}"),
+            })? {
+                leases.push(lease);
+            }
+        }
+        Ok(leases)
+    }
+
+    async fn lock_rollout_storage(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<Option<codex_rollout::RolloutLease>> {
+        if matches!(
+            self.config.rollout_compression_mode,
+            codex_rollout::RolloutCompressionMode::Disabled
+        ) {
+            return Ok(None);
+        }
+        codex_rollout::RolloutLease::try_acquire_exclusive(
+            self.config.codex_home.as_path(),
+            self.config.rollout_compression_mode,
+            thread_id,
+        )
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to lock rollout storage for {thread_id}: {err}"),
+        })?
+        .map(Some)
+        .ok_or_else(|| ThreadStoreError::Conflict {
+            message: format!("thread {thread_id} has active rollout storage"),
+        })
     }
 
     async fn insert_live_recorder(

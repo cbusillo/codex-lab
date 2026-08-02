@@ -44,6 +44,12 @@ pub(super) async fn archive_threads(
     let _writer_guards = store
         .acquire_paginated_writer_locks(&lock_thread_ids)
         .await?;
+    let mut _rollout_storage_guards = Vec::new();
+    for thread_id in &lock_thread_ids {
+        if let Some(guard) = store.lock_rollout_storage(*thread_id).await? {
+            _rollout_storage_guards.push(guard);
+        }
+    }
 
     let parent_thread_id = thread_ids[0];
     let mut archived_thread_ids = Vec::new();

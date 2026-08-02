@@ -127,6 +127,11 @@ enum RolloutCmd {
     Shutdown {
         ack: oneshot::Sender<std::io::Result<()>>,
     },
+    #[cfg(test)]
+    Block {
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
 }
 
 /// Observable state for the background rollout writer task.
@@ -880,23 +885,57 @@ impl RolloutRecorder {
 
                 RolloutWriterState {
                     writer: None,
+                    reference_update: None,
+                    reference_source_lease: None,
+                    rollout_lease: None,
                     deferred_log_file_info: Some(log_file_info),
                     pending_items: Vec::new(),
                     meta: Some(session_meta),
                     cwd: cwd.clone(),
+                    codex_home: config.codex_home().to_path_buf(),
+                    compression_mode: config.rollout_compression_mode(),
+                    thread_id: Some(thread_id),
                     rollout_path: path,
                     ordinal_state,
                     last_logged_error: None,
                 }
             }
             RolloutRecorderParams::Resume { path } => {
+                let lease_path = compression::plain_rollout_path(path.as_path());
+                let thread_id = if matches!(
+                    config.rollout_compression_mode(),
+                    crate::RolloutCompressionMode::Enabled
+                ) {
+                    Some(compression::thread_id_from_rollout_path(
+                        lease_path.as_path(),
+                    )?)
+                } else {
+                    None
+                };
+                let rollout_lease = match thread_id {
+                    Some(thread_id) => {
+                        compression::RolloutLease::acquire_shared(
+                            config.codex_home(),
+                            config.rollout_compression_mode(),
+                            thread_id,
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
                 let (path, file, ordinal_state) = open_rollout_for_append(path.as_path()).await?;
                 RolloutWriterState {
                     writer: Some(JsonlWriter { file }),
+                    reference_update: None,
+                    reference_source_lease: None,
+                    rollout_lease,
                     deferred_log_file_info: None,
                     pending_items: Vec::new(),
                     meta: None,
                     cwd: cwd.clone(),
+                    codex_home: config.codex_home().to_path_buf(),
+                    compression_mode: config.rollout_compression_mode(),
+                    thread_id,
                     rollout_path: path,
                     ordinal_state,
                     last_logged_error: None,
@@ -1630,10 +1669,16 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
 /// unwritten suffix so the next barrier can reopen the file and retry.
 struct RolloutWriterState {
     writer: Option<JsonlWriter>,
+    reference_update: Option<compression::RolloutReferenceUpdate>,
+    reference_source_lease: Option<compression::RolloutLease>,
+    rollout_lease: Option<compression::RolloutLease>,
     deferred_log_file_info: Option<LogFileInfo>,
     pending_items: Vec<RolloutItem>,
     meta: Option<SessionMeta>,
     cwd: PathBuf,
+    codex_home: PathBuf,
+    compression_mode: crate::RolloutCompressionMode,
+    thread_id: Option<ThreadId>,
     rollout_path: PathBuf,
     ordinal_state: RolloutOrdinalState,
     last_logged_error: Option<String>,
@@ -1666,9 +1711,13 @@ impl RolloutWriterState {
 
     async fn shutdown(&mut self) -> std::io::Result<()> {
         if self.is_deferred() && self.pending_items.is_empty() {
+            self.release_storage_leases();
             return Ok(());
         }
-        self.write_pending_with_recovery("shutdown").await
+        self.write_pending_with_recovery("shutdown").await?;
+        self.writer = None;
+        self.release_storage_leases();
+        Ok(())
     }
 
     async fn write_pending_with_recovery(&mut self, operation: &str) -> std::io::Result<()> {
@@ -1722,6 +1771,8 @@ impl RolloutWriterState {
             return Ok(());
         }
 
+        self.ensure_rollout_lease().await?;
+
         let path = self
             .deferred_log_file_info
             .as_ref()
@@ -1733,6 +1784,59 @@ impl RolloutWriterState {
         });
         self.deferred_log_file_info = None;
         Ok(())
+    }
+
+    async fn ensure_rollout_lease(&mut self) -> std::io::Result<()> {
+        if self.rollout_lease.is_none() {
+            let Some(thread_id) = self.thread_id else {
+                return Ok(());
+            };
+            self.rollout_lease = compression::RolloutLease::acquire_shared(
+                self.codex_home.as_path(),
+                self.compression_mode,
+                thread_id,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn begin_reference_update_if_needed(&mut self) -> std::io::Result<()> {
+        if self.reference_update.is_some() {
+            return Ok(());
+        }
+        let Some(history_base) = self.meta.as_ref().and_then(|meta| meta.history_base) else {
+            return Ok(());
+        };
+        self.reference_source_lease = compression::RolloutLease::acquire_shared(
+            self.codex_home.as_path(),
+            self.compression_mode,
+            history_base.thread_id,
+        )
+        .await?;
+        if matches!(
+            self.compression_mode,
+            crate::RolloutCompressionMode::Enabled
+        ) {
+            self.reference_update =
+                Some(compression::RolloutReferenceUpdate::begin(self.codex_home.as_path()).await?);
+        }
+        Ok(())
+    }
+
+    fn commit_reference_update(&mut self) -> std::io::Result<()> {
+        if let Some(update) = self.reference_update.as_mut() {
+            update.commit()?;
+        }
+        self.reference_update = None;
+        self.reference_source_lease = None;
+        Ok(())
+    }
+
+    fn release_storage_leases(&mut self) {
+        self.reference_update = None;
+        self.reference_source_lease = None;
+        self.rollout_lease = None;
     }
 
     async fn write_session_meta_if_needed(&mut self) -> std::io::Result<()> {
@@ -1752,6 +1856,7 @@ impl RolloutWriterState {
 
     async fn write_pending_once(&mut self) -> std::io::Result<()> {
         self.ensure_writer_open().await?;
+        self.begin_reference_update_if_needed().await?;
         self.write_session_meta_if_needed().await?;
 
         self.write_pending_items_once().await?;
@@ -1759,6 +1864,7 @@ impl RolloutWriterState {
         if let Some(writer) = self.writer.as_mut() {
             writer.file.flush().await?;
         }
+        self.commit_reference_update()?;
         Ok(())
     }
 
@@ -1820,6 +1926,11 @@ async fn rollout_writer(
                     let _ = ack.send(Err(err));
                 }
             },
+            #[cfg(test)]
+            RolloutCmd::Block { entered, release } => {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
         }
     }
 
@@ -1861,13 +1972,48 @@ async fn write_session_meta(
 /// `RolloutRecorder::record_canonical_items` so rollout writes remain ordered
 /// with the rest of the session stream.
 pub async fn append_rollout_item_to_path(
+    codex_home: &Path,
+    compression_mode: crate::RolloutCompressionMode,
     rollout_path: &Path,
     item: &RolloutItem,
 ) -> std::io::Result<()> {
+    let _rollout_lease = if matches!(compression_mode, crate::RolloutCompressionMode::Enabled) {
+        let thread_id = compression::thread_id_from_rollout_path(rollout_path)?;
+        compression::RolloutLease::acquire_shared(codex_home, compression_mode, thread_id).await?
+    } else {
+        None
+    };
+    let history_base = match item {
+        RolloutItem::SessionMeta(meta) => meta.meta.history_base,
+        _ => None,
+    };
+    let _source_lease = match (compression_mode, history_base) {
+        (crate::RolloutCompressionMode::Enabled, Some(history_base)) => {
+            compression::RolloutLease::acquire_shared(
+                codex_home,
+                compression_mode,
+                history_base.thread_id,
+            )
+            .await?
+        }
+        _ => None,
+    };
     let (_rollout_path, file, ordinal_state) = open_rollout_for_append(rollout_path).await?;
     let ordinal = ordinal_state.current()?;
     let mut writer = JsonlWriter { file };
-    writer.write_rollout_item(item, ordinal).await
+    let mut reference_update = if history_base.is_some()
+        && matches!(compression_mode, crate::RolloutCompressionMode::Enabled)
+    {
+        Some(compression::RolloutReferenceUpdate::begin(codex_home).await?)
+    } else {
+        None
+    };
+    writer.write_rollout_item(item, ordinal).await?;
+    writer.file.flush().await?;
+    if let Some(update) = reference_update.as_mut() {
+        update.commit()?;
+    }
+    Ok(())
 }
 
 async fn open_rollout_for_append(

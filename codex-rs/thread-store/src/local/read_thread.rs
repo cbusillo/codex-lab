@@ -872,6 +872,8 @@ mod tests {
         )
         .expect("session file");
         codex_rollout::append_rollout_item_to_path(
+            home.path(),
+            config.rollout_compression_mode,
             &rollout_path,
             &RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
                 thread_id,

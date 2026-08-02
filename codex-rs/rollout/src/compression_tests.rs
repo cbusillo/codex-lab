@@ -3,6 +3,7 @@ use std::fs;
 use std::fs::FileTimes;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -24,9 +25,16 @@ use super::*;
 use crate::RolloutConfig;
 use crate::RolloutRecorder;
 use crate::RolloutRecorderParams;
+use crate::RolloutReferenceIndex;
+use crate::SESSIONS_SUBDIR;
 use crate::append_rollout_item_to_path;
 use crate::read_session_meta_line;
 use crate::search_rollout_matches;
+
+const LEASE_CHILD_HOME_ENV: &str = "CODEX_ROLLOUT_LEASE_CHILD_HOME";
+const LEASE_CHILD_ID_ENV: &str = "CODEX_ROLLOUT_LEASE_CHILD_ID";
+const LEASE_CHILD_READY_ENV: &str = "CODEX_ROLLOUT_LEASE_CHILD_READY";
+const LEASE_CHILD_RELEASE_ENV: &str = "CODEX_ROLLOUT_LEASE_CHILD_RELEASE";
 
 #[tokio::test]
 async fn load_rollout_items_reads_compressed_rollout() -> anyhow::Result<()> {
@@ -220,6 +228,8 @@ async fn append_rollout_item_materializes_compressed_rollout() -> anyhow::Result
     compress_now(&rollout_path)?;
 
     append_rollout_item_to_path(
+        home.path(),
+        crate::RolloutCompressionMode::Enabled,
         &rollout_path,
         &RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
             message: "hello after append".to_string(),
@@ -305,6 +315,240 @@ async fn worker_compresses_old_active_and_archived_rollouts() -> anyhow::Result<
             .join("rollout-compression.lock")
             .exists()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_skips_leased_rollout_until_lease_is_released() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let uuid = Uuid::from_u128(22);
+    let id = ThreadId::from_string(&uuid.to_string())?;
+    let path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
+    write_rollout(&path, id, "leased")?;
+    set_old_mtime(&path)?;
+
+    let lease =
+        RolloutLease::acquire_shared(home.path(), crate::RolloutCompressionMode::Enabled, id)
+            .await?
+            .expect("enabled compression should acquire a lease");
+    let second_lease =
+        RolloutLease::acquire_shared(home.path(), crate::RolloutCompressionMode::Enabled, id)
+            .await?
+            .expect("shared rollout leases should coexist");
+    assert!(
+        RolloutLease::try_acquire_exclusive(
+            home.path(),
+            crate::RolloutCompressionMode::Enabled,
+            id,
+        )
+        .await?
+        .is_none()
+    );
+    worker::run(home.path().to_path_buf()).await?;
+    assert!(path.exists());
+    assert!(!compressed_rollout_path(&path).exists());
+
+    drop(second_lease);
+    drop(lease);
+    assert!(!lease_path(home.path(), id).exists());
+    fs::remove_file(home.path().join(".tmp").join("rollout-compression.lock"))?;
+    worker::run(home.path().to_path_buf()).await?;
+    assert!(!path.exists());
+    assert!(compressed_rollout_path(&path).exists());
+    Ok(())
+}
+
+#[test]
+fn rollout_lease_child_process_helper() {
+    let Ok(home) = std::env::var_os(LEASE_CHILD_HOME_ENV).ok_or(()) else {
+        return;
+    };
+    let thread_id = ThreadId::from_string(
+        std::env::var(LEASE_CHILD_ID_ENV)
+            .expect("child thread id")
+            .as_str(),
+    )
+    .expect("valid child thread id");
+    let ready = std::path::PathBuf::from(
+        std::env::var_os(LEASE_CHILD_READY_ENV).expect("child ready path"),
+    );
+    let release = std::path::PathBuf::from(
+        std::env::var_os(LEASE_CHILD_RELEASE_ENV).expect("child release path"),
+    );
+    let lease = RolloutLease::try_acquire_blocking(
+        std::path::Path::new(&home),
+        thread_id,
+        RolloutLeaseKind::Shared,
+    )
+    .expect("acquire child lease")
+    .expect("child lease should be available");
+    fs::write(ready, b"ready").expect("write child ready marker");
+    let started_at = std::time::Instant::now();
+    while !release.exists() {
+        assert!(
+            started_at.elapsed() < Duration::from_secs(10),
+            "timed out waiting for lease release marker"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(lease);
+}
+
+#[tokio::test]
+async fn rollout_lease_excludes_another_process() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let ready = home.path().join("child-ready");
+    let release = home.path().join("child-release");
+    let mut child = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("compression::tests::rollout_lease_child_process_helper")
+        .arg("--nocapture")
+        .env(LEASE_CHILD_HOME_ENV, home.path())
+        .env(LEASE_CHILD_ID_ENV, thread_id.to_string())
+        .env(LEASE_CHILD_READY_ENV, ready.as_path())
+        .env(LEASE_CHILD_RELEASE_ENV, release.as_path())
+        .spawn()?;
+    let started_at = std::time::Instant::now();
+    while !ready.exists() {
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("lease child exited before acquiring its lease: {status}");
+        }
+        anyhow::ensure!(
+            started_at.elapsed() < Duration::from_secs(10),
+            "timed out waiting for lease child"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        RolloutLease::try_acquire_exclusive(
+            home.path(),
+            crate::RolloutCompressionMode::Enabled,
+            thread_id,
+        )
+        .await?
+        .is_none()
+    );
+    fs::write(release, b"release")?;
+    assert!(child.wait()?.success());
+    assert!(
+        RolloutLease::try_acquire_exclusive(
+            home.path(),
+            crate::RolloutCompressionMode::Enabled,
+            thread_id,
+        )
+        .await?
+        .is_some()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_skips_resumed_rollout_until_shutdown() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let config = RolloutConfig {
+        codex_home: home.path().to_path_buf(),
+        sqlite: codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        cwd: home.path().to_path_buf(),
+        model_provider_id: "test-provider".to_string(),
+        generate_memories: true,
+        rollout_compression_mode: crate::RolloutCompressionMode::Enabled,
+    };
+    let uuid = Uuid::from_u128(23);
+    let thread_id = ThreadId::from_string(&uuid.to_string())?;
+    let path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
+    write_rollout(path.as_path(), thread_id, "live resumed")?;
+    let recorder =
+        RolloutRecorder::new(&config, RolloutRecorderParams::resume(path.clone())).await?;
+    set_old_mtime(path.as_path())?;
+
+    worker::run(home.path().to_path_buf()).await?;
+    assert!(path.exists());
+    assert!(!compressed_rollout_path(path.as_path()).exists());
+
+    recorder.shutdown().await?;
+    fs::remove_file(home.path().join(".tmp").join("rollout-compression.lock"))?;
+    worker::run(home.path().to_path_buf()).await?;
+    assert!(!path.exists());
+    assert!(compressed_rollout_path(path.as_path()).exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_refreshes_stale_reference_index_before_compression() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let source_uuid = Uuid::from_u128(24);
+    let source_id = ThreadId::from_string(&source_uuid.to_string())?;
+    let source_path = rollout_path(home.path(), "2025-01-03T12-00-00", source_uuid);
+    write_rollout(source_path.as_path(), source_id, "newly referenced source")?;
+    set_old_mtime(source_path.as_path())?;
+    let mut reference_index = RolloutReferenceIndex::scan(home.path()).await?;
+    let snapshot = RolloutReferenceSnapshot::acquire(home.path()).await?;
+    let mut reference_generation = snapshot.generation();
+    drop(snapshot);
+
+    let config = RolloutConfig {
+        codex_home: home.path().to_path_buf(),
+        sqlite: codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        cwd: home.path().to_path_buf(),
+        model_provider_id: "test-provider".to_string(),
+        generate_memories: true,
+        rollout_compression_mode: crate::RolloutCompressionMode::Enabled,
+    };
+    let child_id = ThreadId::from_string(&Uuid::from_u128(25).to_string())?;
+    let history_base = HistoryPosition {
+        thread_id: source_id,
+        end_ordinal_exclusive: 2,
+        end_byte_offset: fs::metadata(source_path.as_path())?.len(),
+    };
+    let child_recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::new(
+            child_id,
+            /*forked_from_id*/ Some(source_id),
+            /*parent_thread_id*/ Some(source_id),
+            SessionSource::Exec,
+            /*thread_source*/ None,
+            "test-originator".to_string(),
+            codex_protocol::models::BaseInstructions::default(),
+            Vec::new(),
+        )
+        .with_history_mode(codex_protocol::protocol::ThreadHistoryMode::Paginated)
+        .with_history_base(Some(history_base)),
+    )
+    .await?;
+    child_recorder.persist().await?;
+    child_recorder.shutdown().await?;
+
+    worker::compress_rollouts_with_index_for_test(
+        home.path(),
+        home.path().join(SESSIONS_SUBDIR).as_path(),
+        &mut reference_index,
+        &mut reference_generation,
+    )
+    .await?;
+    assert!(source_path.exists());
+    assert!(!compressed_rollout_path(source_path.as_path()).exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_repairs_abandoned_dirty_reference_state() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let uuid = Uuid::from_u128(26);
+    let thread_id = ThreadId::from_string(&uuid.to_string())?;
+    let path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
+    write_rollout(path.as_path(), thread_id, "dirty state recovery")?;
+    set_old_mtime(path.as_path())?;
+    let update = RolloutReferenceUpdate::begin(home.path()).await?;
+    drop(update);
+
+    worker::run(home.path().to_path_buf()).await?;
+
+    assert!(!path.exists());
+    assert!(compressed_rollout_path(path.as_path()).exists());
+    let snapshot = RolloutReferenceSnapshot::acquire(home.path()).await?;
+    assert!(!snapshot.is_dirty());
     Ok(())
 }
 
@@ -397,6 +641,7 @@ async fn resume_materializes_compressed_rollout_path() -> anyhow::Result<()> {
         cwd: home.path().to_path_buf(),
         model_provider_id: "test-provider".to_string(),
         generate_memories: true,
+        rollout_compression_mode: crate::RolloutCompressionMode::Enabled,
     };
     let uuid = Uuid::from_u128(3);
     let thread_id = ThreadId::from_string(&uuid.to_string())?;
@@ -478,6 +723,8 @@ async fn append_materialization_preserves_compressed_rollout_permissions() -> an
     fs::set_permissions(&compressed_path, fs::Permissions::from_mode(0o600))?;
 
     append_rollout_item_to_path(
+        home.path(),
+        crate::RolloutCompressionMode::Enabled,
         &rollout_path,
         &RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
             message: "materialize restricted transcript".to_string(),

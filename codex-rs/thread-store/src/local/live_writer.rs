@@ -102,6 +102,7 @@ pub(super) async fn resume_thread(
         cwd,
         model_provider_id: params.metadata.model_provider.clone(),
         generate_memories: matches!(params.metadata.memory_mode, ThreadMemoryMode::Enabled),
+        rollout_compression_mode: store.config.rollout_compression_mode,
     };
     let writer_lock = if matches!(history_mode, ThreadHistoryMode::Paginated) {
         Some(store.writer_lock_coordinator.acquire(params.thread_id)?)
