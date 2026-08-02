@@ -108,6 +108,7 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
         cwd: codex_home.clone(),
         model_provider_id: "test-provider".to_string(),
         generate_memories: false,
+        rollout_compression_mode: codex_rollout::RolloutCompressionMode::Disabled,
     };
     let recorder = RolloutRecorder::new(
         &rollout_config,

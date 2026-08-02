@@ -15,6 +15,7 @@ pub(super) fn test_config(codex_home: &Path) -> LocalThreadStoreConfig {
         codex_home: codex_home.to_path_buf(),
         sqlite: codex_state::SqliteConfig::new_for_testing(codex_home.abs()),
         default_model_provider_id: "test-provider".to_string(),
+        rollout_compression_mode: codex_rollout::RolloutCompressionMode::Disabled,
     }
 }
 

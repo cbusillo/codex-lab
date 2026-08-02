@@ -36,7 +36,13 @@ pub(super) async fn delete_thread(
         return Err(referenced_thread_error(thread_id));
     }
     let mut writer_guards = store.acquire_paginated_writer_locks(&[thread_id]).await?;
-    delete_thread_after_reference_check(store, thread_id, &mut writer_guards).await
+    stop_live_recorder(store, thread_id, &mut writer_guards).await?;
+    let _rollout_storage_guard = store.lock_rollout_storage(thread_id).await?;
+    let reference_index = scan_reference_index(store).await?;
+    if reference_index.reference_count(thread_id) > 0 {
+        return Err(referenced_thread_error(thread_id));
+    }
+    delete_thread_after_reference_check(store, thread_id).await
 }
 
 pub(super) async fn delete_threads(
@@ -61,10 +67,40 @@ pub(super) async fn delete_threads(
     }
 
     let reference_index = scan_reference_index(store).await?;
+    validate_deletion_references(&reference_index, &deletion_set, &thread_ids)?;
+
+    let mut writer_guards = store
+        .acquire_paginated_writer_locks(&lock_thread_ids)
+        .await?;
+    for thread_id in &lock_thread_ids {
+        stop_live_recorder(store, *thread_id, &mut writer_guards).await?;
+    }
+    let mut _rollout_storage_guards = Vec::new();
+    for thread_id in &lock_thread_ids {
+        if let Some(guard) = store.lock_rollout_storage(*thread_id).await? {
+            _rollout_storage_guards.push(guard);
+        }
+    }
+    let reference_index = scan_reference_index(store).await?;
+    validate_deletion_references(&reference_index, &deletion_set, &thread_ids)?;
+    for thread_id in thread_ids {
+        match delete_thread_after_reference_check(store, thread_id).await {
+            Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn validate_deletion_references(
+    reference_index: &RolloutReferenceIndex,
+    deletion_set: &HashSet<codex_protocol::ThreadId>,
+    thread_ids: &[codex_protocol::ThreadId],
+) -> ThreadStoreResult<()> {
     // References from children in this delete set are removed by the same request, so only
     // references from children outside the set should block it.
     let mut internal_reference_counts = HashMap::new();
-    for child_thread_id in &deletion_set {
+    for child_thread_id in deletion_set {
         if let Some(history_base) = reference_index.history_base(*child_thread_id)
             && history_base.thread_id != *child_thread_id
             && deletion_set.contains(&history_base.thread_id)
@@ -74,7 +110,7 @@ pub(super) async fn delete_threads(
                 .or_default() += 1;
         }
     }
-    for thread_id in &thread_ids {
+    for thread_id in thread_ids {
         let internal_reference_count = internal_reference_counts
             .get(thread_id)
             .copied()
@@ -83,15 +119,26 @@ pub(super) async fn delete_threads(
             return Err(referenced_thread_error(*thread_id));
         }
     }
+    Ok(())
+}
 
-    let mut writer_guards = store
-        .acquire_paginated_writer_locks(&lock_thread_ids)
-        .await?;
-    for thread_id in thread_ids {
-        match delete_thread_after_reference_check(store, thread_id, &mut writer_guards).await {
-            Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
-            Err(err) => return Err(err),
-        }
+async fn stop_live_recorder(
+    store: &LocalThreadStore,
+    thread_id: codex_protocol::ThreadId,
+    writer_guards: &mut Vec<super::writer_lock::WriterLockGuard>,
+) -> ThreadStoreResult<()> {
+    let Some(entry) = store.live_recorders.lock().await.remove(&thread_id) else {
+        return Ok(());
+    };
+    entry
+        .recorder
+        .shutdown()
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to stop rollout writer for {thread_id}: {err}"),
+        })?;
+    if let Some(writer_lock) = entry.writer_lock {
+        writer_guards.push(writer_lock);
     }
     Ok(())
 }
@@ -115,7 +162,6 @@ fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreEr
 async fn delete_thread_after_reference_check(
     store: &LocalThreadStore,
     thread_id: codex_protocol::ThreadId,
-    writer_guards: &mut Vec<super::writer_lock::WriterLockGuard>,
 ) -> ThreadStoreResult<()> {
     let thread_id_str = thread_id.to_string();
     let state_db_ctx = store.state_db().await;
@@ -156,16 +202,6 @@ async fn delete_thread_after_reference_check(
     }
     super::thread_history::delete_thread(store, thread_id).await?;
 
-    // Drop the recorder before removing files, but retain its writer lock until cleanup finishes.
-    if let Some(writer_lock) = store
-        .live_recorders
-        .lock()
-        .await
-        .remove(&thread_id)
-        .and_then(|entry| entry.writer_lock)
-    {
-        writer_guards.push(writer_lock);
-    }
     let found_rollout_path = !rollout_paths.is_empty();
     for rollout_path in rollout_paths {
         delete_rollout_file(store, rollout_path.as_path(), thread_id)?;

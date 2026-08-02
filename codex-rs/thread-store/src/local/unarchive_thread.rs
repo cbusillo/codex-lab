@@ -16,6 +16,7 @@ pub(super) async fn unarchive_thread(
 ) -> ThreadStoreResult<StoredThread> {
     let thread_id = params.thread_id;
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
+    let _rollout_storage_guard = store.lock_rollout_storage(thread_id).await?;
     let state_db_ctx = store.state_db().await;
     let archived_path = find_archived_thread_path_by_id_str(
         store.config.codex_home.as_path(),

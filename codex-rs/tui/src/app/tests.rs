@@ -6501,7 +6501,13 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
                 time_to_first_token_ms: None,
             })),
         ] {
-            codex_rollout::append_rollout_item_to_path(&source_path, &item).await?;
+            codex_rollout::append_rollout_item_to_path(
+                config.codex_home.as_path(),
+                codex_rollout::RolloutCompressionMode::Disabled,
+                &source_path,
+                &item,
+            )
+            .await?;
         }
     }
 
