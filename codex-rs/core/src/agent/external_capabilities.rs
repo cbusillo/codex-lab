@@ -204,7 +204,7 @@ pub(super) fn claude_capabilities(
             Some(ExternalAgentModelCapability {
                 selector: spec.slug.to_string(),
                 model: (*model).to_string(),
-                explicit_only: spec.slug == "claude-fable-5",
+                explicit_only: spec.explicit_only,
             })
         })
         .take(MAX_DISCOVERED_MODELS)

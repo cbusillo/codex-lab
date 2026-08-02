@@ -66,7 +66,6 @@ pub const DEFAULT_AGENT_NAMES: &[&str] = &[
     "github-copilot",
     "claude-haiku-4.5",
     "qwen3-coder-plus",
-    "claude-fable-5",
     "cloud-gpt-5.1-codex-max",
 ];
 
@@ -80,6 +79,7 @@ pub struct AgentModelSpec {
     pub model_args: &'static [&'static str],
     pub description: &'static str,
     pub enabled_by_default: bool,
+    pub explicit_only: bool,
     pub aliases: &'static [&'static str],
     pub gating_env: Option<&'static str>,
     pub is_frontline: bool,
@@ -132,6 +132,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "gpt-5.6-sol"],
         description: "Frontier GPT-5.6 model for high-capability coding, research, and real-world work.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &["gpt-5.6", "gpt-5.6-sol", "code-gpt-5.6"],
         gating_env: None,
         is_frontline: true,
@@ -146,6 +147,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "gpt-5.6-terra"],
         description: "Strong GPT-5.6 model for capable coding work at a lower price point.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &["gpt-5.6-terra"],
         gating_env: None,
         is_frontline: false,
@@ -160,6 +162,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "gpt-5.6-luna"],
         description: "Efficient GPT-5.6 model for high-volume coding and quick iteration.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &["gpt-5.6-luna"],
         gating_env: None,
         is_frontline: false,
@@ -174,6 +177,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "gpt-5.5"],
         description: "Default frontier model for complex coding, research, and real-world work.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &[
             "gpt-5.5",
             "code-gpt-5.1-codex-max",
@@ -199,6 +203,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "gpt-5.4"],
         description: "Highest-capacity GPT option for tricky reasoning and large-context work. In Every Code, GPT-5.4 defaults to the expensive 1m context path, so use when correctness or history preservation is worth the added cost.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &[
             "gpt-5.4",
             "code-gpt-5.1",
@@ -220,6 +225,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "gpt-5.4-mini"],
         description: "Budget coding agent for small changes and quick refactors; use when speed and cost matter.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &[
             "gpt-5.4-mini",
             "code-gpt-5.1-codex-mini",
@@ -242,6 +248,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "claude-opus-5"],
         description: "Most capable Claude model for sustained agentic work and complex reasoning.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &[
             "claude-opus",
             "claude-opus-4.1",
@@ -263,6 +270,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "claude-sonnet-4-6"],
         description: "Balanced Claude model for implementation and debugging; a solid default when you want Claude.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &["claude", "claude-sonnet", "claude-sonnet-4.5"],
         gating_env: None,
         is_frontline: false,
@@ -277,6 +285,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "claude-fable-5"],
         description: FABLE_AGENT_GUIDANCE,
         enabled_by_default: true,
+        explicit_only: true,
         aliases: &["fable", "claude-fable"],
         gating_env: None,
         is_frontline: false,
@@ -291,6 +300,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "claude-haiku-4-5"],
         description: "Fast Claude model for simple tasks, drafts, and quick iterations; pick when latency matters.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &["claude-haiku"],
         gating_env: None,
         is_frontline: false,
@@ -305,6 +315,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &[],
         description: "Google/Gemini-family agent via Antigravity CLI; use for Google perspective after consumer Gemini CLI retirement. AGY uses its configured model, not per-run Gemini Pro/Flash flags.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &[
             "agy",
             "google",
@@ -326,6 +337,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &[],
         description: "GitHub Copilot CLI agent; uses your signed-in Copilot account and configured default model.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &["copilot", "github-copilot-cli"],
         gating_env: None,
         is_frontline: false,
@@ -340,6 +352,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["-m", "qwen3-coder-plus"],
         description: "Fast and capable alternative; useful as a second opinion or for cross-checking.",
         enabled_by_default: true,
+        explicit_only: false,
         aliases: &["qwen", "qwen3", "qwen-3-coder"],
         gating_env: None,
         is_frontline: false,
@@ -354,6 +367,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "gpt-5.1-codex-max"],
         description: "Cloud-hosted gpt-5.1-codex-max agent; use for remote runs when enabled via CODE_ENABLE_CLOUD_AGENT_MODEL.",
         enabled_by_default: false,
+        explicit_only: false,
         aliases: &["cloud-gpt-5.1-codex", "cloud-gpt-5-codex", "cloud"],
         gating_env: Some(CLOUD_MODEL_ENV_FLAG),
         is_frontline: false,
@@ -425,6 +439,7 @@ fn dynamic_code_agent_spec(model: ManifestModel) -> Option<AgentModelSpec> {
         model_args,
         description,
         enabled_by_default: true,
+        explicit_only: false,
         aliases,
         gating_env: None,
         is_frontline,
@@ -522,7 +537,7 @@ pub fn agent_model_specs() -> &'static [AgentModelSpec] {
 pub fn enabled_agent_model_specs() -> Vec<&'static AgentModelSpec> {
     agent_model_specs()
         .iter()
-        .filter(|spec| spec.is_enabled())
+        .filter(|spec| spec.is_enabled() && !spec.explicit_only)
         .collect()
 }
 
@@ -647,7 +662,7 @@ pub fn build_model_guide_description(active_agents: &[String]) -> String {
 pub fn model_guide_markdown() -> String {
     agent_model_specs()
         .iter()
-        .filter(|spec| spec.is_enabled())
+        .filter(|spec| spec.is_enabled() && !spec.explicit_only)
         .map(model_guide_line)
         .collect::<Vec<_>>()
         .join("\n")
@@ -659,7 +674,10 @@ pub fn model_guide_markdown_with_custom(
     let mut lines = Vec::new();
     let mut positions = HashMap::new();
 
-    for spec in agent_model_specs().iter().filter(|spec| spec.is_enabled()) {
+    for spec in agent_model_specs()
+        .iter()
+        .filter(|spec| spec.is_enabled() && !spec.explicit_only)
+    {
         let idx = lines.len();
         positions.insert(spec.slug.to_ascii_lowercase(), idx);
         lines.push(model_guide_line(spec));
