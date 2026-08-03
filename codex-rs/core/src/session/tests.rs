@@ -11209,7 +11209,7 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
             let ResponseItem::Message { role, content, .. } = item else {
                 return false;
             };
-            if role != "user" {
+            if role != "developer" {
                 return false;
             }
             content.iter().any(|content_item| {

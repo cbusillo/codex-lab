@@ -85,6 +85,7 @@ async fn responses_api_parent_and_subagent_requests_include_identity_headers() -
     .await;
 
     let mut builder = test_codex().with_config(|config| {
+        config.agents_enabled = true;
         config
             .features
             .disable(Feature::EnableRequestCompression)

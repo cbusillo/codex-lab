@@ -88,6 +88,7 @@ async fn api_key_subagent_uses_session_id_as_prompt_cache_key() -> Result<()> {
     let mut builder = test_codex()
         .with_auth(CodexAuth::from_api_key("dummy"))
         .with_config(|config| {
+            config.agents_enabled = true;
             config
                 .features
                 .enable(Feature::Collab)

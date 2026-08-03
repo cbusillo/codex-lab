@@ -7,7 +7,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
-use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex_with_agents as test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::time::Duration;

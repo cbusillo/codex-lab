@@ -595,6 +595,7 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
     let mut builder = test_codex()
         .with_exec_server_url(format!("ws://{}", listener.local_addr()?))
         .with_config(|config| {
+            config.agents_enabled = true;
             config.project_doc_max_bytes = 0;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
             assert!(
@@ -1023,6 +1024,7 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments() -> Res
     let mut builder = test_codex()
         .with_exec_server_url(format!("ws://{}", listener.local_addr()?))
         .with_config(|config| {
+            config.agents_enabled = true;
             config.project_doc_max_bytes = 0;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
             assert!(config.features.enable(Feature::Collab).is_ok());

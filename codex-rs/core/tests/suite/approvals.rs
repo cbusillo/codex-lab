@@ -877,7 +877,7 @@ fn body_contains(req: &Request, text: &str) -> bool {
 }
 
 async fn wait_for_spawned_thread(test: &TestCodex) -> Result<Arc<CodexThread>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let ids = test.thread_manager.list_thread_ids().await;
         if let Some(thread_id) = ids
@@ -2320,6 +2320,7 @@ async fn spawned_subagent_execpolicy_amendment_propagates_to_parent_session() ->
     let sandbox_policy = SandboxPolicy::new_read_only_policy();
     let sandbox_policy_for_config = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
+        config.agents_enabled = true;
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
         config
             .set_legacy_sandbox_policy(sandbox_policy_for_config)

@@ -1232,6 +1232,7 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
 pub fn test_codex() -> TestCodexBuilder {
     TestCodexBuilder {
         config_mutators: vec![Box::new(|config| {
+            config.agents_enabled = false;
             config
                 .features
                 .disable(Feature::Apps)
@@ -1257,6 +1258,12 @@ pub fn test_codex() -> TestCodexBuilder {
         history_mode: None,
         home_backed_auth_manager: false,
     }
+}
+
+pub fn test_codex_with_agents() -> TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config.agents_enabled = true;
+    })
 }
 
 #[cfg(test)]
