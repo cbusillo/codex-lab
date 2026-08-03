@@ -322,7 +322,7 @@ async fn named_user_agent_requires_explicit_retry_and_receives_plaintext() -> Re
     let omitted_output = omitted_output_item["output"]
         .as_str()
         .expect("omitted-selector output");
-    assert!(omitted_output.contains("current user turn names specific agents"));
+    assert!(omitted_output.contains("current user turn explicitly requests specific agents"));
     assert!(omitted_output.contains("claude-opus-5"));
     assert!(omitted_output.contains("Set `agent_type`"));
 
@@ -397,9 +397,58 @@ async fn named_user_agent_rejects_explicit_substitution() -> Result<()> {
         .single_request()
         .function_call_output(SPAWN_CALL_ID);
     let output = output_item["output"].as_str().expect("substitution output");
-    assert!(output.contains("names specific agents: `claude-opus-5`"));
+    assert!(output.contains("explicitly requests specific agents: `claude-opus-5`"));
     assert!(output.contains("spawn selected `claude-sonnet-4.6`"));
-    assert!(output.contains("Do not substitute another agent"));
+    assert!(output.contains("do not substitute another agent"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_user_agent_cannot_be_selected_explicitly() -> Result<()> {
+    const USER_PROMPT: &str = "Do not use Opus; use Sonnet for this review.";
+
+    let server = start_mock_server().await;
+    let arguments = spawn_agent_arguments_with_selector(Some("opus"), /*model*/ None)?;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, USER_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-rejected-agent"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &arguments,
+            ),
+            ev_completed("resp-rejected-agent"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+    test.submit_turn(USER_PROMPT).await?;
+
+    let output_item = final_response
+        .single_request()
+        .function_call_output(SPAWN_CALL_ID);
+    let output = output_item["output"]
+        .as_str()
+        .expect("rejected-agent output");
+    assert!(output.contains("explicitly rejects `claude-opus-5`"));
+    assert!(output.contains("Do not spawn that agent"));
     Ok(())
 }
 

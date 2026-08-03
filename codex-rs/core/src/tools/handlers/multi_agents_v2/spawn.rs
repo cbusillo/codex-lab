@@ -6,7 +6,7 @@ use crate::agent::provider_routing::AgentTaskKind;
 use crate::agent::provider_routing::AgentTaskSize;
 use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::provider_routing::select_provider_route;
-use crate::agent::user_agent_intent::UserAgentMentions;
+use crate::agent::user_agent_intent::UserAgentIntent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
@@ -57,7 +57,7 @@ async fn handle_spawn_agent(
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let selectors = resolve_spawn_selectors(args.agent_type.as_deref(), args.model.as_deref())?;
-    require_explicit_selector_for_user_mentions(turn, &selectors)?;
+    enforce_explicit_user_agent_intent(turn, &selectors)?;
     let explicit_role_name = selectors.agent_type.as_deref();
 
     let message = message_content(args.message.clone())?;
@@ -70,6 +70,7 @@ async fn handle_spawn_agent(
         select_provider_route(&config, explicit_role_name, args.task_kind, args.task_size)
             .await
             .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
+    enforce_routed_user_agent_intent(turn, routing.agent_type())?;
     let role_name = routing.role_name();
     let fork_mode = args.fork_mode(routing.is_external())?;
     if routing.is_external() && fork_mode.is_some() {
@@ -206,37 +207,101 @@ struct ResolvedSpawnSelectors {
     model: Option<String>,
 }
 
-fn require_explicit_selector_for_user_mentions(
+fn enforce_explicit_user_agent_intent(
     turn: &crate::session::turn_context::TurnContext,
     selectors: &ResolvedSpawnSelectors,
 ) -> Result<(), FunctionCallError> {
-    let Some(mentions) = turn.extension_data.get::<UserAgentMentions>() else {
+    let Some(intent) = turn.extension_data.get::<UserAgentIntent>() else {
         return Ok(());
     };
-    if mentions.is_empty() {
+    if intent.is_empty() {
         return Ok(());
     }
-    let candidates = mentions
-        .slugs()
+    let required = intent
+        .required()
         .iter()
         .map(|slug| format!("`{slug}`"))
         .collect::<Vec<_>>()
         .join(", ");
-    let Some(selected) = selectors
+    let selected = selectors
         .agent_type
         .as_deref()
-        .or(selectors.model.as_deref())
-    else {
+        .or(selectors.model.as_deref());
+    if let Some(selected) = selected
+        && intent.rejects(selected)
+    {
         return Err(FunctionCallError::RespondToModel(format!(
-            "The current user turn names specific agents: {candidates}. Set `agent_type` to the canonical selector the user requested before spawning. If the user mentioned an agent only to reject it, choose the explicitly requested alternative. Do not encode provider intent only in `task_name`, and do not use automatic routing for a named-agent request."
+            "The current user turn explicitly rejects `{selected}`. Do not spawn that agent; choose an allowed alternative."
+        )));
+    }
+    if intent.required().is_empty() {
+        return Ok(());
+    }
+    let Some(selected) = selected else {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "The current user turn explicitly requests specific agents: {required}. Set `agent_type` to one of those canonical selectors before spawning. Do not use automatic routing for a named-agent request."
         )));
     };
-    if mentions.slugs().iter().any(|slug| slug == selected) {
+    if intent.requires(selected) {
         return Ok(());
     }
     Err(FunctionCallError::RespondToModel(format!(
-        "The current user turn names specific agents: {candidates}, but the spawn selected `{selected}`. Use the canonical selector the user explicitly requested. Do not substitute another agent or encode provider intent only in `task_name`."
+        "The current user turn explicitly requests specific agents: {required}, but the spawn selected `{selected}`. Use one of the requested canonical selectors and do not substitute another agent."
     )))
+}
+
+fn enforce_routed_user_agent_intent(
+    turn: &crate::session::turn_context::TurnContext,
+    selected: &str,
+) -> Result<(), FunctionCallError> {
+    let Some(intent) = turn.extension_data.get::<UserAgentIntent>() else {
+        return Ok(());
+    };
+    validate_routed_user_agent_intent(intent.as_ref(), selected)
+}
+
+fn validate_routed_user_agent_intent(
+    intent: &UserAgentIntent,
+    selected: &str,
+) -> Result<(), FunctionCallError> {
+    if intent.rejects(selected) {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "Automatic routing selected `{selected}`, but the current user turn explicitly rejects that agent. Retry with an allowed explicit `agent_type`."
+        )));
+    }
+    if intent.required().is_empty() || intent.requires(selected) {
+        return Ok(());
+    }
+    let required = intent
+        .required()
+        .iter()
+        .map(|slug| format!("`{slug}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(FunctionCallError::RespondToModel(format!(
+        "Routing selected `{selected}`, but the current user turn explicitly requests {required}. Retry with one of the requested canonical selectors."
+    )))
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+    use codex_protocol::user_input::UserInput;
+
+    fn intent(text: &str) -> UserAgentIntent {
+        UserAgentIntent::from_user_input(&[UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }])
+    }
+
+    #[test]
+    fn rejection_only_intent_blocks_automatic_route_result() {
+        let intent = intent("Do not use Opus.");
+
+        assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_err());
+        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_ok());
+    }
 }
 
 fn resolve_spawn_selectors(
