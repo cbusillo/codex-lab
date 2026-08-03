@@ -395,7 +395,7 @@ where
                 config.include_instructions,
             )];
             let emitted_warnings = input
-                .turn_store
+                .thread_store
                 .get_or_init(EmittedCatalogBudgetWarnings::default);
             if host_snapshot.is_some() && self.providers.has_host_provider() {
                 input.turn_store.insert(HostSkillsCatalogInWorldState);

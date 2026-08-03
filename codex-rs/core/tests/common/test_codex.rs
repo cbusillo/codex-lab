@@ -662,6 +662,11 @@ impl TestCodexBuilder {
             .code_mode_host_program
             .take()
             .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
+        if config.features.enabled(Feature::CodeModeHost) && code_mode_host_program.is_none() {
+            return Err(anyhow!(
+                "Code Mode tests require `codex-code-mode-host`; run `just test -p codex-core` or build it with `cargo build -p codex-code-mode-host` before invoking cargo-nextest directly"
+            ));
+        }
         let thread_manager = if config.features.enabled(Feature::CodeModeHost)
             && let Some(code_mode_host_program) = code_mode_host_program
         {

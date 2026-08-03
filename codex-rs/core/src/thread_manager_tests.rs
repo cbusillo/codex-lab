@@ -371,12 +371,11 @@ async fn ignores_session_prefix_messages_when_truncating() {
     );
     let got_items = truncated.get_rollout_items();
 
-    let expected: Vec<RolloutItem> = vec![
-        RolloutItem::ResponseItem(items[0].clone()),
-        RolloutItem::ResponseItem(items[1].clone()),
-        RolloutItem::ResponseItem(items[2].clone()),
-        RolloutItem::ResponseItem(items[3].clone()),
-    ];
+    let expected: Vec<RolloutItem> = items[..items.len() - 2]
+        .iter()
+        .cloned()
+        .map(RolloutItem::ResponseItem)
+        .collect();
 
     assert_eq!(
         serde_json::to_value(got_items).unwrap(),
@@ -1745,6 +1744,7 @@ fn mixed_response_and_legacy_user_event_history_is_mid_turn() {
 async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_history() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
+    config.agents_enabled = false;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
@@ -1961,6 +1961,7 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
 async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_source() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
+    config.agents_enabled = false;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");

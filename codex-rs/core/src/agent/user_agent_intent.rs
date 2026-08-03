@@ -458,6 +458,15 @@ mod tests {
     }
 
     #[test]
+    fn ignores_aliases_embedded_in_blocked_source_words() {
+        let intent = UserAgentIntent::from_user_input(&[text(
+            "Ask @opus, path/opus, path\\opus, under_opus, and namespace:opus.",
+        )]);
+
+        assert!(intent.is_empty());
+    }
+
+    #[test]
     fn merges_pending_turn_intent_with_latest_instruction_winning() {
         let data = ExtensionData::new("turn");
         record_user_agent_intent(&data, &[text("Ask Opus")]);

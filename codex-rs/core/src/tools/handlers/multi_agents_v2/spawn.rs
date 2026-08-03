@@ -302,6 +302,14 @@ mod intent_tests {
         assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_err());
         assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_ok());
     }
+
+    #[test]
+    fn required_intent_blocks_a_different_automatic_route_result() {
+        let intent = intent("Ask Opus to review this.");
+
+        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_err());
+        assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_ok());
+    }
 }
 
 fn resolve_spawn_selectors(

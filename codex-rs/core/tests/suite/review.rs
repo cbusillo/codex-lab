@@ -667,6 +667,12 @@ async fn review_uses_custom_review_model_from_config() {
     assert_eq!(request.path(), "/v1/responses");
     let body = request.body_json();
     assert_eq!(body["model"].as_str().unwrap(), "gpt-5.4");
+    assert!(body["tools"].as_array().is_some_and(|tools| {
+        tools.iter().all(|tool| {
+            tool.get("name").and_then(serde_json::Value::as_str) != Some("agents")
+                && tool.get("namespace").and_then(serde_json::Value::as_str) != Some("agents")
+        })
+    }));
 
     let _codex_home_guard = codex_home;
     server.verify().await;

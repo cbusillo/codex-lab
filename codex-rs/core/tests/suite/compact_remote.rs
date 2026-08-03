@@ -2373,7 +2373,7 @@ async fn remote_compact_trim_estimate_uses_session_base_instructions() -> Result
     let override_base_instructions = format!(
         "{}\nREMOTE_BASE_INSTRUCTIONS_OVERRIDE {}",
         baseline_compact_request.instructions_text(),
-        "x".repeat(8_000)
+        "x".repeat(16_000)
     );
     let override_context_window = baseline_payload_tokens.saturating_add(500);
     let pretrim_override_estimate =
@@ -2478,8 +2478,10 @@ async fn remote_compact_trim_estimate_uses_session_base_instructions() -> Result
         override_compact_request.has_function_call(override_trailing_call_id),
         "expected remote compact request to preserve trailing function call history with override instructions"
     );
+    let trailing_output =
+        override_compact_request.function_call_output_text(override_trailing_call_id);
     assert_eq!(
-        override_compact_request.function_call_output_text(override_trailing_call_id),
+        trailing_output,
         Some(CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE.to_string()),
         "expected remote compact request to rewrite trailing function call output with override instructions"
     );
