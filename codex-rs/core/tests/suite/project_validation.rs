@@ -2948,7 +2948,7 @@ async fn project_validation_reports_invalid_timeout_as_configuration_error() -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_validation_is_skipped_for_non_root_agents() -> Result<()> {
+async fn project_validation_is_not_reported_for_non_root_agents() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let temp_dir = tempdir()?;
@@ -2966,15 +2966,7 @@ async fn project_validation_is_skipped_for_non_root_agents() -> Result<()> {
     .await?;
 
     let validation_events = validation_events(&events);
-    assert_eq!(validation_events.len(), 1);
-    assert_eq!(
-        validation_events[0].status,
-        ProjectValidationStatus::Skipped
-    );
-    assert_eq!(
-        validation_events[0].skip_reason,
-        Some(ProjectValidationSkipReason::NonRootAgent)
-    );
+    assert!(validation_events.is_empty());
     assert!(!marker.exists());
     Ok(())
 }

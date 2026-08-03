@@ -46,6 +46,7 @@ const COMMAND_TRUNCATED_MARKER: &str = "… project validation command truncated
 const OUTPUT_TRUNCATED_MARKER: &str = "\n… project validation output truncated …\n";
 
 pub(crate) enum ProjectValidationRun {
+    NotApplicable,
     Skipped(ProjectValidationCompletedEvent),
     Completed(ProjectValidationCompletedEvent),
     Cancelled(ProjectValidationCompletedEvent),
@@ -114,13 +115,7 @@ pub(crate) async fn run_project_validation(
 ) -> ProjectValidationRun {
     let configured_project_command = turn_context.config.validation.project_command.as_ref();
     if turn_context.session_source.is_non_root_agent() {
-        return ProjectValidationRun::Skipped(skipped_event(
-            turn_context,
-            Vec::new(),
-            /*cwd*/ None,
-            ProjectValidationSkipReason::NonRootAgent,
-            /*changed_file_count*/ None,
-        ));
+        return ProjectValidationRun::NotApplicable;
     }
 
     let project_command = match configured_project_command {
