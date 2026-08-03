@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_EXTERNAL_AGENT_STDOUT_BYTES: usize = 64 * 1024;
 const MAX_EXTERNAL_AGENT_STDERR_BYTES: usize = 8 * 1024;
-const EXTERNAL_AGENT_TRUNCATED_MARKER: &[u8] = b"[external agent output truncated]\n";
+pub(super) const EXTERNAL_AGENT_TRUNCATED_MARKER: &[u8] = b"[external agent output truncated]\n";
 const MAX_MODEL_VISIBLE_EXTERNAL_AGENT_BYTES: usize = 8 * 1024;
 const EXTERNAL_AGENT_MESSAGE_TRUNCATED_MARKER: &str = "[external agent result truncated]\n";
 pub(super) const MAX_PREFLIGHT_MESSAGE_BYTES: usize = 2 * 1024;

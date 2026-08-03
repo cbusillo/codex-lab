@@ -43,6 +43,7 @@ pub use agent::external_capabilities::ExternalAgentCapabilitySource;
 pub use agent::external_capabilities::ExternalAgentModelCapability;
 pub use agent::external_diagnostics::ExternalAgentFailureDetail;
 pub use agent::external_diagnostics::ExternalAgentFailureKind;
+pub use agent::external_preflight::discover_external_agent_capabilities;
 mod agent_communication;
 mod attestation;
 mod codex_delegate;
