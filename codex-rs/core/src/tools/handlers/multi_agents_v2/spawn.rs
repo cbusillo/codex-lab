@@ -6,6 +6,7 @@ use crate::agent::provider_routing::AgentTaskKind;
 use crate::agent::provider_routing::AgentTaskSize;
 use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::provider_routing::select_provider_route;
+use crate::agent::user_agent_intent::UserAgentMentions;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
@@ -56,6 +57,7 @@ async fn handle_spawn_agent(
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let selectors = resolve_spawn_selectors(args.agent_type.as_deref(), args.model.as_deref())?;
+    require_explicit_selector_for_user_mentions(turn, &selectors)?;
     let explicit_role_name = selectors.agent_type.as_deref();
 
     let message = message_content(args.message.clone())?;
@@ -202,6 +204,39 @@ async fn handle_spawn_agent(
 struct ResolvedSpawnSelectors {
     agent_type: Option<String>,
     model: Option<String>,
+}
+
+fn require_explicit_selector_for_user_mentions(
+    turn: &crate::session::turn_context::TurnContext,
+    selectors: &ResolvedSpawnSelectors,
+) -> Result<(), FunctionCallError> {
+    let Some(mentions) = turn.extension_data.get::<UserAgentMentions>() else {
+        return Ok(());
+    };
+    if mentions.is_empty() {
+        return Ok(());
+    }
+    let candidates = mentions
+        .slugs()
+        .iter()
+        .map(|slug| format!("`{slug}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let Some(selected) = selectors
+        .agent_type
+        .as_deref()
+        .or(selectors.model.as_deref())
+    else {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "The current user turn names specific agents: {candidates}. Set `agent_type` to the canonical selector the user requested before spawning. If the user mentioned an agent only to reject it, choose the explicitly requested alternative. Do not encode provider intent only in `task_name`, and do not use automatic routing for a named-agent request."
+        )));
+    };
+    if mentions.slugs().iter().any(|slug| slug == selected) {
+        return Ok(());
+    }
+    Err(FunctionCallError::RespondToModel(format!(
+        "The current user turn names specific agents: {candidates}, but the spawn selected `{selected}`. Use the canonical selector the user explicitly requested. Do not substitute another agent or encode provider intent only in `task_name`."
+    )))
 }
 
 fn resolve_spawn_selectors(

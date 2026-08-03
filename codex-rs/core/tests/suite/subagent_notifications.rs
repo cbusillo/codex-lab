@@ -1359,6 +1359,8 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(plaintext: bool) -> R
     );
     if plaintext {
         spawn_event["item"]["encrypted_function_args"] = json!([]);
+    } else {
+        spawn_event["item"]["encrypted_function_args"] = json!(["message"]);
     }
     mount_sse_once_match(
         &server,

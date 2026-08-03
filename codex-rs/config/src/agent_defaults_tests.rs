@@ -120,6 +120,20 @@ fn google_intent_aliases_resolve_to_antigravity() {
 }
 
 #[test]
+fn natural_language_aliases_resolve_to_their_canonical_agent() {
+    for (alias, expected_slug) in natural_language_agent_aliases() {
+        let spec = agent_model_spec(expected_slug).expect("canonical agent should exist");
+        assert_eq!(spec.slug, *expected_slug, "alias {alias}");
+    }
+
+    assert!(
+        natural_language_agent_aliases()
+            .iter()
+            .all(|(alias, _)| !matches!(*alias, "code" | "coder" | "google"))
+    );
+}
+
+#[test]
 fn default_configs_use_canonical_selector_commands() {
     let configs = default_agent_configs();
     let antigravity = configs

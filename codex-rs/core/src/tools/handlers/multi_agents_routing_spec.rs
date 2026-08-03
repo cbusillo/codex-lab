@@ -2,7 +2,7 @@ use codex_tools::JsonSchema;
 use serde_json::Value;
 use serde_json::json;
 
-const VISIBLE_PROVIDER_ROUTING_GUIDANCE: &str = "Classify every delegated task with `task_kind` and `task_size`. For normal or large independent review, security, infrastructure, release, and product-risk work, omit `agent_type` so Codex Lab can select an eligible installed third-party agent. Tiny tasks stay native by default. Set `agent_type` only to make an explicit override; `agent_type = \"default\"` explicitly accepts a native agent.";
+const VISIBLE_PROVIDER_ROUTING_GUIDANCE: &str = "Classify every delegated task with `task_kind` and `task_size`. If the user names an agent, provider, or model, you MUST set `agent_type` to its canonical selector; explicit user selection overrides automatic routing and must never be encoded only in `task_name`. For normal or large independent review, security, infrastructure, release, and product-risk work where the user did not name an agent, omit `agent_type` so Codex Lab can select an eligible installed third-party agent. Tiny tasks stay native by default. `agent_type = \"default\"` explicitly accepts a native agent.";
 const HIDDEN_PROVIDER_ROUTING_GUIDANCE: &str = "Classify every delegated task with `task_kind` and `task_size`. For normal or large independent review, security, infrastructure, release, and product-risk work, Codex Lab selects an eligible installed third-party agent when available. Tiny tasks stay native by default. Agent-type overrides are not exposed in this configuration.";
 const AGENT_TASK_KIND_DESCRIPTION: &str = "Task category used by Codex Lab's provider-routing policy. Use `independent_review` for a dissenting review and the matching risk category for security, infrastructure, release, or product-risk work.";
 const AGENT_TASK_SIZE_DESCRIPTION: &str = "Task significance used by provider routing. Use `tiny` only for bounded low-risk work; normal and large high-risk work may route to an eligible third-party agent.";
@@ -46,9 +46,11 @@ pub(super) fn provider_routing_output_schema() -> Value {
                 "type": "string",
                 "enum": ["explicit", "automatic_external", "native_default", "native_fallback"]
             },
+            "requested": { "type": "string" },
+            "effective": { "type": "string" },
             "reason": { "type": "string" }
         },
-        "required": ["kind", "reason"],
+        "required": ["kind", "effective", "reason"],
         "additionalProperties": false
     })
 }

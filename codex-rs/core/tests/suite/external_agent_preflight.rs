@@ -236,8 +236,226 @@ async fn external_aliases_in_model_field_route_to_external_agent_type() -> Resul
 
         assert_eq!(output.get("agent_type"), Some(&json!(canonical_agent_type)));
         assert_eq!(output.pointer("/routing/kind"), Some(&json!("explicit")));
+        assert_eq!(
+            output.pointer("/routing/requested"),
+            Some(&json!(canonical_agent_type))
+        );
+        assert_eq!(
+            output.pointer("/routing/effective"),
+            Some(&json!(canonical_agent_type))
+        );
     }
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_user_agent_requires_explicit_retry_and_receives_plaintext() -> Result<()> {
+    const USER_PROMPT: &str = "Ask Opus to review this and do not substitute another agent.";
+    const RETRY_CALL_ID: &str = "spawn-opus-explicit-retry";
+
+    let stub_dir = TempDir::new()?;
+    let captured_args = stub_dir.path().join("captured-args.txt");
+    let script = format!(
+        "if [ \"${{1:-}}\" = \"--version\" ]; then printf 'test-provider 1.0\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'external provider replied\\n'\n",
+        captured_args.display()
+    );
+    let backend = stub_cli(&stub_dir, "opus-provider.sh", &script);
+    let server = start_mock_server().await;
+    let omitted_selector_args = serde_json::to_string(&json!({
+        "message": AGENT_MESSAGE,
+        "task_name": "opus_review",
+        "task_kind": "independent_review",
+        "task_size": "large",
+        "fork_turns": "none",
+    }))?;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, USER_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-omitted-selector"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &omitted_selector_args,
+            ),
+            ev_completed("resp-omitted-selector"),
+        ]),
+    )
+    .await;
+    let retry_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-explicit-retry"),
+            ev_function_call_with_namespace(
+                RETRY_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &spawn_agent_arguments_with_selector(/*agent_type*/ None, Some("opus"))?,
+            ),
+            ev_completed("resp-explicit-retry"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, RETRY_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_with_named_external_role("claude-opus-5", backend);
+    let test = builder.build(&server).await?;
+    test.submit_turn(USER_PROMPT).await?;
+
+    let omitted_output_item = retry_response
+        .single_request()
+        .function_call_output(SPAWN_CALL_ID);
+    let omitted_output = omitted_output_item["output"]
+        .as_str()
+        .expect("omitted-selector output");
+    assert!(omitted_output.contains("current user turn names specific agents"));
+    assert!(omitted_output.contains("claude-opus-5"));
+    assert!(omitted_output.contains("Set `agent_type`"));
+
+    let retry_output: Value = serde_json::from_str(
+        final_response
+            .single_request()
+            .function_call_output(RETRY_CALL_ID)["output"]
+            .as_str()
+            .expect("explicit retry output"),
+    )?;
+    assert_eq!(retry_output["agent_type"], json!("claude-opus-5"));
+    assert_eq!(retry_output["routing"]["kind"], json!("explicit"));
+    assert_eq!(retry_output["routing"]["requested"], json!("claude-opus-5"));
+    assert_eq!(retry_output["routing"]["effective"], json!("claude-opus-5"));
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !captured_args.exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let captured = std::fs::read_to_string(&captured_args)?;
+    assert!(captured.contains(AGENT_MESSAGE));
+    assert!(!captured.contains("gAAAA"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_user_agent_rejects_explicit_substitution() -> Result<()> {
+    const USER_PROMPT: &str = "Ask Opus to review this and do not substitute another agent.";
+
+    let server = start_mock_server().await;
+    let arguments = serde_json::to_string(&json!({
+        "message": AGENT_MESSAGE,
+        "task_name": "wrong_claude_review",
+        "task_kind": "independent_review",
+        "task_size": "large",
+        "agent_type": "claude-sonnet-4.6",
+        "fork_turns": "none",
+    }))?;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, USER_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-substitution"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &arguments,
+            ),
+            ev_completed("resp-substitution"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+    test.submit_turn(USER_PROMPT).await?;
+
+    let output_item = final_response
+        .single_request()
+        .function_call_output(SPAWN_CALL_ID);
+    let output = output_item["output"].as_str().expect("substitution output");
+    assert!(output.contains("names specific agents: `claude-opus-5`"));
+    assert!(output.contains("spawn selected `claude-sonnet-4.6`"));
+    assert!(output.contains("Do not substitute another agent"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn encrypted_external_agent_message_is_rejected_before_launch() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let launched = stub_dir.path().join("launched.txt");
+    let script = format!(
+        "if [ \"${{1:-}}\" = \"--version\" ]; then printf 'test-provider 1.0\\n'; exit 0; fi\ntouch '{}'\nprintf 'must not run\\n'\n",
+        launched.display()
+    );
+    let backend = stub_cli(&stub_dir, "encrypted-provider.sh", &script);
+    let server = start_mock_server().await;
+    let mut spawn_event = ev_function_call_with_namespace(
+        SPAWN_CALL_ID,
+        COLLABORATION_NAMESPACE,
+        "spawn_agent",
+        &spawn_agent_arguments()?,
+    );
+    spawn_event["item"]["encrypted_function_args"] = json!(["message"]);
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-encrypted"),
+            spawn_event,
+            ev_completed("resp-encrypted"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_with_external_role(backend);
+    let test = builder.build(&server).await?;
+    test.submit_turn(PROMPT).await?;
+
+    let output_item = final_response
+        .single_request()
+        .function_call_output(SPAWN_CALL_ID);
+    let output = output_item["output"]
+        .as_str()
+        .expect("encrypted spawn output");
+    assert!(output.contains("require plaintext task content"));
+    assert!(!output.contains(AGENT_MESSAGE));
+    assert!(!launched.exists());
     Ok(())
 }
 

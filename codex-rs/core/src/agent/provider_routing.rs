@@ -97,6 +97,9 @@ impl ProviderRoutingKind {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct ProviderRoutingSummary {
     pub(crate) kind: ProviderRoutingKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) requested: Option<String>,
+    pub(crate) effective: String,
     pub(crate) reason: String,
 }
 
@@ -167,6 +170,8 @@ impl ProviderRoutingDecision {
         };
         ProviderRoutingSummary {
             kind: self.summary.kind,
+            requested: self.summary.requested.clone(),
+            effective: self.summary.effective.clone(),
             reason,
         }
     }
@@ -249,6 +254,8 @@ where
             provider: None,
             summary: ProviderRoutingSummary {
                 kind: ProviderRoutingKind::Explicit,
+                requested: Some(agent_type.to_string()),
+                effective: agent_type.to_string(),
                 reason: format!("`agent_type` explicitly selected `{agent_type}`."),
             },
         };
@@ -286,6 +293,8 @@ where
                     provider,
                     summary: ProviderRoutingSummary {
                         kind: ProviderRoutingKind::AutomaticExternal,
+                        requested: None,
+                        effective: (*candidate).to_string(),
                         reason: format!(
                             "{} `{}` task selected eligible external agent `{candidate}`.",
                             task_size.as_str(),
@@ -317,7 +326,12 @@ fn native_decision(kind: ProviderRoutingKind, reason: String) -> ProviderRouting
         role_name: None,
         is_external: false,
         provider: None,
-        summary: ProviderRoutingSummary { kind, reason },
+        summary: ProviderRoutingSummary {
+            kind,
+            requested: None,
+            effective: DEFAULT_ROLE_NAME.to_string(),
+            reason,
+        },
     }
 }
 

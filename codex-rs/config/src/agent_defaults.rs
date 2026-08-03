@@ -48,6 +48,28 @@ const QWEN_3_CODER_WRITE: &[&str] = &["-y"];
 const CLOUD_GPT5_CODEX_READ_ONLY: &[&str] = &[];
 const CLOUD_GPT5_CODEX_WRITE: &[&str] = &[];
 const MODELS_MANIFEST: &str = include_str!("../../models-manager/models.json");
+const NATURAL_LANGUAGE_AGENT_ALIASES: &[(&str, &str)] = &[
+    ("opus", "claude-opus-5"),
+    ("claude opus", "claude-opus-5"),
+    ("claude opus 5", "claude-opus-5"),
+    ("sonnet", "claude-sonnet-4.6"),
+    ("claude", "claude-sonnet-4.6"),
+    ("claude sonnet", "claude-sonnet-4.6"),
+    ("claude sonnet 4.6", "claude-sonnet-4.6"),
+    ("fable", "claude-fable-5"),
+    ("claude fable", "claude-fable-5"),
+    ("haiku", "claude-haiku-4.5"),
+    ("claude haiku", "claude-haiku-4.5"),
+    ("antigravity", "antigravity"),
+    ("agy", "antigravity"),
+    ("gemini", "antigravity"),
+    ("google antigravity", "antigravity"),
+    ("copilot", "github-copilot"),
+    ("github copilot", "github-copilot"),
+    ("qwen", "qwen3-coder-plus"),
+    ("qwen3", "qwen3-coder-plus"),
+    ("qwen coder", "qwen3-coder-plus"),
+];
 
 pub const FABLE_AGENT_GUIDANCE: &str = "VERY EXPENSIVE Anthropic specialist model. Do not use Fable for routine work or ordinary multi-agent diversity. Select it only when the user explicitly asks for Fable, or as a last resort for a genuinely difficult problem that other capable agents could not solve.";
 
@@ -533,6 +555,10 @@ fn static_agent_model_spec(identifier: &str) -> Option<&'static AgentModelSpec> 
 
 pub fn agent_model_specs() -> &'static [AgentModelSpec] {
     ALL_AGENT_MODEL_SPECS.as_slice()
+}
+
+pub fn natural_language_agent_aliases() -> &'static [(&'static str, &'static str)] {
+    NATURAL_LANGUAGE_AGENT_ALIASES
 }
 
 pub fn enabled_agent_model_specs() -> Vec<&'static AgentModelSpec> {
