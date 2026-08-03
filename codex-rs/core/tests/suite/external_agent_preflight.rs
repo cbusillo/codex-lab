@@ -49,18 +49,34 @@ fn input_item_texts(item: &Value) -> Vec<String> {
 }
 
 fn spawn_agent_arguments() -> Result<String> {
+    spawn_agent_arguments_with_selector(Some(ROLE), /*model*/ None)
+}
+
+fn spawn_agent_arguments_with_selector(
+    agent_type: Option<&str>,
+    model: Option<&str>,
+) -> Result<String> {
     Ok(serde_json::to_string(&json!({
         "message": AGENT_MESSAGE,
         "task_name": "external_probe",
         "task_kind": "other",
         "task_size": "normal",
-        "agent_type": ROLE,
+        "agent_type": agent_type,
+        "model": model,
         "fork_turns": "none",
     }))?)
 }
 
 /// Configure a single explicit external role and the timeouts the spawn tools need.
 fn builder_with_external_role(backend: ExternalCommandAgentBackendConfig) -> TestCodexBuilder {
+    builder_with_named_external_role(ROLE, backend)
+}
+
+fn builder_with_named_external_role(
+    role: &str,
+    backend: ExternalCommandAgentBackendConfig,
+) -> TestCodexBuilder {
+    let role = role.to_string();
     test_codex().with_config(move |config| {
         config
             .features
@@ -75,7 +91,7 @@ fn builder_with_external_role(backend: ExternalCommandAgentBackendConfig) -> Tes
         config.multi_agent_v2.max_wait_timeout_ms = 5_000;
         config.multi_agent_v2.default_wait_timeout_ms = 2_000;
         config.agent_roles.insert(
-            ROLE.to_string(),
+            role.clone(),
             AgentRoleConfig {
                 description: Some("External agent preflight probe".to_string()),
                 backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
@@ -83,6 +99,56 @@ fn builder_with_external_role(backend: ExternalCommandAgentBackendConfig) -> Tes
             },
         );
     })
+}
+
+async fn spawn_agent_output_with_selector(
+    backend: ExternalCommandAgentBackendConfig,
+    role: &str,
+    agent_type: Option<&str>,
+    model: Option<&str>,
+) -> Result<String> {
+    let server = start_mock_server().await;
+    let arguments = spawn_agent_arguments_with_selector(agent_type, model)?;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &arguments,
+            ),
+            ev_completed("resp-spawn"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_with_named_external_role(role, backend);
+    let test = builder.build(&server).await?;
+    test.submit_turn(PROMPT).await?;
+
+    let output_item = final_response
+        .single_request()
+        .function_call_output(SPAWN_CALL_ID);
+    Ok(output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("spawn_agent output string")
+        .to_string())
 }
 
 /// Drive one turn that spawns the explicit external role and return the
@@ -143,6 +209,63 @@ fn stub_cli(dir: &TempDir, name: &str, script: &str) -> ExternalCommandAgentBack
         timeout_ms: 5_000,
         ..Default::default()
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_aliases_in_model_field_route_to_external_agent_type() -> Result<()> {
+    for (selector, canonical_agent_type) in [
+        ("opus", "claude-opus-5"),
+        ("claude-opus", "claude-opus-5"),
+        ("gemini", "antigravity"),
+        ("antigravity", "antigravity"),
+    ] {
+        let stub_dir = TempDir::new()?;
+        let backend = stub_cli(
+            &stub_dir,
+            &format!("{selector}-provider.sh"),
+            "printf 'external provider replied\\n'\n",
+        );
+        let output = spawn_agent_output_with_selector(
+            backend,
+            canonical_agent_type,
+            /*agent_type*/ None,
+            Some(selector),
+        )
+        .await?;
+        let output: Value = serde_json::from_str(&output)?;
+
+        assert_eq!(output.get("agent_type"), Some(&json!(canonical_agent_type)));
+        assert_eq!(output.pointer("/routing/kind"), Some(&json!("explicit")));
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conflicting_external_selectors_fail_without_substitution() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let backend = stub_cli(
+        &stub_dir,
+        "antigravity-provider.sh",
+        "printf 'must not run\\n'\n",
+    );
+    let output =
+        spawn_agent_output_with_selector(backend, "antigravity", Some("antigravity"), Some("opus"))
+            .await?;
+
+    assert!(output.contains("use one explicit agent selector"));
+    assert!(output.contains("claude-opus-5"));
+    assert!(output.contains("antigravity"));
+
+    let native_conflict = spawn_agent_output_with_selector(
+        stub_cli(&stub_dir, "opus-provider.sh", "printf 'must not run\\n'\n"),
+        "opus",
+        Some("opus"),
+        Some("gpt-5.6-sol"),
+    )
+    .await?;
+    assert!(native_conflict.contains("cannot be combined with native model override"));
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

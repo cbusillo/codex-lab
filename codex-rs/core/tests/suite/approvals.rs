@@ -2342,18 +2342,14 @@ async fn spawned_subagent_execpolicy_amendment_propagates_to_parent_session() ->
 
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
+        "task_name": "child",
     }))?;
     mount_sse_once_match(
         &server,
         |req: &Request| body_contains(req, PARENT_PROMPT),
         sse(vec![
             ev_response_created("resp-parent-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                "multi_agent_v1",
-                "spawn_agent",
-                &spawn_args,
-            ),
+            ev_function_call_with_namespace(SPAWN_CALL_ID, "agents", "spawn_agent", &spawn_args),
             ev_completed("resp-parent-1"),
         ]),
     )

@@ -11,6 +11,8 @@ use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
+use codex_config::agent_defaults::AgentModelSpec;
+use codex_config::agent_defaults::agent_model_spec;
 use codex_protocol::AgentPath;
 use codex_tools::ToolSpec;
 
@@ -53,11 +55,8 @@ async fn handle_spawn_agent(
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let explicit_role_name = args
-        .agent_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|role| !role.is_empty());
+    let selectors = resolve_spawn_selectors(args.agent_type.as_deref(), args.model.as_deref())?;
+    let explicit_role_name = selectors.agent_type.as_deref();
 
     let message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
@@ -88,7 +87,7 @@ async fn handle_spawn_agent(
         &session,
         turn.as_ref(),
         &mut config,
-        args.model.as_deref(),
+        selectors.model.as_deref(),
         args.reasoning_effort.clone(),
     )
     .await?;
@@ -197,6 +196,65 @@ async fn handle_spawn_agent(
             routing: routing.summary(),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSpawnSelectors {
+    agent_type: Option<String>,
+    model: Option<String>,
+}
+
+fn resolve_spawn_selectors(
+    agent_type: Option<&str>,
+    model: Option<&str>,
+) -> Result<ResolvedSpawnSelectors, FunctionCallError> {
+    let agent_type = agent_type.map(str::trim).filter(|role| !role.is_empty());
+    let model = model.map(str::trim).filter(|model| !model.is_empty());
+    let agent_type_selector = agent_type.and_then(external_agent_spec);
+    let model_selector = model.and_then(external_agent_spec);
+    match (agent_type, agent_type_selector, model, model_selector) {
+        (None, _, Some(_), Some(model_selector)) => Ok(ResolvedSpawnSelectors {
+            agent_type: Some(model_selector.slug.to_string()),
+            model: None,
+        }),
+        (Some(_), Some(agent_type_selector), Some(_), Some(model_selector))
+            if agent_type_selector.slug == model_selector.slug =>
+        {
+            Ok(ResolvedSpawnSelectors {
+                agent_type: Some(agent_type_selector.slug.to_string()),
+                model: None,
+            })
+        }
+        (Some(agent_type), Some(agent_type_selector), Some(model), Some(model_selector)) => {
+            Err(FunctionCallError::RespondToModel(format!(
+                "external agent selector `{model}` resolves to `{}`, but agent type `{agent_type}` resolves to `{}`; use one explicit agent selector",
+                model_selector.slug, agent_type_selector.slug
+            )))
+        }
+        (Some(agent_type), Some(_), Some(model), None) => {
+            Err(FunctionCallError::RespondToModel(format!(
+                "external agent type `{agent_type}` cannot be combined with native model override `{model}`; use one explicit agent selector"
+            )))
+        }
+        (Some(agent_type), None, Some(model), Some(model_selector)) => {
+            Err(FunctionCallError::RespondToModel(format!(
+                "external agent selector `{model}` resolves to `{}`, but agent type `{agent_type}` selects a different role; use one explicit agent selector",
+                model_selector.slug
+            )))
+        }
+        (Some(_), Some(agent_type_selector), None, _) => Ok(ResolvedSpawnSelectors {
+            agent_type: Some(agent_type_selector.slug.to_string()),
+            model: None,
+        }),
+        _ => Ok(ResolvedSpawnSelectors {
+            agent_type: agent_type.map(str::to_string),
+            model: model.map(str::to_string),
+        }),
+    }
+}
+
+fn external_agent_spec(selector: &str) -> Option<&'static AgentModelSpec> {
+    agent_model_spec(selector).filter(|spec| spec.family != "code" && spec.is_enabled())
 }
 
 impl CoreToolRuntime for Handler {

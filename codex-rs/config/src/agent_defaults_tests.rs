@@ -75,9 +75,11 @@ fn gpt_codex_aliases_resolve() {
 
 #[test]
 fn claude_opus_aliases_resolve_to_current_opus() {
-    let opus = agent_model_spec("claude-opus").expect("opus alias present");
-    assert_eq!(opus.slug, "claude-opus-5");
-    assert_eq!(opus.model_args, &["--model", "claude-opus-5"]);
+    for alias in ["opus", "claude-opus"] {
+        let opus = agent_model_spec(alias).expect("opus alias present");
+        assert_eq!(opus.slug, "claude-opus-5");
+        assert_eq!(opus.model_args, &["--model", "claude-opus-5"]);
+    }
 
     for legacy in ["claude-opus-4.6", "claude-opus-4.7", "claude-opus-4.8"] {
         let legacy = agent_model_spec(legacy).expect("legacy opus alias present");

@@ -250,6 +250,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         enabled_by_default: true,
         explicit_only: false,
         aliases: &[
+            "opus",
             "claude-opus",
             "claude-opus-4.1",
             "claude-opus-4.5",
