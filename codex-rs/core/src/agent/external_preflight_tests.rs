@@ -111,6 +111,7 @@ async fn timed_out_preflight_reports_the_probe_and_command() {
         temp_dir.path(),
         &["auth", "status"],
         "authentication",
+        ExternalAgentPreflightOutputLimit::Diagnostic,
         Duration::from_millis(200),
     )
     .await
@@ -146,6 +147,8 @@ if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
   exit 0
 fi
 if [ "$1" = "--help" ]; then
+  dd if=/dev/zero bs=1024 count=16 2>/dev/null | tr '\\000' x
+  echo
   echo '--model <model>'
   echo '--effort <level>'
   exit 0

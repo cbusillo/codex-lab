@@ -577,6 +577,7 @@ async fn timed_out_preflight_kills_process_group() {
         temp_dir.path(),
         &["--version"],
         "version",
+        ExternalAgentPreflightOutputLimit::Diagnostic,
         Duration::from_millis(500),
     )
     .await
