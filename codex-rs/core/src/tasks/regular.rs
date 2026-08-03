@@ -166,6 +166,7 @@ impl SessionTask for RegularTask {
             )
             .await
             {
+                ProjectValidationRun::NotApplicable => return Ok(last_agent_message),
                 ProjectValidationRun::Skipped(event) => event,
                 ProjectValidationRun::Completed(event) => {
                     if may_start_correction
