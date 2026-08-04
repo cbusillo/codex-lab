@@ -562,6 +562,28 @@ fn spawn_tool_spec_marks_role_locked_service_tier() {
 }
 
 #[test]
+fn dynamic_antigravity_role_carries_model_and_effort_flags() {
+    let role =
+        super::dynamic_antigravity_role_config("antigravity-gemini-3.6-flash-high", Some("high"))
+            .expect("dynamic selector should resolve");
+    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
+        panic!("dynamic selector should use external command");
+    };
+    assert!(
+        backend
+            .args
+            .windows(2)
+            .any(|args| args == ["--model", "gemini-3.6-flash-high"])
+    );
+    assert!(
+        backend
+            .args
+            .windows(2)
+            .any(|args| args == ["--effort", "high"])
+    );
+}
+
+#[test]
 fn built_in_config_file_contents_resolves_explorer_only() {
     assert_eq!(
         built_in::config_file_contents(Path::new("missing.toml")),

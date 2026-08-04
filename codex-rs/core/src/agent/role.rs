@@ -174,6 +174,37 @@ pub(crate) fn resolve_role_config_owned(
         .or_else(|| built_in::external_agent_role_config(role_name))
 }
 
+pub(crate) fn dynamic_antigravity_role_config(
+    selector: &str,
+    effort: Option<&str>,
+) -> Option<AgentRoleConfig> {
+    let model = selector.strip_prefix("antigravity-")?.to_string();
+    if model.is_empty() {
+        return None;
+    }
+    let mut args = vec!["--model".to_string(), model];
+    if let Some(effort) = effort {
+        args.extend(["--effort".to_string(), effort.to_string()]);
+    }
+    let base = built_in::external_agent_role_config("antigravity")?;
+    let Some(AgentRoleBackendConfig::ExternalCommand(mut backend)) = base.backend else {
+        return None;
+    };
+    backend.args.extend(args);
+    Some(AgentRoleConfig {
+        description: Some(format!(
+            "Antigravity discovered model selector `{selector}`."
+        )),
+        config_file: None,
+        nickname_candidates: None,
+        backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
+    })
+}
+
+pub(crate) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
+    built_in::external_agent_role_config(role_name)
+}
+
 mod reload {
     use super::*;
 
@@ -291,13 +322,31 @@ pub(crate) mod spawn_tool_spec {
 
     /// Builds the spawn-agent tool description text from built-in and configured roles.
     pub(crate) fn build(user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>) -> String {
+        build_with_external_selectors(user_defined_agent_roles, &[])
+    }
+
+    pub(crate) fn build_with_external_selectors(
+        user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>,
+        selectors: &[String],
+    ) -> String {
         let built_in_roles = built_in::configs();
         let external_agent_roles = built_in::external_agent_configs();
-        build_from_configs(
+        let mut description = build_from_configs(
             built_in_roles,
             external_agent_roles,
             user_defined_agent_roles,
-        )
+        );
+        if !selectors.is_empty() {
+            description.push_str("\n\nDiscovered external selectors:\n");
+            description.push_str(
+                &selectors
+                    .iter()
+                    .map(|selector| format!("- `{selector}`: Antigravity model selector."))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        description
     }
 
     // This function is not inlined for testing purpose.

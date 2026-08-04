@@ -130,6 +130,24 @@ static CAPABILITY_CACHE: LazyLock<
     Mutex<HashMap<ExternalAgentCapabilityCacheKey, CachedCapabilities>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub(crate) fn discovered_antigravity_selectors() -> Vec<ExternalAgentModelCapability> {
+    let cache = CAPABILITY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .values()
+        .filter(|cached| cached.capabilities.cli_family == "antigravity")
+        .flat_map(|cached| cached.capabilities.models.iter().cloned())
+        .take(MAX_DISCOVERED_MODELS)
+        .collect()
+}
+
+pub(crate) fn looks_like_antigravity_selector(selector: &str) -> bool {
+    selector
+        .strip_prefix("antigravity-")
+        .is_some_and(|model| !model.is_empty())
+}
+
 pub(super) fn cached_capabilities(
     key: &ExternalAgentCapabilityCacheKey,
 ) -> Option<ExternalAgentCapabilities> {

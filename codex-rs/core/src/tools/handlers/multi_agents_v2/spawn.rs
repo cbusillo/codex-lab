@@ -12,7 +12,6 @@ use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
-use codex_config::agent_defaults::AgentModelSpec;
 use codex_config::agent_defaults::agent_model_spec;
 use codex_protocol::AgentPath;
 use codex_tools::ToolSpec;
@@ -86,14 +85,29 @@ async fn handle_spawn_agent(
     if is_full_history_fork {
         reject_full_fork_agent_type_override(role_name)?;
     }
-    apply_requested_spawn_agent_model_overrides(
-        &session,
-        turn.as_ref(),
-        &mut config,
-        selectors.model.as_deref(),
-        args.reasoning_effort.clone(),
-    )
-    .await?;
+    if routing.is_external()
+        && let Some(role_name) = role_name
+        && crate::agent::external_capabilities::looks_like_antigravity_selector(role_name)
+    {
+        let effort = args.reasoning_effort.as_ref().map(ToString::to_string);
+        let role =
+            crate::agent::role::dynamic_antigravity_role_config(role_name, effort.as_deref())
+                .ok_or_else(|| {
+                    FunctionCallError::RespondToModel(format!(
+                        "Unable to construct external selector `{role_name}` without substitution."
+                    ))
+                })?;
+        config.agent_roles.insert(role_name.to_string(), role);
+    } else {
+        apply_requested_spawn_agent_model_overrides(
+            &session,
+            turn.as_ref(),
+            &mut config,
+            selectors.model.as_deref(),
+            args.reasoning_effort.clone(),
+        )
+        .await?;
+    }
     if !is_full_history_fork {
         apply_spawn_agent_role(&session, &mut config, role_name).await?;
     }
@@ -318,25 +332,24 @@ fn resolve_spawn_selectors(
 ) -> Result<ResolvedSpawnSelectors, FunctionCallError> {
     let agent_type = agent_type.map(str::trim).filter(|role| !role.is_empty());
     let model = model.map(str::trim).filter(|model| !model.is_empty());
-    let agent_type_selector = agent_type.and_then(external_agent_spec);
-    let model_selector = model.and_then(external_agent_spec);
+    let agent_type_selector = agent_type.and_then(canonical_external_selector);
+    let model_selector = model.and_then(canonical_external_selector);
     match (agent_type, agent_type_selector, model, model_selector) {
         (None, _, Some(_), Some(model_selector)) => Ok(ResolvedSpawnSelectors {
-            agent_type: Some(model_selector.slug.to_string()),
+            agent_type: Some(model_selector),
             model: None,
         }),
         (Some(_), Some(agent_type_selector), Some(_), Some(model_selector))
-            if agent_type_selector.slug == model_selector.slug =>
+            if agent_type_selector == model_selector =>
         {
             Ok(ResolvedSpawnSelectors {
-                agent_type: Some(agent_type_selector.slug.to_string()),
+                agent_type: Some(agent_type_selector),
                 model: None,
             })
         }
         (Some(agent_type), Some(agent_type_selector), Some(model), Some(model_selector)) => {
             Err(FunctionCallError::RespondToModel(format!(
-                "external agent selector `{model}` resolves to `{}`, but agent type `{agent_type}` resolves to `{}`; use one explicit agent selector",
-                model_selector.slug, agent_type_selector.slug
+                "external agent selector `{model}` resolves to `{model_selector}`, but agent type `{agent_type}` resolves to `{agent_type_selector}`; use one explicit agent selector"
             )))
         }
         (Some(agent_type), Some(_), Some(model), None) => {
@@ -346,12 +359,11 @@ fn resolve_spawn_selectors(
         }
         (Some(agent_type), None, Some(model), Some(model_selector)) => {
             Err(FunctionCallError::RespondToModel(format!(
-                "external agent selector `{model}` resolves to `{}`, but agent type `{agent_type}` selects a different role; use one explicit agent selector",
-                model_selector.slug
+                "external agent selector `{model}` resolves to `{model_selector}`, but agent type `{agent_type}` selects a different role; use one explicit agent selector"
             )))
         }
         (Some(_), Some(agent_type_selector), None, _) => Ok(ResolvedSpawnSelectors {
-            agent_type: Some(agent_type_selector.slug.to_string()),
+            agent_type: Some(agent_type_selector),
             model: None,
         }),
         _ => Ok(ResolvedSpawnSelectors {
@@ -361,8 +373,13 @@ fn resolve_spawn_selectors(
     }
 }
 
-fn external_agent_spec(selector: &str) -> Option<&'static AgentModelSpec> {
-    agent_model_spec(selector).filter(|spec| spec.family != "code" && spec.is_enabled())
+fn canonical_external_selector(selector: &str) -> Option<String> {
+    if crate::agent::external_capabilities::looks_like_antigravity_selector(selector) {
+        return Some(selector.to_string());
+    }
+    agent_model_spec(selector)
+        .filter(|spec| spec.family != "code" && spec.is_enabled())
+        .map(|spec| spec.slug.to_string())
 }
 
 impl CoreToolRuntime for Handler {
