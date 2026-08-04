@@ -120,8 +120,9 @@ class InstallCodexLabDevTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            check=True,
+            check=False,
         )
+        self.assertEqual(result.returncode, 0, result.stdout)
         return checkout, fake_cargo, lab_home, environment, result
 
     def test_installs_launcher_pinned_to_staged_candidate(self) -> None:
