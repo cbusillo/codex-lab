@@ -44,6 +44,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
         fake_bin = root / "fake bin"
         fake_bin.mkdir()
+        (fake_bin / "bash").symlink_to("/bin/bash")
         fake_cargo = fake_bin / "cargo"
         fake_cargo.write_text(
             dedent(

@@ -75,11 +75,9 @@ done
 case "$profile" in
 dev)
 	target_subdir="debug"
-	cargo_profile_args=()
 	;;
 release)
 	target_subdir="release"
-	cargo_profile_args=(--release)
 	;;
 *)
 	echo "error: --profile must be dev or release" >&2
@@ -121,7 +119,7 @@ CARGO_TARGET_DIR="$("$repo_root/scripts/local/cargo-build-env.sh")"
 export CARGO_TARGET_DIR
 (
 	cd "$repo_root/codex-rs"
-	cargo build -p codex-cli --bin codex-lab -p codex-code-mode-host --bin codex-code-mode-host "${cargo_profile_args[@]}" --manifest-path Cargo.toml >/dev/null
+	cargo build -p codex-cli --bin codex-lab -p codex-code-mode-host --bin codex-code-mode-host --profile "$profile" --manifest-path Cargo.toml >/dev/null
 )
 target_root="${CARGO_TARGET_DIR:-$repo_root/codex-rs/target}"
 candidate="$("$python_bin" "$repo_root/scripts/local/codex_lab_provenance.py" \
