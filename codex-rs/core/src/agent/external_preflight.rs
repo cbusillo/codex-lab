@@ -4,6 +4,7 @@ use super::external_capabilities::antigravity_capabilities;
 use super::external_capabilities::cache_capabilities;
 use super::external_capabilities::cached_capabilities;
 use super::external_capabilities::claude_capabilities;
+use super::external_capabilities::record_active_capability_catalog;
 use super::external_capabilities::validate_requested_capabilities;
 use super::external_command::EXTERNAL_AGENT_TRUNCATED_MARKER;
 use super::external_command::ExternalAgentChildGuard;
@@ -58,9 +59,11 @@ pub async fn discover_external_agent_capabilities(
     backend: &ExternalCommandAgentBackendConfig,
     workspace: &Path,
 ) -> ExternalAgentCapabilities {
-    probe_external_agent_backend(backend, workspace)
+    let capabilities = probe_external_agent_backend(backend, workspace)
         .await
-        .capabilities
+        .capabilities;
+    record_active_capability_catalog(backend, workspace, &capabilities);
+    capabilities
 }
 
 pub(crate) async fn preflight_external_agent_backend(

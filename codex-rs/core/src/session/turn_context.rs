@@ -953,7 +953,12 @@ impl Session {
 
         if multi_agent_version == MultiAgentVersion::V2
             && let Some(crate::config::AgentRoleBackendConfig::ExternalCommand(backend)) =
-                crate::agent::role::external_agent_role_config("antigravity")
+                turn_context
+                    .config
+                    .agent_roles
+                    .get("antigravity")
+                    .cloned()
+                    .or_else(|| crate::agent::role::external_agent_role_config("antigravity"))
                     .and_then(|role| role.backend)
         {
             let _ = crate::agent::external_preflight::discover_external_agent_capabilities(

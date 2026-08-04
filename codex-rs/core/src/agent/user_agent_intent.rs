@@ -49,16 +49,15 @@ impl UserAgentIntent {
         &self.required
     }
 
-    #[cfg(test)]
-    fn rejected(&self) -> &[String] {
+    pub(crate) fn rejected(&self) -> &[String] {
         &self.rejected
     }
 
-    pub(crate) fn requires(&self, slug: &str) -> bool {
+    fn requires(&self, slug: &str) -> bool {
         self.required.iter().any(|required| required == slug)
     }
 
-    pub(crate) fn rejects(&self, slug: &str) -> bool {
+    fn rejects(&self, slug: &str) -> bool {
         self.rejected.iter().any(|rejected| rejected == slug)
     }
 

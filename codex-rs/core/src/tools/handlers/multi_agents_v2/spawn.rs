@@ -242,7 +242,10 @@ fn enforce_explicit_user_agent_intent(
         .as_deref()
         .or(selectors.model.as_deref());
     if let Some(selected) = selected
-        && intent.rejects(selected)
+        && intent
+            .rejected()
+            .iter()
+            .any(|rejected| intent_selector_matches(rejected, selected))
     {
         return Err(FunctionCallError::RespondToModel(format!(
             "The current user turn explicitly rejects `{selected}`. Do not spawn that agent; choose an allowed alternative."
@@ -256,7 +259,11 @@ fn enforce_explicit_user_agent_intent(
             "The current user turn explicitly requests specific agents: {required}. Set `agent_type` to one of those canonical selectors before spawning. Do not use automatic routing for a named-agent request."
         )));
     };
-    if intent.requires(selected) {
+    if intent
+        .required()
+        .iter()
+        .any(|required| intent_selector_matches(required, selected))
+    {
         return Ok(());
     }
     Err(FunctionCallError::RespondToModel(format!(
@@ -278,12 +285,21 @@ fn validate_routed_user_agent_intent(
     intent: &UserAgentIntent,
     selected: &str,
 ) -> Result<(), FunctionCallError> {
-    if intent.rejects(selected) {
+    if intent
+        .rejected()
+        .iter()
+        .any(|rejected| intent_selector_matches(rejected, selected))
+    {
         return Err(FunctionCallError::RespondToModel(format!(
             "Automatic routing selected `{selected}`, but the current user turn explicitly rejects that agent. Retry with an allowed explicit `agent_type`."
         )));
     }
-    if intent.required().is_empty() || intent.requires(selected) {
+    if intent.required().is_empty()
+        || intent
+            .required()
+            .iter()
+            .any(|required| intent_selector_matches(required, selected))
+    {
         return Ok(());
     }
     let required = intent
@@ -295,6 +311,12 @@ fn validate_routed_user_agent_intent(
     Err(FunctionCallError::RespondToModel(format!(
         "Routing selected `{selected}`, but the current user turn explicitly requests {required}. Retry with one of the requested canonical selectors."
     )))
+}
+
+fn intent_selector_matches(intent_selector: &str, selected: &str) -> bool {
+    intent_selector == selected
+        || (intent_selector == "antigravity"
+            && crate::agent::external_capabilities::looks_like_antigravity_selector(selected))
 }
 
 #[cfg(test)]
@@ -323,6 +345,19 @@ mod intent_tests {
 
         assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_err());
         assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_ok());
+    }
+
+    #[test]
+    fn provider_intent_accepts_exact_antigravity_model_without_accepting_other_models() {
+        let intent = intent("Ask Antigravity to review this.");
+
+        assert!(
+            validate_routed_user_agent_intent(&intent, "antigravity-gemini-3.6-flash-high").is_ok()
+        );
+        assert!(
+            validate_routed_user_agent_intent(&intent, "antigravity-gemini-3.1-pro-low").is_ok()
+        );
+        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_err());
     }
 }
 
@@ -374,6 +409,9 @@ fn resolve_spawn_selectors(
 }
 
 fn canonical_external_selector(selector: &str) -> Option<String> {
+    // Keep unknown provider-qualified selectors on the external route so bounded
+    // preflight can reject them with the installed CLI's actionable capability
+    // diagnostics. Never fall back to a native or provider-default selector.
     if crate::agent::external_capabilities::looks_like_antigravity_selector(selector) {
         return Some(selector.to_string());
     }

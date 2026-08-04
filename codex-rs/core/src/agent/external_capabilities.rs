@@ -3,6 +3,7 @@ use super::external_diagnostics::ExternalAgentFailureKind;
 use crate::config::ExternalCommandAgentBackendConfig;
 use codex_config::agent_defaults::agent_model_specs;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -17,6 +18,7 @@ use std::time::UNIX_EPOCH;
 const CAPABILITY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_CAPABILITY_CACHE_ENTRIES: usize = 32;
 const MAX_DISCOVERED_MODELS: usize = 32;
+const MAX_ACTIVE_CAPABILITY_CATALOGS: usize = 32;
 const MAX_MODEL_NAME_BYTES: usize = 128;
 
 /// Identifies where an external-agent capability report came from.
@@ -126,20 +128,77 @@ struct CachedCapabilities {
     cached_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct ActiveCapabilityCatalogEntry {
+    models: Vec<ExternalAgentModelCapability>,
+    recorded_at: Instant,
+}
+
 static CAPABILITY_CACHE: LazyLock<
     Mutex<HashMap<ExternalAgentCapabilityCacheKey, CachedCapabilities>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(crate) fn discovered_antigravity_selectors() -> Vec<ExternalAgentModelCapability> {
-    let cache = CAPABILITY_CACHE
+static ACTIVE_CAPABILITY_CATALOG: LazyLock<
+    Mutex<BTreeMap<(String, String), ActiveCapabilityCatalogEntry>>,
+> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+pub(crate) fn record_active_capability_catalog(
+    backend: &ExternalCommandAgentBackendConfig,
+    workspace: &Path,
+    capabilities: &ExternalAgentCapabilities,
+) {
+    if capabilities.cli_family != "antigravity" {
+        return;
+    }
+    let mut models = capabilities.models.clone();
+    models.sort_by(|left, right| left.selector.cmp(&right.selector));
+    models.dedup_by(|left, right| left.selector == right.selector);
+    let mut catalog = ACTIVE_CAPABILITY_CATALOG
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache
-        .values()
-        .filter(|cached| cached.capabilities.cli_family == "antigravity")
-        .flat_map(|cached| cached.capabilities.models.iter().cloned())
-        .take(MAX_DISCOVERED_MODELS)
-        .collect()
+    let key = (
+        backend.command.trim().to_string(),
+        workspace.display().to_string(),
+    );
+    if catalog.len() >= MAX_ACTIVE_CAPABILITY_CATALOGS && !catalog.contains_key(&key) {
+        catalog.pop_first();
+    }
+    catalog.insert(
+        key,
+        ActiveCapabilityCatalogEntry {
+            models: models.into_iter().take(MAX_DISCOVERED_MODELS).collect(),
+            recorded_at: Instant::now(),
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn clear_active_capability_catalog() {
+    ACTIVE_CAPABILITY_CATALOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+pub(crate) fn discovered_antigravity_selectors(
+    backend: &ExternalCommandAgentBackendConfig,
+    workspace: &Path,
+) -> Vec<ExternalAgentModelCapability> {
+    let mut catalog = ACTIVE_CAPABILITY_CATALOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (
+        backend.command.trim().to_string(),
+        workspace.display().to_string(),
+    );
+    let Some(entry) = catalog.get(&key) else {
+        return Vec::new();
+    };
+    if entry.recorded_at.elapsed() > CAPABILITY_CACHE_TTL {
+        catalog.remove(&key);
+        return Vec::new();
+    }
+    entry.models.clone()
 }
 
 pub(crate) fn looks_like_antigravity_selector(selector: &str) -> bool {

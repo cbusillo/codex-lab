@@ -483,7 +483,24 @@ fn agent_type_description(
     turn_context: &TurnContext,
     default_agent_type_description: &str,
 ) -> String {
-    let selectors = crate::agent::external_capabilities::discovered_antigravity_selectors()
+    let antigravity_backend = turn_context
+        .config
+        .agent_roles
+        .get("antigravity")
+        .cloned()
+        .or_else(|| crate::agent::role::external_agent_role_config("antigravity"));
+    let selectors = antigravity_backend
+        .and_then(|role| role.backend)
+        .and_then(|backend| match backend {
+            crate::config::AgentRoleBackendConfig::ExternalCommand(backend) => Some(backend),
+        })
+        .map(|backend| {
+            crate::agent::external_capabilities::discovered_antigravity_selectors(
+                &backend,
+                turn_context.config.cwd.as_path(),
+            )
+        })
+        .unwrap_or_default()
         .into_iter()
         .map(|model| model.selector)
         .collect::<Vec<_>>();
