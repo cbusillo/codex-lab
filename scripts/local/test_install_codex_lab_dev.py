@@ -35,9 +35,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
             check=True,
         )
         subprocess.run(["git", "add", "."], cwd=checkout, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "test"], cwd=checkout, check=True
-        )
+        subprocess.run(["git", "commit", "-q", "-m", "test"], cwd=checkout, check=True)
         source_commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
         ).strip()
@@ -147,9 +145,13 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertNotIn("python", contents.lower())
             self.assertIn("Installed Codex Lab dev launcher", install.stdout)
             self.assertIn("Pinned dogfood candidate", install.stdout)
-            self.assertEqual((root / "cargo.log").read_text(encoding="utf-8"), "build\n")
             self.assertEqual(
-                Path((root / "cargo.pwd").read_text(encoding="utf-8").strip()).resolve(),
+                (root / "cargo.log").read_text(encoding="utf-8"), "build\n"
+            )
+            self.assertEqual(
+                Path(
+                    (root / "cargo.pwd").read_text(encoding="utf-8").strip()
+                ).resolve(),
                 (checkout / "codex-rs").resolve(),
             )
 
@@ -174,7 +176,9 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertEqual(launch.returncode, 0, launch.stderr)
             self.assertIn("candidate=", launch.stdout)
             self.assertTrue(runtime_home.is_dir())
-            self.assertEqual((root / "cargo.log").read_text(encoding="utf-8"), "build\n")
+            self.assertEqual(
+                (root / "cargo.log").read_text(encoding="utf-8"), "build\n"
+            )
             candidate = Path(launch.stdout.split("candidate=", maxsplit=1)[1].strip())
             companion = candidate.parent / "codex-code-mode-host"
             self.assertTrue(companion.is_file())
