@@ -46,6 +46,7 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -714,6 +715,46 @@ impl AgentControl {
         Ok(children_by_parent
             .remove(&parent_thread_id)
             .unwrap_or_default())
+    }
+
+    pub(crate) async fn direct_children_all_terminal(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let mut child_thread_ids = self
+            .open_thread_spawn_children(parent_thread_id)
+            .await?
+            .into_iter()
+            .map(|(child_thread_id, _)| child_thread_id)
+            .collect::<HashSet<_>>();
+        child_thread_ids.extend(
+            self.state
+                .registered_external_thread_spawn_edges()
+                .into_iter()
+                .filter_map(|(registered_parent_thread_id, child_thread_id)| {
+                    (registered_parent_thread_id == parent_thread_id).then_some(child_thread_id)
+                }),
+        );
+        if let Ok(state) = self.upgrade()
+            && let Some(agent_graph_store) = state.agent_graph_store()
+            && let Ok(persisted_children) = agent_graph_store
+                .list_thread_spawn_children(
+                    parent_thread_id,
+                    Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
+                )
+                .await
+        {
+            child_thread_ids.extend(persisted_children);
+        }
+        if child_thread_ids.is_empty() {
+            return Ok(false);
+        }
+        for child_thread_id in child_thread_ids {
+            if !is_final(&self.get_status(child_thread_id).await) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     async fn live_thread_spawn_children(

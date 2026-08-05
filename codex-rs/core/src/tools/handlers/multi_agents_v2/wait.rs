@@ -92,8 +92,19 @@ impl Handler {
             )
             .await;
 
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        let outcome = wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
+        let all_children_terminal = pending_activity.is_none()
+            && session
+                .services
+                .agent_control
+                .direct_children_all_terminal(session.thread_id)
+                .await
+                .unwrap_or(false);
+        let outcome = if all_children_terminal {
+            WaitOutcome::AllChildrenTerminal
+        } else {
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+            wait_for_activity(&mut activity_rx, pending_activity, deadline).await
+        };
         let result = WaitAgentResult::from_outcome(outcome);
 
         session
@@ -142,6 +153,7 @@ impl WaitAgentResult {
             WaitOutcome::MailboxActivity => "Wait completed.",
             WaitOutcome::Steered => "Wait interrupted by new input.",
             WaitOutcome::TimedOut => "Wait timed out.",
+            WaitOutcome::AllChildrenTerminal => "All child agents are terminal.",
         };
         Self {
             message: message.to_string(),
@@ -173,6 +185,7 @@ enum WaitOutcome {
     MailboxActivity,
     Steered,
     TimedOut,
+    AllChildrenTerminal,
 }
 
 async fn wait_for_activity(
