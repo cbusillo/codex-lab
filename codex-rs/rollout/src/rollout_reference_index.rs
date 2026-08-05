@@ -22,15 +22,36 @@ use crate::compression::RolloutFile;
 pub struct RolloutReferenceIndex {
     history_base_by_thread: HashMap<ThreadId, HistoryPosition>,
     reference_counts_by_thread: HashMap<ThreadId, usize>,
+    scanned_rollouts: usize,
+    unreadable_rollouts: usize,
+    duplicate_thread_ids: usize,
+    scan_truncated: bool,
 }
 
 impl RolloutReferenceIndex {
     /// Scans active and archived local rollout metadata without a deadline.
     pub async fn scan(codex_home: &Path) -> io::Result<Self> {
-        let Some(index) = Self::scan_with_deadline(codex_home, ScanDeadline::Unlimited).await?
+        let Some(index) =
+            Self::scan_with_deadline(codex_home, ScanDeadline::Unlimited, None).await?
         else {
             return Err(io::Error::other(
                 "unlimited rollout reference scan exceeded a deadline",
+            ));
+        };
+        Ok(index)
+    }
+
+    /// Scans at most `max_rollouts` active and archived rollout files.
+    ///
+    /// A truncated or otherwise incomplete result remains useful for diagnostics, but callers
+    /// must use [`RolloutReferenceIndex::is_complete`] before making eligibility decisions.
+    pub async fn scan_bounded(codex_home: &Path, max_rollouts: usize) -> io::Result<Self> {
+        let Some(index) =
+            Self::scan_with_deadline(codex_home, ScanDeadline::Unlimited, Some(max_rollouts))
+                .await?
+        else {
+            return Err(io::Error::other(
+                "bounded rollout reference scan exceeded a deadline",
             ));
         };
         Ok(index)
@@ -50,6 +71,7 @@ impl RolloutReferenceIndex {
                 started_at,
                 max_runtime,
             },
+            None,
         )
         .await
     }
@@ -67,12 +89,42 @@ impl RolloutReferenceIndex {
         self.history_base_by_thread.get(&thread_id)
     }
 
+    /// Whether every discovered rollout contributed trustworthy reference metadata.
+    pub fn is_complete(&self) -> bool {
+        self.unreadable_rollouts == 0 && self.duplicate_thread_ids == 0 && !self.scan_truncated
+    }
+
+    /// Returns the number of rollout files considered by the scan.
+    pub fn scanned_rollouts(&self) -> usize {
+        self.scanned_rollouts
+    }
+
+    /// Returns the number of rollout files whose session metadata could not be read.
+    pub fn unreadable_rollouts(&self) -> usize {
+        self.unreadable_rollouts
+    }
+
+    /// Returns the number of rollout files that repeated an already-seen thread ID.
+    pub fn duplicate_thread_ids(&self) -> usize {
+        self.duplicate_thread_ids
+    }
+
+    /// Returns whether the configured rollout limit stopped the scan early.
+    pub fn scan_truncated(&self) -> bool {
+        self.scan_truncated
+    }
+
     async fn scan_with_deadline(
         codex_home: &Path,
         deadline: ScanDeadline,
+        max_rollouts: Option<usize>,
     ) -> io::Result<Option<Self>> {
         let mut history_base_by_thread = HashMap::new();
         let mut seen_thread_ids = HashSet::new();
+        let mut scanned_rollouts = 0usize;
+        let mut unreadable_rollouts = 0usize;
+        let mut duplicate_thread_ids = 0usize;
+        let mut scan_truncated = false;
         let mut stack = vec![
             codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
             codex_home.join(SESSIONS_SUBDIR),
@@ -105,16 +157,26 @@ impl RolloutReferenceIndex {
                 let Some(rollout_file) = RolloutFile::from_path(path) else {
                     continue;
                 };
+                if max_rollouts.is_some_and(|limit| scanned_rollouts >= limit) {
+                    scan_truncated = true;
+                    break;
+                }
+                scanned_rollouts = scanned_rollouts.saturating_add(1);
                 let Ok(meta) = crate::read_session_meta_line(rollout_file.path()).await else {
+                    unreadable_rollouts = unreadable_rollouts.saturating_add(1);
                     continue;
                 };
                 let thread_id = meta.meta.id;
                 if !seen_thread_ids.insert(thread_id) {
+                    duplicate_thread_ids = duplicate_thread_ids.saturating_add(1);
                     continue;
                 }
                 if let Some(history_base) = meta.meta.history_base {
                     history_base_by_thread.insert(thread_id, history_base);
                 }
+            }
+            if scan_truncated {
+                break;
             }
         }
 
@@ -130,6 +192,10 @@ impl RolloutReferenceIndex {
         Ok(Some(Self {
             history_base_by_thread,
             reference_counts_by_thread,
+            scanned_rollouts,
+            unreadable_rollouts,
+            duplicate_thread_ids,
+            scan_truncated,
         }))
     }
 }

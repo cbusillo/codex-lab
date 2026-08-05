@@ -31,6 +31,8 @@ const ROLLOUT_LEASE_COORDINATION_FILE: &str = ".coordination.lock";
 const ROLLOUT_REFERENCE_STATE_FILE: &str = ".reference-state";
 const ROLLOUT_LEASE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const ROLLOUT_LEASE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const COMPRESSION_LEVEL: i32 = 3;
+pub const ROLLOUT_COMPRESSION_MIN_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Starts a best-effort background job that compresses cold local rollout files.
 ///
@@ -56,6 +58,29 @@ enum RolloutLeaseKind {
 }
 
 impl RolloutLease {
+    /// Checks an existing lease without creating, deleting, or updating lease files.
+    pub async fn is_active_read_only(codex_home: &Path, thread_id: ThreadId) -> io::Result<bool> {
+        let path = lease_path(codex_home, thread_id);
+        tokio::task::spawn_blocking(move || {
+            let file = match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+            {
+                Ok(file) => file,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(err) => return Err(err),
+            };
+            match file.try_lock() {
+                Ok(()) => Ok(false),
+                Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+                Err(std::fs::TryLockError::Error(err)) => Err(err),
+            }
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     pub async fn acquire_shared(
         codex_home: &Path,
         compression_mode: RolloutCompressionMode,
@@ -132,6 +157,32 @@ impl RolloutLease {
         drop(coordination_lock);
         Ok(lease)
     }
+}
+
+/// Estimates the exact zstd output size for a plain rollout without creating an output file.
+pub async fn estimate_compressed_rollout_size(path: &Path) -> io::Result<u64> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        struct CountingWriter(u64);
+
+        impl Write for CountingWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                self.0 = self.0.saturating_add(buffer.len() as u64);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut input = File::open(path)?;
+        let mut encoder = zstd::stream::write::Encoder::new(CountingWriter(0), COMPRESSION_LEVEL)?;
+        io::copy(&mut input, &mut encoder)?;
+        Ok(encoder.finish()?.0)
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 impl Drop for RolloutLease {
@@ -609,8 +660,6 @@ mod worker {
     use super::path;
 
     const TEMP_SUFFIX: &str = ".tmp";
-    const COMPRESSION_LEVEL: i32 = 3;
-    const MIN_ROLLOUT_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
     const RUN_MARKER_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
     const TEMP_FILE_STALE_AFTER: Duration = RUN_MARKER_STALE_AFTER;
     const WORKER_MAX_RUNTIME: Duration = Duration::from_secs(5 * 60 * 60);
@@ -971,7 +1020,7 @@ mod worker {
         SystemTime::now()
             .duration_since(modified)
             .unwrap_or(Duration::ZERO)
-            >= MIN_ROLLOUT_AGE
+            >= super::ROLLOUT_COMPRESSION_MIN_AGE
     }
 
     enum ReferenceIndexScan {
@@ -1222,7 +1271,7 @@ mod worker {
         let age = SystemTime::now()
             .duration_since(modified)
             .unwrap_or(Duration::ZERO);
-        if age < MIN_ROLLOUT_AGE {
+        if age < super::ROLLOUT_COMPRESSION_MIN_AGE {
             return Ok(ColdFileState::NotCold(Some(state)));
         }
         Ok(ColdFileState::Cold(state))
@@ -1240,7 +1289,7 @@ mod worker {
 
     fn encode_zstd_to_writer(source: &Path, output: impl Write) -> io::Result<()> {
         let mut input = File::open(source)?;
-        let mut encoder = zstd::stream::write::Encoder::new(output, COMPRESSION_LEVEL)?;
+        let mut encoder = zstd::stream::write::Encoder::new(output, super::COMPRESSION_LEVEL)?;
         io::copy(&mut input, &mut encoder)?;
         encoder.finish()?;
         Ok(())
