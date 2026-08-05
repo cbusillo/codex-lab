@@ -12,6 +12,18 @@ fn app_scoped_key_path_quotes_dotted_app_ids() {
 }
 
 #[test]
+fn agent_selector_edit_quotes_dotted_selector_names() {
+    assert_eq!(
+        agent_selector_enabled_edit("antigravity-gemini-3.6-flash", false),
+        ConfigEdit {
+            key_path: "agents.selectors.\"antigravity-gemini-3.6-flash\".enabled".to_string(),
+            value: serde_json::json!(false),
+            merge_strategy: MergeStrategy::Replace,
+        }
+    );
+}
+
+#[test]
 fn trusted_project_edit_targets_project_trust_level() {
     assert_eq!(
         trusted_project_edit(Path::new("/workspace/team.project")),

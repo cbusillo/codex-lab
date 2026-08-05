@@ -1992,6 +1992,10 @@ impl App {
             AppEvent::OpenAgentsSettings => {
                 self.chat_widget.open_agents_settings_popup();
             }
+            AppEvent::SetAgentSelectorEnabled { selector, enabled } => {
+                self.update_agent_selector_enabled(app_server, &selector, enabled)
+                    .await;
+            }
             AppEvent::SetAutomaticValidationEnabled(enabled) => {
                 self.update_automatic_validation_enabled(app_server, enabled)
                     .await;

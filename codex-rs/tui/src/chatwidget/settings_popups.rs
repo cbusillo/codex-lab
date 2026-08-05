@@ -6,7 +6,8 @@
 use super::*;
 use crate::agent_install_helpers::AgentInstallStatus;
 use crate::agent_install_helpers::external_agent_install_statuses;
-use codex_config::agent_defaults::enabled_agent_model_specs;
+use codex_config::agent_defaults::AgentModelSpec;
+use codex_config::agent_defaults::agent_model_specs;
 
 impl ChatWidget {
     pub(super) fn open_theme_picker(&mut self) {
@@ -198,17 +199,33 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_agents_settings_popup(&mut self) {
-        let specs = enabled_agent_model_specs();
+        let specs = agent_model_specs()
+            .iter()
+            .filter(|spec| matches!(spec.family, "antigravity" | "claude" | "copilot" | "qwen"))
+            .collect::<Vec<_>>();
         let statuses = external_agent_install_statuses(&specs);
-        self.open_agents_settings_popup_with_statuses(statuses);
+        self.open_agents_settings_popup_with_statuses(&specs, statuses);
     }
 
     pub(crate) fn open_agents_settings_popup_with_statuses(
         &mut self,
+        specs: &[&'static AgentModelSpec],
         statuses: Vec<AgentInstallStatus>,
     ) {
-        self.bottom_pane
-            .show_selection_view(agents_settings_params(statuses));
+        self.bottom_pane.show_selection_view(agents_settings_params(
+            specs,
+            statuses,
+            &self.config.agent_selector_overrides,
+        ));
+    }
+
+    pub(crate) fn set_agent_selector_enabled(&mut self, selector: &str, enabled: bool) {
+        self.config.agent_selector_overrides.insert(
+            selector.to_string(),
+            codex_config::config_toml::AgentSelectorToml {
+                enabled: Some(enabled),
+            },
+        );
     }
 
     pub(crate) fn open_experimental_popup(&mut self) {
@@ -251,51 +268,75 @@ impl ChatWidget {
     }
 }
 
-fn agents_settings_params(statuses: Vec<AgentInstallStatus>) -> SelectionViewParams {
-    let items = statuses
-        .into_iter()
-        .map(agent_status_selection_item)
+fn agents_settings_params(
+    specs: &[&'static AgentModelSpec],
+    statuses: Vec<AgentInstallStatus>,
+    overrides: &std::collections::BTreeMap<String, codex_config::config_toml::AgentSelectorToml>,
+) -> SelectionViewParams {
+    let items = specs
+        .iter()
+        .map(|spec| {
+            let status = statuses
+                .iter()
+                .find(|status| status.family == spec.family && status.command == spec.cli);
+            let enabled = overrides
+                .get(spec.slug)
+                .and_then(|override_config| override_config.enabled)
+                .unwrap_or_else(|| spec.is_enabled());
+            agent_selector_selection_item(spec, status, enabled)
+        })
         .collect();
     SelectionViewParams {
         title: Some("Agents".to_string()),
-        subtitle: Some("Third-party agent CLI status for spawn_agent.".to_string()),
+        subtitle: Some(
+            "Enable only the external selectors you want spawn_agent to use.".to_string(),
+        ),
         footer_hint: Some(standard_popup_hint_line()),
         items,
         ..Default::default()
     }
 }
 
-fn agent_status_selection_item(status: AgentInstallStatus) -> SelectionItem {
-    let marker = if status.installed {
+fn agent_selector_selection_item(
+    spec: &'static AgentModelSpec,
+    status: Option<&AgentInstallStatus>,
+    enabled: bool,
+) -> SelectionItem {
+    let enabled_marker = if enabled { "enabled" } else { "disabled" };
+    let install_marker = if status.is_some_and(|status| status.installed) {
         "installed"
     } else {
         "not installed"
     };
-    let description = if status.installed {
-        format!("{marker} - `{}` is on PATH", status.command)
-    } else {
-        format!("{marker} - {}", status.install_hint)
-    };
-    let selected_description = if status.installed {
-        Some(format!(
-            "{} Command: `{}` is available on PATH.",
-            status.description, status.command
-        ))
-    } else {
-        Some(format!(
-            "{} Command: `{}`. {}",
-            status.description, status.command, status.install_hint
-        ))
-    };
+    let selector = spec.slug.to_string();
+    let next_enabled = !enabled;
+    let selected_description = status.map_or_else(
+        || Some(spec.description.to_string()),
+        |status| {
+            let availability = if status.installed {
+                format!("`{}` is available on PATH.", status.command)
+            } else {
+                status.install_hint.clone()
+            };
+            Some(format!("{} {availability}", spec.description))
+        },
+    );
 
     SelectionItem {
-        name: format!("{} ({marker})", status.name),
-        description: Some(description),
+        name: format!("{} ({enabled_marker})", spec.slug),
+        description: Some(format!("{install_marker} • provider `{}`", spec.family)),
         selected_description,
         search_value: Some(format!(
-            "{} {} {} {}",
-            status.name, status.family, status.command, status.description
+            "{} {} {}",
+            spec.slug, spec.family, spec.description
         )),
+        is_current: enabled,
+        actions: vec![Box::new(move |tx| {
+            tx.send(AppEvent::SetAgentSelectorEnabled {
+                selector: selector.clone(),
+                enabled: next_enabled,
+            });
+        })],
         dismiss_on_select: true,
         ..Default::default()
     }

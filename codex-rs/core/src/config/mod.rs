@@ -937,6 +937,9 @@ pub struct Config {
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
 
+    /// Explicit enablement overrides for built-in and discovered external-agent selectors.
+    pub agent_selector_overrides: BTreeMap<String, codex_config::config_toml::AgentSelectorToml>,
+
     /// Whether to record a model-visible message when an agent turn is interrupted.
     pub agent_interrupt_message_enabled: bool,
 
@@ -3929,6 +3932,11 @@ impl Config {
             .agents
             .as_ref()
             .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
+        let agent_selector_overrides = cfg
+            .agents
+            .as_ref()
+            .map(|agents| agents.selectors.clone())
+            .unwrap_or_default();
         let agent_interrupt_message_enabled = cfg
             .agents
             .as_ref()
@@ -4276,6 +4284,7 @@ impl Config {
             agent_max_threads,
             agent_default_subagent_model,
             agent_default_subagent_reasoning_effort,
+            agent_selector_overrides,
             agent_max_depth,
             agent_roles,
             memories: memories_config,

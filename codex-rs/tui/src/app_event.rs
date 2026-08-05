@@ -1028,6 +1028,12 @@ pub(crate) enum AppEvent {
     /// Open third-party agent install/status settings from the general settings menu.
     OpenAgentsSettings,
 
+    /// Persist an explicit enablement override for an agent selector.
+    SetAgentSelectorEnabled {
+        selector: String,
+        enabled: bool,
+    },
+
     /// Update whether built-in functional Automatic Validation is enabled.
     SetAutomaticValidationEnabled(bool),
 

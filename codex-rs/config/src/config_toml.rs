@@ -732,6 +732,10 @@ pub struct AgentsToml {
     /// Defaults to true.
     pub interrupt_message: Option<bool>,
 
+    /// Explicit enablement overrides for built-in and discovered agent selectors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub selectors: BTreeMap<String, AgentSelectorToml>,
+
     /// User-defined role declarations keyed by role name.
     ///
     /// Example:
@@ -743,6 +747,13 @@ pub struct AgentsToml {
     /// ```
     #[serde(default, flatten)]
     pub roles: BTreeMap<String, AgentRoleToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentSelectorToml {
+    /// Whether this selector is available to the model and explicit spawn calls.
+    pub enabled: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
