@@ -27,6 +27,7 @@ use codex_tools::ToolOutput;
 use codex_tools::ToolSpec;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use tempfile::TempDir;
 
 use crate::WaitForEnvironmentToolConfig;
 use crate::config::CurrentTimeReminderConfig;
@@ -48,6 +49,83 @@ use crate::tools::spec_plan::append_source_tool_runtimes;
 use crate::tools::spec_plan::build_core_tool_runtimes;
 
 const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+
+#[test]
+fn discovered_external_selectors_expose_agent_type_without_configured_roles() {
+    assert!(super::should_expose_agent_type(
+        /*has_configured_roles*/ false, /*has_external_selectors*/ true,
+    ));
+    assert!(!super::should_expose_agent_type(
+        /*has_configured_roles*/ false, /*has_external_selectors*/ false,
+    ));
+}
+
+#[tokio::test]
+async fn discovered_external_selector_is_advertised_without_user_roles() {
+    let workspace = TempDir::new().expect("create workspace");
+    let workspace =
+        codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(workspace.path())
+            .expect("workspace should be absolute");
+    let selector = "antigravity-gemini-3.6-flash-high";
+
+    let plan = probe(|turn| {
+        set_features(turn, &[Feature::Collab, Feature::MultiAgentV2]);
+        update_config(turn, |config| {
+            config.cwd = workspace.clone();
+            config.agent_roles.clear();
+        });
+        let backend = crate::agent::role::external_agent_role_config("antigravity")
+            .and_then(|role| role.backend)
+            .map(|backend| match backend {
+                crate::config::AgentRoleBackendConfig::ExternalCommand(backend) => backend,
+            })
+            .expect("built-in Antigravity backend");
+        crate::agent::external_capabilities::record_active_capability_catalog(
+            &backend,
+            workspace.as_path(),
+            &crate::agent::external_capabilities::ExternalAgentCapabilities {
+                cli_family: "antigravity".to_string(),
+                cli_version: Some("1.1.10".to_string()),
+                supports_model_selection: true,
+                supports_effort_selection: true,
+                models: vec![
+                    crate::agent::external_capabilities::ExternalAgentModelCapability {
+                        selector: selector.to_string(),
+                        model: "gemini-3.6-flash-high".to_string(),
+                        explicit_only: false,
+                    },
+                ],
+                effort_levels: vec!["high".to_string()],
+                source:
+                    crate::agent::external_capabilities::ExternalAgentCapabilitySource::LocalCli,
+                freshness:
+                    crate::agent::external_capabilities::ExternalAgentCapabilityFreshness::Fresh,
+                observed_at_unix_seconds: 0,
+                failure: None,
+            },
+        );
+    })
+    .await;
+
+    let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
+        panic!("expected agents namespace");
+    };
+    let spawn_agent = namespace
+        .tools
+        .iter()
+        .find_map(|tool| match tool {
+            ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent" => Some(tool),
+            ResponsesApiNamespaceTool::Function(_) => None,
+        })
+        .expect("spawn_agent tool");
+    let parameters = serde_json::to_value(&spawn_agent.parameters).expect("serialize parameters");
+    let agent_type_description = parameters
+        .pointer("/properties/agent_type/description")
+        .and_then(serde_json::Value::as_str)
+        .expect("discovered selectors should expose agent_type");
+
+    assert!(agent_type_description.contains(selector));
+}
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -1696,6 +1774,25 @@ async fn mandatory_multi_agent_v2_exposes_one_agent_tool_family() {
         direct_model_only
             .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
         ToolExposure::DirectModelOnly
+    );
+    let ToolSpec::Freeform(exec) =
+        direct_model_only.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME)
+    else {
+        panic!("expected code mode exec tool");
+    };
+    assert!(
+        exec.description
+            .contains("`agents.spawn_agent` is a direct top-level tool"),
+        "{}",
+        exec.description
+    );
+    assert!(
+        exec.description
+            .contains("`to=functions.agents.spawn_agent`")
+    );
+    assert!(
+        exec.description
+            .contains("`ALL_TOOLS` entry is capability metadata")
     );
 }
 

@@ -5,6 +5,7 @@ use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
+use codex_code_mode::ToolDefinition;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 
@@ -16,13 +17,19 @@ use super::is_exec_tool_name;
 pub struct CodeModeExecuteHandler {
     spec: ToolSpec,
     nested_tool_specs: Vec<ToolSpec>,
+    direct_model_only_tools: Vec<ToolDefinition>,
 }
 
 impl CodeModeExecuteHandler {
-    pub(crate) fn new(spec: ToolSpec, nested_tool_specs: Vec<ToolSpec>) -> Self {
+    pub(crate) fn new(
+        spec: ToolSpec,
+        nested_tool_specs: Vec<ToolSpec>,
+        direct_model_only_tools: Vec<ToolDefinition>,
+    ) -> Self {
         Self {
             spec,
             nested_tool_specs,
+            direct_model_only_tools,
         }
     }
 
@@ -38,6 +45,7 @@ impl CodeModeExecuteHandler {
         let exec = ExecContext { session, turn };
         let enabled_tools =
             codex_tools::collect_code_mode_tool_definitions(&self.nested_tool_specs);
+        let source = source_with_direct_tool_metadata(&args.code, &self.direct_model_only_tools)?;
         let started_at = std::time::Instant::now();
         let started_cell = exec
             .session
@@ -46,7 +54,7 @@ impl CodeModeExecuteHandler {
             .execute(codex_code_mode::ExecuteRequest {
                 tool_call_id: call_id.clone(),
                 enabled_tools,
-                source: args.code.clone(),
+                source,
                 yield_time_ms: args.yield_time_ms,
                 max_output_tokens: args.max_output_tokens,
             })
@@ -95,6 +103,35 @@ impl CodeModeExecuteHandler {
     }
 }
 
+fn source_with_direct_tool_metadata(
+    source: &str,
+    direct_tools: &[ToolDefinition],
+) -> Result<String, FunctionCallError> {
+    if direct_tools.is_empty() {
+        return Ok(source.to_string());
+    }
+    let metadata = direct_tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "callable": false,
+                "invocation": "direct",
+                "recipient": super::direct_tool_recipient(&tool.tool_name),
+            })
+        })
+        .collect::<Vec<_>>();
+    let metadata = serde_json::to_string(&metadata).map_err(|error| {
+        FunctionCallError::RespondToModel(format!(
+            "failed to encode direct tool capability metadata: {error}"
+        ))
+    })?;
+    Ok(format!(
+        "{{ const directTools = {metadata}; for (const tool of directTools) {{ ALL_TOOLS.push(tool); }} }}\n{source}"
+    ))
+}
+
 impl ToolExecutor<ToolInvocation> for CodeModeExecuteHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(PUBLIC_TOOL_NAME)
@@ -138,5 +175,56 @@ impl CodeModeExecuteHandler {
 impl CoreToolRuntime for CodeModeExecuteHandler {
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Custom { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_tool_metadata_leaves_source_unchanged_when_empty() {
+        let source = "text('ready');";
+
+        assert_eq!(
+            source_with_direct_tool_metadata(source, &[]).expect("source should encode"),
+            source
+        );
+    }
+
+    #[test]
+    fn direct_tool_metadata_is_machine_readable_and_not_callable() {
+        let source = "text('ready');";
+        let tool = ToolDefinition {
+            name: "agents__spawn_agent".to_string(),
+            tool_name: ToolName::namespaced("agents", "spawn_agent"),
+            description: "Call the direct tool.".to_string(),
+            kind: codex_code_mode::CodeModeToolKind::Function,
+            input_schema: None,
+            output_schema: None,
+        };
+
+        let encoded =
+            source_with_direct_tool_metadata(source, &[tool]).expect("source should encode");
+        let metadata = encoded
+            .strip_prefix("{ const directTools = ")
+            .and_then(|encoded| encoded.split_once("; for (const tool of directTools)"))
+            .map(|(metadata, _)| metadata)
+            .expect("metadata prelude should be present");
+        let metadata: serde_json::Value =
+            serde_json::from_str(metadata).expect("metadata should be valid JSON");
+
+        assert_eq!(
+            metadata,
+            serde_json::json!([{
+                "name": "agents__spawn_agent",
+                "description": "Call the direct tool.",
+                "callable": false,
+                "invocation": "direct",
+                "recipient": "functions.agents.spawn_agent",
+            }])
+        );
+        assert!(encoded.ends_with(source));
+        assert!(!encoded.contains("Object.defineProperty"));
     }
 }

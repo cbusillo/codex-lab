@@ -12,7 +12,6 @@ use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
-use codex_config::agent_defaults::AgentModelSpec;
 use codex_config::agent_defaults::agent_model_spec;
 use codex_protocol::AgentPath;
 use codex_tools::ToolSpec;
@@ -66,6 +65,17 @@ async fn handle_spawn_agent(
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    if let Some(role_name) = explicit_role_name
+        && crate::agent::external_capabilities::looks_like_antigravity_selector(role_name)
+    {
+        let effort = args.reasoning_effort.as_ref().map(ToString::to_string);
+        crate::agent::role::install_dynamic_antigravity_role(
+            &mut config,
+            role_name,
+            effort.as_deref(),
+        )
+        .map_err(FunctionCallError::RespondToModel)?;
+    }
     let routing =
         select_provider_route(&config, explicit_role_name, args.task_kind, args.task_size)
             .await
@@ -86,14 +96,16 @@ async fn handle_spawn_agent(
     if is_full_history_fork {
         reject_full_fork_agent_type_override(role_name)?;
     }
-    apply_requested_spawn_agent_model_overrides(
-        &session,
-        turn.as_ref(),
-        &mut config,
-        selectors.model.as_deref(),
-        args.reasoning_effort.clone(),
-    )
-    .await?;
+    if !routing.is_external() {
+        apply_requested_spawn_agent_model_overrides(
+            &session,
+            turn.as_ref(),
+            &mut config,
+            selectors.model.as_deref(),
+            args.reasoning_effort.clone(),
+        )
+        .await?;
+    }
     if !is_full_history_fork {
         apply_spawn_agent_role(&session, &mut config, role_name).await?;
     }
@@ -228,7 +240,10 @@ fn enforce_explicit_user_agent_intent(
         .as_deref()
         .or(selectors.model.as_deref());
     if let Some(selected) = selected
-        && intent.rejects(selected)
+        && intent
+            .rejected()
+            .iter()
+            .any(|rejected| intent_selector_matches(rejected, selected))
     {
         return Err(FunctionCallError::RespondToModel(format!(
             "The current user turn explicitly rejects `{selected}`. Do not spawn that agent; choose an allowed alternative."
@@ -242,7 +257,11 @@ fn enforce_explicit_user_agent_intent(
             "The current user turn explicitly requests specific agents: {required}. Set `agent_type` to one of those canonical selectors before spawning. Do not use automatic routing for a named-agent request."
         )));
     };
-    if intent.requires(selected) {
+    if intent
+        .required()
+        .iter()
+        .any(|required| intent_selector_matches(required, selected))
+    {
         return Ok(());
     }
     Err(FunctionCallError::RespondToModel(format!(
@@ -264,12 +283,21 @@ fn validate_routed_user_agent_intent(
     intent: &UserAgentIntent,
     selected: &str,
 ) -> Result<(), FunctionCallError> {
-    if intent.rejects(selected) {
+    if intent
+        .rejected()
+        .iter()
+        .any(|rejected| intent_selector_matches(rejected, selected))
+    {
         return Err(FunctionCallError::RespondToModel(format!(
             "Automatic routing selected `{selected}`, but the current user turn explicitly rejects that agent. Retry with an allowed explicit `agent_type`."
         )));
     }
-    if intent.required().is_empty() || intent.requires(selected) {
+    if intent.required().is_empty()
+        || intent
+            .required()
+            .iter()
+            .any(|required| intent_selector_matches(required, selected))
+    {
         return Ok(());
     }
     let required = intent
@@ -281,6 +309,12 @@ fn validate_routed_user_agent_intent(
     Err(FunctionCallError::RespondToModel(format!(
         "Routing selected `{selected}`, but the current user turn explicitly requests {required}. Retry with one of the requested canonical selectors."
     )))
+}
+
+fn intent_selector_matches(intent_selector: &str, selected: &str) -> bool {
+    intent_selector == selected
+        || (intent_selector == "antigravity"
+            && crate::agent::external_capabilities::looks_like_antigravity_selector(selected))
 }
 
 #[cfg(test)]
@@ -310,6 +344,19 @@ mod intent_tests {
         assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_err());
         assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_ok());
     }
+
+    #[test]
+    fn provider_intent_accepts_exact_antigravity_model_without_accepting_other_models() {
+        let intent = intent("Ask Antigravity to review this.");
+
+        assert!(
+            validate_routed_user_agent_intent(&intent, "antigravity-gemini-3.6-flash-high").is_ok()
+        );
+        assert!(
+            validate_routed_user_agent_intent(&intent, "antigravity-gemini-3.1-pro-low").is_ok()
+        );
+        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_err());
+    }
 }
 
 fn resolve_spawn_selectors(
@@ -318,25 +365,24 @@ fn resolve_spawn_selectors(
 ) -> Result<ResolvedSpawnSelectors, FunctionCallError> {
     let agent_type = agent_type.map(str::trim).filter(|role| !role.is_empty());
     let model = model.map(str::trim).filter(|model| !model.is_empty());
-    let agent_type_selector = agent_type.and_then(external_agent_spec);
-    let model_selector = model.and_then(external_agent_spec);
+    let agent_type_selector = agent_type.and_then(canonical_external_selector);
+    let model_selector = model.and_then(canonical_external_selector);
     match (agent_type, agent_type_selector, model, model_selector) {
         (None, _, Some(_), Some(model_selector)) => Ok(ResolvedSpawnSelectors {
-            agent_type: Some(model_selector.slug.to_string()),
+            agent_type: Some(model_selector),
             model: None,
         }),
         (Some(_), Some(agent_type_selector), Some(_), Some(model_selector))
-            if agent_type_selector.slug == model_selector.slug =>
+            if agent_type_selector == model_selector =>
         {
             Ok(ResolvedSpawnSelectors {
-                agent_type: Some(agent_type_selector.slug.to_string()),
+                agent_type: Some(agent_type_selector),
                 model: None,
             })
         }
         (Some(agent_type), Some(agent_type_selector), Some(model), Some(model_selector)) => {
             Err(FunctionCallError::RespondToModel(format!(
-                "external agent selector `{model}` resolves to `{}`, but agent type `{agent_type}` resolves to `{}`; use one explicit agent selector",
-                model_selector.slug, agent_type_selector.slug
+                "external agent selector `{model}` resolves to `{model_selector}`, but agent type `{agent_type}` resolves to `{agent_type_selector}`; use one explicit agent selector"
             )))
         }
         (Some(agent_type), Some(_), Some(model), None) => {
@@ -346,12 +392,11 @@ fn resolve_spawn_selectors(
         }
         (Some(agent_type), None, Some(model), Some(model_selector)) => {
             Err(FunctionCallError::RespondToModel(format!(
-                "external agent selector `{model}` resolves to `{}`, but agent type `{agent_type}` selects a different role; use one explicit agent selector",
-                model_selector.slug
+                "external agent selector `{model}` resolves to `{model_selector}`, but agent type `{agent_type}` selects a different role; use one explicit agent selector"
             )))
         }
         (Some(_), Some(agent_type_selector), None, _) => Ok(ResolvedSpawnSelectors {
-            agent_type: Some(agent_type_selector.slug.to_string()),
+            agent_type: Some(agent_type_selector),
             model: None,
         }),
         _ => Ok(ResolvedSpawnSelectors {
@@ -361,8 +406,16 @@ fn resolve_spawn_selectors(
     }
 }
 
-fn external_agent_spec(selector: &str) -> Option<&'static AgentModelSpec> {
-    agent_model_spec(selector).filter(|spec| spec.family != "code" && spec.is_enabled())
+fn canonical_external_selector(selector: &str) -> Option<String> {
+    // Keep unknown provider-qualified selectors on the external route so bounded
+    // preflight can reject them with the installed CLI's actionable capability
+    // diagnostics. Never fall back to a native or provider-default selector.
+    if crate::agent::external_capabilities::looks_like_antigravity_selector(selector) {
+        return Some(selector.to_string());
+    }
+    agent_model_spec(selector)
+        .filter(|spec| spec.family != "code" && spec.is_enabled())
+        .map(|spec| spec.slug.to_string())
 }
 
 impl CoreToolRuntime for Handler {

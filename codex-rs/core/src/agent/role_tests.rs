@@ -561,6 +561,110 @@ fn spawn_tool_spec_marks_role_locked_service_tier() {
     ));
 }
 
+#[tokio::test]
+async fn dynamic_antigravity_role_carries_model_and_effort_flags() {
+    let (_home, config) = test_config_with_cli_overrides(Vec::new()).await;
+    let role = super::dynamic_antigravity_role_config(
+        &config,
+        "antigravity-gemini-3.6-flash-high",
+        Some("high"),
+    )
+    .expect("dynamic selector should resolve");
+    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
+        panic!("dynamic selector should use external command");
+    };
+    assert!(
+        backend
+            .args
+            .windows(2)
+            .any(|args| args == ["--model", "gemini-3.6-flash-high"])
+    );
+    assert!(
+        backend
+            .args
+            .windows(2)
+            .any(|args| args == ["--effort", "high"])
+    );
+}
+
+#[tokio::test]
+async fn dynamic_antigravity_role_preserves_configured_backend() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let mut backend = ExternalCommandAgentBackendConfig {
+        command: "custom-agy".to_string(),
+        args: ["--custom", "--model=old-model", "--effort", "low"]
+            .map(str::to_string)
+            .to_vec(),
+        ..Default::default()
+    };
+    backend
+        .env
+        .insert("CUSTOM_AGY".to_string(), "enabled".to_string());
+    config.agent_roles.insert(
+        "antigravity".to_string(),
+        AgentRoleConfig {
+            description: Some("Custom Antigravity backend.".to_string()),
+            config_file: None,
+            nickname_candidates: None,
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
+        },
+    );
+
+    let role = super::dynamic_antigravity_role_config(
+        &config,
+        "antigravity-gemini-3.6-flash-high",
+        Some("high"),
+    )
+    .expect("dynamic selector should resolve from configured backend");
+    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
+        panic!("dynamic selector should use external command");
+    };
+
+    assert_eq!(backend.command, "custom-agy");
+    assert_eq!(
+        backend.env.get("CUSTOM_AGY").map(String::as_str),
+        Some("enabled")
+    );
+    assert_eq!(
+        backend.args,
+        [
+            "--custom",
+            "--model",
+            "gemini-3.6-flash-high",
+            "--effort",
+            "high",
+        ]
+        .map(str::to_string)
+    );
+}
+
+#[tokio::test]
+async fn installed_dynamic_antigravity_role_is_resolvable_before_routing() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let selector = "antigravity-gemini-3.6-flash-high";
+
+    super::install_dynamic_antigravity_role(&mut config, selector, Some("high"))
+        .expect("dynamic selector should install");
+
+    let role = super::resolve_role_config_owned(&config, selector)
+        .expect("installed dynamic selector should resolve");
+    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
+        panic!("installed dynamic selector should use the external backend");
+    };
+    assert!(
+        backend
+            .args
+            .windows(2)
+            .any(|args| args == ["--model", "gemini-3.6-flash-high"])
+    );
+    assert!(
+        backend
+            .args
+            .windows(2)
+            .any(|args| args == ["--effort", "high"])
+    );
+}
+
 #[test]
 fn built_in_config_file_contents_resolves_explorer_only() {
     assert_eq!(

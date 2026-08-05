@@ -71,6 +71,14 @@ fn malformed_and_unbounded_antigravity_models_fail_conservatively() {
     );
     assert!(malformed.models.is_empty());
 
+    let leading_dash =
+        antigravity_capabilities(None, b"--dangerous-flag\n", false, b"--model\n", false);
+    assert_eq!(
+        leading_dash.failure.as_ref().map(|failure| failure.kind),
+        Some(ExternalAgentFailureKind::MalformedOutput)
+    );
+    assert!(leading_dash.models.is_empty());
+
     let oversized = (0..=MAX_DISCOVERED_MODELS)
         .map(|index| format!("gemini-test-{index}"))
         .collect::<Vec<_>>()
@@ -154,4 +162,23 @@ fn capability_cache_only_reuses_successful_reports() {
     );
     cache_capabilities(key.clone(), &failed);
     assert!(cached_capabilities(&key).is_none());
+}
+
+#[test]
+fn discovery_cache_reuses_failures_during_backoff() {
+    clear_capability_cache();
+    let backend = backend(&[]);
+    let key = ExternalAgentDiscoveryCacheKey::new(&backend, Path::new("/tmp/workspace"));
+    let failed = ExternalAgentCapabilities::conservative(
+        "antigravity",
+        None,
+        ExternalAgentFailureDetail::new(ExternalAgentFailureKind::CommandMissing, "missing agy"),
+    );
+
+    cache_discovery(key.clone(), &failed);
+    let cached = cached_discovery(&key).expect("failed discovery should be backoff-cached");
+
+    assert_eq!(cached.failure, failed.failure);
+    assert_eq!(cached.freshness, ExternalAgentCapabilityFreshness::Cached);
+    clear_capability_cache();
 }

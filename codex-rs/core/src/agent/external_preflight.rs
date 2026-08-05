@@ -1,9 +1,13 @@
 use super::external_capabilities::ExternalAgentCapabilities;
 use super::external_capabilities::ExternalAgentCapabilityCacheKey;
+use super::external_capabilities::ExternalAgentDiscoveryCacheKey;
 use super::external_capabilities::antigravity_capabilities;
 use super::external_capabilities::cache_capabilities;
+use super::external_capabilities::cache_discovery;
 use super::external_capabilities::cached_capabilities;
+use super::external_capabilities::cached_discovery;
 use super::external_capabilities::claude_capabilities;
+use super::external_capabilities::record_active_capability_catalog;
 use super::external_capabilities::validate_requested_capabilities;
 use super::external_command::EXTERNAL_AGENT_TRUNCATED_MARKER;
 use super::external_command::ExternalAgentChildGuard;
@@ -58,9 +62,17 @@ pub async fn discover_external_agent_capabilities(
     backend: &ExternalCommandAgentBackendConfig,
     workspace: &Path,
 ) -> ExternalAgentCapabilities {
-    probe_external_agent_backend(backend, workspace)
+    let cache_key = ExternalAgentDiscoveryCacheKey::new(backend, workspace);
+    if let Some(capabilities) = cached_discovery(&cache_key) {
+        record_active_capability_catalog(backend, workspace, &capabilities);
+        return capabilities;
+    }
+    let capabilities = probe_external_agent_backend(backend, workspace)
         .await
-        .capabilities
+        .capabilities;
+    cache_discovery(cache_key, &capabilities);
+    record_active_capability_catalog(backend, workspace, &capabilities);
+    capabilities
 }
 
 pub(crate) async fn preflight_external_agent_backend(
@@ -220,7 +232,8 @@ async fn probe_external_agent_backend(
             .await
             {
                 Ok(output) if output.status.success() => {
-                    claude_capabilities(cli_version, &output.stdout, output_was_truncated(&output))
+                    let help_output = combined_capability_output(&output);
+                    claude_capabilities(cli_version, &help_output, output_was_truncated(&output))
                 }
                 Ok(output) => ExternalAgentCapabilities::conservative(
                     cli_family,
@@ -275,13 +288,16 @@ async fn probe_external_agent_backend(
             )
             .await
             {
-                Ok(help_output) if help_output.status.success() => antigravity_capabilities(
-                    cli_version,
-                    &models_output.stdout,
-                    output_was_truncated(&models_output),
-                    &help_output.stdout,
-                    output_was_truncated(&help_output),
-                ),
+                Ok(help_output) if help_output.status.success() => {
+                    let combined_help_output = combined_capability_output(&help_output);
+                    antigravity_capabilities(
+                        cli_version,
+                        &models_output.stdout,
+                        output_was_truncated(&models_output),
+                        &combined_help_output,
+                        output_was_truncated(&help_output),
+                    )
+                }
                 Ok(output) => ExternalAgentCapabilities::conservative(
                     cli_family,
                     cli_version,
@@ -331,6 +347,21 @@ fn capability_failure_is_fatal(kind: ExternalAgentFailureKind) -> bool {
 fn output_was_truncated(output: &std::process::Output) -> bool {
     output.stdout.starts_with(EXTERNAL_AGENT_TRUNCATED_MARKER)
         || output.stderr.starts_with(EXTERNAL_AGENT_TRUNCATED_MARKER)
+}
+
+fn combined_capability_output(output: &std::process::Output) -> Vec<u8> {
+    let mut combined = Vec::with_capacity(
+        output
+            .stdout
+            .len()
+            .saturating_add(output.stderr.len().saturating_add(1)),
+    );
+    combined.extend_from_slice(&output.stdout);
+    if !output.stdout.is_empty() && !output.stderr.is_empty() {
+        combined.push(b'\n');
+    }
+    combined.extend_from_slice(&output.stderr);
+    combined
 }
 
 fn capability_failure_from_output(

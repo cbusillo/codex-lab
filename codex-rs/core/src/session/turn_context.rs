@@ -951,6 +951,23 @@ impl Session {
         turn_context.extension_data.insert(trusted_plugin_roots);
         turn_context.realtime_active = self.conversation.running_state().await.is_some();
 
+        if multi_agent_version == MultiAgentVersion::V2
+            && let Some(crate::config::AgentRoleBackendConfig::ExternalCommand(backend)) =
+                turn_context
+                    .config
+                    .agent_roles
+                    .get("antigravity")
+                    .cloned()
+                    .or_else(|| crate::agent::role::external_agent_role_config("antigravity"))
+                    .and_then(|role| role.backend)
+        {
+            let _ = crate::agent::external_preflight::discover_external_agent_capabilities(
+                &backend,
+                turn_context.config.cwd.as_path(),
+            )
+            .await;
+        }
+
         if let Some(final_schema) = final_output_json_schema {
             turn_context.final_output_json_schema = final_schema;
         }

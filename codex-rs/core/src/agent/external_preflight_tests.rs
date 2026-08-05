@@ -1,7 +1,9 @@
 use super::*;
 use crate::agent::external_capabilities::ExternalAgentCapabilityFreshness;
 use crate::agent::external_capabilities::ExternalAgentCapabilitySource;
+use crate::agent::external_capabilities::clear_active_capability_catalog;
 use crate::agent::external_capabilities::clear_capability_cache;
+use crate::agent::external_capabilities::discovered_antigravity_selectors;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -196,6 +198,7 @@ async fn current_antigravity_capabilities_are_discovered_and_cached() {
         "antigravity",
         &format!(
             r#"if [ "$1" = "--version" ]; then
+  echo version >> '{}'
   echo "1.1.9"
   exit 0
 fi
@@ -207,12 +210,13 @@ if [ "$1" = "models" ]; then
 fi
 if [ "$1" = "--help" ]; then
   echo help >> '{}'
-  echo '--model Model'
-  echo '--effort low|medium|high'
+  echo '--model Model' >&2
+  echo '--effort low|medium|high' >&2
   exit 0
 fi
 exit 2
 "#,
+            marker_path.display(),
             marker_path.display(),
             marker_path.display()
         ),
@@ -242,8 +246,38 @@ exit 2
             .expect("read capability probe marker")
             .lines()
             .count(),
-        2,
-        "models and help should each run once across a cache hit"
+        3,
+        "version, models, and help should each run once across a discovery cache hit"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_catalog_is_scoped_and_deterministic() {
+    clear_capability_cache();
+    clear_active_capability_catalog();
+    let temp_dir = TempDir::new().expect("tempdir");
+    let first = shell_backend(
+        &temp_dir,
+        "first-agy.sh",
+        "antigravity",
+        "case \"$1\" in --version) echo one;; models) printf '%s\\n' z-model a-model a-model;; --help) echo --model;; esac",
+    );
+    let second = shell_backend(
+        &temp_dir,
+        "second-agy.sh",
+        "antigravity",
+        "case \"$1\" in --version) echo two;; models) printf '%s\\n' y-model;; --help) echo --model;; esac",
+    );
+    let first_caps = discover_external_agent_capabilities(&first, temp_dir.path()).await;
+    let second_caps = discover_external_agent_capabilities(&second, temp_dir.path()).await;
+    assert_eq!(
+        discovered_antigravity_selectors(&first, temp_dir.path()),
+        vec![first_caps.models[1].clone(), first_caps.models[0].clone()]
+    );
+    assert_eq!(
+        discovered_antigravity_selectors(&second, temp_dir.path()),
+        second_caps.models
     );
 }
 

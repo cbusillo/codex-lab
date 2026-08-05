@@ -174,6 +174,73 @@ pub(crate) fn resolve_role_config_owned(
         .or_else(|| built_in::external_agent_role_config(role_name))
 }
 
+pub(crate) fn dynamic_antigravity_role_config(
+    config: &Config,
+    selector: &str,
+    effort: Option<&str>,
+) -> Option<AgentRoleConfig> {
+    let model = selector.strip_prefix("antigravity-")?.to_string();
+    if !crate::agent::external_capabilities::is_valid_antigravity_model_name(&model) {
+        return None;
+    }
+    let base = resolve_role_config_owned(config, "antigravity")?;
+    let Some(AgentRoleBackendConfig::ExternalCommand(mut backend)) = base.backend else {
+        return None;
+    };
+    replace_backend_argument(&mut backend.args, "--model", &model);
+    if let Some(effort) = effort {
+        replace_backend_argument(&mut backend.args, "--effort", effort);
+    }
+    Some(AgentRoleConfig {
+        description: Some(format!(
+            "Antigravity discovered model selector `{selector}`."
+        )),
+        config_file: None,
+        nickname_candidates: None,
+        backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
+    })
+}
+
+fn replace_backend_argument(args: &mut Vec<String>, flag: &str, value: &str) {
+    let inline_prefix = format!("{flag}=");
+    let mut retained = Vec::with_capacity(args.len() + 2);
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if argument == flag {
+            index += 1;
+            if index < args.len() && !args[index].starts_with("--") {
+                index += 1;
+            }
+            continue;
+        }
+        if argument.starts_with(&inline_prefix) {
+            index += 1;
+            continue;
+        }
+        retained.push(argument.clone());
+        index += 1;
+    }
+    retained.extend([flag.to_string(), value.to_string()]);
+    *args = retained;
+}
+
+pub(crate) fn install_dynamic_antigravity_role(
+    config: &mut Config,
+    selector: &str,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    let role = dynamic_antigravity_role_config(config, selector, effort).ok_or_else(|| {
+        format!("Unable to construct external selector `{selector}` without substitution.")
+    })?;
+    config.agent_roles.insert(selector.to_string(), role);
+    Ok(())
+}
+
+pub(crate) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
+    built_in::external_agent_role_config(role_name)
+}
+
 mod reload {
     use super::*;
 
@@ -291,13 +358,31 @@ pub(crate) mod spawn_tool_spec {
 
     /// Builds the spawn-agent tool description text from built-in and configured roles.
     pub(crate) fn build(user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>) -> String {
+        build_with_external_selectors(user_defined_agent_roles, &[])
+    }
+
+    pub(crate) fn build_with_external_selectors(
+        user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>,
+        selectors: &[String],
+    ) -> String {
         let built_in_roles = built_in::configs();
         let external_agent_roles = built_in::external_agent_configs();
-        build_from_configs(
+        let mut description = build_from_configs(
             built_in_roles,
             external_agent_roles,
             user_defined_agent_roles,
-        )
+        );
+        if !selectors.is_empty() {
+            description.push_str("\n\nDiscovered external selectors:\n");
+            description.push_str(
+                &selectors
+                    .iter()
+                    .map(|selector| format!("- `{selector}`: Antigravity model selector."))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        description
     }
 
     // This function is not inlined for testing purpose.

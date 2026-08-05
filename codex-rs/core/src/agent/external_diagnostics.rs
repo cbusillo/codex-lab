@@ -120,6 +120,10 @@ pub(crate) struct ExternalAgentProviderProvenance {
     pub(crate) protocol: ExternalAgentProtocol,
     pub(crate) mode: ExternalAgentLaunchMode,
     pub(crate) workspace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effort: Option<String>,
     #[serde(skip)]
     resolved_command: Option<PathBuf>,
 }
@@ -144,6 +148,8 @@ impl ExternalAgentProviderProvenance {
                 ExternalAgentLaunchMode::Write
             },
             workspace: workspace.display().to_string(),
+            model: requested_flag_value(&backend.args, "--model"),
+            effort: requested_flag_value(&backend.args, "--effort"),
             resolved_command: None,
         }
     }
@@ -155,6 +161,20 @@ impl ExternalAgentProviderProvenance {
     pub(crate) fn resolved_command(&self) -> Option<&Path> {
         self.resolved_command.as_deref()
     }
+}
+
+fn requested_flag_value(args: &[String], flag: &str) -> Option<String> {
+    let inline_prefix = format!("{flag}=");
+    let mut value = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            value = iter.next().cloned();
+        } else if let Some(inline) = arg.strip_prefix(&inline_prefix) {
+            value = Some(inline.to_string());
+        }
+    }
+    value.filter(|value| !value.is_empty())
 }
 
 pub(crate) fn permission_profile_is_read_only(profile: &PermissionProfile) -> bool {
