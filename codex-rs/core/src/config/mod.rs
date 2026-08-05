@@ -3317,13 +3317,13 @@ fn validate_agent_selector_overrides(
                 && value.len() <= 128
                 && !value.starts_with('-')
                 && value.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || ".-_".contains(character)
+                    character.is_ascii_alphanumeric() || "-_.:/+".contains(character)
                 });
             if !valid {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
-                        "agents.selectors.{selector}.{field} must be a non-empty provider value containing only letters, numbers, '.', '-', or '_'"
+                        "agents.selectors.{selector}.{field} must be a non-empty provider value containing only letters, numbers, '-', '_', '.', ':', '/', or '+'"
                     ),
                 ));
             }

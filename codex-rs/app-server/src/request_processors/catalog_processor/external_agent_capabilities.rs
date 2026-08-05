@@ -367,7 +367,7 @@ impl CatalogRequestProcessor {
                 .map(|backend| {
                     let cwd = context.cwd.clone();
                     async move {
-                        codex_core::discover_external_agent_capabilities(&backend, &cwd).await;
+                        codex_core::refresh_external_agent_capabilities(&backend, &cwd).await;
                     }
                 })
                 .buffer_unordered(CAPABILITY_REFRESH_CONCURRENCY)
@@ -377,14 +377,15 @@ impl CatalogRequestProcessor {
                 result = tokio::time::timeout(CAPABILITY_REFRESH_DEADLINE, probes) => if result.is_ok() { ExternalAgentCapabilitiesRefreshStatus::Completed } else { ExternalAgentCapabilitiesRefreshStatus::DeadlineExceeded },
                 () = token.cancelled() => ExternalAgentCapabilitiesRefreshStatus::Cancelled,
             };
-            let mut active = active.lock().await;
-            if active
-                .get(&notification_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &token))
             {
-                active.remove(&notification_id);
+                let mut active = active.lock().await;
+                if active
+                    .get(&notification_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &token))
+                {
+                    active.remove(&notification_id);
+                }
             }
-            drop(active);
             outgoing
                 .send_server_notification(ServerNotification::ExternalAgentCapabilitiesUpdated(
                     ExternalAgentCapabilitiesUpdatedNotification {

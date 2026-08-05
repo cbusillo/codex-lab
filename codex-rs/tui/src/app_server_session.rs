@@ -26,6 +26,10 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ConfigWriteResponse;
+use codex_app_server_protocol::ExternalAgentCapabilitiesReadParams;
+use codex_app_server_protocol::ExternalAgentCapabilitiesReadResponse;
+use codex_app_server_protocol::ExternalAgentCapabilitiesRefreshCancelParams;
+use codex_app_server_protocol::ExternalAgentCapabilitiesRefreshCancelResponse;
 use codex_app_server_protocol::ExternalAgentConfigDetectParams;
 use codex_app_server_protocol::ExternalAgentConfigDetectResponse;
 use codex_app_server_protocol::ExternalAgentConfigImportParams;
@@ -453,6 +457,31 @@ impl AppServerSession {
             .request_typed(ClientRequest::ExternalAgentConfigDetect { request_id, params })
             .await
             .wrap_err("externalAgentConfig/detect failed during external agent import")
+    }
+
+    pub(crate) async fn external_agent_capabilities_read(
+        &mut self,
+        params: ExternalAgentCapabilitiesReadParams,
+    ) -> Result<ExternalAgentCapabilitiesReadResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ExternalAgentCapabilitiesRead { request_id, params })
+            .await
+            .wrap_err("externalAgentCapability/read failed")
+    }
+
+    pub(crate) async fn external_agent_capabilities_refresh_cancel(
+        &mut self,
+        refresh_id: String,
+    ) -> Result<ExternalAgentCapabilitiesRefreshCancelResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ExternalAgentCapabilitiesRefreshCancel {
+                request_id,
+                params: ExternalAgentCapabilitiesRefreshCancelParams { refresh_id },
+            })
+            .await
+            .wrap_err("externalAgentCapability/refresh/cancel failed")
     }
 
     pub(crate) async fn external_agent_config_import(

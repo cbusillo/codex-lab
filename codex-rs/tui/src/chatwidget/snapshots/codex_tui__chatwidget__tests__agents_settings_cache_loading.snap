@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Agents
+  Loading cached capabilities…
+
+› •  Reading cached provider state…  Opening Agents settings never waits for
+                                     local CLI probes.
+
+  Press enter to confirm or esc to go back

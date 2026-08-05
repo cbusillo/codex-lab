@@ -8703,6 +8703,39 @@ async fn load_config_rejects_flaglike_agent_selector_defaults() -> std::io::Resu
     Ok(())
 }
 
+#[tokio::test]
+async fn load_config_accepts_provider_qualified_agent_model_names() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        agents: Some(AgentsToml {
+            selectors: BTreeMap::from([(
+                "antigravity".to_string(),
+                AgentSelectorToml {
+                    model: Some("models/gemini:3.1+preview".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    assert_eq!(
+        config
+            .agent_selector_overrides
+            .get("antigravity")
+            .and_then(|selector| selector.model.as_deref()),
+        Some("models/gemini:3.1+preview")
+    );
+    Ok(())
+}
+
 #[test]
 fn agents_max_threads_alias_matches_canonical_config() {
     let canonical: ConfigToml = toml::from_str(

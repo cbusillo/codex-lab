@@ -1028,10 +1028,45 @@ pub(crate) enum AppEvent {
     /// Open third-party agent install/status settings from the general settings menu.
     OpenAgentsSettings,
 
+    /// Refresh bounded local external-agent capabilities in the background.
+    RefreshAgentCapabilities,
+
+    /// Cancel the active external-agent capability refresh while keeping settings open.
+    CancelAgentCapabilitiesRefresh,
+
+    /// Cancel the active external-agent capability refresh and close Agents settings.
+    CloseAgentsSettings,
+
+    /// Open the provider-default model picker for an external selector.
+    OpenAgentSelectorModelPicker {
+        selector: String,
+        models: Vec<String>,
+        current: Option<String>,
+    },
+
+    /// Open the provider-default effort picker for an external selector.
+    OpenAgentSelectorEffortPicker {
+        selector: String,
+        efforts: Vec<String>,
+        current: Option<String>,
+    },
+
     /// Persist an explicit enablement override for an agent selector.
     SetAgentSelectorEnabled {
         selector: String,
         enabled: bool,
+    },
+
+    /// Persist or clear the provider-default model for an external selector.
+    SetAgentSelectorModel {
+        selector: String,
+        model: Option<String>,
+    },
+
+    /// Persist or clear the default effort for an external selector.
+    SetAgentSelectorEffort {
+        selector: String,
+        effort: Option<String>,
     },
 
     /// Update whether built-in functional Automatic Validation is enabled.

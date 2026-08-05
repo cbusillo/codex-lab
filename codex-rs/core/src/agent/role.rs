@@ -212,11 +212,17 @@ pub fn agent_selector_enabled(config: &Config, selector: &str) -> bool {
         {
             return enabled;
         }
-        return config
+        let configured_provider_model = config
             .agent_selector_overrides
             .get("antigravity")
-            .and_then(|override_config| override_config.enabled)
-            .unwrap_or(true);
+            .and_then(|override_config| override_config.model.as_deref())
+            .is_some_and(|model| selector == format!("antigravity-{model}"));
+        return configured_provider_model
+            && config
+                .agent_selector_overrides
+                .get("antigravity")
+                .and_then(|override_config| override_config.enabled)
+                .unwrap_or(true);
     }
     true
 }

@@ -46,6 +46,7 @@ pub use agent::external_diagnostics::ExternalAgentFailureDetail;
 pub use agent::external_diagnostics::ExternalAgentFailureKind;
 pub use agent::external_preflight::cached_external_agent_capabilities;
 pub use agent::external_preflight::discover_external_agent_capabilities;
+pub use agent::external_preflight::refresh_external_agent_capabilities;
 pub use agent::role::agent_selector_enabled;
 pub use agent::role::external_agent_backend_for_selector;
 mod agent_communication;

@@ -219,6 +219,7 @@ mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_picker;
 mod agent_status_feed;
+mod agents_settings;
 mod app_server_event_targets;
 mod app_server_events;
 pub(crate) mod app_server_requests;
@@ -617,6 +618,7 @@ pub(crate) struct App {
     pending_login_add_account_id: Option<String>,
     completed_login_add_account_id: Option<String>,
     pending_auth_profile_login: Option<PendingAuthProfileLogin>,
+    agent_settings: agents_settings::AgentSettingsState,
 }
 
 pub(crate) struct PendingDirectLoginAddAccount {
@@ -1158,6 +1160,7 @@ See the Codex keymap documentation for supported actions and examples."
             pending_login_add_account_id: None,
             completed_login_add_account_id: None,
             pending_auth_profile_login: None,
+            agent_settings: Default::default(),
         };
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);

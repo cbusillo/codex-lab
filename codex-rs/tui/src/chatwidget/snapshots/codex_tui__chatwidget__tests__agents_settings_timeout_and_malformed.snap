@@ -1,0 +1,17 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: "render_bottom_popup(&chat, 100)"
+---
+  Agents
+  Refresh timed out; showing partial cached capabilities.
+
+  1. Refresh capabilities                   Re-check install, sign-in, version, models, and effort
+                                            support.
+  •  Antigravity / Gemini                   installed • sign-in unknown • version unknown • not
+                                            checked • probe timed out
+› 2. antigravity (enabled) (current)        Antigravity capability probe timed out.
+  •  Claude                                 installed • sign-in unknown • version unknown • not
+                                            checked • malformed output
+  3. claude-sonnet-4.6 (enabled) (current)  provider default • provider `claude`
+
+  Press enter to confirm or esc to go back
