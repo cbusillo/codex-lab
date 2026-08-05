@@ -58,9 +58,45 @@ pub(crate) fn install_configured_provider_selectors(config: &mut Config) -> Resu
                 defaults.model.as_deref(),
                 defaults.effort.as_deref(),
             )?;
+        } else if (defaults.model.is_some() || defaults.effort.is_some())
+            && crate::agent::role::external_agent_backend_for_selector(config, &effective_selector)
+                .is_some()
+        {
+            crate::agent::role::install_external_role_defaults(
+                config,
+                &effective_selector,
+                defaults.model.as_deref(),
+                defaults.effort.as_deref(),
+            )?;
         }
     }
     Ok(())
+}
+
+pub(crate) fn install_selected_provider_defaults(
+    config: &mut Config,
+    selector: &str,
+    explicit_effort: Option<&str>,
+) -> Result<bool, String> {
+    let effort = resolve_effort(config, selector, explicit_effort);
+    if selector == "antigravity" || looks_like_antigravity_selector(selector) {
+        crate::agent::role::install_dynamic_antigravity_role(config, selector, effort.as_deref())?;
+        return Ok(true);
+    }
+    if crate::agent::role::external_agent_backend_for_selector(config, selector).is_none() {
+        return Ok(false);
+    }
+
+    let defaults = selector_defaults(config, selector);
+    if defaults.model.is_some() || effort.is_some() {
+        crate::agent::role::install_external_role_defaults(
+            config,
+            selector,
+            defaults.model.as_deref(),
+            effort.as_deref(),
+        )?;
+    }
+    Ok(true)
 }
 
 fn selector_override<'a>(config: &'a Config, selector: &str) -> Option<&'a AgentSelectorToml> {

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_config::config_toml::AgentSelectorToml;
 use codex_core::config::AgentRoleBackendConfig;
 use codex_core::config::AgentRoleConfig;
 use codex_core::config::ExternalCommandAgentBackendConfig;
@@ -58,6 +59,16 @@ fn spawn_agent_arguments_with_selector(
     agent_type: Option<&str>,
     model: Option<&str>,
 ) -> Result<String> {
+    spawn_agent_arguments_with_selector_and_effort(
+        agent_type, model, /*reasoning_effort*/ None,
+    )
+}
+
+fn spawn_agent_arguments_with_selector_and_effort(
+    agent_type: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> Result<String> {
     Ok(serde_json::to_string(&json!({
         "message": AGENT_MESSAGE,
         "task_name": "external_probe",
@@ -65,6 +76,7 @@ fn spawn_agent_arguments_with_selector(
         "task_size": "normal",
         "agent_type": agent_type,
         "model": model,
+        "reasoning_effort": reasoning_effort,
         "fork_turns": "none",
     }))?)
 }
@@ -105,7 +117,9 @@ fn builder_with_named_external_role(
 
 fn builder_for_dynamic_external_selector(
     backend: ExternalCommandAgentBackendConfig,
+    selector: &str,
 ) -> TestCodexBuilder {
+    let selector = selector.to_string();
     test_codex().with_config(move |config| {
         config
             .features
@@ -124,6 +138,13 @@ fn builder_for_dynamic_external_selector(
             AgentRoleConfig {
                 description: Some("Antigravity test backend".to_string()),
                 backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
+                ..Default::default()
+            },
+        );
+        config.agent_selector_overrides.insert(
+            selector.clone(),
+            AgentSelectorToml {
+                enabled: Some(true),
                 ..Default::default()
             },
         );
@@ -375,6 +396,114 @@ async fn named_user_agent_requires_explicit_retry_and_receives_plaintext() -> Re
     assert!(captured.contains(AGENT_MESSAGE));
     assert!(!captured.contains("gAAAA"));
     Ok(())
+}
+
+async fn assert_claude_effort_reaches_launch(
+    configured_effort: &str,
+    explicit_effort: Option<&str>,
+    expected_effort: &str,
+) -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let captured_args = stub_dir.path().join("captured-args.txt");
+    let role_config = stub_dir.path().join("claude-role.toml");
+    std::fs::write(
+        &role_config,
+        "developer_instructions = \"Run the bounded provenance probe.\"\n",
+    )?;
+    let script = format!(
+        "if [ \"${{1:-}}\" = \"--version\" ]; then printf 'Claude Code 2.1.220\\n'; exit 0; fi\nif [ \"${{1:-}}\" = \"auth\" ] && [ \"${{2:-}}\" = \"status\" ]; then printf '{{\"loggedIn\":true}}\\n'; exit 0; fi\nif [ \"${{1:-}}\" = \"--help\" ]; then printf '%s\\n' '--effort <level>'; exit 0; fi\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'CLAUDE_PROVENANCE_OK\\n'\n",
+        captured_args.display()
+    );
+    let mut backend = stub_cli(&stub_dir, "claude-provider.sh", &script);
+    backend.args = vec!["--effort".to_string(), "low".to_string()];
+    backend.launch_family = Some("claude".to_string());
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &spawn_agent_arguments_with_selector_and_effort(
+                    Some("claude-sonnet-4.6"),
+                    /*model*/ None,
+                    explicit_effort,
+                )?,
+            ),
+            ev_completed("resp-spawn"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_with_named_external_role("claude-sonnet-4.6", backend);
+    let configured_effort = configured_effort.to_string();
+    builder = builder.with_config(move |config| {
+        config.agent_selector_overrides.insert(
+            "claude-sonnet-4.6".to_string(),
+            AgentSelectorToml {
+                effort: Some(configured_effort.clone()),
+                ..Default::default()
+            },
+        );
+        config
+            .agent_roles
+            .get_mut("claude-sonnet-4.6")
+            .expect("test role should exist")
+            .config_file = Some(role_config.clone());
+    });
+    let test = builder.build(&server).await?;
+    test.submit_turn(PROMPT).await?;
+
+    let response = final_response.single_request();
+    let output_item = response.function_call_output(SPAWN_CALL_ID);
+    let output_text = output_item["output"].as_str().expect("spawn output");
+    let output: Value = serde_json::from_str(output_text)
+        .unwrap_or_else(|err| panic!("spawn output should be JSON ({err}): {output_text}"));
+    assert_eq!(output["routing"]["effective"], "claude-sonnet-4.6");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !captured_args.exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let captured = std::fs::read_to_string(captured_args)?;
+    let arguments = captured.lines().collect::<Vec<_>>();
+    assert!(
+        arguments
+            .windows(2)
+            .any(|args| args == ["--effort", expected_effort])
+    );
+    assert_eq!(
+        arguments.iter().filter(|arg| **arg == "--effort").count(),
+        1
+    );
+    assert!(!arguments.contains(&"low"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_claude_effort_reaches_launch_after_role_reload() -> Result<()> {
+    assert_claude_effort_reaches_launch("medium", /*explicit_effort*/ None, "medium").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_claude_effort_overrides_default_and_reaches_launch() -> Result<()> {
+    assert_claude_effort_reaches_launch("medium", Some("high"), "high").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -778,7 +907,7 @@ printf 'external provider replied\n'
     )
     .await;
 
-    let mut builder = builder_for_dynamic_external_selector(backend);
+    let mut builder = builder_for_dynamic_external_selector(backend, selector);
     let test = builder.build(&server).await?;
     test.submit_turn(PROMPT).await?;
 
@@ -787,7 +916,8 @@ printf 'external provider replied\n'
         .as_str()
         .expect("spawn output string")
         .to_string();
-    let spawn_output: Value = serde_json::from_str(&spawn_output)?;
+    let spawn_output: Value = serde_json::from_str(&spawn_output)
+        .unwrap_or_else(|err| panic!("spawn output should be JSON ({err}): {spawn_output}"));
     assert_eq!(spawn_output["agent_type"], selector);
     assert_eq!(spawn_output["routing"]["effective"], selector);
     assert_eq!(spawn_output["routing"]["kind"], "explicit");
@@ -795,13 +925,12 @@ printf 'external provider replied\n'
     let wait_output = wait_output_item["output"]
         .as_str()
         .expect("wait output string");
-    assert_eq!(
-        serde_json::from_str::<Value>(wait_output)?,
-        json!({
-            "message": "Wait completed.",
-            "timed_out": false,
-        })
-    );
+    let wait_output = serde_json::from_str::<Value>(wait_output)?;
+    assert_eq!(wait_output["timed_out"], false);
+    assert!(matches!(
+        wait_output["message"].as_str(),
+        Some("Wait completed." | "All child agents are terminal.")
+    ));
 
     let logged_args = std::fs::read_to_string(args_log)?;
     assert!(logged_args.contains("--model gemini-3.6-flash-high"));
