@@ -4,6 +4,9 @@ use std::pin::Pin;
 use codex_protocol::ThreadId;
 
 use crate::AgentGraphStoreResult;
+use crate::ExternalAgentRunOutcome;
+use crate::ExternalAgentRunRecord;
+use crate::ExternalAgentRunStart;
 use crate::ThreadSpawnEdgeStatus;
 
 /// Future returned by [`AgentGraphStore`] operations.
@@ -15,6 +18,37 @@ pub type AgentGraphStoreFuture<'a, T> =
 /// Implementations are expected to return stable ordering for list methods so callers can merge
 /// persisted graph state with live in-memory state without introducing nondeterministic output.
 pub trait AgentGraphStore: Send + Sync {
+    fn insert_external_agent_run(
+        &self,
+        run: ExternalAgentRunStart,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = run;
+            Ok(())
+        })
+    }
+
+    fn finish_external_agent_run(
+        &self,
+        child_thread_id: ThreadId,
+        outcome: ExternalAgentRunOutcome,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = (child_thread_id, outcome);
+            Ok(())
+        })
+    }
+
+    fn list_external_agent_runs(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Vec<ExternalAgentRunRecord>> {
+        Box::pin(async move {
+            let _ = parent_thread_id;
+            Ok(Vec::new())
+        })
+    }
+
     /// Insert or replace the directional parent/child edge for a spawned thread.
     ///
     /// `child_thread_id` has at most one persisted parent. Re-inserting the same child should

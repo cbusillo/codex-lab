@@ -1,9 +1,7 @@
 use codex_protocol::ThreadId;
-use serde::Deserialize;
-use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExternalAgentRunRecord {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalAgentRun {
     pub child_thread_id: ThreadId,
     pub parent_thread_id: ThreadId,
     pub agent_path: Option<String>,
@@ -30,7 +28,7 @@ pub struct ExternalAgentRunRecord {
     pub failure_message: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalAgentRunStart {
     pub child_thread_id: ThreadId,
     pub parent_thread_id: ThreadId,
@@ -53,51 +51,11 @@ pub struct ExternalAgentRunStart {
     pub started_at_ms: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalAgentRunOutcome {
     pub completed_at_ms: i64,
     pub duration_ms: u64,
     pub terminal_state: String,
     pub failure_kind: Option<String>,
     pub failure_message: Option<String>,
-}
-
-/// Lifecycle status attached to a directional thread-spawn edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadSpawnEdgeStatus {
-    /// The child thread is still live or resumable as an open spawned agent.
-    Open,
-    /// The child thread has been closed from the parent/child graph's perspective.
-    Closed,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn thread_spawn_edge_status_serializes_as_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&ThreadSpawnEdgeStatus::Open)
-                .expect("open status should serialize"),
-            "\"open\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ThreadSpawnEdgeStatus::Closed)
-                .expect("closed status should serialize"),
-            "\"closed\""
-        );
-        assert_eq!(
-            serde_json::from_str::<ThreadSpawnEdgeStatus>("\"open\"")
-                .expect("open status should deserialize"),
-            ThreadSpawnEdgeStatus::Open
-        );
-        assert_eq!(
-            serde_json::from_str::<ThreadSpawnEdgeStatus>("\"closed\"")
-                .expect("closed status should deserialize"),
-            ThreadSpawnEdgeStatus::Closed
-        );
-    }
 }

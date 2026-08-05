@@ -161,6 +161,242 @@ async fn interrupt_agent_cancels_and_releases_external_agent() {
 }
 
 #[tokio::test]
+async fn cancelled_external_agent_run_remains_durable_after_release() {
+    let harness = AgentControlHarness::new().await;
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let backend = crate::config::ExternalCommandAgentBackendConfig {
+        command: "/bin/true".to_string(),
+        launch_family: Some("claude".to_string()),
+        ..Default::default()
+    };
+    let provider = ExternalAgentProviderProvenance::new(
+        Some("claude-sonnet-4.6"),
+        &backend,
+        harness.config.cwd.as_path(),
+        /*is_read_only*/ true,
+        Some("1.2.3".to_string()),
+    );
+    let routing = crate::agent::provider_routing::ProviderRoutingSummary {
+        kind: crate::agent::provider_routing::ProviderRoutingKind::Explicit,
+        requested: Some("claude-sonnet-4.6".to_string()),
+        effective: "claude-sonnet-4.6".to_string(),
+        reason: "explicit test selection".to_string(),
+        skipped_candidates: Vec::new(),
+    };
+    harness.control.state.register_external_agent(
+        child_thread_id,
+        parent_thread_id,
+        AgentStatus::Running,
+        provider.clone(),
+    );
+    harness
+        .control
+        .persist_external_agent_run_started(
+            parent_thread_id,
+            child_thread_id,
+            Some("reviewer".to_string()),
+            &routing,
+            &provider,
+        )
+        .await;
+    harness
+        .control
+        .update_external_agent_status(child_thread_id, AgentStatus::Shutdown);
+    harness
+        .control
+        .persist_external_agent_run_finished(child_thread_id, "cancelled")
+        .await;
+    harness.control.release_external_agent(child_thread_id);
+
+    let state = harness
+        .control
+        .upgrade()
+        .expect("thread manager state should be available");
+    let runs = state
+        .agent_graph_store()
+        .expect("test harness should provide an agent graph store")
+        .list_external_agent_runs(parent_thread_id)
+        .await
+        .expect("external agent runs should load");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].child_thread_id, child_thread_id);
+    assert_eq!(runs[0].terminal_state.as_deref(), Some("cancelled"));
+    assert!(runs[0].duration_ms.is_some());
+    assert_eq!(
+        runs[0].requested_selector.as_deref(),
+        Some("claude-sonnet-4.6")
+    );
+}
+
+#[tokio::test]
+async fn production_cancel_path_finishes_run_before_releasing_runtime_state() {
+    let harness = AgentControlHarness::new().await;
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let backend = crate::config::ExternalCommandAgentBackendConfig {
+        command: "/bin/true".to_string(),
+        launch_family: Some("claude".to_string()),
+        ..Default::default()
+    };
+    let provider = ExternalAgentProviderProvenance::new(
+        Some("claude-sonnet-4.6"),
+        &backend,
+        harness.config.cwd.as_path(),
+        /*is_read_only*/ true,
+        /*cli_version*/ None,
+    );
+    let routing = crate::agent::provider_routing::ProviderRoutingSummary {
+        kind: crate::agent::provider_routing::ProviderRoutingKind::Explicit,
+        requested: Some("claude-sonnet-4.6".to_string()),
+        effective: "claude-sonnet-4.6".to_string(),
+        reason: "explicit test selection".to_string(),
+        skipped_candidates: Vec::new(),
+    };
+    let cancellation_token = harness.control.state.register_external_agent(
+        child_thread_id,
+        parent_thread_id,
+        AgentStatus::PendingInit,
+        provider.clone(),
+    );
+    harness
+        .control
+        .persist_external_agent_run_started(
+            parent_thread_id,
+            child_thread_id,
+            Some("reviewer".to_string()),
+            &routing,
+            &provider,
+        )
+        .await;
+    cancellation_token.cancel();
+    crate::agent::external_command::run_external_agent(
+        crate::agent::external_command::ExternalAgentLaunch {
+            thread_id: child_thread_id,
+            parent_thread_id,
+            author: AgentPath::root(),
+            recipient: AgentPath::try_from("/root/reviewer").expect("agent path"),
+            role: Some("claude-sonnet-4.6".to_string()),
+            task_name: Some("review".to_string()),
+            initial_operation: Op::UserInput {
+                items: text_input("review this"),
+                final_output_json_schema: None,
+                responsesapi_client_metadata: None,
+                additional_context: Default::default(),
+                thread_settings: Default::default(),
+            },
+            backend,
+            cwd: harness.config.cwd.to_path_buf(),
+            cancellation_token,
+            is_read_only: true,
+            preflight_completed: false,
+            resolved_command: None,
+            hide_provider_metadata: false,
+        },
+        harness.control.clone(),
+    )
+    .await;
+
+    assert_eq!(
+        harness.control.get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    let state = harness
+        .control
+        .upgrade()
+        .expect("thread manager state should be available");
+    let runs = state
+        .agent_graph_store()
+        .expect("test harness should provide an agent graph store")
+        .list_external_agent_runs(parent_thread_id)
+        .await
+        .expect("external agent runs should load");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].terminal_state.as_deref(), Some("cancelled"));
+}
+
+#[tokio::test]
+async fn failed_external_agent_run_persists_terminal_failure_details() {
+    let harness = AgentControlHarness::new().await;
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let backend = crate::config::ExternalCommandAgentBackendConfig {
+        command: "/bin/true".to_string(),
+        launch_family: Some("antigravity".to_string()),
+        ..Default::default()
+    };
+    let provider = ExternalAgentProviderProvenance::new(
+        Some("antigravity-gemini-3.1-pro"),
+        &backend,
+        harness.config.cwd.as_path(),
+        /*is_read_only*/ false,
+        Some("1.2.3".to_string()),
+    );
+    let routing = crate::agent::provider_routing::ProviderRoutingSummary {
+        kind: crate::agent::provider_routing::ProviderRoutingKind::AutomaticExternal,
+        requested: None,
+        effective: "antigravity-gemini-3.1-pro".to_string(),
+        reason: "selected after Claude was unavailable".to_string(),
+        skipped_candidates: vec![crate::agent::provider_routing::ProviderRoutingSkip {
+            selector: "claude-sonnet-4.6".to_string(),
+            kind: crate::agent::provider_routing::ProviderRoutingSkipKind::Unavailable,
+            failure_kind: Some(
+                crate::agent::external_diagnostics::ExternalAgentFailureKind::CommandMissing,
+            ),
+            reason: "not installed".to_string(),
+        }],
+    };
+    harness.control.state.register_external_agent(
+        child_thread_id,
+        parent_thread_id,
+        AgentStatus::Running,
+        provider.clone(),
+    );
+    harness
+        .control
+        .persist_external_agent_run_started(
+            parent_thread_id,
+            child_thread_id,
+            Some("reviewer".to_string()),
+            &routing,
+            &provider,
+        )
+        .await;
+    harness.control.update_external_agent_failure(
+        child_thread_id,
+        AgentStatus::Errored("provider failed".to_string()),
+        ExternalAgentFailureDetail::new(
+            crate::agent::external_diagnostics::ExternalAgentFailureKind::ProviderFailed,
+            "provider failed",
+        ),
+    );
+    harness
+        .control
+        .persist_external_agent_run_finished(child_thread_id, "errored")
+        .await;
+
+    let state = harness
+        .control
+        .upgrade()
+        .expect("thread manager state should be available");
+    let runs = state
+        .agent_graph_store()
+        .expect("test harness should provide an agent graph store")
+        .list_external_agent_runs(parent_thread_id)
+        .await
+        .expect("external agent runs should load");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].terminal_state.as_deref(), Some("errored"));
+    assert_eq!(runs[0].failure_kind.as_deref(), Some("provider_failed"));
+    assert_eq!(runs[0].failure_message.as_deref(), Some("provider failed"));
+    assert!(
+        runs[0]
+            .skipped_candidates_json
+            .contains("claude-sonnet-4.6")
+    );
+}
+
+#[tokio::test]
 async fn direct_children_all_terminal_includes_completed_external_agents() {
     let harness = AgentControlHarness::new().await;
     let parent_thread_id = ThreadId::new();

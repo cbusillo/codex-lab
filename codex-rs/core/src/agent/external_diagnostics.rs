@@ -1,3 +1,5 @@
+use crate::agent::external_capabilities::ExternalAgentCapabilityFreshness;
+use crate::agent::external_capabilities::ExternalAgentCapabilitySource;
 use crate::config::ExternalCommandAgentBackendConfig;
 use crate::config::ExternalCommandProtocol;
 use codex_protocol::models::PermissionProfile;
@@ -92,11 +94,29 @@ pub(crate) enum ExternalAgentLaunchMode {
     Write,
 }
 
+impl ExternalAgentLaunchMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Write => "write",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ExternalAgentProtocol {
     Json,
     RawCli,
+}
+
+impl ExternalAgentProtocol {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::RawCli => "raw_cli",
+        }
+    }
 }
 
 impl From<ExternalCommandProtocol> for ExternalAgentProtocol {
@@ -117,6 +137,9 @@ pub(crate) struct ExternalAgentProviderProvenance {
     pub(crate) command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cli_version: Option<String>,
+    pub(crate) capability_source: ExternalAgentCapabilitySource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) capability_freshness: Option<ExternalAgentCapabilityFreshness>,
     pub(crate) protocol: ExternalAgentProtocol,
     pub(crate) mode: ExternalAgentLaunchMode,
     pub(crate) workspace: String,
@@ -141,6 +164,8 @@ impl ExternalAgentProviderProvenance {
             provider_family: backend.launch_family.clone(),
             command: external_agent_command_name(backend),
             cli_version,
+            capability_source: ExternalAgentCapabilitySource::NotProbed,
+            capability_freshness: None,
             protocol: backend.protocol.into(),
             mode: if is_read_only {
                 ExternalAgentLaunchMode::ReadOnly
@@ -156,6 +181,15 @@ impl ExternalAgentProviderProvenance {
 
     pub(crate) fn set_resolved_command(&mut self, resolved_command: PathBuf) {
         self.resolved_command = Some(resolved_command);
+    }
+
+    pub(crate) fn set_capability_observation(
+        &mut self,
+        source: ExternalAgentCapabilitySource,
+        freshness: ExternalAgentCapabilityFreshness,
+    ) {
+        self.capability_source = source;
+        self.capability_freshness = Some(freshness);
     }
 
     pub(crate) fn resolved_command(&self) -> Option<&Path> {

@@ -4,6 +4,8 @@ use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
+use crate::agent::provider_routing::ProviderRoutingKind;
+use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v1;
@@ -138,6 +140,13 @@ async fn handle_spawn_agent(
             parent_turn_id: Some(turn.sub_id.clone()),
             environments: Some(step_context.environments.to_selections()),
             external_agent_provider: None,
+            external_agent_routing: Some(ProviderRoutingSummary {
+                kind: ProviderRoutingKind::Explicit,
+                requested: role_name.map(str::to_string),
+                effective: role_name.unwrap_or(DEFAULT_ROLE_NAME).to_string(),
+                reason: "`agent_type` explicitly selected the v1 spawn role.".to_string(),
+                skipped_candidates: Vec::new(),
+            }),
         },
     ))
     .await

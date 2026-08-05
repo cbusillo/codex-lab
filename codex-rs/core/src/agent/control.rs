@@ -1,6 +1,7 @@
 use crate::agent::AgentStatus;
 use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
 use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -77,6 +78,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) parent_turn_id: Option<String>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) external_agent_provider: Option<ExternalAgentProviderProvenance>,
+    pub(crate) external_agent_routing: Option<ProviderRoutingSummary>,
 }
 
 #[derive(Clone, Debug)]

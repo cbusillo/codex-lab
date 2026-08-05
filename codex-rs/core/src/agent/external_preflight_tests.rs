@@ -359,7 +359,7 @@ exit 2
     assert!(!capabilities.supports_model_selection);
     assert!(!capabilities.supports_effort_selection);
     assert!(capabilities.failure.is_none());
-    preflight_external_agent_backend(
+    let provenance = preflight_external_agent_backend(
         Some("antigravity"),
         &backend,
         temp_dir.path(),
@@ -367,6 +367,14 @@ exit 2
     )
     .await
     .expect("provider-default Antigravity launch should survive an old CLI");
+    assert_eq!(
+        provenance.capability_source,
+        ExternalAgentCapabilitySource::LocalCli
+    );
+    assert_eq!(
+        provenance.capability_freshness,
+        Some(ExternalAgentCapabilityFreshness::Cached)
+    );
 }
 
 #[tokio::test]

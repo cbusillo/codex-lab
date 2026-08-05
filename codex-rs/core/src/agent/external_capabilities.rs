@@ -32,12 +32,32 @@ pub enum ExternalAgentCapabilitySource {
     ConservativeFallback,
 }
 
+impl ExternalAgentCapabilitySource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::StaticCatalog => "static_catalog",
+            Self::LocalCli => "local_cli",
+            Self::NotProbed => "not_probed",
+            Self::ConservativeFallback => "conservative_fallback",
+        }
+    }
+}
+
 /// Indicates whether a capability report was freshly probed or reused.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalAgentCapabilityFreshness {
     Fresh,
     Cached,
+}
+
+impl ExternalAgentCapabilityFreshness {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Cached => "cached",
+        }
+    }
 }
 
 /// One model choice reported for an installed external-agent CLI.

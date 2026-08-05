@@ -180,6 +180,7 @@ async fn handle_spawn_agent(
                     parent_turn_id: Some(turn.sub_id.clone()),
                     environments: Some(step_context.environments.to_selections()),
                     external_agent_provider: routing.provider().cloned(),
+                    external_agent_routing: Some(routing.summary()),
                 },
             ),
     )

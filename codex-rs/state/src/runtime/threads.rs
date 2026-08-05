@@ -4,6 +4,65 @@ use codex_protocol::protocol::SessionSource;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
+#[derive(sqlx::FromRow)]
+struct ExternalAgentRunRow {
+    child_thread_id: String,
+    parent_thread_id: String,
+    agent_path: Option<String>,
+    routing_kind: String,
+    requested_selector: Option<String>,
+    effective_selector: String,
+    routing_reason: String,
+    skipped_candidates_json: String,
+    provider_family: Option<String>,
+    command: String,
+    cli_version: Option<String>,
+    capability_source: String,
+    capability_freshness: Option<String>,
+    protocol: String,
+    mode: String,
+    workspace: String,
+    model: Option<String>,
+    effort: Option<String>,
+    started_at_ms: i64,
+    completed_at_ms: Option<i64>,
+    duration_ms: Option<i64>,
+    terminal_state: Option<String>,
+    failure_kind: Option<String>,
+    failure_message: Option<String>,
+}
+
+impl ExternalAgentRunRow {
+    fn try_into_run(self) -> anyhow::Result<crate::ExternalAgentRun> {
+        Ok(crate::ExternalAgentRun {
+            child_thread_id: ThreadId::from_string(&self.child_thread_id)?,
+            parent_thread_id: ThreadId::from_string(&self.parent_thread_id)?,
+            agent_path: self.agent_path,
+            routing_kind: self.routing_kind,
+            requested_selector: self.requested_selector,
+            effective_selector: self.effective_selector,
+            routing_reason: self.routing_reason,
+            skipped_candidates_json: self.skipped_candidates_json,
+            provider_family: self.provider_family,
+            command: self.command,
+            cli_version: self.cli_version,
+            capability_source: self.capability_source,
+            capability_freshness: self.capability_freshness,
+            protocol: self.protocol,
+            mode: self.mode,
+            workspace: self.workspace,
+            model: self.model,
+            effort: self.effort,
+            started_at_ms: self.started_at_ms,
+            completed_at_ms: self.completed_at_ms,
+            duration_ms: self.duration_ms.map(|value| value.max(0) as u64),
+            terminal_state: self.terminal_state,
+            failure_kind: self.failure_kind,
+            failure_message: self.failure_message,
+        })
+    }
+}
+
 impl StateRuntime {
     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
         let row = sqlx::query(
@@ -126,6 +185,153 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
             .execute(self.pool.as_ref())
             .await?;
         Ok(())
+    }
+
+    pub async fn insert_external_agent_run(
+        &self,
+        run: crate::ExternalAgentRunStart,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+INSERT INTO external_agent_runs (
+    child_thread_id,
+    parent_thread_id,
+    agent_path,
+    routing_kind,
+    requested_selector,
+    effective_selector,
+    routing_reason,
+    skipped_candidates_json,
+    provider_family,
+    command,
+    cli_version,
+    capability_source,
+    capability_freshness,
+    protocol,
+    mode,
+    workspace,
+    model,
+    effort,
+    started_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(child_thread_id) DO UPDATE SET
+    parent_thread_id = excluded.parent_thread_id,
+    agent_path = excluded.agent_path,
+    routing_kind = excluded.routing_kind,
+    requested_selector = excluded.requested_selector,
+    effective_selector = excluded.effective_selector,
+    routing_reason = excluded.routing_reason,
+    skipped_candidates_json = excluded.skipped_candidates_json,
+    provider_family = excluded.provider_family,
+    command = excluded.command,
+    cli_version = excluded.cli_version,
+    capability_source = excluded.capability_source,
+    capability_freshness = excluded.capability_freshness,
+    protocol = excluded.protocol,
+    mode = excluded.mode,
+    workspace = excluded.workspace,
+    model = excluded.model,
+    effort = excluded.effort,
+    started_at_ms = excluded.started_at_ms,
+    completed_at_ms = NULL,
+    duration_ms = NULL,
+    terminal_state = NULL,
+    failure_kind = NULL,
+    failure_message = NULL
+            "#,
+        )
+        .bind(run.child_thread_id.to_string())
+        .bind(run.parent_thread_id.to_string())
+        .bind(run.agent_path)
+        .bind(run.routing_kind)
+        .bind(run.requested_selector)
+        .bind(run.effective_selector)
+        .bind(run.routing_reason)
+        .bind(run.skipped_candidates_json)
+        .bind(run.provider_family)
+        .bind(run.command)
+        .bind(run.cli_version)
+        .bind(run.capability_source)
+        .bind(run.capability_freshness)
+        .bind(run.protocol)
+        .bind(run.mode)
+        .bind(run.workspace)
+        .bind(run.model)
+        .bind(run.effort)
+        .bind(run.started_at_ms)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn finish_external_agent_run(
+        &self,
+        child_thread_id: ThreadId,
+        outcome: crate::ExternalAgentRunOutcome,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+UPDATE external_agent_runs
+SET completed_at_ms = ?,
+    duration_ms = ?,
+    terminal_state = ?,
+    failure_kind = ?,
+    failure_message = ?
+WHERE child_thread_id = ?
+            "#,
+        )
+        .bind(outcome.completed_at_ms)
+        .bind(i64::try_from(outcome.duration_ms).unwrap_or(i64::MAX))
+        .bind(outcome.terminal_state)
+        .bind(outcome.failure_kind)
+        .bind(outcome.failure_message)
+        .bind(child_thread_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_external_agent_runs(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> anyhow::Result<Vec<crate::ExternalAgentRun>> {
+        let rows = sqlx::query_as::<_, ExternalAgentRunRow>(
+            r#"
+SELECT child_thread_id,
+       parent_thread_id,
+       agent_path,
+       routing_kind,
+       requested_selector,
+       effective_selector,
+       routing_reason,
+       skipped_candidates_json,
+       provider_family,
+       command,
+       cli_version,
+       capability_source,
+       capability_freshness,
+       protocol,
+       mode,
+       workspace,
+       model,
+       effort,
+       started_at_ms,
+       completed_at_ms,
+       duration_ms,
+       terminal_state,
+       failure_kind,
+       failure_message
+FROM external_agent_runs
+WHERE parent_thread_id = ?
+ORDER BY started_at_ms ASC, child_thread_id ASC
+            "#,
+        )
+        .bind(parent_thread_id.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(ExternalAgentRunRow::try_into_run)
+            .collect()
     }
 
     /// List direct spawned children of `parent_thread_id` whose edge matches `status`.
@@ -1086,6 +1292,15 @@ ON CONFLICT(id) DO UPDATE SET
         for thread_id_string in &thread_id_strings {
             sqlx::query(
                 "DELETE FROM thread_spawn_edges WHERE parent_thread_id = ? OR child_thread_id = ?",
+            )
+            .bind(thread_id_string)
+            .bind(thread_id_string)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for thread_id_string in &thread_id_strings {
+            sqlx::query(
+                "DELETE FROM external_agent_runs WHERE parent_thread_id = ? OR child_thread_id = ?",
             )
             .bind(thread_id_string)
             .bind(thread_id_string)

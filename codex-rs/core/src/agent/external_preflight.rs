@@ -142,6 +142,7 @@ pub(crate) async fn preflight_external_agent_backend(
         is_read_only,
         probe.capabilities.cli_version,
     );
+    provenance.set_capability_observation(probe.capabilities.source, probe.capabilities.freshness);
     provenance.set_resolved_command(resolved_command);
     Ok(provenance)
 }
