@@ -47,6 +47,7 @@ use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex_with_agents;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
@@ -1015,6 +1016,105 @@ text(JSON.stringify({{
     assert!(
         recorded_apps_tool_calls(&server).await.is_empty(),
         "app-only code mode call should not reach the MCP server"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_lists_direct_agent_tools_and_keeps_nested_calls_unavailable() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let code = r#"
+const tool = ALL_TOOLS.find(({ name }) => name === "agents__spawn_agent");
+let error = null;
+try {
+  await tools.agents__spawn_agent({});
+} catch (caught) {
+  error = String(caught);
+}
+text(JSON.stringify({
+  listed: tool !== undefined,
+  callable: typeof tools.agents__spawn_agent === "function",
+  metadataCallable: tool?.callable ?? null,
+  invocation: tool?.invocation ?? null,
+  recipient: tool?.recipient ?? null,
+  description: tool?.description ?? null,
+  error,
+}));
+"#;
+    let first_mock = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_custom_tool_call("call-1", "exec", code),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let second_mock = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex_with_agents().with_config(|config| {
+        config
+            .features
+            .enable(Feature::CodeMode)
+            .expect("test config should enable CodeMode");
+        config
+            .features
+            .enable(Feature::CodeModeOnly)
+            .expect("test config should enable CodeModeOnly");
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should enable Collab");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should enable MultiAgentV2");
+        config.multi_agent_v2.non_code_mode_only = true;
+    });
+    let test = builder.build(&server).await?;
+    test.submit_turn("inspect and try the direct agent tool through exec")
+        .await?;
+
+    let first_request_tool_names = tool_names(&first_mock.single_request().body_json());
+    assert!(
+        first_request_tool_names.contains(&"agents".to_string()),
+        "agents namespace should remain directly visible to the model: {first_request_tool_names:?}"
+    );
+    let request = second_mock.single_request();
+    let (output, success) = custom_tool_output_body_and_success(&request, "call-1");
+    assert_ne!(
+        success,
+        Some(false),
+        "exec should catch the redirect: {output}"
+    );
+    let parsed: Value = serde_json::from_str(&output)?;
+    assert_eq!(parsed["listed"], true);
+    assert_eq!(parsed["callable"], false);
+    assert_eq!(parsed["metadataCallable"], false);
+    assert_eq!(parsed["invocation"], "direct");
+    assert_eq!(parsed["recipient"], "functions.agents.spawn_agent");
+    assert!(
+        parsed["description"].as_str().is_some_and(|description| {
+            description.contains("direct top-level tool")
+                && description.contains("to=functions.agents.spawn_agent")
+        }),
+        "direct agent metadata should name the top-level recipient: {parsed:?}"
+    );
+    assert!(
+        parsed["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("is not a function")),
+        "nested direct-agent call should remain unavailable: {parsed:?}"
     );
 
     Ok(())

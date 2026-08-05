@@ -17,6 +17,8 @@ use core_test_support::test_codex::test_codex_with_agents as test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 const PROMPT: &str = "probe the configured external agent";
@@ -94,6 +96,33 @@ fn builder_with_named_external_role(
             role.clone(),
             AgentRoleConfig {
                 description: Some("External agent preflight probe".to_string()),
+                backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
+                ..Default::default()
+            },
+        );
+    })
+}
+
+fn builder_for_dynamic_external_selector(
+    backend: ExternalCommandAgentBackendConfig,
+) -> TestCodexBuilder {
+    test_codex().with_config(move |config| {
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should enable Collab");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should enable MultiAgentV2");
+        config.multi_agent_v2.hide_spawn_agent_metadata = false;
+        config.multi_agent_v2.min_wait_timeout_ms = 10;
+        config.multi_agent_v2.max_wait_timeout_ms = 5_000;
+        config.multi_agent_v2.default_wait_timeout_ms = 2_000;
+        config.agent_roles.insert(
+            "antigravity".to_string(),
+            AgentRoleConfig {
+                description: Some("Antigravity test backend".to_string()),
                 backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
                 ..Default::default()
             },
@@ -650,6 +679,133 @@ exit 2
         )
     );
 
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovered_antigravity_selector_routes_before_preflight_and_launches_exactly() -> Result<()>
+{
+    let stub_dir = TempDir::new()?;
+    let agy = stub_dir.path().join("agy");
+    let args_log = stub_dir.path().join("agy-args.log");
+    std::fs::write(
+        &agy,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+if [ "$1" = "--version" ]; then
+  echo "1.1.10"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo "gemini-3.6-flash-high"
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo '--model Model'
+  echo '--effort low|medium|high'
+  exit 0
+fi
+printf 'external provider replied\n'
+"#,
+            args_log.display()
+        ),
+    )?;
+    let mut permissions = std::fs::metadata(&agy)?.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&agy, permissions)?;
+    let backend = ExternalCommandAgentBackendConfig {
+        command: agy.display().to_string(),
+        protocol: ExternalCommandProtocol::RawCli,
+        launch_family: Some("antigravity".to_string()),
+        ..Default::default()
+    };
+
+    let server = start_mock_server().await;
+    let selector = "antigravity-gemini-3.6-flash-high";
+    let spawn_arguments = serde_json::to_string(&json!({
+        "message": AGENT_MESSAGE,
+        "task_name": "external_probe",
+        "task_kind": "other",
+        "task_size": "normal",
+        "model": selector,
+        "reasoning_effort": "high",
+        "fork_turns": "none",
+    }))?;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &spawn_arguments,
+            ),
+            ev_completed("resp-spawn"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, SPAWN_CALL_ID) && !body_contains(request, WAIT_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-wait"),
+            ev_function_call_with_namespace(
+                WAIT_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "wait_agent",
+                &serde_json::to_string(&json!({ "timeout_ms": 5_000 }))?,
+            ),
+            ev_completed("resp-wait"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, WAIT_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_for_dynamic_external_selector(backend);
+    let test = builder.build(&server).await?;
+    test.submit_turn(PROMPT).await?;
+
+    let request = final_response.single_request();
+    let spawn_output = request.function_call_output(SPAWN_CALL_ID)["output"]
+        .as_str()
+        .expect("spawn output string")
+        .to_string();
+    let spawn_output: Value = serde_json::from_str(&spawn_output)?;
+    assert_eq!(spawn_output["agent_type"], selector);
+    assert_eq!(spawn_output["routing"]["effective"], selector);
+    assert_eq!(spawn_output["routing"]["kind"], "explicit");
+    let wait_output_item = request.function_call_output(WAIT_CALL_ID);
+    let wait_output = wait_output_item["output"]
+        .as_str()
+        .expect("wait output string");
+    assert_eq!(
+        serde_json::from_str::<Value>(wait_output)?,
+        json!({
+            "message": "Wait completed.",
+            "timed_out": false,
+        })
+    );
+
+    let logged_args = std::fs::read_to_string(args_log)?;
+    assert!(logged_args.contains("--model gemini-3.6-flash-high"));
+    assert!(logged_args.contains("--effort high"));
     Ok(())
 }
 

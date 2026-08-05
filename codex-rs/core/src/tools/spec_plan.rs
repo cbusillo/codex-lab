@@ -53,6 +53,7 @@ use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+use crate::tools::handlers::multi_agents_v2::MULTI_AGENT_V2_TOOL_NAMES;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -482,7 +483,7 @@ fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOpt
 fn agent_type_description(
     turn_context: &TurnContext,
     default_agent_type_description: &str,
-) -> String {
+) -> (String, bool) {
     let antigravity_backend = turn_context
         .config
         .agent_roles
@@ -504,15 +505,21 @@ fn agent_type_description(
         .into_iter()
         .map(|model| model.selector)
         .collect::<Vec<_>>();
+    let has_external_selectors = !selectors.is_empty();
     let agent_type_description = crate::agent::role::spawn_tool_spec::build_with_external_selectors(
         &turn_context.config.agent_roles,
         &selectors,
     );
-    if agent_type_description.is_empty() {
+    let description = if agent_type_description.is_empty() {
         default_agent_type_description.to_string()
     } else {
         agent_type_description
-    }
+    };
+    (description, has_external_selectors)
+}
+
+fn should_expose_agent_type(has_configured_roles: bool, has_external_selectors: bool) -> bool {
+    has_configured_roles || has_external_selectors
 }
 
 fn is_hidden_by_code_mode_only(
@@ -548,17 +555,24 @@ fn register_code_mode_executors(
     }
 
     let mut code_mode_tool_names = BTreeMap::new();
+    let mut direct_model_only_tools = Vec::new();
     let mut code_mode_nested_tool_specs = Vec::new();
     let mut exec_prompt_tool_specs = Vec::new();
     let mut deferred_exec_prompt_tool_specs = Vec::new();
     let deferred_tools_guidance_enabled = search_tool_enabled(turn_context);
     for executor in registry.runtimes() {
         let exposure = executor.exposure();
+        let tool_name = executor.tool_name();
+        let direct_model_only = exposure == ToolExposure::DirectModelOnly
+            && is_multi_agent_v2_tool(turn_context, &tool_name);
+        if direct_model_only {
+            direct_model_only_tools.push(direct_model_only_code_mode_definition(&tool_name));
+            continue;
+        }
         if !exposure.is_available_in_code_mode() {
             continue;
         }
 
-        let tool_name = executor.tool_name();
         if is_excluded_from_code_mode(turn_context, &tool_name) {
             continue;
         }
@@ -613,21 +627,64 @@ fn register_code_mode_executors(
         default_exec_yield_time_override_ms(&turn_context.config.features)
             .unwrap_or(codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS);
 
+    let mut execute_spec = create_code_mode_tool(
+        &enabled_tools,
+        &deferred_tools,
+        &namespace_descriptions,
+        default_exec_yield_time_ms,
+        tool_mode == ToolMode::CodeModeOnly,
+    );
+    append_direct_model_only_guidance(&mut execute_spec, &direct_model_only_tools);
     let execute_handler = CodeModeExecuteHandler::new(
-        create_code_mode_tool(
-            &enabled_tools,
-            &deferred_tools,
-            &namespace_descriptions,
-            default_exec_yield_time_ms,
-            tool_mode == ToolMode::CodeModeOnly,
-        ),
+        execute_spec,
         code_mode_nested_tool_specs,
+        direct_model_only_tools,
     );
 
     registry.prepend_trusted(Arc::new(CodeModeWaitHandler));
     registry.prepend_trusted(Arc::new(execute_handler));
 
     code_mode_tool_names
+}
+
+fn is_multi_agent_v2_tool(turn_context: &TurnContext, tool_name: &ToolName) -> bool {
+    let expected_namespace = namespace_tools_enabled(turn_context)
+        .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
+        .flatten();
+    tool_name.namespace.as_deref() == expected_namespace
+        && MULTI_AGENT_V2_TOOL_NAMES.contains(&tool_name.name.as_str())
+}
+
+fn direct_model_only_code_mode_definition(tool_name: &ToolName) -> codex_code_mode::ToolDefinition {
+    codex_code_mode::ToolDefinition {
+        name: codex_tools::code_mode_name_for_tool_name(tool_name),
+        tool_name: tool_name.clone(),
+        description: crate::tools::code_mode::direct_model_only_error(tool_name),
+        kind: codex_code_mode::CodeModeToolKind::Function,
+        input_schema: None,
+        output_schema: None,
+    }
+}
+
+fn append_direct_model_only_guidance(
+    spec: &mut ToolSpec,
+    direct_tools: &[codex_code_mode::ToolDefinition],
+) {
+    if direct_tools.is_empty() {
+        return;
+    }
+    let ToolSpec::Freeform(tool) = spec else {
+        tracing::error!("code mode execute spec must be a freeform tool");
+        return;
+    };
+    tool.description.push_str(
+        "\n\nDirect top-level tools (do not call through `functions.exec` or `tools.*`):\n",
+    );
+    for direct_tool in direct_tools {
+        tool.description.push_str("- ");
+        tool.description.push_str(&direct_tool.description);
+        tool.description.push('\n');
+    }
 }
 
 #[instrument(level = "trace", skip_all, fields(tool_spec_count = specs.len()))]
@@ -957,7 +1014,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             let tool_namespace = namespace_tools_enabled(turn_context)
                 .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
                 .flatten();
-            let agent_type_description =
+            let (agent_type_description, has_external_selectors) =
                 agent_type_description(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
@@ -966,7 +1023,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
                         available_models: turn_context.available_models.clone(),
                         agent_type_description,
-                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                        expose_agent_type: should_expose_agent_type(
+                            !turn_context.config.agent_roles.is_empty(),
+                            has_external_selectors,
+                        ),
                         hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
                         expose_spawn_agent_model_overrides: turn_context
                             .config
@@ -1005,7 +1065,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 exposure,
             ));
         } else {
-            let agent_type_description =
+            let (agent_type_description, _) =
                 agent_type_description(turn_context, context.default_agent_type_description);
             let exposure = if search_tool_enabled(turn_context) {
                 ToolExposure::Deferred

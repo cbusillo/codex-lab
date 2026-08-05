@@ -1,8 +1,11 @@
 use super::external_capabilities::ExternalAgentCapabilities;
 use super::external_capabilities::ExternalAgentCapabilityCacheKey;
+use super::external_capabilities::ExternalAgentDiscoveryCacheKey;
 use super::external_capabilities::antigravity_capabilities;
 use super::external_capabilities::cache_capabilities;
+use super::external_capabilities::cache_discovery;
 use super::external_capabilities::cached_capabilities;
+use super::external_capabilities::cached_discovery;
 use super::external_capabilities::claude_capabilities;
 use super::external_capabilities::record_active_capability_catalog;
 use super::external_capabilities::validate_requested_capabilities;
@@ -59,9 +62,15 @@ pub async fn discover_external_agent_capabilities(
     backend: &ExternalCommandAgentBackendConfig,
     workspace: &Path,
 ) -> ExternalAgentCapabilities {
+    let cache_key = ExternalAgentDiscoveryCacheKey::new(backend, workspace);
+    if let Some(capabilities) = cached_discovery(&cache_key) {
+        record_active_capability_catalog(backend, workspace, &capabilities);
+        return capabilities;
+    }
     let capabilities = probe_external_agent_backend(backend, workspace)
         .await
         .capabilities;
+    cache_discovery(cache_key, &capabilities);
     record_active_capability_catalog(backend, workspace, &capabilities);
     capabilities
 }

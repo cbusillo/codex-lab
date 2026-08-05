@@ -2424,7 +2424,7 @@ pub enum AgentRoleBackendConfig {
     ExternalCommand(ExternalCommandAgentBackendConfig),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
 pub enum ExternalCommandProtocol {
     #[default]
     Json,

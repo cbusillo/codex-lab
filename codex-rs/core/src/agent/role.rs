@@ -175,22 +175,22 @@ pub(crate) fn resolve_role_config_owned(
 }
 
 pub(crate) fn dynamic_antigravity_role_config(
+    config: &Config,
     selector: &str,
     effort: Option<&str>,
 ) -> Option<AgentRoleConfig> {
     let model = selector.strip_prefix("antigravity-")?.to_string();
-    if model.is_empty() {
+    if !crate::agent::external_capabilities::is_valid_antigravity_model_name(&model) {
         return None;
     }
-    let mut args = vec!["--model".to_string(), model];
-    if let Some(effort) = effort {
-        args.extend(["--effort".to_string(), effort.to_string()]);
-    }
-    let base = built_in::external_agent_role_config("antigravity")?;
+    let base = resolve_role_config_owned(config, "antigravity")?;
     let Some(AgentRoleBackendConfig::ExternalCommand(mut backend)) = base.backend else {
         return None;
     };
-    backend.args.extend(args);
+    replace_backend_argument(&mut backend.args, "--model", &model);
+    if let Some(effort) = effort {
+        replace_backend_argument(&mut backend.args, "--effort", effort);
+    }
     Some(AgentRoleConfig {
         description: Some(format!(
             "Antigravity discovered model selector `{selector}`."
@@ -199,6 +199,42 @@ pub(crate) fn dynamic_antigravity_role_config(
         nickname_candidates: None,
         backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
     })
+}
+
+fn replace_backend_argument(args: &mut Vec<String>, flag: &str, value: &str) {
+    let inline_prefix = format!("{flag}=");
+    let mut retained = Vec::with_capacity(args.len() + 2);
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if argument == flag {
+            index += 1;
+            if index < args.len() && !args[index].starts_with("--") {
+                index += 1;
+            }
+            continue;
+        }
+        if argument.starts_with(&inline_prefix) {
+            index += 1;
+            continue;
+        }
+        retained.push(argument.clone());
+        index += 1;
+    }
+    retained.extend([flag.to_string(), value.to_string()]);
+    *args = retained;
+}
+
+pub(crate) fn install_dynamic_antigravity_role(
+    config: &mut Config,
+    selector: &str,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    let role = dynamic_antigravity_role_config(config, selector, effort).ok_or_else(|| {
+        format!("Unable to construct external selector `{selector}` without substitution.")
+    })?;
+    config.agent_roles.insert(selector.to_string(), role);
+    Ok(())
 }
 
 pub(crate) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {

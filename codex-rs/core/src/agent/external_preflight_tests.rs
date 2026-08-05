@@ -198,6 +198,7 @@ async fn current_antigravity_capabilities_are_discovered_and_cached() {
         "antigravity",
         &format!(
             r#"if [ "$1" = "--version" ]; then
+  echo version >> '{}'
   echo "1.1.9"
   exit 0
 fi
@@ -215,6 +216,7 @@ if [ "$1" = "--help" ]; then
 fi
 exit 2
 "#,
+            marker_path.display(),
             marker_path.display(),
             marker_path.display()
         ),
@@ -244,8 +246,8 @@ exit 2
             .expect("read capability probe marker")
             .lines()
             .count(),
-        2,
-        "models and help should each run once across a cache hit"
+        3,
+        "version, models, and help should each run once across a discovery cache hit"
     );
 }
 

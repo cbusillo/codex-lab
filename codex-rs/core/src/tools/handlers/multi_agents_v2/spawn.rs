@@ -65,6 +65,17 @@ async fn handle_spawn_agent(
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    if let Some(role_name) = explicit_role_name
+        && crate::agent::external_capabilities::looks_like_antigravity_selector(role_name)
+    {
+        let effort = args.reasoning_effort.as_ref().map(ToString::to_string);
+        crate::agent::role::install_dynamic_antigravity_role(
+            &mut config,
+            role_name,
+            effort.as_deref(),
+        )
+        .map_err(FunctionCallError::RespondToModel)?;
+    }
     let routing =
         select_provider_route(&config, explicit_role_name, args.task_kind, args.task_size)
             .await
@@ -85,20 +96,7 @@ async fn handle_spawn_agent(
     if is_full_history_fork {
         reject_full_fork_agent_type_override(role_name)?;
     }
-    if routing.is_external()
-        && let Some(role_name) = role_name
-        && crate::agent::external_capabilities::looks_like_antigravity_selector(role_name)
-    {
-        let effort = args.reasoning_effort.as_ref().map(ToString::to_string);
-        let role =
-            crate::agent::role::dynamic_antigravity_role_config(role_name, effort.as_deref())
-                .ok_or_else(|| {
-                    FunctionCallError::RespondToModel(format!(
-                        "Unable to construct external selector `{role_name}` without substitution."
-                    ))
-                })?;
-        config.agent_roles.insert(role_name.to_string(), role);
-    } else {
+    if !routing.is_external() {
         apply_requested_spawn_agent_model_overrides(
             &session,
             turn.as_ref(),

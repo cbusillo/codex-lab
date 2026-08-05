@@ -16,6 +16,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 const CAPABILITY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const FAILED_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_CAPABILITY_CACHE_ENTRIES: usize = 32;
 const MAX_DISCOVERED_MODELS: usize = 32;
 const MAX_ACTIVE_CAPABILITY_CATALOGS: usize = 32;
@@ -134,6 +135,45 @@ struct ActiveCapabilityCatalogEntry {
     recorded_at: Instant,
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(super) struct ExternalAgentDiscoveryCacheKey {
+    command: String,
+    protocol: crate::config::ExternalCommandProtocol,
+    args: Vec<String>,
+    args_read_only: Vec<String>,
+    args_write: Vec<String>,
+    env: BTreeMap<String, String>,
+    timeout_ms: u64,
+    launch_family: Option<String>,
+    workspace: PathBuf,
+}
+
+impl ExternalAgentDiscoveryCacheKey {
+    pub(super) fn new(backend: &ExternalCommandAgentBackendConfig, workspace: &Path) -> Self {
+        Self {
+            command: backend.command.clone(),
+            protocol: backend.protocol,
+            args: backend.args.clone(),
+            args_read_only: backend.args_read_only.clone(),
+            args_write: backend.args_write.clone(),
+            env: backend
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            timeout_ms: backend.timeout_ms,
+            launch_family: backend.launch_family.clone(),
+            workspace: workspace.to_path_buf(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedDiscovery {
+    capabilities: ExternalAgentCapabilities,
+    cached_at: Instant,
+}
+
 static CAPABILITY_CACHE: LazyLock<
     Mutex<HashMap<ExternalAgentCapabilityCacheKey, CachedCapabilities>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -141,6 +181,55 @@ static CAPABILITY_CACHE: LazyLock<
 static ACTIVE_CAPABILITY_CATALOG: LazyLock<
     Mutex<BTreeMap<(String, String), ActiveCapabilityCatalogEntry>>,
 > = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+static DISCOVERY_CACHE: LazyLock<Mutex<HashMap<ExternalAgentDiscoveryCacheKey, CachedDiscovery>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(super) fn cached_discovery(
+    key: &ExternalAgentDiscoveryCacheKey,
+) -> Option<ExternalAgentCapabilities> {
+    let mut cache = DISCOVERY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cached = cache.get(key)?;
+    let ttl = if cached.capabilities.failure.is_some() {
+        FAILED_DISCOVERY_CACHE_TTL
+    } else {
+        CAPABILITY_CACHE_TTL
+    };
+    if cached.cached_at.elapsed() > ttl {
+        cache.remove(key);
+        return None;
+    }
+    let mut capabilities = cached.capabilities.clone();
+    capabilities.freshness = ExternalAgentCapabilityFreshness::Cached;
+    Some(capabilities)
+}
+
+pub(super) fn cache_discovery(
+    key: ExternalAgentDiscoveryCacheKey,
+    capabilities: &ExternalAgentCapabilities,
+) {
+    let mut cache = DISCOVERY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache.len() >= MAX_CAPABILITY_CACHE_ENTRIES
+        && !cache.contains_key(&key)
+        && let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, cached)| cached.cached_at)
+            .map(|(key, _)| key.clone())
+    {
+        cache.remove(&oldest_key);
+    }
+    cache.insert(
+        key,
+        CachedDiscovery {
+            capabilities: capabilities.clone(),
+            cached_at: Instant::now(),
+        },
+    );
+}
 
 pub(crate) fn record_active_capability_catalog(
     backend: &ExternalCommandAgentBackendConfig,
@@ -205,6 +294,15 @@ pub(crate) fn looks_like_antigravity_selector(selector: &str) -> bool {
     selector
         .strip_prefix("antigravity-")
         .is_some_and(|model| !model.is_empty())
+}
+
+pub(crate) fn is_valid_antigravity_model_name(model: &str) -> bool {
+    !model.is_empty()
+        && !model.starts_with('-')
+        && model.len() <= MAX_MODEL_NAME_BYTES
+        && model
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.:/+".contains(character))
 }
 
 pub(super) fn cached_capabilities(
@@ -447,11 +545,7 @@ fn parse_antigravity_models(output: &[u8]) -> Result<Vec<String>, ExternalAgentF
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        if line.len() > MAX_MODEL_NAME_BYTES
-            || !line
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "-_.:/+".contains(character))
-        {
+        if !is_valid_antigravity_model_name(line) {
             return Err(ExternalAgentFailureDetail::new(
                 ExternalAgentFailureKind::MalformedOutput,
                 "Antigravity returned a malformed model identifier",
@@ -529,6 +623,10 @@ fn observed_at_unix_seconds() -> u64 {
 #[cfg(test)]
 pub(super) fn clear_capability_cache() {
     CAPABILITY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    DISCOVERY_CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();

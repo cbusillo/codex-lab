@@ -165,16 +165,16 @@ impl ExternalAgentProviderProvenance {
 
 fn requested_flag_value(args: &[String], flag: &str) -> Option<String> {
     let inline_prefix = format!("{flag}=");
+    let mut value = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == flag {
-            return iter.next().cloned();
-        }
-        if let Some(value) = arg.strip_prefix(&inline_prefix) {
-            return Some(value.to_string());
+            value = iter.next().cloned();
+        } else if let Some(inline) = arg.strip_prefix(&inline_prefix) {
+            value = Some(inline.to_string());
         }
     }
-    None
+    value.filter(|value| !value.is_empty())
 }
 
 pub(crate) fn permission_profile_is_read_only(profile: &PermissionProfile) -> bool {
