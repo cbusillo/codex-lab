@@ -36,6 +36,15 @@ pub(crate) use send_message::Handler as SendMessageHandler;
 pub(crate) use spawn::Handler as SpawnAgentHandler;
 pub(crate) use wait::Handler as WaitAgentHandler;
 
+pub(crate) const MULTI_AGENT_V2_TOOL_NAMES: [&str; 6] = [
+    "spawn_agent",
+    "send_message",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+];
+
 mod followup_task;
 mod interrupt_agent;
 mod list_agents;

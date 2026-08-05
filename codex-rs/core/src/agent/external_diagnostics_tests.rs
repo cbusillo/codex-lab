@@ -38,3 +38,32 @@ fn provenance_redacts_command_paths() {
     assert_eq!(provenance.command, "claude");
     assert_eq!(provenance.mode, ExternalAgentLaunchMode::ReadOnly);
 }
+
+#[test]
+fn provenance_reports_the_last_explicit_model_and_effort() {
+    let provenance = ExternalAgentProviderProvenance::new(
+        Some("antigravity-gemini-new"),
+        &ExternalCommandAgentBackendConfig {
+            command: "agy".to_string(),
+            protocol: ExternalCommandProtocol::RawCli,
+            args: [
+                "--model=gemini-old",
+                "--effort",
+                "low",
+                "--model",
+                "gemini-new",
+                "--effort=high",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+            launch_family: Some("antigravity".to_string()),
+            ..Default::default()
+        },
+        Path::new("/tmp/workspace"),
+        /*is_read_only*/ false,
+        Some("1.1.10".to_string()),
+    );
+
+    assert_eq!(provenance.model.as_deref(), Some("gemini-new"));
+    assert_eq!(provenance.effort.as_deref(), Some("high"));
+}

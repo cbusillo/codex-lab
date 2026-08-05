@@ -336,7 +336,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         read_only_args: ANTIGRAVITY_READ_ONLY,
         write_args: ANTIGRAVITY_WRITE,
         model_args: &[],
-        description: "Google/Gemini-family agent via Antigravity CLI; use for Google perspective after consumer Gemini CLI retirement. AGY uses its configured model, not per-run Gemini Pro/Flash flags.",
+        description: "Google/Gemini-family agent via Antigravity CLI; use for Google perspective after consumer Gemini CLI retirement. Every Code discovers installed AGY models and exposes provider-qualified selectors for explicit per-run model and effort routing.",
         enabled_by_default: true,
         explicit_only: false,
         aliases: &[
