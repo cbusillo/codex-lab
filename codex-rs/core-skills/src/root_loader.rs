@@ -157,6 +157,11 @@ fn merge_skill_root_snapshots(snapshots: Vec<SkillRootSnapshot>) -> SkillLoadOut
     outcome
         .skills
         .retain(|skill| seen.insert(skill.path_to_skills_md.clone()));
+    outcome.skills.sort_by_key(|skill| scope_rank(skill.scope));
+    let mut seen_names = HashSet::new();
+    outcome
+        .skills
+        .retain(|skill| seen_names.insert(skill.name.clone()));
     let retained_skill_paths = outcome
         .skills
         .iter()

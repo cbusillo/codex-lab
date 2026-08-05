@@ -16,6 +16,7 @@ mod test_support;
 mod tools;
 
 use crate::context::ContextualUserFragment;
+use codex_extension_api::MAX_WORLD_STATE_SECTION_BYTES;
 use codex_extension_api::PreviousWorldStateSection;
 use codex_extension_api::RenderedWorldStateFragment;
 use codex_extension_api::WorldStateSectionContribution;
@@ -31,7 +32,6 @@ use sha1::Sha1;
 use std::collections::BTreeMap;
 use std::fmt;
 
-const MAX_WORLD_STATE_SECTION_BYTES: usize = 9 * 1024;
 const MAX_WORLD_STATE_TOTAL_BYTES: usize = 64 * 1024;
 const MIN_WORLD_STATE_SECTION_BYTES: usize = 256;
 const MAX_WORLD_STATE_SECTION_COUNT: usize = 128;

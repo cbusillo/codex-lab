@@ -2706,12 +2706,55 @@ async fn deduplicates_by_path_preferring_first_root() {
 }
 
 #[tokio::test]
-async fn keeps_duplicate_names_from_repo_and_user() {
+async fn deduplicates_by_name_preferring_higher_priority_scope() {
+    let repo_root = tempfile::tempdir().expect("repo tempdir");
+    let user_root = tempfile::tempdir().expect("user tempdir");
+    let system_root = tempfile::tempdir().expect("system tempdir");
+    let admin_root = tempfile::tempdir().expect("admin tempdir");
+
+    let repo_path = write_skill_at(repo_root.path(), "repo", "collision", "from repo");
+    write_skill_at(user_root.path(), "user", "collision", "from user");
+    write_skill_at(system_root.path(), "system", "collision", "from system");
+    write_skill_at(admin_root.path(), "admin", "collision", "from admin");
+
+    let roots = [
+        (admin_root.path(), SkillScope::Admin),
+        (system_root.path(), SkillScope::System),
+        (user_root.path(), SkillScope::User),
+        (repo_root.path(), SkillScope::Repo),
+    ]
+    .into_iter()
+    .map(|(path, scope)| SkillRoot {
+        path: path.abs(),
+        scope,
+        file_system: Arc::clone(&LOCAL_FS),
+        plugin_identity: None,
+        plugin_namespace: None,
+        plugin_root: None,
+        discovery_mode: SkillDiscoveryMode::Recursive,
+    });
+
+    let outcome = load_skills_from_roots(
+        roots,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    assert!(outcome.errors.is_empty());
+    assert_eq!(outcome.skills.len(), 1);
+    assert_eq!(outcome.skills[0].description, "from repo");
+    assert_eq!(outcome.skills[0].path_to_skills_md, normalized(&repo_path));
+    assert_eq!(outcome.skills[0].scope, SkillScope::Repo);
+}
+
+#[tokio::test]
+async fn duplicate_names_prefer_repo_over_user() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let repo_dir = tempfile::tempdir().expect("tempdir");
     mark_as_git_repo(repo_dir.path());
 
-    let user_skill_path = write_skill(&codex_home, "user", "dupe-skill", "from user");
+    write_skill(&codex_home, "user", "dupe-skill", "from user");
     let repo_skill_path = write_skill_at(
         &repo_dir
             .path()
@@ -2732,37 +2775,23 @@ async fn keeps_duplicate_names_from_repo_and_user() {
     );
     assert_eq!(
         outcome.skills,
-        vec![
-            SkillMetadata {
-                name: "dupe-skill".to_string(),
-                description: "from repo".to_string(),
-                short_description: None,
-                interface: None,
-                dependencies: None,
-                policy: None,
-                path_to_skills_md: normalized(&repo_skill_path),
-                scope: SkillScope::Repo,
-                plugin_id: None,
-                remote_plugin_id: None,
-            },
-            SkillMetadata {
-                name: "dupe-skill".to_string(),
-                description: "from user".to_string(),
-                short_description: None,
-                interface: None,
-                dependencies: None,
-                policy: None,
-                path_to_skills_md: normalized(&user_skill_path),
-                scope: SkillScope::User,
-                plugin_id: None,
-                remote_plugin_id: None,
-            },
-        ]
+        vec![SkillMetadata {
+            name: "dupe-skill".to_string(),
+            description: "from repo".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&repo_skill_path),
+            scope: SkillScope::Repo,
+            plugin_id: None,
+            remote_plugin_id: None,
+        }]
     );
 }
 
 #[tokio::test]
-async fn keeps_duplicate_names_from_nested_codex_dirs() {
+async fn duplicate_repo_names_prefer_the_nearest_nested_root() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let repo_dir = tempfile::tempdir().expect("tempdir");
     mark_as_git_repo(repo_dir.path());
@@ -2770,7 +2799,7 @@ async fn keeps_duplicate_names_from_nested_codex_dirs() {
     let nested_dir = repo_dir.path().join("nested/inner");
     fs::create_dir_all(&nested_dir).unwrap();
 
-    let root_skill_path = write_skill_at(
+    write_skill_at(
         &repo_dir
             .path()
             .join(REPO_ROOT_CONFIG_DIR_NAME)
@@ -2798,42 +2827,20 @@ async fn keeps_duplicate_names_from_nested_codex_dirs() {
         "unexpected errors: {:?}",
         outcome.errors
     );
-    let root_path = normalized(&root_skill_path);
-    let nested_path = normalized(&nested_skill_path);
-    let (first_path, second_path, first_description, second_description) =
-        if root_path <= nested_path {
-            (root_path, nested_path, "from root", "from nested")
-        } else {
-            (nested_path, root_path, "from nested", "from root")
-        };
     assert_eq!(
         outcome.skills,
-        vec![
-            SkillMetadata {
-                name: "dupe-skill".to_string(),
-                description: first_description.to_string(),
-                short_description: None,
-                interface: None,
-                dependencies: None,
-                policy: None,
-                path_to_skills_md: first_path,
-                scope: SkillScope::Repo,
-                plugin_id: None,
-                remote_plugin_id: None,
-            },
-            SkillMetadata {
-                name: "dupe-skill".to_string(),
-                description: second_description.to_string(),
-                short_description: None,
-                interface: None,
-                dependencies: None,
-                policy: None,
-                path_to_skills_md: second_path,
-                scope: SkillScope::Repo,
-                plugin_id: None,
-                remote_plugin_id: None,
-            },
-        ]
+        vec![SkillMetadata {
+            name: "dupe-skill".to_string(),
+            description: "from nested".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&nested_skill_path),
+            scope: SkillScope::Repo,
+            plugin_id: None,
+            remote_plugin_id: None,
+        }]
     );
 }
 

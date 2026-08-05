@@ -56,6 +56,7 @@ use crate::render::render_combined_available_skills;
 use crate::render::skill_metadata_budget;
 use crate::render::truncate_main_prompt_contents;
 use crate::render::truncate_utf8_to_bytes;
+use crate::render::world_state_skill_metadata_budget;
 use crate::render_observability::CatalogSurface;
 use crate::render_observability::record_catalog_render;
 use crate::render_observability::trace_catalog_budget_pressure;
@@ -280,7 +281,7 @@ where
             let context_window = model_info
                 .as_deref()
                 .and_then(ModelInfo::resolved_context_window);
-            let metadata_budget = skill_metadata_budget(context_window);
+            let metadata_budget = world_state_skill_metadata_budget(context_window, include_usage);
             let extension_metrics = input.extension_metrics.clone();
             let host_snapshot = input.turn_store.get::<HostSkillsSnapshot>();
             let needs_host_catalog = config.include_instructions || config.shadow_selection_enabled;

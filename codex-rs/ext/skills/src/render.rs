@@ -5,7 +5,12 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_core_skills::SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS;
+use codex_core_skills::SKILLS_HOW_TO_USE_WITH_ALIASES;
 use codex_core_skills::render_available_skills_body;
+use codex_extension_api::MAX_WORLD_STATE_SECTION_BYTES;
+use codex_protocol::protocol::SKILLS_INSTRUCTIONS_CLOSE_TAG;
+use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_string::approx_token_count;
 use codex_utils_string::take_bytes_at_char_boundary;
@@ -65,19 +70,22 @@ impl SkillCatalogRenderPolicy {
             Self::ExtensionCompatible => {}
         }
     }
-
-    fn includes_omission_notice(self) -> bool {
-        match self {
-            Self::CoreCompatible => false,
-            Self::ExtensionCompatible => true,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SkillMetadataBudget {
     Tokens(usize),
     Characters(usize),
+    TokensWithinBytes {
+        token_limit: usize,
+        byte_limit: usize,
+        normalized_limit: usize,
+    },
+    CharactersWithinBytes {
+        character_limit: usize,
+        byte_limit: usize,
+        normalized_limit: usize,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -141,18 +149,106 @@ pub(crate) fn skill_metadata_budget(context_window: Option<i64>) -> SkillMetadat
         ))
 }
 
+pub(crate) fn world_state_skill_metadata_budget(
+    context_window: Option<i64>,
+    include_skills_usage_instructions: bool,
+) -> SkillMetadataBudget {
+    let fixed_byte_count = available_skills_fixed_byte_count(
+        include_skills_usage_instructions,
+        /*with_aliases*/ false,
+    )
+    .max(available_skills_fixed_byte_count(
+        include_skills_usage_instructions,
+        /*with_aliases*/ true,
+    ));
+    let byte_limit = MAX_WORLD_STATE_SECTION_BYTES.saturating_sub(fixed_byte_count);
+    match skill_metadata_budget(context_window) {
+        SkillMetadataBudget::Tokens(token_limit) => SkillMetadataBudget::TokensWithinBytes {
+            token_limit,
+            byte_limit,
+            normalized_limit: token_limit.saturating_mul(byte_limit),
+        },
+        SkillMetadataBudget::Characters(character_limit) => {
+            SkillMetadataBudget::CharactersWithinBytes {
+                character_limit,
+                byte_limit,
+                normalized_limit: character_limit.saturating_mul(byte_limit),
+            }
+        }
+        SkillMetadataBudget::TokensWithinBytes { .. }
+        | SkillMetadataBudget::CharactersWithinBytes { .. } => {
+            unreachable!("base skill metadata budget is unconstrained")
+        }
+    }
+}
+
+fn available_skills_fixed_byte_count(
+    include_skills_usage_instructions: bool,
+    with_aliases: bool,
+) -> usize {
+    let skill_root_lines = if with_aliases {
+        vec![String::new()]
+    } else {
+        Vec::new()
+    };
+    let mut skill_lines = Vec::new();
+    if include_skills_usage_instructions {
+        skill_lines.push("### How to use skills".to_string());
+        skill_lines.push(
+            if with_aliases {
+                SKILLS_HOW_TO_USE_WITH_ALIASES
+            } else {
+                SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS
+            }
+            .to_string(),
+        );
+    }
+    SKILLS_INSTRUCTIONS_OPEN_TAG
+        .len()
+        .saturating_add(render_available_skills_body(&skill_root_lines, &skill_lines).len())
+        .saturating_add(SKILLS_INSTRUCTIONS_CLOSE_TAG.len())
+}
+
 fn metadata_line_cost(budget: SkillMetadataBudget, line: &str) -> usize {
     let line = format!("{line}\n");
-    match budget {
-        SkillMetadataBudget::Tokens(_) => approx_token_count(&line),
-        SkillMetadataBudget::Characters(_) => line.chars().count(),
-    }
+    budget.cost(&line)
 }
 
 impl SkillMetadataBudget {
     pub(crate) fn limit(self) -> usize {
         match self {
             Self::Tokens(limit) | Self::Characters(limit) => limit,
+            Self::TokensWithinBytes {
+                normalized_limit, ..
+            }
+            | Self::CharactersWithinBytes {
+                normalized_limit, ..
+            } => normalized_limit,
+        }
+    }
+
+    fn with_limit(self, normalized_limit: usize) -> Self {
+        match self {
+            Self::Tokens(_) => Self::Tokens(normalized_limit),
+            Self::Characters(_) => Self::Characters(normalized_limit),
+            Self::TokensWithinBytes {
+                token_limit,
+                byte_limit,
+                ..
+            } => Self::TokensWithinBytes {
+                token_limit,
+                byte_limit,
+                normalized_limit,
+            },
+            Self::CharactersWithinBytes {
+                character_limit,
+                byte_limit,
+                ..
+            } => Self::CharactersWithinBytes {
+                character_limit,
+                byte_limit,
+                normalized_limit,
+            },
         }
     }
 
@@ -163,6 +259,24 @@ impl SkillMetadataBudget {
                     / APPROX_BYTES_PER_TOKEN
             }
             Self::Characters(_) => chars,
+            Self::TokensWithinBytes {
+                token_limit,
+                byte_limit,
+                ..
+            } => {
+                let tokens = bytes.saturating_add(APPROX_BYTES_PER_TOKEN.saturating_sub(1))
+                    / APPROX_BYTES_PER_TOKEN;
+                tokens
+                    .saturating_mul(byte_limit)
+                    .max(bytes.saturating_mul(token_limit))
+            }
+            Self::CharactersWithinBytes {
+                character_limit,
+                byte_limit,
+                ..
+            } => chars
+                .saturating_mul(byte_limit)
+                .max(bytes.saturating_mul(character_limit)),
         }
     }
 
@@ -170,6 +284,22 @@ impl SkillMetadataBudget {
         match self {
             Self::Tokens(_) => approx_token_count(text),
             Self::Characters(_) => text.chars().count(),
+            Self::TokensWithinBytes {
+                token_limit,
+                byte_limit,
+                ..
+            } => approx_token_count(text)
+                .saturating_mul(byte_limit)
+                .max(text.len().saturating_mul(token_limit)),
+            Self::CharactersWithinBytes {
+                character_limit,
+                byte_limit,
+                ..
+            } => text
+                .chars()
+                .count()
+                .saturating_mul(byte_limit)
+                .max(text.len().saturating_mul(character_limit)),
         }
     }
 }
@@ -580,8 +710,8 @@ fn render_combined_lines(
     let mut lines = executor_lines;
     lines.extend(host_lines);
     let mut allocations = allocate_skill_lines(&lines, budget);
-    let executor_omission_marker =
-        reserve_executor_omission_marker(&lines, executor_count, budget, &mut allocations);
+    let (host_omission_marker, executor_omission_marker) =
+        reserve_combined_omission_markers(&lines, executor_count, budget, &mut allocations);
 
     CombinedAvailableSkillsRender {
         executor: render_combined_group(
@@ -594,7 +724,7 @@ fn render_combined_lines(
             &lines[executor_count..],
             &allocations[executor_count..],
             host_skill_root_lines,
-            /*omission_marker*/ None,
+            host_omission_marker,
         ),
     }
 }
@@ -639,10 +769,7 @@ fn build_aliased_combined_catalog(
     }
 
     let adjusted_limit = budget.limit().saturating_sub(plan.table_cost);
-    let adjusted_budget = match budget {
-        SkillMetadataBudget::Tokens(_) => SkillMetadataBudget::Tokens(adjusted_limit),
-        SkillMetadataBudget::Characters(_) => SkillMetadataBudget::Characters(adjusted_limit),
-    };
+    let adjusted_budget = budget.with_limit(adjusted_limit);
     let host_lines = host_entries
         .iter()
         .map(|entry| {
@@ -728,28 +855,41 @@ fn combined_available_skills_cost(
         })
 }
 
-fn reserve_executor_omission_marker(
+fn reserve_combined_omission_markers(
     skill_lines: &[SkillLine<'_>],
     executor_count: usize,
     budget: SkillMetadataBudget,
     allocations: &mut [SkillLineAllocation],
-) -> Option<String> {
+) -> (Option<String>, Option<String>) {
     loop {
-        let omitted_count = allocations[..executor_count]
+        let executor_omitted_count = allocations[..executor_count]
             .iter()
             .filter(|allocation| matches!(allocation, SkillLineAllocation::Omitted))
             .count();
-        if omitted_count == 0 {
-            return None;
-        }
-
-        let marker = omission_marker(omitted_count);
+        let host_omitted_count = allocations[executor_count..]
+            .iter()
+            .filter(|allocation| matches!(allocation, SkillLineAllocation::Omitted))
+            .count();
+        let executor_marker = (executor_omitted_count > 0).then(|| {
+            omission_marker(
+                executor_omitted_count,
+                SkillCatalogRenderPolicy::ExtensionCompatible,
+            )
+        });
+        let host_marker = (host_omitted_count > 0)
+            .then(|| omission_marker(host_omitted_count, SkillCatalogRenderPolicy::CoreCompatible));
         let used = allocated_skill_lines_cost(skill_lines, allocations, budget);
-        if used.saturating_add(metadata_line_cost(budget, &marker)) <= budget.limit() {
-            return Some(marker);
+        let marker_cost = executor_marker
+            .iter()
+            .chain(host_marker.iter())
+            .fold(0usize, |cost, marker| {
+                cost.saturating_add(metadata_line_cost(budget, marker))
+            });
+        if used.saturating_add(marker_cost) <= budget.limit() {
+            return (host_marker, executor_marker);
         }
 
-        let index = (executor_count..allocations.len())
+        let Some(index) = (executor_count..allocations.len())
             .rev()
             .chain((0..executor_count).rev())
             .find(|index| {
@@ -757,7 +897,10 @@ fn reserve_executor_omission_marker(
                     allocations[*index],
                     SkillLineAllocation::DescriptionChars(_)
                 )
-            })?;
+            })
+        else {
+            return (host_marker, executor_marker);
+        };
         allocations[index] = SkillLineAllocation::Omitted;
     }
 }
@@ -798,9 +941,9 @@ fn render_catalog(
         used.saturating_add(metadata_line_cost(budget, &rendered.line))
     });
 
-    if omitted > 0 && policy.includes_omission_notice() {
+    if omitted > 0 {
         loop {
-            let marker = omission_marker(omitted);
+            let marker = omission_marker(omitted, policy);
             if total_cost.saturating_add(metadata_line_cost(budget, &marker)) <= budget.limit() {
                 rendered_lines.push(RenderedSkillLine { line: marker });
                 break;
@@ -858,10 +1001,7 @@ fn build_aliased_catalog(
     }
 
     let adjusted_limit = budget.limit().saturating_sub(plan.table_cost);
-    let adjusted_budget = match budget {
-        SkillMetadataBudget::Tokens(_) => SkillMetadataBudget::Tokens(adjusted_limit),
-        SkillMetadataBudget::Characters(_) => SkillMetadataBudget::Characters(adjusted_limit),
-    };
+    let adjusted_budget = budget.with_limit(adjusted_limit);
     let skill_lines = entries
         .iter()
         .map(|entry| {
@@ -1054,9 +1194,16 @@ fn rendered_catalog_cost(budget: SkillMetadataBudget, rendered: &RenderedCatalog
         })
 }
 
-fn omission_marker(omitted: usize) -> String {
+fn omission_marker(omitted: usize, policy: SkillCatalogRenderPolicy) -> String {
     let skill_word = if omitted == 1 { "skill" } else { "skills" };
-    format!("- {omitted} additional {skill_word} omitted from this bounded skills list.")
+    match policy {
+        SkillCatalogRenderPolicy::CoreCompatible => format!(
+            "- {omitted} additional host {skill_word} omitted from this bounded list. Search for `SKILL.md` beneath the configured skill roots to discover them."
+        ),
+        SkillCatalogRenderPolicy::ExtensionCompatible => {
+            format!("- {omitted} additional {skill_word} omitted from this bounded skills list.")
+        }
+    }
 }
 
 pub(crate) fn truncate_catalog_skill_description(description: &str) -> Cow<'_, str> {

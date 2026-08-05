@@ -45,6 +45,7 @@ pub use turn_lifecycle::TurnAbortInput;
 pub use turn_lifecycle::TurnErrorInput;
 pub use turn_lifecycle::TurnStartInput;
 pub use turn_lifecycle::TurnStopInput;
+pub use world_state::MAX_WORLD_STATE_SECTION_BYTES;
 pub use world_state::PreviousWorldStateSection;
 pub use world_state::RenderedWorldStateFragment;
 pub use world_state::WorldStateContributionInput;

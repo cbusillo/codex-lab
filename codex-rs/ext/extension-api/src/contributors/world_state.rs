@@ -9,6 +9,9 @@ use serde_json::Value;
 use crate::ExtensionData;
 use crate::ExtensionMetrics;
 
+/// Maximum rendered size of one World State section, including its section markers.
+pub const MAX_WORLD_STATE_SECTION_BYTES: usize = 9 * 1024;
+
 /// Host state available while an extension contributes one sampling step's World State.
 pub struct WorldStateContributionInput<'a> {
     pub thread_id: ThreadId,
