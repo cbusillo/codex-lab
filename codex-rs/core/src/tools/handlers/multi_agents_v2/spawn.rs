@@ -57,8 +57,8 @@ async fn handle_spawn_agent(
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let selectors = resolve_spawn_selectors(args.agent_type.as_deref(), args.model.as_deref())?;
     enforce_explicit_user_agent_intent(turn, &selectors)?;
-    let explicit_role_name = selectors.agent_type.as_deref();
-    if let Some(role_name) = explicit_role_name
+    let requested_role_name = selectors.agent_type.as_deref();
+    if let Some(role_name) = requested_role_name
         && !crate::agent::role::agent_selector_enabled(&turn.config, role_name)
     {
         return Err(FunctionCallError::RespondToModel(format!(
@@ -72,10 +72,21 @@ async fn handle_spawn_agent(
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
-    if let Some(role_name) = explicit_role_name
-        && crate::agent::external_capabilities::looks_like_antigravity_selector(role_name)
+    crate::agent::selector_defaults::install_configured_provider_selectors(&mut config)
+        .map_err(FunctionCallError::RespondToModel)?;
+    let explicit_role_name = requested_role_name.map(|role_name| {
+        crate::agent::selector_defaults::resolve_effective_selector(&config, role_name)
+    });
+    if let Some(role_name) = explicit_role_name.as_deref()
+        && (role_name == "antigravity"
+            || crate::agent::external_capabilities::looks_like_antigravity_selector(role_name))
     {
-        let effort = args.reasoning_effort.as_ref().map(ToString::to_string);
+        let explicit_effort = args.reasoning_effort.as_ref().map(ToString::to_string);
+        let effort = crate::agent::selector_defaults::resolve_effort(
+            &config,
+            role_name,
+            explicit_effort.as_deref(),
+        );
         crate::agent::role::install_dynamic_antigravity_role(
             &mut config,
             role_name,
@@ -83,10 +94,14 @@ async fn handle_spawn_agent(
         )
         .map_err(FunctionCallError::RespondToModel)?;
     }
-    let routing =
-        select_provider_route(&config, explicit_role_name, args.task_kind, args.task_size)
-            .await
-            .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
+    let routing = select_provider_route(
+        &config,
+        explicit_role_name.as_deref(),
+        args.task_kind,
+        args.task_size,
+    )
+    .await
+    .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
     enforce_routed_user_agent_intent(turn, routing.agent_type())?;
     let role_name = routing.role_name();
     let fork_mode = args.fork_mode(routing.is_external())?;

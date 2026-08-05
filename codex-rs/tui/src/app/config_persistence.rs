@@ -858,12 +858,11 @@ impl App {
             return;
         }
 
-        let override_config = codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(enabled),
-        };
         self.config
             .agent_selector_overrides
-            .insert(selector.to_string(), override_config);
+            .entry(selector.to_string())
+            .or_default()
+            .enabled = Some(enabled);
         self.chat_widget
             .set_agent_selector_enabled(selector, enabled);
     }

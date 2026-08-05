@@ -672,12 +672,14 @@ async fn selector_overrides_disable_static_and_discovered_external_agents() {
         "claude-sonnet-4.6".to_string(),
         codex_config::config_toml::AgentSelectorToml {
             enabled: Some(false),
+            ..Default::default()
         },
     );
     config.agent_selector_overrides.insert(
         "antigravity".to_string(),
         codex_config::config_toml::AgentSelectorToml {
             enabled: Some(false),
+            ..Default::default()
         },
     );
 
@@ -700,6 +702,7 @@ async fn selector_overrides_can_enable_a_gated_external_agent() {
         "cloud-gpt-5.1-codex-max".to_string(),
         codex_config::config_toml::AgentSelectorToml {
             enabled: Some(true),
+            ..Default::default()
         },
     );
 
@@ -715,6 +718,7 @@ async fn selector_overrides_do_not_disable_native_roles() {
         "explorer".to_string(),
         codex_config::config_toml::AgentSelectorToml {
             enabled: Some(false),
+            ..Default::default()
         },
     );
 

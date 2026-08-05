@@ -204,9 +204,16 @@ pub(crate) async fn select_provider_route(
         None
     };
 
+    let configured_candidates = task_kind
+        .provider_candidates()
+        .iter()
+        .map(|candidate| {
+            crate::agent::selector_defaults::resolve_effective_selector(config, candidate)
+        })
+        .collect::<Vec<_>>();
     let mut eligibility = std::collections::HashMap::new();
     if explicit_agent_type.is_none() && task_size != AgentTaskSize::Tiny {
-        for candidate in task_kind.provider_candidates() {
+        for candidate in &configured_candidates {
             let result = external_role_preflight(config, candidate)
                 .await
                 .map(|provider| ProviderEligibility::Available(Some(provider)))
@@ -214,14 +221,15 @@ pub(crate) async fn select_provider_route(
                     let message = detail.message.as_deref().unwrap_or("preflight failed");
                     ProviderEligibility::Unavailable(format!("{}: {message}", detail.kind.as_str()))
                 });
-            eligibility.insert(*candidate, result);
+            eligibility.insert(candidate.clone(), result);
         }
     }
 
-    let mut decision = select_provider_route_with(
+    let mut decision = select_provider_route_with_candidates(
         explicit_agent_type,
         task_kind,
         task_size,
+        &configured_candidates,
         |agent_type| role_uses_external_backend(config, agent_type),
         |agent_type| {
             eligibility.remove(agent_type).unwrap_or_else(|| {
@@ -235,10 +243,38 @@ pub(crate) async fn select_provider_route(
     Ok(decision)
 }
 
+#[cfg(test)]
 fn select_provider_route_with<IsExternal, Eligibility>(
     explicit_agent_type: Option<&str>,
     task_kind: AgentTaskKind,
     task_size: AgentTaskSize,
+    is_external: IsExternal,
+    eligibility: Eligibility,
+) -> ProviderRoutingDecision
+where
+    IsExternal: Fn(&str) -> bool,
+    Eligibility: FnMut(&str) -> ProviderEligibility,
+{
+    let candidates = task_kind
+        .provider_candidates()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    select_provider_route_with_candidates(
+        explicit_agent_type,
+        task_kind,
+        task_size,
+        &candidates,
+        is_external,
+        eligibility,
+    )
+}
+
+fn select_provider_route_with_candidates<IsExternal, Eligibility>(
+    explicit_agent_type: Option<&str>,
+    task_kind: AgentTaskKind,
+    task_size: AgentTaskSize,
+    candidates: &[String],
     is_external: IsExternal,
     mut eligibility: Eligibility,
 ) -> ProviderRoutingDecision
@@ -271,7 +307,6 @@ where
         );
     }
 
-    let candidates = task_kind.provider_candidates();
     if candidates.is_empty() {
         return native_decision(
             ProviderRoutingKind::NativeDefault,
@@ -284,17 +319,17 @@ where
 
     let mut unavailable = Vec::new();
     for candidate in candidates {
-        match eligibility(candidate) {
+        match eligibility(candidate.as_str()) {
             ProviderEligibility::Available(provider) => {
                 return ProviderRoutingDecision {
-                    agent_type: (*candidate).to_string(),
-                    role_name: Some((*candidate).to_string()),
+                    agent_type: candidate.clone(),
+                    role_name: Some(candidate.clone()),
                     is_external: true,
                     provider,
                     summary: ProviderRoutingSummary {
                         kind: ProviderRoutingKind::AutomaticExternal,
                         requested: None,
-                        effective: (*candidate).to_string(),
+                        effective: candidate.clone(),
                         reason: format!(
                             "{} `{}` task selected eligible external agent `{candidate}`.",
                             task_size.as_str(),

@@ -3302,6 +3302,36 @@ fn validate_multi_agent_v2_tool_namespace(namespace: Option<&str>) -> std::io::R
     Ok(())
 }
 
+fn validate_agent_selector_overrides(
+    overrides: &BTreeMap<String, codex_config::config_toml::AgentSelectorToml>,
+) -> std::io::Result<()> {
+    for (selector, override_config) in overrides {
+        for (field, value) in [
+            ("model", override_config.model.as_deref()),
+            ("effort", override_config.effort.as_deref()),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            let valid = !value.is_empty()
+                && value.len() <= 128
+                && !value.starts_with('-')
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || ".-_".contains(character)
+                });
+            if !valid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.selectors.{selector}.{field} must be a non-empty provider value containing only letters, numbers, '.', '-', or '_'"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     #[cfg(test)]
     async fn load_from_base_config_with_overrides(
@@ -3937,6 +3967,7 @@ impl Config {
             .as_ref()
             .map(|agents| agents.selectors.clone())
             .unwrap_or_default();
+        validate_agent_selector_overrides(&agent_selector_overrides)?;
         let agent_interrupt_message_enabled = cfg
             .agents
             .as_ref()

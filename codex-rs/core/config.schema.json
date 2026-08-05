@@ -110,9 +110,17 @@
     "AgentSelectorToml": {
       "additionalProperties": false,
       "properties": {
+        "effort": {
+          "description": "Provider-native effort used when a spawn call does not select one explicitly.",
+          "type": "string"
+        },
         "enabled": {
           "description": "Whether this selector is available to the model and explicit spawn calls.",
           "type": "boolean"
+        },
+        "model": {
+          "description": "Provider-native model used when this selector does not name one explicitly.",
+          "type": "string"
         }
       },
       "type": "object"

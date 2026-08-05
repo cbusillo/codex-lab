@@ -220,12 +220,11 @@ impl ChatWidget {
     }
 
     pub(crate) fn set_agent_selector_enabled(&mut self, selector: &str, enabled: bool) {
-        self.config.agent_selector_overrides.insert(
-            selector.to_string(),
-            codex_config::config_toml::AgentSelectorToml {
-                enabled: Some(enabled),
-            },
-        );
+        self.config
+            .agent_selector_overrides
+            .entry(selector.to_string())
+            .or_default()
+            .enabled = Some(enabled);
     }
 
     pub(crate) fn open_experimental_popup(&mut self) {

@@ -754,6 +754,10 @@ pub struct AgentsToml {
 pub struct AgentSelectorToml {
     /// Whether this selector is available to the model and explicit spawn calls.
     pub enabled: Option<bool>,
+    /// Provider-native model used when this selector does not name one explicitly.
+    pub model: Option<String>,
+    /// Provider-native effort used when a spawn call does not select one explicitly.
+    pub effort: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
