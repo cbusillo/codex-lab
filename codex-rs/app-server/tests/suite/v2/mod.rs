@@ -31,6 +31,7 @@ mod executor_mcp;
 mod executor_skills;
 mod experimental_api;
 mod experimental_feature_list;
+mod external_agent_capabilities;
 mod external_agent_config;
 mod fs;
 mod git_attribution;

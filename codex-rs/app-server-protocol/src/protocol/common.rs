@@ -1242,6 +1242,18 @@ client_request_definitions! {
         serialization: global_shared_read("config"),
         response: v2::ExternalAgentConfigImportHistoriesReadResponse,
     },
+    #[experimental("externalAgentCapability/read")]
+    ExternalAgentCapabilitiesRead => "externalAgentCapability/read" {
+        params: v2::ExternalAgentCapabilitiesReadParams,
+        serialization: global_shared_read("config"),
+        response: v2::ExternalAgentCapabilitiesReadResponse,
+    },
+    #[experimental("externalAgentCapability/refresh/cancel")]
+    ExternalAgentCapabilitiesRefreshCancel => "externalAgentCapability/refresh/cancel" {
+        params: v2::ExternalAgentCapabilitiesRefreshCancelParams,
+        serialization: None,
+        response: v2::ExternalAgentCapabilitiesRefreshCancelResponse,
+    },
     ConfigValueWrite => "config/value/write" {
         params: v2::ConfigValueWriteParams,
         serialization: global("config"),
@@ -1796,6 +1808,8 @@ server_notification_definitions! {
     RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
     ExternalAgentConfigImportProgress => "externalAgentConfig/import/progress" (v2::ExternalAgentConfigImportProgressNotification),
     ExternalAgentConfigImportCompleted => "externalAgentConfig/import/completed" (v2::ExternalAgentConfigImportCompletedNotification),
+    #[experimental("externalAgentCapability/updated")]
+    ExternalAgentCapabilitiesUpdated => "externalAgentCapability/updated" (v2::ExternalAgentCapabilitiesUpdatedNotification),
     FsChanged => "fs/changed" (v2::FsChangedNotification),
     ReasoningSummaryTextDelta => "item/reasoning/summaryTextDelta" (v2::ReasoningSummaryTextDeltaNotification),
     ReasoningSummaryPartAdded => "item/reasoning/summaryPartAdded" (v2::ReasoningSummaryPartAddedNotification),

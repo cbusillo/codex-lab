@@ -153,6 +153,15 @@ export type { ExperimentalFeatureEnablementSetResponse } from "./ExperimentalFea
 export type { ExperimentalFeatureListParams } from "./ExperimentalFeatureListParams";
 export type { ExperimentalFeatureListResponse } from "./ExperimentalFeatureListResponse";
 export type { ExperimentalFeatureStage } from "./ExperimentalFeatureStage";
+export type { ExternalAgentAuthState } from "./ExternalAgentAuthState";
+export type { ExternalAgentCapabilitiesRefreshHandle } from "./ExternalAgentCapabilitiesRefreshHandle";
+export type { ExternalAgentCapabilitiesRefreshParams } from "./ExternalAgentCapabilitiesRefreshParams";
+export type { ExternalAgentCapabilitiesRefreshStatus } from "./ExternalAgentCapabilitiesRefreshStatus";
+export type { ExternalAgentCapabilitiesUpdatedNotification } from "./ExternalAgentCapabilitiesUpdatedNotification";
+export type { ExternalAgentCapabilityFailure } from "./ExternalAgentCapabilityFailure";
+export type { ExternalAgentCapabilityFailureKind } from "./ExternalAgentCapabilityFailureKind";
+export type { ExternalAgentCapabilityFreshness } from "./ExternalAgentCapabilityFreshness";
+export type { ExternalAgentCapabilitySource } from "./ExternalAgentCapabilitySource";
 export type { ExternalAgentConfigDetectParams } from "./ExternalAgentConfigDetectParams";
 export type { ExternalAgentConfigDetectResponse } from "./ExternalAgentConfigDetectResponse";
 export type { ExternalAgentConfigImportCompletedNotification } from "./ExternalAgentConfigImportCompletedNotification";
@@ -174,6 +183,10 @@ export type { ExternalAgentDetectedConnectorCandidate } from "./ExternalAgentDet
 export type { ExternalAgentDetectedConnectorSource } from "./ExternalAgentDetectedConnectorSource";
 export type { ExternalAgentImportedConnectorCandidate } from "./ExternalAgentImportedConnectorCandidate";
 export type { ExternalAgentImportedConnectorSource } from "./ExternalAgentImportedConnectorSource";
+export type { ExternalAgentInstallState } from "./ExternalAgentInstallState";
+export type { ExternalAgentProviderCapabilities } from "./ExternalAgentProviderCapabilities";
+export type { ExternalAgentSelectorState } from "./ExternalAgentSelectorState";
+export type { ExternalAgentSettingOrigin } from "./ExternalAgentSettingOrigin";
 export type { FeedbackRequirements } from "./FeedbackRequirements";
 export type { FeedbackUploadParams } from "./FeedbackUploadParams";
 export type { FeedbackUploadResponse } from "./FeedbackUploadResponse";

@@ -933,6 +933,16 @@ impl MessageProcessor {
                 .read_import_histories()
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::ExternalAgentCapabilitiesRead { params, .. } => {
+                self.catalog_processor
+                    .external_agent_capabilities_read(params)
+                    .await
+            }
+            ClientRequest::ExternalAgentCapabilitiesRefreshCancel { params, .. } => {
+                self.catalog_processor
+                    .external_agent_capabilities_refresh_cancel(params)
+                    .await
+            }
             ClientRequest::ConfigValueWrite { params, .. } => {
                 self.config_processor.value_write(params).await.map(Some)
             }

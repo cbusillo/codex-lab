@@ -269,7 +269,7 @@ pub(crate) fn clear_active_capability_catalog() {
         .clear();
 }
 
-pub(crate) fn discovered_antigravity_selectors(
+pub fn discovered_antigravity_selectors(
     backend: &ExternalCommandAgentBackendConfig,
     workspace: &Path,
 ) -> Vec<ExternalAgentModelCapability> {

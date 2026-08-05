@@ -6994,6 +6994,129 @@
         }
       ]
     },
+    "ExternalAgentAuthState": {
+      "enum": [
+        "authenticated",
+        "notAuthenticated",
+        "notProbed",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentCapabilitiesRefreshHandle": {
+      "properties": {
+        "deadlineMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "families": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "refreshId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "deadlineMs",
+        "families",
+        "refreshId"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentCapabilitiesRefreshParams": {
+      "properties": {
+        "refreshId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "refreshId"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentCapabilitiesRefreshStatus": {
+      "enum": [
+        "completed",
+        "cancelled",
+        "deadlineExceeded"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentCapabilitiesUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "providers": {
+          "items": {
+            "$ref": "#/definitions/ExternalAgentProviderCapabilities"
+          },
+          "type": "array"
+        },
+        "refreshId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ExternalAgentCapabilitiesRefreshStatus"
+        }
+      },
+      "required": [
+        "providers",
+        "refreshId",
+        "status"
+      ],
+      "title": "ExternalAgentCapabilitiesUpdatedNotification",
+      "type": "object"
+    },
+    "ExternalAgentCapabilityFailure": {
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/ExternalAgentCapabilityFailureKind"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentCapabilityFailureKind": {
+      "enum": [
+        "commandMissing",
+        "authenticationRequired",
+        "quotaOrRateLimited",
+        "unsupportedMode",
+        "timedOut",
+        "malformedOutput",
+        "emptyOutput",
+        "launchFailed",
+        "providerFailed"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentCapabilityFreshness": {
+      "enum": [
+        "fresh",
+        "cached",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentCapabilitySource": {
+      "enum": [
+        "staticCatalog",
+        "localCli",
+        "notProbed",
+        "conservativeFallback",
+        "cacheMiss"
+      ],
+      "type": "string"
+    },
     "ExternalAgentConfigDetectParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -7522,6 +7645,180 @@
         "remoteMcpServersConfig"
       ],
       "type": "string"
+    },
+    "ExternalAgentInstallState": {
+      "enum": [
+        "installed",
+        "notInstalled",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentProviderCapabilities": {
+      "properties": {
+        "auth": {
+          "$ref": "#/definitions/ExternalAgentAuthState"
+        },
+        "cliVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "effortLevels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExternalAgentCapabilityFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "family": {
+          "type": "string"
+        },
+        "freshness": {
+          "$ref": "#/definitions/ExternalAgentCapabilityFreshness"
+        },
+        "install": {
+          "$ref": "#/definitions/ExternalAgentInstallState"
+        },
+        "observedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "selectors": {
+          "items": {
+            "$ref": "#/definitions/ExternalAgentSelectorState"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/definitions/ExternalAgentCapabilitySource"
+        },
+        "supportsEffortSelection": {
+          "type": "boolean"
+        },
+        "supportsModelSelection": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "auth",
+        "command",
+        "effortLevels",
+        "family",
+        "freshness",
+        "install",
+        "selectors",
+        "source",
+        "supportsEffortSelection",
+        "supportsModelSelection"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentSelectorState": {
+      "properties": {
+        "defaultEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultEffortOrigin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExternalAgentSettingOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "defaultModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultModelOrigin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExternalAgentSettingOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "discovered": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabledOrigin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExternalAgentSettingOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "explicitOnly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "discovered",
+        "enabled",
+        "explicitOnly",
+        "selector"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentSettingOrigin": {
+      "properties": {
+        "configPath": {
+          "type": "string"
+        },
+        "layer": {
+          "$ref": "#/definitions/ConfigLayerMetadata"
+        },
+        "readOnly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "configPath",
+        "layer",
+        "readOnly"
+      ],
+      "type": "object"
     },
     "FeedbackRequirements": {
       "properties": {
@@ -16115,6 +16412,26 @@
             "params"
           ],
           "title": "ExternalAgentConfig/import/completedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "externalAgentCapability/updated"
+              ],
+              "title": "ExternalAgentCapability/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ExternalAgentCapabilitiesUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "ExternalAgentCapability/updatedNotification",
           "type": "object"
         },
         {

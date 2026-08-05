@@ -186,7 +186,7 @@ pub(crate) fn resolve_role_config_owned(
     })
 }
 
-pub(crate) fn agent_selector_enabled(config: &Config, selector: &str) -> bool {
+pub fn agent_selector_enabled(config: &Config, selector: &str) -> bool {
     if let Some(spec) = codex_config::agent_defaults::agent_model_spec(selector) {
         if let Some(enabled) = config
             .agent_selector_overrides
@@ -320,6 +320,21 @@ pub(crate) fn install_configured_antigravity_role(
 
 pub(crate) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
     built_in::external_agent_role_config_with_override(role_name, None)
+}
+
+/// Resolves an external-command backend regardless of selector enablement.
+pub fn external_agent_backend_for_selector(
+    config: &Config,
+    selector: &str,
+) -> Option<ExternalCommandAgentBackendConfig> {
+    let role = config
+        .agent_roles
+        .get(selector)
+        .cloned()
+        .or_else(|| built_in::external_agent_role_config_with_override(selector, Some(true)))?;
+    match role.backend? {
+        AgentRoleBackendConfig::ExternalCommand(backend) => Some(backend),
+    }
 }
 
 mod reload {

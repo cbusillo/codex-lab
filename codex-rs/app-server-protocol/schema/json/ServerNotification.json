@@ -1030,6 +1030,211 @@
       ],
       "type": "string"
     },
+    "ConfigLayerMetadata": {
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/ConfigLayerSource"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "ConfigLayerSource": {
+      "oneOf": [
+        {
+          "description": "Managed preferences layer delivered by MDM (macOS only).",
+          "properties": {
+            "domain": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "mdm"
+              ],
+              "title": "MdmConfigLayerSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "domain",
+            "key",
+            "type"
+          ],
+          "title": "MdmConfigLayerSource",
+          "type": "object"
+        },
+        {
+          "description": "Managed config layer from a file (usually `managed_config.toml`).",
+          "properties": {
+            "file": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                }
+              ],
+              "description": "This is the path to the system config.toml file, though it is not guaranteed to exist."
+            },
+            "type": {
+              "enum": [
+                "system"
+              ],
+              "title": "SystemConfigLayerSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file",
+            "type"
+          ],
+          "title": "SystemConfigLayerSource",
+          "type": "object"
+        },
+        {
+          "description": "Enterprise-managed config layer delivered by the cloud config bundle.",
+          "properties": {
+            "id": {
+              "description": "Stable identifier for the delivered layer.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Admin-facing name for the delivered layer. This is surfaced in diagnostics so users know which cloud layer needs administrator attention.",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "enterpriseManaged"
+              ],
+              "title": "EnterpriseManagedConfigLayerSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "type"
+          ],
+          "title": "EnterpriseManagedConfigLayerSource",
+          "type": "object"
+        },
+        {
+          "description": "User config layer from $CODEX_LAB_HOME/config.toml. This layer is special in that it is expected to be: - writable by the user - generally outside the workspace directory",
+          "properties": {
+            "file": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                }
+              ],
+              "description": "This is the path to the user's config.toml file, though it is not guaranteed to exist."
+            },
+            "profile": {
+              "description": "Name of the selected profile-v2 config layered on top of the base user config, when this layer represents one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "user"
+              ],
+              "title": "UserConfigLayerSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file",
+            "type"
+          ],
+          "title": "UserConfigLayerSource",
+          "type": "object"
+        },
+        {
+          "description": "Path to a .codex/ folder within a project. There could be multiple of these between `cwd` and the project/repo root.",
+          "properties": {
+            "dotCodexFolder": {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            "type": {
+              "enum": [
+                "project"
+              ],
+              "title": "ProjectConfigLayerSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dotCodexFolder",
+            "type"
+          ],
+          "title": "ProjectConfigLayerSource",
+          "type": "object"
+        },
+        {
+          "description": "Session-layer overrides supplied via `-c`/`--config`.",
+          "properties": {
+            "type": {
+              "enum": [
+                "sessionFlags"
+              ],
+              "title": "SessionFlagsConfigLayerSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "SessionFlagsConfigLayerSource",
+          "type": "object"
+        },
+        {
+          "description": "`managed_config.toml` was designed to be a config that was loaded as the last layer on top of everything else. This scheme did not quite work out as intended, but we keep this variant as a \"best effort\" while we phase out `managed_config.toml` in favor of `requirements.toml`.",
+          "properties": {
+            "file": {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            "type": {
+              "enum": [
+                "legacyManagedConfigTomlFromFile"
+              ],
+              "title": "LegacyManagedConfigTomlFromFileConfigLayerSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file",
+            "type"
+          ],
+          "title": "LegacyManagedConfigTomlFromFileConfigLayerSource",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "legacyManagedConfigTomlFromMdm"
+              ],
+              "title": "LegacyManagedConfigTomlFromMdmConfigLayerSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "LegacyManagedConfigTomlFromMdmConfigLayerSource",
+          "type": "object"
+        }
+      ]
+    },
     "ConfigWarningNotification": {
       "properties": {
         "details": {
@@ -1233,6 +1438,92 @@
       ],
       "type": "object"
     },
+    "ExternalAgentAuthState": {
+      "enum": [
+        "authenticated",
+        "notAuthenticated",
+        "notProbed",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentCapabilitiesRefreshStatus": {
+      "enum": [
+        "completed",
+        "cancelled",
+        "deadlineExceeded"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentCapabilitiesUpdatedNotification": {
+      "properties": {
+        "providers": {
+          "items": {
+            "$ref": "#/definitions/ExternalAgentProviderCapabilities"
+          },
+          "type": "array"
+        },
+        "refreshId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ExternalAgentCapabilitiesRefreshStatus"
+        }
+      },
+      "required": [
+        "providers",
+        "refreshId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentCapabilityFailure": {
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/ExternalAgentCapabilityFailureKind"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentCapabilityFailureKind": {
+      "enum": [
+        "commandMissing",
+        "authenticationRequired",
+        "quotaOrRateLimited",
+        "unsupportedMode",
+        "timedOut",
+        "malformedOutput",
+        "emptyOutput",
+        "launchFailed",
+        "providerFailed"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentCapabilityFreshness": {
+      "enum": [
+        "fresh",
+        "cached",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentCapabilitySource": {
+      "enum": [
+        "staticCatalog",
+        "localCli",
+        "notProbed",
+        "conservativeFallback",
+        "cacheMiss"
+      ],
+      "type": "string"
+    },
     "ExternalAgentConfigImportCompletedNotification": {
       "properties": {
         "importId": {
@@ -1388,6 +1679,180 @@
         "SESSIONS"
       ],
       "type": "string"
+    },
+    "ExternalAgentInstallState": {
+      "enum": [
+        "installed",
+        "notInstalled",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExternalAgentProviderCapabilities": {
+      "properties": {
+        "auth": {
+          "$ref": "#/definitions/ExternalAgentAuthState"
+        },
+        "cliVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "effortLevels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExternalAgentCapabilityFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "family": {
+          "type": "string"
+        },
+        "freshness": {
+          "$ref": "#/definitions/ExternalAgentCapabilityFreshness"
+        },
+        "install": {
+          "$ref": "#/definitions/ExternalAgentInstallState"
+        },
+        "observedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "selectors": {
+          "items": {
+            "$ref": "#/definitions/ExternalAgentSelectorState"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/definitions/ExternalAgentCapabilitySource"
+        },
+        "supportsEffortSelection": {
+          "type": "boolean"
+        },
+        "supportsModelSelection": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "auth",
+        "command",
+        "effortLevels",
+        "family",
+        "freshness",
+        "install",
+        "selectors",
+        "source",
+        "supportsEffortSelection",
+        "supportsModelSelection"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentSelectorState": {
+      "properties": {
+        "defaultEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultEffortOrigin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExternalAgentSettingOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "defaultModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultModelOrigin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExternalAgentSettingOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "discovered": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabledOrigin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExternalAgentSettingOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "explicitOnly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "discovered",
+        "enabled",
+        "explicitOnly",
+        "selector"
+      ],
+      "type": "object"
+    },
+    "ExternalAgentSettingOrigin": {
+      "properties": {
+        "configPath": {
+          "type": "string"
+        },
+        "layer": {
+          "$ref": "#/definitions/ConfigLayerMetadata"
+        },
+        "readOnly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "configPath",
+        "layer",
+        "readOnly"
+      ],
+      "type": "object"
     },
     "FileChangeOutputDeltaNotification": {
       "description": "Deprecated legacy notification for `apply_patch` textual output.\n\nThe server no longer emits this notification.",
@@ -7269,6 +7734,26 @@
         "params"
       ],
       "title": "ExternalAgentConfig/import/completedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "externalAgentCapability/updated"
+          ],
+          "title": "ExternalAgentCapability/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ExternalAgentCapabilitiesUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "ExternalAgentCapability/updatedNotification",
       "type": "object"
     },
     {

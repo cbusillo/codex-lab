@@ -4921,3 +4921,44 @@ fn realtime_start_deserializes_client_handoff_channel_prefixes() {
         ]))
     );
 }
+
+#[test]
+fn external_agent_capabilities_read_params_default_to_cache_only() {
+    let params: ExternalAgentCapabilitiesReadParams =
+        serde_json::from_value(serde_json::json!({})).expect("params should deserialize");
+
+    assert_eq!(
+        params,
+        ExternalAgentCapabilitiesReadParams {
+            cwd: None,
+            families: None,
+            refresh: None,
+        }
+    );
+}
+
+#[test]
+fn external_agent_capability_failure_kind_uses_stable_wire_names() {
+    assert_eq!(
+        serde_json::to_value(ExternalAgentCapabilityFailureKind::AuthenticationRequired)
+            .expect("failure kind should serialize"),
+        serde_json::json!("authenticationRequired")
+    );
+}
+
+#[test]
+fn external_agent_capabilities_refresh_uses_client_id() {
+    let params: ExternalAgentCapabilitiesReadParams = serde_json::from_value(serde_json::json!({
+        "families": ["antigravity"],
+        "refresh": { "refreshId": "refresh-1" }
+    }))
+    .expect("params should deserialize");
+
+    assert_eq!(params.families, Some(vec!["antigravity".to_string()]));
+    assert_eq!(
+        params.refresh,
+        Some(ExternalAgentCapabilitiesRefreshParams {
+            refresh_id: "refresh-1".to_string(),
+        })
+    );
+}
