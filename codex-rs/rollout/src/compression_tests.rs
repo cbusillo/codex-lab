@@ -444,6 +444,58 @@ async fn rollout_lease_excludes_another_process() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn read_only_lease_probe_does_not_create_state() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+
+    assert!(!RolloutLease::is_active_read_only(home.path(), ThreadId::new()).await?);
+    assert!(fs::read_dir(home.path())?.next().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_lease_probe_preserves_active_lock_metadata() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let lease = RolloutLease::acquire_shared(
+        home.path(),
+        crate::RolloutCompressionMode::Enabled,
+        thread_id,
+    )
+    .await?
+    .expect("compression enabled lease");
+    let lease_path = lease_path(home.path(), thread_id);
+    let before = fs::metadata(lease_path.as_path())?;
+
+    assert!(RolloutLease::is_active_read_only(home.path(), thread_id).await?);
+
+    let after = fs::metadata(lease_path.as_path())?;
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after.modified()?, before.modified()?);
+    drop(lease);
+    Ok(())
+}
+
+#[tokio::test]
+async fn compressed_size_estimate_is_exact_and_does_not_mutate_source() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let path = home.path().join("rollout.jsonl");
+    let contents = format!("{{\"message\":\"{}\"}}\n", "repeat".repeat(4096));
+    fs::write(path.as_path(), contents.as_bytes())?;
+    let before = fs::metadata(path.as_path())?;
+    let expected = zstd::stream::encode_all(contents.as_bytes(), COMPRESSION_LEVEL)?.len() as u64;
+
+    let estimated = estimate_compressed_rollout_size(path.as_path()).await?;
+
+    let after = fs::metadata(path.as_path())?;
+    assert_eq!(estimated, expected);
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after.modified()?, before.modified()?);
+    assert_eq!(fs::read(path.as_path())?, contents.as_bytes());
+    assert_eq!(fs::read_dir(home.path())?.count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_skips_resumed_rollout_until_shutdown() -> anyhow::Result<()> {
     let home = TempDir::new()?;
     let config = RolloutConfig {
