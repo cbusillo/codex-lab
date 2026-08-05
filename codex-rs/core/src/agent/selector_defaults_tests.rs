@@ -129,6 +129,71 @@ async fn effort_only_default_installs_on_bare_antigravity() {
 }
 
 #[tokio::test]
+async fn configured_claude_defaults_replace_external_arguments() {
+    let (_home, mut config) = test_config().await;
+    config.agent_selector_overrides.insert(
+        "claude-sonnet-4.6".to_string(),
+        AgentSelectorToml {
+            model: Some("claude-opus-4-6".to_string()),
+            effort: Some("high".to_string()),
+            ..Default::default()
+        },
+    );
+
+    install_configured_provider_selectors(&mut config).expect("install configured selector");
+    let role = crate::agent::role::resolve_role_config_owned(&config, "claude-sonnet-4.6")
+        .expect("configured selector should resolve");
+    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
+        panic!("configured selector should use external command backend");
+    };
+    assert!(
+        backend
+            .args
+            .windows(2)
+            .any(|args| args == ["--model", "claude-opus-4-6"])
+    );
+    assert!(
+        backend
+            .args
+            .windows(2)
+            .any(|args| args == ["--effort", "high"])
+    );
+    assert_eq!(
+        backend.args.iter().filter(|arg| *arg == "--model").count(),
+        1
+    );
+    assert_eq!(
+        backend.args.iter().filter(|arg| *arg == "--effort").count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn configured_defaults_ignore_native_roles() {
+    let (_home, mut config) = test_config().await;
+    config.agent_selector_overrides.insert(
+        "explorer".to_string(),
+        AgentSelectorToml {
+            effort: Some("high".to_string()),
+            ..Default::default()
+        },
+    );
+
+    install_configured_provider_selectors(&mut config)
+        .expect("native role defaults should not affect external selectors");
+    assert!(
+        !install_selected_provider_defaults(&mut config, "explorer", Some("high"))
+            .expect("native role should be ignored")
+    );
+    assert!(
+        crate::agent::role::resolve_role_config_owned(&config, "explorer")
+            .expect("native role should resolve")
+            .backend
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn enabled_model_selector_can_use_disabled_provider_base() {
     let (_home, mut config) = test_config().await;
     config.agent_selector_overrides.insert(

@@ -324,6 +324,31 @@ pub(crate) fn install_configured_antigravity_role(
     Ok(())
 }
 
+pub(crate) fn install_external_role_defaults(
+    config: &mut Config,
+    selector: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    let mut role = config
+        .agent_roles
+        .get(selector)
+        .cloned()
+        .or_else(|| built_in::external_agent_role_config_with_override(selector, Some(true)))
+        .ok_or_else(|| format!("Unable to configure external selector `{selector}`."))?;
+    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend.as_mut() else {
+        return Err(format!("Selector `{selector}` is not an external agent."));
+    };
+    if let Some(model) = model {
+        replace_backend_argument(&mut backend.args, "--model", model);
+    }
+    if let Some(effort) = effort {
+        replace_backend_argument(&mut backend.args, "--effort", effort);
+    }
+    config.agent_roles.insert(selector.to_string(), role);
+    Ok(())
+}
+
 pub(crate) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
     built_in::external_agent_role_config_with_override(role_name, None)
 }

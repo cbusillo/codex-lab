@@ -77,20 +77,12 @@ async fn handle_spawn_agent(
     let explicit_role_name = requested_role_name.map(|role_name| {
         crate::agent::selector_defaults::resolve_effective_selector(&config, role_name)
     });
-    if let Some(role_name) = explicit_role_name.as_deref()
-        && (role_name == "antigravity"
-            || crate::agent::external_capabilities::looks_like_antigravity_selector(role_name))
-    {
-        let explicit_effort = args.reasoning_effort.as_ref().map(ToString::to_string);
-        let effort = crate::agent::selector_defaults::resolve_effort(
-            &config,
-            role_name,
-            explicit_effort.as_deref(),
-        );
-        crate::agent::role::install_dynamic_antigravity_role(
+    let explicit_effort = args.reasoning_effort.as_ref().map(ToString::to_string);
+    if let Some(role_name) = explicit_role_name.as_deref() {
+        crate::agent::selector_defaults::install_selected_provider_defaults(
             &mut config,
             role_name,
-            effort.as_deref(),
+            explicit_effort.as_deref(),
         )
         .map_err(FunctionCallError::RespondToModel)?;
     }
@@ -104,6 +96,14 @@ async fn handle_spawn_agent(
     .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
     enforce_routed_user_agent_intent(turn, routing.agent_type())?;
     let role_name = routing.role_name();
+    let preflighted_external_role = if routing.is_external() {
+        role_name.and_then(|role_name| {
+            crate::agent::role::resolve_role_config_owned(&config, role_name)
+                .map(|role| (role_name.to_string(), role))
+        })
+    } else {
+        None
+    };
     let fork_mode = args.fork_mode(routing.is_external())?;
     if routing.is_external() && fork_mode.is_some() {
         return Err(FunctionCallError::RespondToModel(
@@ -130,6 +130,9 @@ async fn handle_spawn_agent(
     }
     if !is_full_history_fork {
         apply_spawn_agent_role(&session, &mut config, role_name).await?;
+    }
+    if let Some((role_name, role)) = preflighted_external_role {
+        config.agent_roles.insert(role_name, role);
     }
     apply_spawn_agent_service_tier(
         &session,
