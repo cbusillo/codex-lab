@@ -665,6 +665,64 @@ async fn installed_dynamic_antigravity_role_is_resolvable_before_routing() {
     );
 }
 
+#[tokio::test]
+async fn selector_overrides_disable_static_and_discovered_external_agents() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_selector_overrides.insert(
+        "claude-sonnet-4.6".to_string(),
+        codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(false),
+        },
+    );
+    config.agent_selector_overrides.insert(
+        "antigravity".to_string(),
+        codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(false),
+        },
+    );
+
+    assert!(super::resolve_role_config_owned(&config, "claude-sonnet-4.6").is_none());
+    assert!(
+        super::resolve_role_config_owned(&config, "antigravity-gemini-3.6-flash-high").is_none()
+    );
+    let description = spawn_tool_spec::build_for_config_with_external_selectors(
+        &config,
+        &["antigravity-gemini-3.6-flash-high".to_string()],
+    );
+    assert!(!description.contains("claude-sonnet-4.6"));
+    assert!(!description.contains("antigravity-gemini-3.6-flash-high"));
+}
+
+#[tokio::test]
+async fn selector_overrides_can_enable_a_gated_external_agent() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_selector_overrides.insert(
+        "cloud-gpt-5.1-codex-max".to_string(),
+        codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(true),
+        },
+    );
+
+    assert!(super::resolve_role_config_owned(&config, "cloud-gpt-5.1-codex-max").is_some());
+    let description = spawn_tool_spec::build_for_config_with_external_selectors(&config, &[]);
+    assert!(description.contains("cloud-gpt-5.1-codex-max"));
+}
+
+#[tokio::test]
+async fn selector_overrides_do_not_disable_native_roles() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_selector_overrides.insert(
+        "explorer".to_string(),
+        codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(false),
+        },
+    );
+
+    assert!(super::resolve_role_config_owned(&config, "explorer").is_some());
+    let description = spawn_tool_spec::build_for_config_with_external_selectors(&config, &[]);
+    assert!(description.contains("explorer"));
+}
+
 #[test]
 fn built_in_config_file_contents_resolves_explorer_only() {
     assert_eq!(

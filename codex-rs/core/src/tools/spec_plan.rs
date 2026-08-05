@@ -504,12 +504,16 @@ fn agent_type_description(
         .unwrap_or_default()
         .into_iter()
         .map(|model| model.selector)
+        .filter(|selector| {
+            crate::agent::role::agent_selector_enabled(&turn_context.config, selector)
+        })
         .collect::<Vec<_>>();
     let has_external_selectors = !selectors.is_empty();
-    let agent_type_description = crate::agent::role::spawn_tool_spec::build_with_external_selectors(
-        &turn_context.config.agent_roles,
-        &selectors,
-    );
+    let agent_type_description =
+        crate::agent::role::spawn_tool_spec::build_for_config_with_external_selectors(
+            &turn_context.config,
+            &selectors,
+        );
     let description = if agent_type_description.is_empty() {
         default_agent_type_description.to_string()
     } else {

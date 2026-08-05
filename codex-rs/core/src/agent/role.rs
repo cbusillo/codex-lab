@@ -159,6 +159,9 @@ pub(crate) fn resolve_role_config<'a>(
     config: &'a Config,
     role_name: &str,
 ) -> Option<&'a AgentRoleConfig> {
+    if !agent_selector_enabled(config, role_name) {
+        return None;
+    }
     config
         .agent_roles
         .get(role_name)
@@ -169,9 +172,53 @@ pub(crate) fn resolve_role_config_owned(
     config: &Config,
     role_name: &str,
 ) -> Option<AgentRoleConfig> {
-    resolve_role_config(config, role_name)
-        .cloned()
-        .or_else(|| built_in::external_agent_role_config(role_name))
+    if !agent_selector_enabled(config, role_name) {
+        return None;
+    }
+    resolve_role_config(config, role_name).cloned().or_else(|| {
+        built_in::external_agent_role_config_with_override(
+            role_name,
+            config
+                .agent_selector_overrides
+                .get(role_name)
+                .and_then(|override_config| override_config.enabled),
+        )
+    })
+}
+
+pub(crate) fn agent_selector_enabled(config: &Config, selector: &str) -> bool {
+    if let Some(spec) = codex_config::agent_defaults::agent_model_spec(selector) {
+        if let Some(enabled) = config
+            .agent_selector_overrides
+            .get(selector)
+            .and_then(|override_config| override_config.enabled)
+        {
+            return enabled;
+        }
+        if let Some(enabled) = config
+            .agent_selector_overrides
+            .get(spec.slug)
+            .and_then(|override_config| override_config.enabled)
+        {
+            return enabled;
+        }
+        return spec.is_enabled();
+    }
+    if crate::agent::external_capabilities::looks_like_antigravity_selector(selector) {
+        if let Some(enabled) = config
+            .agent_selector_overrides
+            .get(selector)
+            .and_then(|override_config| override_config.enabled)
+        {
+            return enabled;
+        }
+        return config
+            .agent_selector_overrides
+            .get("antigravity")
+            .and_then(|override_config| override_config.enabled)
+            .unwrap_or(true);
+    }
+    true
 }
 
 pub(crate) fn dynamic_antigravity_role_config(
@@ -238,7 +285,7 @@ pub(crate) fn install_dynamic_antigravity_role(
 }
 
 pub(crate) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
-    built_in::external_agent_role_config(role_name)
+    built_in::external_agent_role_config_with_override(role_name, None)
 }
 
 mod reload {
@@ -376,6 +423,52 @@ pub(crate) mod spawn_tool_spec {
             description.push_str("\n\nDiscovered external selectors:\n");
             description.push_str(
                 &selectors
+                    .iter()
+                    .map(|selector| format!("- `{selector}`: Antigravity model selector."))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        description
+    }
+
+    pub(crate) fn build_for_config_with_external_selectors(
+        config: &Config,
+        selectors: &[String],
+    ) -> String {
+        let built_in_roles = built_in::configs();
+        let external_agent_roles = built_in::external_agent_configs();
+        let enabled_user_roles = config
+            .agent_roles
+            .iter()
+            .filter(|(name, _)| agent_selector_enabled(config, name))
+            .map(|(name, role)| (name.clone(), role.clone()))
+            .collect();
+        let mut enabled_external_roles = external_agent_roles
+            .iter()
+            .filter(|(name, _)| agent_selector_enabled(config, name))
+            .map(|(name, role)| (name.clone(), role.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for (selector, override_config) in &config.agent_selector_overrides {
+            if override_config.enabled == Some(true)
+                && !enabled_external_roles.contains_key(selector)
+                && let Some(role) =
+                    built_in::external_agent_role_config_with_override(selector, Some(true))
+            {
+                enabled_external_roles.insert(selector.clone(), role);
+            }
+        }
+        let enabled_selectors = selectors
+            .iter()
+            .filter(|selector| agent_selector_enabled(config, selector))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut description =
+            build_from_configs(built_in_roles, &enabled_external_roles, &enabled_user_roles);
+        if !enabled_selectors.is_empty() {
+            description.push_str("\n\nDiscovered external selectors:\n");
+            description.push_str(
+                &enabled_selectors
                     .iter()
                     .map(|selector| format!("- `{selector}`: Antigravity model selector."))
                     .collect::<Vec<_>>()
@@ -554,13 +647,16 @@ Rules:
         &CONFIG
     }
 
-    pub(super) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
+    pub(super) fn external_agent_role_config_with_override(
+        role_name: &str,
+        enabled_override: Option<bool>,
+    ) -> Option<AgentRoleConfig> {
         external_agent_configs()
             .get(role_name)
             .cloned()
             .or_else(|| {
                 codex_config::agent_defaults::agent_model_spec(role_name)
-                    .filter(|spec| spec.is_enabled())
+                    .filter(|spec| enabled_override.unwrap_or_else(|| spec.is_enabled()))
                     .map(external_agent_role_config_from_spec)
             })
     }

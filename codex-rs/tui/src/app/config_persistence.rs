@@ -822,6 +822,52 @@ impl App {
             .open_automatic_validation_settings_popup(enabled);
     }
 
+    pub(super) async fn update_agent_selector_enabled(
+        &mut self,
+        app_server: &mut AppServerSession,
+        selector: &str,
+        enabled: bool,
+    ) {
+        let write_response = match crate::config_update::write_config_batch(
+            app_server.request_handle(),
+            vec![crate::config_update::agent_selector_enabled_edit(
+                selector, enabled,
+            )],
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    selector,
+                    "failed to persist agent selector setting"
+                );
+                self.chat_widget.add_error_message(format!(
+                    "Failed to save `{selector}` selector setting: {err}"
+                ));
+                return;
+            }
+        };
+
+        if write_response.status == WriteStatus::OkOverridden {
+            self.chat_widget.add_error_message(format!(
+                "`{selector}` was saved but not applied: {}",
+                overridden_write_message(&write_response)
+            ));
+            return;
+        }
+
+        let override_config = codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(enabled),
+        };
+        self.config
+            .agent_selector_overrides
+            .insert(selector.to_string(), override_config);
+        self.chat_widget
+            .set_agent_selector_enabled(selector, enabled);
+    }
+
     pub(super) async fn update_automatic_validation_enabled(
         &mut self,
         app_server: &mut AppServerSession,

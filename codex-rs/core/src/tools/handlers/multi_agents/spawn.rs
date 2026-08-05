@@ -59,6 +59,13 @@ async fn handle_spawn_agent(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
+    if let Some(role_name) = role_name
+        && !crate::agent::role::agent_selector_enabled(&turn.config, role_name)
+    {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "agent_type `{role_name}` is disabled by configuration"
+        )));
+    }
     let input_items = parse_collab_input(args.message, args.items)?;
     let prompt = render_input_preview(&input_items);
     let session_source = turn.session_source.clone();

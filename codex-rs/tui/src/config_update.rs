@@ -44,6 +44,14 @@ pub(crate) fn app_scoped_key_path(app_id: &str, key_path: &str) -> String {
     format!("apps.{app_id}.{key_path}")
 }
 
+pub(crate) fn agent_selector_enabled_edit(selector: &str, enabled: bool) -> ConfigEdit {
+    let selector = selector.replace('\\', "\\\\").replace('"', "\\\"");
+    replace_config_value(
+        format!("agents.selectors.\"{selector}\".enabled"),
+        serde_json::json!(enabled),
+    )
+}
+
 pub(crate) fn format_config_error(err: &impl Display) -> String {
     format!("{err:#}")
 }

@@ -107,6 +107,16 @@
       },
       "type": "object"
     },
+    "AgentSelectorToml": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Whether this selector is available to the model and explicit spawn calls.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "AgentsToml": {
       "additionalProperties": {
         "$ref": "#/definitions/AgentRoleToml"
@@ -142,6 +152,13 @@
           "description": "Maximum nesting depth for V1 agent threads. Ignored by V2.",
           "format": "int32",
           "type": "integer"
+        },
+        "selectors": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AgentSelectorToml"
+          },
+          "description": "Explicit enablement overrides for built-in and discovered agent selectors.",
+          "type": "object"
         }
       },
       "type": "object"

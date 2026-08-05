@@ -58,6 +58,13 @@ async fn handle_spawn_agent(
     let selectors = resolve_spawn_selectors(args.agent_type.as_deref(), args.model.as_deref())?;
     enforce_explicit_user_agent_intent(turn, &selectors)?;
     let explicit_role_name = selectors.agent_type.as_deref();
+    if let Some(role_name) = explicit_role_name
+        && !crate::agent::role::agent_selector_enabled(&turn.config, role_name)
+    {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "agent_type `{role_name}` is disabled by configuration"
+        )));
+    }
 
     let message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
