@@ -232,7 +232,8 @@ async fn probe_external_agent_backend(
             .await
             {
                 Ok(output) if output.status.success() => {
-                    claude_capabilities(cli_version, &output.stdout, output_was_truncated(&output))
+                    let help_output = combined_capability_output(&output);
+                    claude_capabilities(cli_version, &help_output, output_was_truncated(&output))
                 }
                 Ok(output) => ExternalAgentCapabilities::conservative(
                     cli_family,
@@ -287,13 +288,16 @@ async fn probe_external_agent_backend(
             )
             .await
             {
-                Ok(help_output) if help_output.status.success() => antigravity_capabilities(
-                    cli_version,
-                    &models_output.stdout,
-                    output_was_truncated(&models_output),
-                    &help_output.stdout,
-                    output_was_truncated(&help_output),
-                ),
+                Ok(help_output) if help_output.status.success() => {
+                    let combined_help_output = combined_capability_output(&help_output);
+                    antigravity_capabilities(
+                        cli_version,
+                        &models_output.stdout,
+                        output_was_truncated(&models_output),
+                        &combined_help_output,
+                        output_was_truncated(&help_output),
+                    )
+                }
                 Ok(output) => ExternalAgentCapabilities::conservative(
                     cli_family,
                     cli_version,
@@ -343,6 +347,21 @@ fn capability_failure_is_fatal(kind: ExternalAgentFailureKind) -> bool {
 fn output_was_truncated(output: &std::process::Output) -> bool {
     output.stdout.starts_with(EXTERNAL_AGENT_TRUNCATED_MARKER)
         || output.stderr.starts_with(EXTERNAL_AGENT_TRUNCATED_MARKER)
+}
+
+fn combined_capability_output(output: &std::process::Output) -> Vec<u8> {
+    let mut combined = Vec::with_capacity(
+        output
+            .stdout
+            .len()
+            .saturating_add(output.stderr.len().saturating_add(1)),
+    );
+    combined.extend_from_slice(&output.stdout);
+    if !output.stdout.is_empty() && !output.stderr.is_empty() {
+        combined.push(b'\n');
+    }
+    combined.extend_from_slice(&output.stderr);
+    combined
 }
 
 fn capability_failure_from_output(

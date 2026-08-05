@@ -210,8 +210,8 @@ if [ "$1" = "models" ]; then
 fi
 if [ "$1" = "--help" ]; then
   echo help >> '{}'
-  echo '--model Model'
-  echo '--effort low|medium|high'
+  echo '--model Model' >&2
+  echo '--effort low|medium|high' >&2
   exit 0
 fi
 exit 2
