@@ -181,6 +181,56 @@ fn catalog_budget_uses_context_percentage_or_character_fallback() {
 }
 
 #[test]
+fn world_state_budget_reserves_complete_skills_fragment_overhead() {
+    let catalog = SkillCatalog {
+        entries: (0..100)
+            .map(|index| {
+                entry(
+                    &format!("skill-{index:03}"),
+                    &"description ".repeat(200),
+                    None,
+                )
+            })
+            .collect(),
+        warnings: Vec::new(),
+    };
+    let budget = world_state_skill_metadata_budget(Some(258_400), true);
+    let fragment =
+        render_available_skills(&catalog, SkillCatalogRenderPolicy::CoreCompatible, budget)
+            .expect("skills should render")
+            .into_fragment(true)
+            .expect("skills fragment should render");
+    let rendered = fragment.render();
+
+    assert!(rendered.len() <= MAX_WORLD_STATE_SECTION_BYTES);
+    assert!(rendered.contains("- skill-000:"));
+    assert!(rendered.contains("### Binding skill routing"));
+    assert!(rendered.contains("### How to use skills"));
+    assert!(!rendered.contains("…world-state content truncated…"));
+}
+
+#[test]
+fn omitted_host_skills_include_a_model_visible_lookup_mechanism() {
+    let catalog = SkillCatalog {
+        entries: (0..1_000)
+            .map(|index| entry(&format!("skill-{index:04}"), "description", None))
+            .collect(),
+        warnings: Vec::new(),
+    };
+    let budget = world_state_skill_metadata_budget(Some(258_400), false);
+    let rendered =
+        render_available_skills(&catalog, SkillCatalogRenderPolicy::CoreCompatible, budget)
+            .expect("skills should render")
+            .into_fragment(false)
+            .expect("skills fragment should render")
+            .render();
+
+    assert!(rendered.len() <= MAX_WORLD_STATE_SECTION_BYTES);
+    assert!(rendered.contains("additional host skills omitted"));
+    assert!(rendered.contains("Search for `SKILL.md` beneath the configured skill roots"));
+}
+
+#[test]
 fn path_aliases_are_not_used_without_budget_pressure() {
     let root = "/Users/test/.codex/plugins/cache/openai-curated/example/hash/skills";
     let catalog = SkillCatalog {
@@ -374,27 +424,26 @@ fn mixed_catalog_reserves_executor_omission_marker_by_omitting_host_first() {
         executor.report,
         SkillRenderReport {
             total_count: 2,
-            included_count: 1,
-            omitted_count: 1,
+            included_count: 0,
+            omitted_count: 2,
             truncated_description_chars: 0,
             truncated_description_count: 0,
         }
     );
     assert_eq!(
         executor.skill_lines,
-        vec![
-            "- e1: (environment resource: skill://executor/one)".to_string(),
-            "- 1 additional skill omitted from this bounded skills list.".to_string(),
-        ]
+        vec!["- 2 additional skills omitted from this bounded skills list.".to_string()]
     );
     assert!(
         host.into_fragment(/*include_skills_usage_instructions*/ false)
-            .is_none()
+            .expect("host lookup marker should render")
+            .body()
+            .contains("Search for `SKILL.md` beneath the configured skill roots")
     );
 }
 
 #[test]
-fn mixed_catalog_prefers_executor_inclusion_over_total_aliased_inclusion() {
+fn mixed_catalog_keeps_host_discovery_while_prioritizing_executor_inclusion() {
     let root = format!("/{}", "r".repeat(219));
     let host_catalog = SkillCatalog {
         entries: ["h1", "h2"]
@@ -437,8 +486,8 @@ fn mixed_catalog_prefers_executor_inclusion_over_total_aliased_inclusion() {
         executor.report,
         SkillRenderReport {
             total_count: 2,
-            included_count: 2,
-            omitted_count: 0,
+            included_count: 1,
+            omitted_count: 1,
             truncated_description_chars: 0,
             truncated_description_count: 0,
         }
@@ -447,13 +496,13 @@ fn mixed_catalog_prefers_executor_inclusion_over_total_aliased_inclusion() {
         host.report,
         SkillRenderReport {
             total_count: 2,
-            included_count: 0,
-            omitted_count: 2,
+            included_count: 2,
+            omitted_count: 0,
             truncated_description_chars: 0,
             truncated_description_count: 0,
         }
     );
-    assert_eq!(host.skill_root_lines, Vec::<String>::new());
+    assert!(!host.skill_root_lines.is_empty());
 }
 
 #[test]
@@ -526,7 +575,11 @@ fn omission_notice_follows_render_policy_and_is_charged_to_catalog_budget() {
         .map(|line| approx_token_count(&format!("{line}\n")))
         .sum::<usize>();
 
-    assert!(!core_fragment.body().contains("additional skills omitted"));
+    assert!(
+        core_fragment
+            .body()
+            .contains("additional host skills omitted")
+    );
     assert!(fragment.body().contains("additional skills omitted"));
     assert!(rendered_metadata_cost <= 100);
 }

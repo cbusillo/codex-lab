@@ -19,7 +19,7 @@ const HIDDEN_EXECUTOR_SKILLS_BODY: &str = "\n## Skills update\nSelected-environm
 const NO_HOST_SKILLS_BODY: &str =
     "\n## Host skills update\nNo host skills are currently available.\n";
 const HIDDEN_HOST_SKILLS_BODY: &str = "\n## Host skills update\nHost skills are not listed automatically. Explicit skill mentions can still be resolved when available.\n";
-const OMITTED_HOST_SKILLS_BODY: &str = "\n## Host skills update\nHost skills are available but omitted from the model-visible skills list because the skills context budget was exceeded.\n";
+const OMITTED_HOST_SKILLS_BODY: &str = "\n## Host skills update\nHost skills are available but omitted from the model-visible skills list because the skills context budget was exceeded. Search local skill directories for `SKILL.md` files to discover them.\n";
 
 pub(crate) type HostSkillsWarningEmitter = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -83,13 +83,18 @@ pub(crate) fn host_skills_world_state_section(
     warning_message: Option<String>,
     warning_emitter: HostSkillsWarningEmitter,
 ) -> WorldStateSectionContribution {
-    let body = body.or_else(|| {
-        render_metrics
-            .is_some_and(|(total_count, included_count, omitted_count, _)| {
-                total_count > 0 && included_count == 0 && omitted_count > 0
-            })
-            .then(|| OMITTED_HOST_SKILLS_BODY.to_string())
-    });
+    let all_host_skills_omitted =
+        render_metrics.is_some_and(|(total_count, included_count, omitted_count, _)| {
+            total_count > 0 && included_count == 0 && omitted_count > 0
+        });
+    let body = if all_host_skills_omitted
+        && body.as_deref().is_none_or(|body| {
+            !body.contains("Search for `SKILL.md` beneath the configured skill roots")
+        }) {
+        Some(OMITTED_HOST_SKILLS_BODY.to_string())
+    } else {
+        body
+    };
     let snapshot = json!({
         "body": body,
         "includeInstructions": include_instructions,

@@ -37,6 +37,7 @@ pub use contributors::ApprovalReviewContributor;
 pub use contributors::ConfigContributor;
 pub use contributors::ContextContributor;
 pub use contributors::ExtensionFuture;
+pub use contributors::MAX_WORLD_STATE_SECTION_BYTES;
 pub use contributors::McpServerContribution;
 pub use contributors::McpServerContributionContext;
 pub use contributors::McpServerContributor;
