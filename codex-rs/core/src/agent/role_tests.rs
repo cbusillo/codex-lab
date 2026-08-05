@@ -642,6 +642,13 @@ async fn dynamic_antigravity_role_preserves_configured_backend() {
 async fn installed_dynamic_antigravity_role_is_resolvable_before_routing() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let selector = "antigravity-gemini-3.6-flash-high";
+    config.agent_selector_overrides.insert(
+        selector.to_string(),
+        codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(true),
+            ..Default::default()
+        },
+    );
 
     super::install_dynamic_antigravity_role(&mut config, selector, Some("high"))
         .expect("dynamic selector should install");
@@ -663,6 +670,42 @@ async fn installed_dynamic_antigravity_role_is_resolvable_before_routing() {
             .windows(2)
             .any(|args| args == ["--effort", "high"])
     );
+}
+
+#[tokio::test]
+async fn discovered_antigravity_selectors_require_explicit_enablement() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let selector = "antigravity-gemini-3.6-flash-high";
+
+    assert!(super::agent_selector_enabled(&config, "antigravity"));
+    assert!(!super::agent_selector_enabled(&config, selector));
+
+    config.agent_selector_overrides.insert(
+        selector.to_string(),
+        codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(true),
+            ..Default::default()
+        },
+    );
+    assert!(super::agent_selector_enabled(&config, selector));
+}
+
+#[tokio::test]
+async fn configured_antigravity_provider_model_remains_enabled() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_selector_overrides.insert(
+        "antigravity".to_string(),
+        codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(true),
+            model: Some("gemini-3.6-flash-high".to_string()),
+            effort: None,
+        },
+    );
+
+    assert!(super::agent_selector_enabled(
+        &config,
+        "antigravity-gemini-3.6-flash-high"
+    ));
 }
 
 #[tokio::test]

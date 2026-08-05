@@ -1990,10 +1990,43 @@ impl App {
                 self.open_automatic_validation_settings(app_server).await;
             }
             AppEvent::OpenAgentsSettings => {
-                self.chat_widget.open_agents_settings_popup();
+                self.open_agents_settings(app_server).await;
+            }
+            AppEvent::RefreshAgentCapabilities => {
+                self.refresh_agent_capabilities(app_server).await;
+            }
+            AppEvent::CancelAgentCapabilitiesRefresh => {
+                self.cancel_agent_capabilities_refresh(app_server).await;
+            }
+            AppEvent::CloseAgentsSettings => {
+                self.close_agents_settings(app_server).await;
+            }
+            AppEvent::OpenAgentSelectorModelPicker {
+                selector,
+                models,
+                current,
+            } => {
+                self.chat_widget
+                    .open_agent_selector_model_picker(selector, models, current);
+            }
+            AppEvent::OpenAgentSelectorEffortPicker {
+                selector,
+                efforts,
+                current,
+            } => {
+                self.chat_widget
+                    .open_agent_selector_effort_picker(selector, efforts, current);
             }
             AppEvent::SetAgentSelectorEnabled { selector, enabled } => {
                 self.update_agent_selector_enabled(app_server, &selector, enabled)
+                    .await;
+            }
+            AppEvent::SetAgentSelectorModel { selector, model } => {
+                self.update_agent_selector_model(app_server, selector, model)
+                    .await;
+            }
+            AppEvent::SetAgentSelectorEffort { selector, effort } => {
+                self.update_agent_selector_effort(app_server, selector, effort)
                     .await;
             }
             AppEvent::SetAutomaticValidationEnabled(enabled) => {

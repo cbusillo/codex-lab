@@ -253,6 +253,54 @@ exit 2
 
 #[cfg(unix)]
 #[tokio::test]
+async fn explicit_capability_refresh_bypasses_both_caches() {
+    clear_capability_cache();
+    let temp_dir = TempDir::new().expect("tempdir");
+    let marker_path = temp_dir.path().join("probe-count");
+    let backend = shell_backend(
+        &temp_dir,
+        "fake-agy-refresh.sh",
+        "antigravity",
+        &format!(
+            r#"echo "$1" >> '{}'
+if [ "$1" = "--version" ]; then
+  echo "1.1.9"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo 'gemini-3.6-flash-high'
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo '--model Model' >&2
+  echo '--effort low|medium|high' >&2
+  exit 0
+fi
+exit 2
+"#,
+            marker_path.display()
+        ),
+    );
+
+    let first = discover_external_agent_capabilities(&backend, temp_dir.path()).await;
+    let cached = discover_external_agent_capabilities(&backend, temp_dir.path()).await;
+    let refreshed = refresh_external_agent_capabilities(&backend, temp_dir.path()).await;
+
+    assert_eq!(first.freshness, ExternalAgentCapabilityFreshness::Fresh);
+    assert_eq!(cached.freshness, ExternalAgentCapabilityFreshness::Cached);
+    assert_eq!(refreshed.freshness, ExternalAgentCapabilityFreshness::Fresh);
+    assert_eq!(
+        std::fs::read_to_string(marker_path)
+            .expect("read capability probe marker")
+            .lines()
+            .count(),
+        6,
+        "explicit refresh should re-run version, models, and help"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn antigravity_catalog_is_scoped_and_deterministic() {
     clear_capability_cache();
     clear_active_capability_catalog();

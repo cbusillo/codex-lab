@@ -62,12 +62,37 @@ pub async fn discover_external_agent_capabilities(
     backend: &ExternalCommandAgentBackendConfig,
     workspace: &Path,
 ) -> ExternalAgentCapabilities {
+    discover_external_agent_capabilities_with_cache(backend, workspace).await
+}
+
+/// Re-probes bounded local capabilities without reusing either capability cache.
+pub async fn refresh_external_agent_capabilities(
+    backend: &ExternalCommandAgentBackendConfig,
+    workspace: &Path,
+) -> ExternalAgentCapabilities {
+    probe_and_record_external_agent_capabilities(backend, workspace, CapabilityCacheMode::Bypass)
+        .await
+}
+
+async fn discover_external_agent_capabilities_with_cache(
+    backend: &ExternalCommandAgentBackendConfig,
+    workspace: &Path,
+) -> ExternalAgentCapabilities {
     let cache_key = ExternalAgentDiscoveryCacheKey::new(backend, workspace);
     if let Some(capabilities) = cached_discovery(&cache_key) {
         record_active_capability_catalog(backend, workspace, &capabilities);
         return capabilities;
     }
-    let capabilities = probe_external_agent_backend(backend, workspace)
+    probe_and_record_external_agent_capabilities(backend, workspace, CapabilityCacheMode::Use).await
+}
+
+async fn probe_and_record_external_agent_capabilities(
+    backend: &ExternalCommandAgentBackendConfig,
+    workspace: &Path,
+    cache_mode: CapabilityCacheMode,
+) -> ExternalAgentCapabilities {
+    let cache_key = ExternalAgentDiscoveryCacheKey::new(backend, workspace);
+    let capabilities = probe_external_agent_backend(backend, workspace, cache_mode)
         .await
         .capabilities;
     cache_discovery(cache_key, &capabilities);
@@ -89,7 +114,7 @@ pub(crate) async fn preflight_external_agent_backend(
     workspace: &Path,
     is_read_only: bool,
 ) -> Result<ExternalAgentProviderProvenance, ExternalAgentFailureDetail> {
-    let probe = probe_external_agent_backend(backend, workspace).await;
+    let probe = probe_external_agent_backend(backend, workspace, CapabilityCacheMode::Use).await;
     if let Some(failure) = probe.capabilities.failure.as_ref()
         && capability_failure_is_fatal(failure.kind)
     {
@@ -124,6 +149,7 @@ pub(crate) async fn preflight_external_agent_backend(
 async fn probe_external_agent_backend(
     backend: &ExternalCommandAgentBackendConfig,
     workspace: &Path,
+    cache_mode: CapabilityCacheMode,
 ) -> ExternalAgentCapabilityProbe {
     let cli_family = backend.launch_family.as_deref().unwrap_or("custom");
     let (command, command_args) = match configured_external_agent_command(backend) {
@@ -206,7 +232,9 @@ async fn probe_external_agent_backend(
         cli_family,
         cli_version.as_deref(),
     );
-    if let Some(capabilities) = cached_capabilities(&cache_key) {
+    if cache_mode == CapabilityCacheMode::Use
+        && let Some(capabilities) = cached_capabilities(&cache_key)
+    {
         return ExternalAgentCapabilityProbe {
             capabilities,
             resolved_command: Some(resolved_command),
@@ -324,6 +352,12 @@ async fn probe_external_agent_backend(
         resolved_command: Some(resolved_command),
         command_args,
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CapabilityCacheMode {
+    Use,
+    Bypass,
 }
 
 fn failed_capability_probe(

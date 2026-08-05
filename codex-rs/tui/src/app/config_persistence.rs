@@ -855,6 +855,7 @@ impl App {
                 "`{selector}` was saved but not applied: {}",
                 overridden_write_message(&write_response)
             ));
+            self.open_agents_settings(app_server).await;
             return;
         }
 
@@ -865,6 +866,7 @@ impl App {
             .enabled = Some(enabled);
         self.chat_widget
             .set_agent_selector_enabled(selector, enabled);
+        self.open_agents_settings(app_server).await;
     }
 
     pub(super) async fn update_automatic_validation_enabled(

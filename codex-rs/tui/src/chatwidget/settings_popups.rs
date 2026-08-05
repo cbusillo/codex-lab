@@ -212,11 +212,21 @@ impl ChatWidget {
         specs: &[&'static AgentModelSpec],
         statuses: Vec<AgentInstallStatus>,
     ) {
-        self.bottom_pane.show_selection_view(agents_settings_params(
+        let params = agents_settings_params(
             specs,
-            statuses,
+            statuses.clone(),
             &self.config.agent_selector_overrides,
-        ));
+        );
+        if !self
+            .bottom_pane
+            .replace_selection_view_if_present("agents-settings", params)
+        {
+            self.bottom_pane.show_selection_view(agents_settings_params(
+                specs,
+                statuses,
+                &self.config.agent_selector_overrides,
+            ));
+        }
     }
 
     pub(crate) fn set_agent_selector_enabled(&mut self, selector: &str, enabled: bool) {
@@ -286,12 +296,14 @@ fn agents_settings_params(
         })
         .collect();
     SelectionViewParams {
+        view_id: Some("agents-settings"),
         title: Some("Agents".to_string()),
         subtitle: Some(
             "Enable only the external selectors you want spawn_agent to use.".to_string(),
         ),
         footer_hint: Some(standard_popup_hint_line()),
         items,
+        on_cancel: Some(Box::new(|tx| tx.send(AppEvent::CloseAgentsSettings))),
         ..Default::default()
     }
 }

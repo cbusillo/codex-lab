@@ -24,6 +24,26 @@ fn agent_selector_edit_quotes_dotted_selector_names() {
 }
 
 #[test]
+fn agent_selector_default_edits_use_typed_model_and_effort_fields() {
+    assert_eq!(
+        agent_selector_model_edit("antigravity", Some("gemini-3-pro")),
+        ConfigEdit {
+            key_path: "agents.selectors.\"antigravity\".model".to_string(),
+            value: serde_json::json!("gemini-3-pro"),
+            merge_strategy: MergeStrategy::Replace,
+        }
+    );
+    assert_eq!(
+        agent_selector_effort_edit("antigravity", None),
+        ConfigEdit {
+            key_path: "agents.selectors.\"antigravity\".effort".to_string(),
+            value: serde_json::Value::Null,
+            merge_strategy: MergeStrategy::Replace,
+        }
+    );
+}
+
+#[test]
 fn trusted_project_edit_targets_project_trust_level() {
     assert_eq!(
         trusted_project_edit(Path::new("/workspace/team.project")),
