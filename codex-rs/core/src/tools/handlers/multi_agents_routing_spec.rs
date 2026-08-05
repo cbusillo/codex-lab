@@ -48,7 +48,37 @@ pub(super) fn provider_routing_output_schema() -> Value {
             },
             "requested": { "type": "string" },
             "effective": { "type": "string" },
-            "reason": { "type": "string" }
+            "reason": { "type": "string" },
+            "skipped_candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "selector": { "type": "string" },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["disabled", "unavailable"]
+                        },
+                        "failure_kind": {
+                            "type": "string",
+                            "enum": [
+                                "command_missing",
+                                "authentication_required",
+                                "quota_or_rate_limited",
+                                "unsupported_mode",
+                                "timed_out",
+                                "malformed_output",
+                                "empty_output",
+                                "launch_failed",
+                                "provider_failed"
+                            ]
+                        },
+                        "reason": { "type": "string" }
+                    },
+                    "required": ["selector", "kind", "reason"],
+                    "additionalProperties": false
+                }
+            }
         },
         "required": ["kind", "effective", "reason"],
         "additionalProperties": false
@@ -64,6 +94,14 @@ pub(super) fn external_agent_provider_output_schema() -> Value {
             "provider_family": { "type": "string" },
             "command": { "type": "string" },
             "cli_version": { "type": "string" },
+            "capability_source": {
+                "type": "string",
+                "enum": ["static_catalog", "local_cli", "not_probed", "conservative_fallback"]
+            },
+            "capability_freshness": {
+                "type": "string",
+                "enum": ["fresh", "cached"]
+            },
             "protocol": {
                 "type": "string",
                 "enum": ["json", "raw_cli"]
@@ -72,9 +110,17 @@ pub(super) fn external_agent_provider_output_schema() -> Value {
                 "type": "string",
                 "enum": ["read_only", "write"]
             },
-            "workspace": { "type": "string" }
+            "workspace": { "type": "string" },
+            "model": { "type": "string" },
+            "effort": { "type": "string" }
         },
-        "required": ["command", "protocol", "mode", "workspace"],
+        "required": [
+            "command",
+            "capability_source",
+            "protocol",
+            "mode",
+            "workspace"
+        ],
         "additionalProperties": false
     })
 }

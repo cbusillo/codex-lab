@@ -1,4 +1,5 @@
 mod backfill_state;
+mod external_agent_run;
 mod graph;
 mod log;
 mod memories;
@@ -7,6 +8,9 @@ mod thread_metadata;
 
 pub use backfill_state::BackfillState;
 pub use backfill_state::BackfillStatus;
+pub use external_agent_run::ExternalAgentRun;
+pub use external_agent_run::ExternalAgentRunOutcome;
+pub use external_agent_run::ExternalAgentRunStart;
 pub use graph::DirectionalThreadSpawnEdgeStatus;
 pub use log::LogEntry;
 pub use log::LogQuery;

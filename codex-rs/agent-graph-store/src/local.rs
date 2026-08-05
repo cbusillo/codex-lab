@@ -5,6 +5,9 @@ use std::sync::Arc;
 use crate::AgentGraphStore;
 use crate::AgentGraphStoreError;
 use crate::AgentGraphStoreFuture;
+use crate::ExternalAgentRunOutcome;
+use crate::ExternalAgentRunRecord;
+use crate::ExternalAgentRunStart;
 use crate::ThreadSpawnEdgeStatus;
 
 /// SQLite-backed implementation of [`AgentGraphStore`] using an existing state runtime.
@@ -29,6 +32,44 @@ impl LocalAgentGraphStore {
 }
 
 impl AgentGraphStore for LocalAgentGraphStore {
+    fn insert_external_agent_run(
+        &self,
+        run: ExternalAgentRunStart,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.state_db
+                .insert_external_agent_run(to_state_run_start(run))
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn finish_external_agent_run(
+        &self,
+        child_thread_id: ThreadId,
+        outcome: ExternalAgentRunOutcome,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.state_db
+                .finish_external_agent_run(child_thread_id, to_state_run_outcome(outcome))
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn list_external_agent_runs(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Vec<ExternalAgentRunRecord>> {
+        Box::pin(async move {
+            self.state_db
+                .list_external_agent_runs(parent_thread_id)
+                .await
+                .map(|runs| runs.into_iter().map(from_state_run).collect())
+                .map_err(internal_error)
+        })
+    }
+
     fn upsert_thread_spawn_edge(
         &self,
         parent_thread_id: ThreadId,
@@ -106,6 +147,69 @@ impl AgentGraphStore for LocalAgentGraphStore {
                     .map_err(internal_error),
             }
         })
+    }
+}
+
+fn to_state_run_start(run: ExternalAgentRunStart) -> codex_state::ExternalAgentRunStart {
+    codex_state::ExternalAgentRunStart {
+        child_thread_id: run.child_thread_id,
+        parent_thread_id: run.parent_thread_id,
+        agent_path: run.agent_path,
+        routing_kind: run.routing_kind,
+        requested_selector: run.requested_selector,
+        effective_selector: run.effective_selector,
+        routing_reason: run.routing_reason,
+        skipped_candidates_json: run.skipped_candidates_json,
+        provider_family: run.provider_family,
+        command: run.command,
+        cli_version: run.cli_version,
+        capability_source: run.capability_source,
+        capability_freshness: run.capability_freshness,
+        protocol: run.protocol,
+        mode: run.mode,
+        workspace: run.workspace,
+        model: run.model,
+        effort: run.effort,
+        started_at_ms: run.started_at_ms,
+    }
+}
+
+fn to_state_run_outcome(outcome: ExternalAgentRunOutcome) -> codex_state::ExternalAgentRunOutcome {
+    codex_state::ExternalAgentRunOutcome {
+        completed_at_ms: outcome.completed_at_ms,
+        duration_ms: outcome.duration_ms,
+        terminal_state: outcome.terminal_state,
+        failure_kind: outcome.failure_kind,
+        failure_message: outcome.failure_message,
+    }
+}
+
+fn from_state_run(run: codex_state::ExternalAgentRun) -> ExternalAgentRunRecord {
+    ExternalAgentRunRecord {
+        child_thread_id: run.child_thread_id,
+        parent_thread_id: run.parent_thread_id,
+        agent_path: run.agent_path,
+        routing_kind: run.routing_kind,
+        requested_selector: run.requested_selector,
+        effective_selector: run.effective_selector,
+        routing_reason: run.routing_reason,
+        skipped_candidates_json: run.skipped_candidates_json,
+        provider_family: run.provider_family,
+        command: run.command,
+        cli_version: run.cli_version,
+        capability_source: run.capability_source,
+        capability_freshness: run.capability_freshness,
+        protocol: run.protocol,
+        mode: run.mode,
+        workspace: run.workspace,
+        model: run.model,
+        effort: run.effort,
+        started_at_ms: run.started_at_ms,
+        completed_at_ms: run.completed_at_ms,
+        duration_ms: run.duration_ms,
+        terminal_state: run.terminal_state,
+        failure_kind: run.failure_kind,
+        failure_message: run.failure_message,
     }
 }
 
@@ -242,6 +346,61 @@ mod tests {
             .await
             .expect("closed children should load");
         assert_eq!(closed_children, vec![child_thread_id]);
+    }
+
+    #[tokio::test]
+    async fn local_store_persists_external_agent_run_lifecycle() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let parent_thread_id = thread_id(/*suffix*/ 12);
+        let child_thread_id = thread_id(/*suffix*/ 13);
+        store
+            .insert_external_agent_run(ExternalAgentRunStart {
+                child_thread_id,
+                parent_thread_id,
+                agent_path: Some("worker/reviewer".to_string()),
+                routing_kind: "automatic_external".to_string(),
+                requested_selector: None,
+                effective_selector: "claude-sonnet-4.6".to_string(),
+                routing_reason: "selected first eligible candidate".to_string(),
+                skipped_candidates_json: "[]".to_string(),
+                provider_family: Some("claude".to_string()),
+                command: "claude".to_string(),
+                cli_version: Some("1.2.3".to_string()),
+                capability_source: "local_cli".to_string(),
+                capability_freshness: Some("fresh".to_string()),
+                protocol: "raw_cli".to_string(),
+                mode: "read_only".to_string(),
+                workspace: "/workspace".to_string(),
+                model: Some("claude-sonnet-4.6".to_string()),
+                effort: Some("high".to_string()),
+                started_at_ms: 100,
+            })
+            .await
+            .expect("external run should insert");
+        store
+            .finish_external_agent_run(
+                child_thread_id,
+                ExternalAgentRunOutcome {
+                    completed_at_ms: 175,
+                    duration_ms: 75,
+                    terminal_state: "completed".to_string(),
+                    failure_kind: None,
+                    failure_message: None,
+                },
+            )
+            .await
+            .expect("external run should finish");
+
+        let runs = store
+            .list_external_agent_runs(parent_thread_id)
+            .await
+            .expect("external runs should load");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].child_thread_id, child_thread_id);
+        assert_eq!(runs[0].duration_ms, Some(75));
+        assert_eq!(runs[0].terminal_state.as_deref(), Some("completed"));
+        assert_eq!(runs[0].capability_source, "local_cli");
     }
 
     #[tokio::test]

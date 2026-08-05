@@ -101,6 +101,24 @@ pub(crate) struct ProviderRoutingSummary {
     pub(crate) requested: Option<String>,
     pub(crate) effective: String,
     pub(crate) reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) skipped_candidates: Vec<ProviderRoutingSkip>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProviderRoutingSkipKind {
+    Disabled,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct ProviderRoutingSkip {
+    pub(crate) selector: String,
+    pub(crate) kind: ProviderRoutingSkipKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure_kind: Option<ExternalAgentFailureKind>,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +191,7 @@ impl ProviderRoutingDecision {
             requested: self.summary.requested.clone(),
             effective: self.summary.effective.clone(),
             reason,
+            skipped_candidates: Vec::new(),
         }
     }
 }
@@ -180,7 +199,8 @@ impl ProviderRoutingDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProviderEligibility {
     Available(Option<ExternalAgentProviderProvenance>),
-    Unavailable(String),
+    Disabled,
+    Unavailable(ExternalAgentFailureDetail),
 }
 
 pub(crate) async fn select_provider_route(
@@ -214,13 +234,14 @@ pub(crate) async fn select_provider_route(
     let mut eligibility = std::collections::HashMap::new();
     if explicit_agent_type.is_none() && task_size != AgentTaskSize::Tiny {
         for candidate in &configured_candidates {
-            let result = external_role_preflight(config, candidate)
-                .await
-                .map(|provider| ProviderEligibility::Available(Some(provider)))
-                .unwrap_or_else(|detail| {
-                    let message = detail.message.as_deref().unwrap_or("preflight failed");
-                    ProviderEligibility::Unavailable(format!("{}: {message}", detail.kind.as_str()))
-                });
+            let result = if crate::agent::role::agent_selector_enabled(config, candidate) {
+                external_role_preflight(config, candidate)
+                    .await
+                    .map(|provider| ProviderEligibility::Available(Some(provider)))
+                    .unwrap_or_else(ProviderEligibility::Unavailable)
+            } else {
+                ProviderEligibility::Disabled
+            };
             eligibility.insert(candidate.clone(), result);
         }
     }
@@ -233,7 +254,10 @@ pub(crate) async fn select_provider_route(
         |agent_type| role_uses_external_backend(config, agent_type),
         |agent_type| {
             eligibility.remove(agent_type).unwrap_or_else(|| {
-                ProviderEligibility::Unavailable("preflight was not run".to_string())
+                ProviderEligibility::Unavailable(ExternalAgentFailureDetail::new(
+                    ExternalAgentFailureKind::LaunchFailed,
+                    "preflight was not run",
+                ))
             })
         },
     );
@@ -293,6 +317,7 @@ where
                 requested: Some(agent_type.to_string()),
                 effective: agent_type.to_string(),
                 reason: format!("`agent_type` explicitly selected `{agent_type}`."),
+                skipped_candidates: Vec::new(),
             },
         };
     }
@@ -304,6 +329,7 @@ where
                 "Tiny `{}` task kept on the native default agent.",
                 task_kind.as_str()
             ),
+            Vec::new(),
         );
     }
 
@@ -314,6 +340,7 @@ where
                 "`{}` tasks do not require provider-diverse routing.",
                 task_kind.as_str()
             ),
+            Vec::new(),
         );
     }
 
@@ -335,27 +362,53 @@ where
                             task_size.as_str(),
                             task_kind.as_str()
                         ),
+                        skipped_candidates: unavailable,
                     },
                 };
             }
-            ProviderEligibility::Unavailable(reason) => {
-                unavailable.push(format!("`{candidate}`: {reason}"));
+            ProviderEligibility::Disabled => {
+                unavailable.push(ProviderRoutingSkip {
+                    selector: candidate.clone(),
+                    kind: ProviderRoutingSkipKind::Disabled,
+                    failure_kind: None,
+                    reason: "disabled by configuration".to_string(),
+                });
+            }
+            ProviderEligibility::Unavailable(detail) => {
+                unavailable.push(ProviderRoutingSkip {
+                    selector: candidate.clone(),
+                    kind: ProviderRoutingSkipKind::Unavailable,
+                    failure_kind: Some(detail.kind),
+                    reason: detail
+                        .message
+                        .unwrap_or_else(|| "preflight failed".to_string()),
+                });
             }
         }
     }
 
+    let unavailable_reason = unavailable
+        .iter()
+        .map(|candidate| format!("`{}`: {}", candidate.selector, candidate.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
     native_decision(
         ProviderRoutingKind::NativeFallback,
         format!(
             "No eligible external agent was found for {} `{}` work; using the native default agent. {}",
             task_size.as_str(),
             task_kind.as_str(),
-            unavailable.join("; ")
+            unavailable_reason
         ),
+        unavailable,
     )
 }
 
-fn native_decision(kind: ProviderRoutingKind, reason: String) -> ProviderRoutingDecision {
+fn native_decision(
+    kind: ProviderRoutingKind,
+    reason: String,
+    skipped_candidates: Vec<ProviderRoutingSkip>,
+) -> ProviderRoutingDecision {
     ProviderRoutingDecision {
         agent_type: DEFAULT_ROLE_NAME.to_string(),
         role_name: None,
@@ -366,6 +419,7 @@ fn native_decision(kind: ProviderRoutingKind, reason: String) -> ProviderRouting
             requested: None,
             effective: DEFAULT_ROLE_NAME.to_string(),
             reason,
+            skipped_candidates,
         },
     }
 }

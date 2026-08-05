@@ -5,8 +5,12 @@ use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
 use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
 use crate::agent::external_diagnostics::permission_profile_is_read_only;
 use crate::agent::external_diagnostics::redact_external_agent_status;
+use crate::agent::provider_routing::ProviderRoutingKind;
+use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::registry::SpawnReservation;
 use crate::config::ExternalCommandAgentBackendConfig;
+use codex_agent_graph_store::ExternalAgentRunOutcome;
+use codex_agent_graph_store::ExternalAgentRunStart;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -107,6 +111,7 @@ impl AgentControl {
         let is_read_only =
             permission_profile_is_read_only(&config.permissions.effective_permission_profile());
         let external_agent_provider = options.external_agent_provider.clone();
+        let external_agent_routing = options.external_agent_routing.clone();
         let resolved_command = external_agent_provider
             .as_ref()
             .and_then(ExternalAgentProviderProvenance::resolved_command)
@@ -121,15 +126,30 @@ impl AgentControl {
                 /*cli_version*/ None,
             )
         });
+        let routing = external_agent_routing.unwrap_or_else(|| ProviderRoutingSummary {
+            kind: ProviderRoutingKind::Explicit,
+            requested: agent_role.clone(),
+            effective: agent_role.clone().unwrap_or_else(|| "external".to_string()),
+            reason: "External agent was selected explicitly.".to_string(),
+            skipped_candidates: Vec::new(),
+        });
         let cancellation_token = self.state.register_external_agent(
             thread_id,
             parent_thread_id,
             AgentStatus::PendingInit,
-            provider,
+            provider.clone(),
         );
         reservation.commit(agent_metadata.clone());
         self.persist_thread_spawn_edge(parent_thread_id, thread_id)
             .await;
+        self.persist_external_agent_run_started(
+            parent_thread_id,
+            thread_id,
+            agent_metadata.agent_path.as_ref().map(ToString::to_string),
+            &routing,
+            &provider,
+        )
+        .await;
         let launch = ExternalAgentLaunch {
             thread_id,
             parent_thread_id,
@@ -201,6 +221,43 @@ impl AgentControl {
     pub(crate) async fn close_external_agent(&self, agent_id: ThreadId) {
         self.close_thread_spawn_edge(agent_id).await;
         self.release_external_agent(agent_id);
+    }
+
+    pub(crate) async fn persist_external_agent_run_finished(
+        &self,
+        agent_id: ThreadId,
+        terminal_state: &str,
+    ) {
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        let Some(agent_graph_store) = state.agent_graph_store() else {
+            return;
+        };
+        let (duration_ms, failure) = match self.state.external_agent_snapshot(agent_id) {
+            Some(snapshot) => (snapshot.duration_ms, snapshot.failure),
+            None => {
+                warn!(
+                    "external-agent runtime snapshot missing while persisting outcome for {agent_id}"
+                );
+                (0, None)
+            }
+        };
+        let outcome = ExternalAgentRunOutcome {
+            completed_at_ms: chrono::Utc::now().timestamp_millis(),
+            duration_ms,
+            terminal_state: terminal_state.to_string(),
+            failure_kind: failure
+                .as_ref()
+                .map(|failure| failure.kind.as_str().to_string()),
+            failure_message: failure.and_then(|failure| failure.message),
+        };
+        if let Err(err) = agent_graph_store
+            .finish_external_agent_run(agent_id, outcome)
+            .await
+        {
+            warn!("failed to persist external-agent run outcome for {agent_id}: {err}");
+        }
     }
 
     pub(crate) async fn close_thread_spawn_edge(&self, agent_id: ThreadId) {
@@ -283,6 +340,50 @@ impl AgentControl {
             .await
         {
             warn!("failed to persist thread-spawn edge: {err}");
+        }
+    }
+
+    pub(super) async fn persist_external_agent_run_started(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+        agent_path: Option<String>,
+        routing: &ProviderRoutingSummary,
+        provider: &ExternalAgentProviderProvenance,
+    ) {
+        let Ok(state) = self.upgrade() else {
+            return;
+        };
+        let Some(agent_graph_store) = state.agent_graph_store() else {
+            return;
+        };
+        let skipped_candidates_json =
+            serde_json::to_string(&routing.skipped_candidates).unwrap_or_else(|_| "[]".to_string());
+        let run = ExternalAgentRunStart {
+            child_thread_id,
+            parent_thread_id,
+            agent_path,
+            routing_kind: routing.kind.as_str().to_string(),
+            requested_selector: routing.requested.clone(),
+            effective_selector: routing.effective.clone(),
+            routing_reason: routing.reason.clone(),
+            skipped_candidates_json,
+            provider_family: provider.provider_family.clone(),
+            command: provider.command.clone(),
+            cli_version: provider.cli_version.clone(),
+            capability_source: provider.capability_source.as_str().to_string(),
+            capability_freshness: provider
+                .capability_freshness
+                .map(|freshness| freshness.as_str().to_string()),
+            protocol: provider.protocol.as_str().to_string(),
+            mode: provider.mode.as_str().to_string(),
+            workspace: provider.workspace.clone(),
+            model: provider.model.clone(),
+            effort: provider.effort.clone(),
+            started_at_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        if let Err(err) = agent_graph_store.insert_external_agent_run(run).await {
+            warn!("failed to persist external-agent run start for {child_thread_id}: {err}");
         }
     }
 }

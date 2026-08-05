@@ -17,7 +17,10 @@ fn route_with_available(
             if available.contains(agent_type) {
                 ProviderEligibility::Available(None)
             } else {
-                ProviderEligibility::Unavailable("not installed".to_string())
+                ProviderEligibility::Unavailable(ExternalAgentFailureDetail::new(
+                    ExternalAgentFailureKind::CommandMissing,
+                    "not installed",
+                ))
             }
         },
     )
@@ -69,7 +72,10 @@ fn automatic_route_preserves_configured_antigravity_selector() {
             if candidate == configured {
                 ProviderEligibility::Available(None)
             } else {
-                ProviderEligibility::Unavailable("not installed".to_string())
+                ProviderEligibility::Unavailable(ExternalAgentFailureDetail::new(
+                    ExternalAgentFailureKind::CommandMissing,
+                    "not installed",
+                ))
             }
         },
     );
@@ -128,6 +134,44 @@ fn unavailable_external_agents_produce_attributable_native_fallback() {
             .reason
             .contains("`claude-sonnet-4.6`: not installed")
     );
+    assert_eq!(decision.summary.skipped_candidates.len(), 2);
+    assert_eq!(
+        decision.summary.skipped_candidates[0],
+        ProviderRoutingSkip {
+            selector: ANTIGRAVITY_SELECTOR.to_string(),
+            kind: ProviderRoutingSkipKind::Unavailable,
+            failure_kind: Some(ExternalAgentFailureKind::CommandMissing),
+            reason: "not installed".to_string(),
+        }
+    );
+}
+
+#[test]
+fn automatic_route_records_disabled_candidates_before_the_final_choice() {
+    let decision = select_provider_route_with(
+        /*explicit_agent_type*/ None,
+        AgentTaskKind::IndependentReview,
+        AgentTaskSize::Normal,
+        |_| true,
+        |candidate| {
+            if candidate == CLAUDE_SELECTOR {
+                ProviderEligibility::Disabled
+            } else {
+                ProviderEligibility::Available(None)
+            }
+        },
+    );
+
+    assert_eq!(decision.agent_type(), ANTIGRAVITY_SELECTOR);
+    assert_eq!(
+        decision.summary.skipped_candidates,
+        vec![ProviderRoutingSkip {
+            selector: CLAUDE_SELECTOR.to_string(),
+            kind: ProviderRoutingSkipKind::Disabled,
+            failure_kind: None,
+            reason: "disabled by configuration".to_string(),
+        }]
+    );
 }
 
 #[test]
@@ -176,4 +220,5 @@ fn redacted_summary_preserves_routing_kind_and_effective_selector() {
     assert!(summary.reason.contains("eligible external agent"));
     assert_eq!(summary.requested, None);
     assert_eq!(summary.effective, CLAUDE_SELECTOR);
+    assert!(summary.skipped_candidates.is_empty());
 }

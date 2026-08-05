@@ -158,6 +158,9 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
     let result = run_external_agent_inner(&launch).await;
     if launch.cancellation_token.is_cancelled() {
         control.update_external_agent_status(thread_id, AgentStatus::Shutdown);
+        control
+            .persist_external_agent_run_finished(thread_id, "cancelled")
+            .await;
         send_completion_to_parent(&launch, &control, "external agent cancelled".to_string()).await;
         control.release_external_agent(thread_id);
         return;
@@ -169,6 +172,9 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 thread_id,
                 AgentStatus::Completed(Some(final_message.clone())),
             );
+            control
+                .persist_external_agent_run_finished(thread_id, "completed")
+                .await;
             send_completion_to_parent(&launch, &control, final_message.clone()).await;
         }
         Ok(response) => {
@@ -187,11 +193,17 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 AgentStatus::Errored(message.clone()),
                 failure,
             );
+            control
+                .persist_external_agent_run_finished(thread_id, "errored")
+                .await;
             send_completion_to_parent(&launch, &control, parent_message).await;
         }
         Err(err) => {
             if launch.cancellation_token.is_cancelled() {
                 control.update_external_agent_status(thread_id, AgentStatus::Shutdown);
+                control
+                    .persist_external_agent_run_finished(thread_id, "cancelled")
+                    .await;
                 send_completion_to_parent(
                     &launch,
                     &control,
@@ -209,6 +221,9 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 AgentStatus::Errored(message.clone()),
                 err.detail,
             );
+            control
+                .persist_external_agent_run_finished(thread_id, "errored")
+                .await;
             send_completion_to_parent(&launch, &control, parent_message).await;
         }
     }

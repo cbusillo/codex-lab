@@ -10,4 +10,7 @@ pub use error::AgentGraphStoreResult;
 pub use local::LocalAgentGraphStore;
 pub use store::AgentGraphStore;
 pub use store::AgentGraphStoreFuture;
+pub use types::ExternalAgentRunOutcome;
+pub use types::ExternalAgentRunRecord;
+pub use types::ExternalAgentRunStart;
 pub use types::ThreadSpawnEdgeStatus;
