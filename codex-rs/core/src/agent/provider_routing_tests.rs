@@ -56,6 +56,29 @@ fn high_risk_work_prefers_antigravity() {
 }
 
 #[test]
+fn automatic_route_preserves_configured_antigravity_selector() {
+    let configured = "antigravity-gemini-3.1-pro".to_string();
+    let candidates = vec![configured.clone(), CLAUDE_SELECTOR.to_string()];
+    let decision = select_provider_route_with_candidates(
+        /*explicit_agent_type*/ None,
+        AgentTaskKind::Security,
+        AgentTaskSize::Normal,
+        &candidates,
+        |_| true,
+        |candidate| {
+            if candidate == configured {
+                ProviderEligibility::Available(None)
+            } else {
+                ProviderEligibility::Unavailable("not installed".to_string())
+            }
+        },
+    );
+
+    assert_eq!(decision.agent_type(), configured);
+    assert_eq!(decision.summary.effective, configured);
+}
+
+#[test]
 fn high_risk_work_uses_next_eligible_external_agent() {
     let decision = route_with_available(
         /*explicit_agent_type*/ None,

@@ -7,6 +7,7 @@ pub(crate) mod external_preflight;
 pub(crate) mod provider_routing;
 mod registry;
 pub(crate) mod role;
+pub(crate) mod selector_defaults;
 pub(crate) mod status;
 pub(crate) mod user_agent_intent;
 

@@ -226,22 +226,42 @@ pub(crate) fn dynamic_antigravity_role_config(
     selector: &str,
     effort: Option<&str>,
 ) -> Option<AgentRoleConfig> {
-    let model = selector.strip_prefix("antigravity-")?.to_string();
-    if !crate::agent::external_capabilities::is_valid_antigravity_model_name(&model) {
+    configured_antigravity_role_config(config, selector, None, effort)
+}
+
+fn configured_antigravity_role_config(
+    config: &Config,
+    selector: &str,
+    model_override: Option<&str>,
+    effort: Option<&str>,
+) -> Option<AgentRoleConfig> {
+    let model = selector.strip_prefix("antigravity-").or(model_override);
+    if let Some(model) = model
+        && !crate::agent::external_capabilities::is_valid_antigravity_model_name(model)
+    {
         return None;
     }
-    let base = resolve_role_config_owned(config, "antigravity")?;
+    if selector != "antigravity" && model.is_none() {
+        return None;
+    }
+    let base = config.agent_roles.get("antigravity").cloned().or_else(|| {
+        built_in::external_agent_role_config_with_override("antigravity", Some(true))
+    })?;
     let Some(AgentRoleBackendConfig::ExternalCommand(mut backend)) = base.backend else {
         return None;
     };
-    replace_backend_argument(&mut backend.args, "--model", &model);
+    if let Some(model) = model {
+        replace_backend_argument(&mut backend.args, "--model", model);
+    }
     if let Some(effort) = effort {
         replace_backend_argument(&mut backend.args, "--effort", effort);
     }
     Some(AgentRoleConfig {
-        description: Some(format!(
-            "Antigravity discovered model selector `{selector}`."
-        )),
+        description: Some(if selector == "antigravity" {
+            "Antigravity provider-default selector with configured defaults.".to_string()
+        } else {
+            format!("Antigravity discovered model selector `{selector}`.")
+        }),
         config_file: None,
         nickname_candidates: None,
         backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
@@ -280,6 +300,20 @@ pub(crate) fn install_dynamic_antigravity_role(
     let role = dynamic_antigravity_role_config(config, selector, effort).ok_or_else(|| {
         format!("Unable to construct external selector `{selector}` without substitution.")
     })?;
+    config.agent_roles.insert(selector.to_string(), role);
+    Ok(())
+}
+
+pub(crate) fn install_configured_antigravity_role(
+    config: &mut Config,
+    selector: &str,
+    model_override: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    let role = configured_antigravity_role_config(config, selector, model_override, effort)
+        .ok_or_else(|| {
+            format!("Unable to construct external selector `{selector}` without substitution.")
+        })?;
     config.agent_roles.insert(selector.to_string(), role);
     Ok(())
 }

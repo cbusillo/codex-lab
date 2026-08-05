@@ -14,6 +14,7 @@ use codex_config::ProfileV2Name;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
 use codex_config::config_toml::AgentRoleToml;
+use codex_config::config_toml::AgentSelectorToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
@@ -8623,6 +8624,14 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             default_subagent_model: Some("gpt-5.6-terra".to_string()),
             default_subagent_reasoning_effort: Some(ReasoningEffort::High),
             interrupt_message: Some(false),
+            selectors: BTreeMap::from([(
+                "antigravity".to_string(),
+                AgentSelectorToml {
+                    enabled: Some(true),
+                    model: Some("gemini-3.1-pro".to_string()),
+                    effort: Some("high".to_string()),
+                },
+            )]),
             ..Default::default()
         }),
         ..Default::default()
@@ -8651,7 +8660,46 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             false,
         )
     );
+    assert_eq!(
+        config
+            .agent_selector_overrides
+            .get("antigravity")
+            .and_then(|selector| selector.model.as_deref()),
+        Some("gemini-3.1-pro")
+    );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_rejects_flaglike_agent_selector_defaults() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        agents: Some(AgentsToml {
+            selectors: BTreeMap::from([(
+                "antigravity".to_string(),
+                AgentSelectorToml {
+                    model: Some("--dangerously-skip-permissions".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("flag-like selector defaults should be rejected");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("agents.selectors.antigravity.model")
+    );
     Ok(())
 }
 
