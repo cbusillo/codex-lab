@@ -16,7 +16,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
-use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex_with_agents as test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -400,38 +400,6 @@ async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
         ),
         (2, 1, 1)
     );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ultra_on_multi_agent_v1_uses_max_without_mode_instructions() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = start_mock_server().await;
-    let response = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
-    )
-    .await;
-    let test = test_codex()
-        .with_model_info_override("gpt-5.4", add_ultra_reasoning)
-        .with_config(|config| {
-            config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
-        })
-        .build(&server)
-        .await?;
-
-    submit_turn(&test.codex, "hello", /*effort*/ None).await?;
-
-    let request = response.single_request();
-    assert_eq!(
-        request.body_json()["reasoning"]["effort"].as_str(),
-        Some("max")
-    );
-    let input = request.input();
-    let texts = developer_texts(&input);
-    assert_eq!(count_containing(&texts, MULTI_AGENT_MODE_OPEN_TAG), 0);
 
     Ok(())
 }

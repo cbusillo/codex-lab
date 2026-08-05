@@ -662,6 +662,11 @@ impl TestCodexBuilder {
             .code_mode_host_program
             .take()
             .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
+        if config.features.enabled(Feature::CodeModeHost) && code_mode_host_program.is_none() {
+            return Err(anyhow!(
+                "Code Mode tests require `codex-code-mode-host`; run `just test -p codex-core` or build it with `cargo build -p codex-code-mode-host` before invoking cargo-nextest directly"
+            ));
+        }
         let thread_manager = if config.features.enabled(Feature::CodeModeHost)
             && let Some(code_mode_host_program) = code_mode_host_program
         {
@@ -1232,6 +1237,7 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
 pub fn test_codex() -> TestCodexBuilder {
     TestCodexBuilder {
         config_mutators: vec![Box::new(|config| {
+            config.agents_enabled = false;
             config
                 .features
                 .disable(Feature::Apps)
@@ -1257,6 +1263,12 @@ pub fn test_codex() -> TestCodexBuilder {
         history_mode: None,
         home_backed_auth_manager: false,
     }
+}
+
+pub fn test_codex_with_agents() -> TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config.agents_enabled = true;
+    })
 }
 
 #[cfg(test)]

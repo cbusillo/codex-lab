@@ -1,5 +1,6 @@
 use crate::test_codex::TestCodexBuilder;
 use crate::test_codex::test_codex;
+use crate::test_codex::test_codex_with_agents;
 use anyhow::Result;
 use codex_core::config::Config;
 use codex_features::Feature;
@@ -286,7 +287,7 @@ pub fn apps_enabled_builder(apps_base_url: impl Into<String>) -> TestCodexBuilde
 
 pub fn search_capable_apps_builder(apps_base_url: impl Into<String>) -> TestCodexBuilder {
     let apps_base_url = apps_base_url.into();
-    test_codex()
+    test_codex_with_agents()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| configure_search_capable_apps(config, apps_base_url.as_str()))
 }

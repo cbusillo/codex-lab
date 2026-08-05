@@ -378,6 +378,7 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
     let codex = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
+            config.agents_enabled = true;
             config
                 .features
                 .enable(Feature::MultiAgentV2)

@@ -90,6 +90,15 @@ impl AgentControl {
         let initial_operation = match initial_input {
             SpawnInitialInput::UserInput(input) => input.into(),
             SpawnInitialInput::InterAgentCommunication(communication, _) => {
+                if communication
+                    .encrypted_content
+                    .as_ref()
+                    .is_some_and(|content| !content.is_empty())
+                {
+                    return Err(CodexErr::UnsupportedOperation(
+                        "external_command agents require plaintext task content".to_string(),
+                    ));
+                }
                 Op::InterAgentCommunication { communication }
             }
         };

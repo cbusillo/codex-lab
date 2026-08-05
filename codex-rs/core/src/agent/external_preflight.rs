@@ -27,6 +27,7 @@ use tokio::process::Command;
 
 const GITHUB_COPILOT_VERSION_MARKER: &[u8] = b"GitHub Copilot CLI";
 const THIRD_PARTY_CLI_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CAPABILITY_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_CLI_VERSION_BYTES: usize = 200;
 const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
 const CODEX_LAB_CARGO_TARGET_DIR_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_DIR";
@@ -35,6 +36,21 @@ struct ExternalAgentCapabilityProbe {
     capabilities: ExternalAgentCapabilities,
     resolved_command: Option<PathBuf>,
     command_args: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ExternalAgentPreflightOutputLimit {
+    Diagnostic,
+    Capability,
+}
+
+impl ExternalAgentPreflightOutputLimit {
+    fn bytes(self) -> usize {
+        match self {
+            Self::Diagnostic => MAX_PREFLIGHT_MESSAGE_BYTES,
+            Self::Capability => MAX_CAPABILITY_OUTPUT_BYTES,
+        }
+    }
 }
 
 /// Discovers bounded local capabilities for a configured external agent.
@@ -199,6 +215,7 @@ async fn probe_external_agent_backend(
                 &launch_cwd,
                 &["--help"],
                 "capability",
+                ExternalAgentPreflightOutputLimit::Capability,
             )
             .await
             {
@@ -223,6 +240,7 @@ async fn probe_external_agent_backend(
                 &launch_cwd,
                 &["models"],
                 "authentication",
+                ExternalAgentPreflightOutputLimit::Capability,
             )
             .await
             {
@@ -253,6 +271,7 @@ async fn probe_external_agent_backend(
                 &launch_cwd,
                 &["--help"],
                 "capability",
+                ExternalAgentPreflightOutputLimit::Capability,
             )
             .await
             {
@@ -399,6 +418,7 @@ async fn capture_external_agent_cli_version(
         workspace,
         &["--version"],
         "version",
+        ExternalAgentPreflightOutputLimit::Diagnostic,
     )
     .await?;
     if backend.launch_family.as_deref() == Some("copilot")
@@ -437,6 +457,7 @@ async fn verify_external_agent_auth(
         workspace,
         args,
         probe_name,
+        ExternalAgentPreflightOutputLimit::Diagnostic,
     )
     .await?;
     let claude_signed_out = backend.launch_family.as_deref() == Some("claude")
@@ -495,6 +516,7 @@ async fn run_external_agent_preflight_command(
     workspace: &Path,
     args: &[&str],
     probe_name: &str,
+    output_limit: ExternalAgentPreflightOutputLimit,
 ) -> Result<std::process::Output, ExternalAgentFailureDetail> {
     run_external_agent_preflight_command_with_timeout(
         backend,
@@ -503,6 +525,7 @@ async fn run_external_agent_preflight_command(
         workspace,
         args,
         probe_name,
+        output_limit,
         THIRD_PARTY_CLI_PREFLIGHT_TIMEOUT,
     )
     .await
@@ -515,6 +538,7 @@ pub(super) async fn run_external_agent_preflight_command_with_timeout(
     workspace: &Path,
     args: &[&str],
     probe_name: &str,
+    output_limit: ExternalAgentPreflightOutputLimit,
     timeout: Duration,
 ) -> Result<std::process::Output, ExternalAgentFailureDetail> {
     let mut command = Command::new(resolved_command);
@@ -562,9 +586,10 @@ pub(super) async fn run_external_agent_preflight_command_with_timeout(
         )
     })?;
     let interaction = async move {
+        let output_limit = output_limit.bytes();
         let (stdout, stderr, status) = tokio::try_join!(
-            read_limited_output(stdout, MAX_PREFLIGHT_MESSAGE_BYTES, "preflight stdout"),
-            read_limited_output(stderr, MAX_PREFLIGHT_MESSAGE_BYTES, "preflight stderr"),
+            read_limited_output(stdout, output_limit, "preflight stdout"),
+            read_limited_output(stderr, output_limit, "preflight stderr"),
             async { child.wait().await.map_err(anyhow::Error::from) },
         )?;
         child.disarm();

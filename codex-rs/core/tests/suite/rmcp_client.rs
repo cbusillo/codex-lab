@@ -278,6 +278,7 @@ fn copy_binary_to_remote_env(
 struct TestMcpServerOptions {
     environment_id: String,
     auth: McpServerAuth,
+    startup_timeout_sec: Duration,
     supports_parallel_tool_calls: bool,
     tool_timeout_sec: Option<Duration>,
 }
@@ -287,6 +288,7 @@ impl Default for TestMcpServerOptions {
         Self {
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             auth: McpServerAuth::default(),
+            startup_timeout_sec: Duration::from_secs(10),
             supports_parallel_tool_calls: false,
             tool_timeout_sec: None,
         }
@@ -338,7 +340,7 @@ fn insert_mcp_server(
             required: false,
             supports_parallel_tool_calls: options.supports_parallel_tool_calls,
             disabled_reason: None,
-            startup_timeout_sec: Some(Duration::from_secs(10)),
+            startup_timeout_sec: Some(options.startup_timeout_sec),
             tool_timeout_sec: options.tool_timeout_sec,
             default_tools_approval_mode: None,
             enabled_tools: None,
@@ -1030,7 +1032,8 @@ async fn modern_mcp_pagination_preserves_valid_tools_and_rejects_oversized_curso
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn apps_enabled_turn_skips_pending_optional_mcp_without_cached_tools() -> anyhow::Result<()> {
+async fn apps_enabled_turn_omits_pending_optional_mcp_after_startup_timeout() -> anyhow::Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -1065,7 +1068,10 @@ async fn apps_enabled_turn_skips_pending_optional_mcp_without_cached_tools() -> 
                     http_headers: None,
                     env_http_headers: None,
                 },
-                TestMcpServerOptions::default(),
+                TestMcpServerOptions {
+                    startup_timeout_sec: Duration::from_secs(1),
+                    ..Default::default()
+                },
             );
         })
         .build_with_auto_env(&server)
@@ -1756,6 +1762,7 @@ async fn stdio_mcp_parallel_tool_calls_opt_in_runs_concurrently() -> anyhow::Res
                 TestMcpServerOptions {
                     environment_id: remote_aware_environment_id(),
                     auth: Default::default(),
+                    startup_timeout_sec: Duration::from_secs(10),
                     supports_parallel_tool_calls: true,
                     tool_timeout_sec: Some(Duration::from_secs(2)),
                 },

@@ -39,7 +39,6 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::McpHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::WaitForEnvironmentHandler;
-use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::override_tool_exposure;
 use crate::tools::router::ToolRouter;
@@ -1611,61 +1610,7 @@ async fn excluded_deferred_namespaces_do_not_enable_nested_tool_guidance() {
 }
 
 #[tokio::test]
-async fn multi_agent_feature_selects_one_agent_tool_family() {
-    let v1 = probe(|turn| {
-        set_feature(turn, Feature::Collab, /*enabled*/ true);
-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
-    })
-    .await;
-    v1.assert_visible_contains(&[MULTI_AGENT_V1_NAMESPACE]);
-    v1.assert_visible_lacks(&[
-        "spawn_agent",
-        "send_input",
-        "resume_agent",
-        "wait_agent",
-        "close_agent",
-        "interrupt_agent",
-        "send_message",
-        "followup_task",
-        "assign_task",
-        "list_agents",
-    ]);
-    assert_eq!(
-        v1.namespace_function_names(MULTI_AGENT_V1_NAMESPACE),
-        &[
-            "close_agent".to_string(),
-            "resume_agent".to_string(),
-            "send_input".to_string(),
-            "spawn_agent".to_string(),
-            "wait_agent".to_string(),
-        ]
-    );
-    let ToolSpec::Namespace(namespace) = v1.visible_spec(MULTI_AGENT_V1_NAMESPACE) else {
-        panic!("expected v1 multi-agent namespace");
-    };
-    let Some(ResponsesApiNamespaceTool::Function(spawn_agent)) =
-        namespace.tools.iter().find(|tool| {
-            matches!(
-                tool,
-                ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent"
-            )
-        })
-    else {
-        panic!("expected v1 spawn_agent function");
-    };
-    let properties = spawn_agent
-        .parameters
-        .properties
-        .as_ref()
-        .expect("spawn_agent should use object params");
-    for property in ["model", "reasoning_effort", "service_tier"] {
-        assert!(
-            properties.contains_key(property),
-            "expected v1 spawn_agent to expose `{property}`"
-        );
-    }
-    assert!(!properties.contains_key("agent_type"));
-
+async fn mandatory_multi_agent_v2_exposes_one_agent_tool_family() {
     let v2 = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
         update_config(turn, |config| {
@@ -1755,7 +1700,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_message_schemas_are_encrypted() {
+async fn multi_agent_v2_message_schemas_are_plaintext() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
@@ -1781,7 +1726,7 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
             properties
                 .get("message")
                 .and_then(|schema| schema.encrypted),
-            Some(true)
+            None
         );
     }
 }
@@ -1821,51 +1766,6 @@ async fn tool_mode_selector_overrides_feature_flags() {
         codex_code_mode::PUBLIC_TOOL_NAME,
         codex_code_mode::WAIT_TOOL_NAME,
     ]);
-}
-
-#[tokio::test]
-async fn v1_multi_agent_tools_defer_when_tool_search_available() {
-    let plan = probe(|turn| {
-        turn.model_info.supports_search_tool = true;
-        set_feature(turn, Feature::Collab, /*enabled*/ true);
-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
-    })
-    .await;
-
-    plan.assert_visible_contains(&["tool_search"]);
-    plan.assert_visible_lacks(&[
-        "spawn_agent",
-        "send_input",
-        "resume_agent",
-        "wait_agent",
-        "close_agent",
-        "interrupt_agent",
-    ]);
-    for tool_name in [
-        "spawn_agent",
-        "send_input",
-        "resume_agent",
-        "wait_agent",
-        "close_agent",
-    ] {
-        let namespaced_tool_name = ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, tool_name);
-        let namespaced_tool_name = namespaced_tool_name.to_string();
-        assert!(
-            plan.registered_names.contains(&namespaced_tool_name),
-            "expected namespaced runtime for {tool_name}"
-        );
-        assert!(
-            !plan
-                .registered_names
-                .contains(&ToolName::plain(tool_name).to_string()),
-            "expected no plain runtime for deferred {tool_name}"
-        );
-        assert_eq!(plan.exposure(&namespaced_tool_name), ToolExposure::Deferred);
-    }
-    let ToolSpec::ToolSearch { description, .. } = plan.visible_spec("tool_search") else {
-        panic!("expected visible tool_search spec");
-    };
-    assert!(description.contains("- Multi-agent tools: Spawn and manage sub-agents."));
 }
 
 #[tokio::test]

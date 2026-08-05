@@ -6,11 +6,14 @@ use crate::agent::provider_routing::AgentTaskKind;
 use crate::agent::provider_routing::AgentTaskSize;
 use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::provider_routing::select_provider_route;
+use crate::agent::user_agent_intent::UserAgentIntent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
+use codex_config::agent_defaults::AgentModelSpec;
+use codex_config::agent_defaults::agent_model_spec;
 use codex_protocol::AgentPath;
 use codex_tools::ToolSpec;
 
@@ -53,11 +56,9 @@ async fn handle_spawn_agent(
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let explicit_role_name = args
-        .agent_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|role| !role.is_empty());
+    let selectors = resolve_spawn_selectors(args.agent_type.as_deref(), args.model.as_deref())?;
+    enforce_explicit_user_agent_intent(turn, &selectors)?;
+    let explicit_role_name = selectors.agent_type.as_deref();
 
     let message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
@@ -69,6 +70,7 @@ async fn handle_spawn_agent(
         select_provider_route(&config, explicit_role_name, args.task_kind, args.task_size)
             .await
             .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
+    enforce_routed_user_agent_intent(turn, routing.agent_type())?;
     let role_name = routing.role_name();
     let fork_mode = args.fork_mode(routing.is_external())?;
     if routing.is_external() && fork_mode.is_some() {
@@ -88,7 +90,7 @@ async fn handle_spawn_agent(
         &session,
         turn.as_ref(),
         &mut config,
-        args.model.as_deref(),
+        selectors.model.as_deref(),
         args.reasoning_effort.clone(),
     )
     .await?;
@@ -197,6 +199,170 @@ async fn handle_spawn_agent(
             routing: routing.summary(),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSpawnSelectors {
+    agent_type: Option<String>,
+    model: Option<String>,
+}
+
+fn enforce_explicit_user_agent_intent(
+    turn: &crate::session::turn_context::TurnContext,
+    selectors: &ResolvedSpawnSelectors,
+) -> Result<(), FunctionCallError> {
+    let Some(intent) = turn.extension_data.get::<UserAgentIntent>() else {
+        return Ok(());
+    };
+    if intent.is_empty() {
+        return Ok(());
+    }
+    let required = intent
+        .required()
+        .iter()
+        .map(|slug| format!("`{slug}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let selected = selectors
+        .agent_type
+        .as_deref()
+        .or(selectors.model.as_deref());
+    if let Some(selected) = selected
+        && intent.rejects(selected)
+    {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "The current user turn explicitly rejects `{selected}`. Do not spawn that agent; choose an allowed alternative."
+        )));
+    }
+    if intent.required().is_empty() {
+        return Ok(());
+    }
+    let Some(selected) = selected else {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "The current user turn explicitly requests specific agents: {required}. Set `agent_type` to one of those canonical selectors before spawning. Do not use automatic routing for a named-agent request."
+        )));
+    };
+    if intent.requires(selected) {
+        return Ok(());
+    }
+    Err(FunctionCallError::RespondToModel(format!(
+        "The current user turn explicitly requests specific agents: {required}, but the spawn selected `{selected}`. Use one of the requested canonical selectors and do not substitute another agent."
+    )))
+}
+
+fn enforce_routed_user_agent_intent(
+    turn: &crate::session::turn_context::TurnContext,
+    selected: &str,
+) -> Result<(), FunctionCallError> {
+    let Some(intent) = turn.extension_data.get::<UserAgentIntent>() else {
+        return Ok(());
+    };
+    validate_routed_user_agent_intent(intent.as_ref(), selected)
+}
+
+fn validate_routed_user_agent_intent(
+    intent: &UserAgentIntent,
+    selected: &str,
+) -> Result<(), FunctionCallError> {
+    if intent.rejects(selected) {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "Automatic routing selected `{selected}`, but the current user turn explicitly rejects that agent. Retry with an allowed explicit `agent_type`."
+        )));
+    }
+    if intent.required().is_empty() || intent.requires(selected) {
+        return Ok(());
+    }
+    let required = intent
+        .required()
+        .iter()
+        .map(|slug| format!("`{slug}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(FunctionCallError::RespondToModel(format!(
+        "Routing selected `{selected}`, but the current user turn explicitly requests {required}. Retry with one of the requested canonical selectors."
+    )))
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+    use codex_protocol::user_input::UserInput;
+
+    fn intent(text: &str) -> UserAgentIntent {
+        UserAgentIntent::from_user_input(&[UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }])
+    }
+
+    #[test]
+    fn rejection_only_intent_blocks_automatic_route_result() {
+        let intent = intent("Do not use Opus.");
+
+        assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_err());
+        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_ok());
+    }
+
+    #[test]
+    fn required_intent_blocks_a_different_automatic_route_result() {
+        let intent = intent("Ask Opus to review this.");
+
+        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_err());
+        assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_ok());
+    }
+}
+
+fn resolve_spawn_selectors(
+    agent_type: Option<&str>,
+    model: Option<&str>,
+) -> Result<ResolvedSpawnSelectors, FunctionCallError> {
+    let agent_type = agent_type.map(str::trim).filter(|role| !role.is_empty());
+    let model = model.map(str::trim).filter(|model| !model.is_empty());
+    let agent_type_selector = agent_type.and_then(external_agent_spec);
+    let model_selector = model.and_then(external_agent_spec);
+    match (agent_type, agent_type_selector, model, model_selector) {
+        (None, _, Some(_), Some(model_selector)) => Ok(ResolvedSpawnSelectors {
+            agent_type: Some(model_selector.slug.to_string()),
+            model: None,
+        }),
+        (Some(_), Some(agent_type_selector), Some(_), Some(model_selector))
+            if agent_type_selector.slug == model_selector.slug =>
+        {
+            Ok(ResolvedSpawnSelectors {
+                agent_type: Some(agent_type_selector.slug.to_string()),
+                model: None,
+            })
+        }
+        (Some(agent_type), Some(agent_type_selector), Some(model), Some(model_selector)) => {
+            Err(FunctionCallError::RespondToModel(format!(
+                "external agent selector `{model}` resolves to `{}`, but agent type `{agent_type}` resolves to `{}`; use one explicit agent selector",
+                model_selector.slug, agent_type_selector.slug
+            )))
+        }
+        (Some(agent_type), Some(_), Some(model), None) => {
+            Err(FunctionCallError::RespondToModel(format!(
+                "external agent type `{agent_type}` cannot be combined with native model override `{model}`; use one explicit agent selector"
+            )))
+        }
+        (Some(agent_type), None, Some(model), Some(model_selector)) => {
+            Err(FunctionCallError::RespondToModel(format!(
+                "external agent selector `{model}` resolves to `{}`, but agent type `{agent_type}` selects a different role; use one explicit agent selector",
+                model_selector.slug
+            )))
+        }
+        (Some(_), Some(agent_type_selector), None, _) => Ok(ResolvedSpawnSelectors {
+            agent_type: Some(agent_type_selector.slug.to_string()),
+            model: None,
+        }),
+        _ => Ok(ResolvedSpawnSelectors {
+            agent_type: agent_type.map(str::to_string),
+            model: model.map(str::to_string),
+        }),
+    }
+}
+
+fn external_agent_spec(selector: &str) -> Option<&'static AgentModelSpec> {
+    agent_model_spec(selector).filter(|spec| spec.family != "code" && spec.is_enabled())
 }
 
 impl CoreToolRuntime for Handler {

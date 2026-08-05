@@ -377,7 +377,7 @@ async fn start_review_conversation(
     }
     let _ = sub_agent_config.features.disable(Feature::SpawnCsv);
     let _ = sub_agent_config.features.disable(Feature::Collab);
-    let _ = sub_agent_config.features.disable(Feature::MultiAgentV2);
+    sub_agent_config.agents_enabled = false;
 
     // Set explicit review rubric for the sub-agent
     sub_agent_config.base_instructions = Some(crate::REVIEW_PROMPT.to_string());

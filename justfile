@@ -102,11 +102,12 @@ install:
 # there should be no need to add `--all-features`.
 [unix]
 test *args:
+    if printf '%s\n' "$@" | grep -Fxq 'codex-core'; then cargo build -p codex-cli -p codex-code-mode-host; fi
     RUST_MIN_STACK={{ rust_min_stack }} NEXTEST_PROFILE=local cargo nextest run --no-fail-fast "$@"
 
 [windows]
 test *args:
-    $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @($args | Select-Object -Skip 1)
+    $testArgs = @($args | Select-Object -Skip 1); if ($testArgs -contains "codex-core") { cargo build -p codex-cli -p codex-code-mode-host; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }; $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @testArgs
 
 # Run from the repository root so scripts that resolve paths from `cwd` see
 # the same layout they use in GitHub Actions.

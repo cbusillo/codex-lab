@@ -38,6 +38,8 @@ fn independent_review_prefers_claude() {
         decision.summary.kind,
         ProviderRoutingKind::AutomaticExternal
     );
+    assert_eq!(decision.summary.requested, None);
+    assert_eq!(decision.summary.effective, CLAUDE_SELECTOR);
 }
 
 #[test]
@@ -132,10 +134,12 @@ fn explicit_external_agent_type_always_wins() {
     assert_eq!(decision.role_name(), Some(CLAUDE_SELECTOR));
     assert!(decision.is_external());
     assert_eq!(decision.summary.kind, ProviderRoutingKind::Explicit);
+    assert_eq!(decision.summary.requested.as_deref(), Some(CLAUDE_SELECTOR));
+    assert_eq!(decision.summary.effective, CLAUDE_SELECTOR);
 }
 
 #[test]
-fn redacted_summary_preserves_routing_kind_without_selector() {
+fn redacted_summary_preserves_routing_kind_and_effective_selector() {
     let decision = route_with_available(
         /*explicit_agent_type*/ None,
         AgentTaskKind::IndependentReview,
@@ -147,4 +151,6 @@ fn redacted_summary_preserves_routing_kind_without_selector() {
     assert_eq!(summary.kind, ProviderRoutingKind::AutomaticExternal);
     assert!(!summary.reason.contains(CLAUDE_SELECTOR));
     assert!(summary.reason.contains("eligible external agent"));
+    assert_eq!(summary.requested, None);
+    assert_eq!(summary.effective, CLAUDE_SELECTOR);
 }

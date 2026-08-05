@@ -1957,6 +1957,73 @@ async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_cargo_provider_skips_tool_use_when_dirty_worktree_is_unchanged() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    std::fs::create_dir(repo.path().join("src"))?;
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    let source_path = repo.path().join("src/lib.rs");
+    std::fs::write(&source_path, "pub fn value() -> u8 { 1 }\n")?;
+    init_git_repo(repo.path())?;
+    std::fs::write(&source_path, "pub fn value() -> u8 { 2 }\n")?;
+
+    let provider = tempdir()?;
+    let marker = provider.path().join("cargo-ran");
+    let fake_cargo = provider.path().join("cargo");
+    write_executable(
+        &fake_cargo,
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )?;
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-cargo-read-only-1"),
+                ev_shell_command_call("shell-read-only", "true"),
+                ev_completed("resp-cargo-read-only-1"),
+            ]),
+            responses::sse(vec![
+                ev_assistant_message("msg-cargo-read-only", "inspection complete"),
+                ev_completed("resp-cargo-read-only-2"),
+            ]),
+        ],
+    )
+    .await;
+    let test = build_cargo_provider_codex(
+        &server,
+        repo.path(),
+        fake_cargo
+            .to_str()
+            .context("fake cargo path should be UTF-8")?
+            .to_string(),
+        /*timeout_ms*/ 5_000,
+    )
+    .await?;
+
+    submit_user_input(&test.codex, &test, "inspect without changing files").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::Skipped
+    );
+    assert_eq!(
+        validation_events[0].skip_reason,
+        Some(ProjectValidationSkipReason::UnchangedFingerprint)
+    );
+    assert!(!marker.exists());
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_cargo_provider_runs_one_json_diagnostic_correction_cycle() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2430,7 +2497,7 @@ async fn automatic_validation_disabled_precedes_unsupported_environment() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn automatic_validation_reports_no_changed_files() -> Result<()> {
+async fn automatic_validation_skips_unchanged_tool_turn_before_provider_selection() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let repo = tempdir()?;
@@ -2459,9 +2526,10 @@ async fn automatic_validation_reports_no_changed_files() -> Result<()> {
     submit_user_input(&test.codex, &test, "inspect without changing files").await?;
     let events = collect_events_until_terminal(&test.codex).await?;
 
-    let event = assert_single_validation_skip(&events, ProjectValidationSkipReason::NoChangedFiles);
+    let event =
+        assert_single_validation_skip(&events, ProjectValidationSkipReason::UnchangedFingerprint);
     assert!(event.command.is_empty());
-    assert_eq!(event.changed_file_count, Some(0));
+    assert_eq!(event.changed_file_count, None);
     assert_eq!(response_mock.requests().len(), 2);
     Ok(())
 }

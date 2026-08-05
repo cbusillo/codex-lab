@@ -13,10 +13,12 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
+use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
-use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex_with_agents as test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -51,6 +53,65 @@ const ROLE_MODEL: &str = "gpt-5.4";
 const ROLE_MODEL_PROVIDER_ID: &str = "mock";
 const ROLE_DEVELOPER_INSTRUCTIONS: &str = "Keep the durable worker role configuration.";
 const SUBAGENT_DEVELOPER_INSTRUCTIONS: &str = "Use the default durable worker instructions.";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_v1_history_resumes_with_v2_tools_and_preserved_context() -> Result<()> {
+    let server = start_mock_server().await;
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-legacy"),
+            ev_assistant_message("msg-legacy", "legacy response"),
+            ev_completed("resp-legacy"),
+        ]),
+    )
+    .await;
+    let mut initial_builder = test_codex();
+    let initial = initial_builder.build_with_auto_env(&server).await?;
+    let home = initial.home.clone();
+    let rollout_path = initial
+        .codex
+        .rollout_path()
+        .expect("legacy rollout path")
+        .to_path_buf();
+    initial.submit_turn("legacy V1 context").await?;
+    let rollout = std::fs::read_to_string(&rollout_path)?;
+    let legacy_rollout = rollout
+        .lines()
+        .map(|line| -> Result<String> {
+            let mut item: Value = serde_json::from_str(line)?;
+            if item.get("type").and_then(Value::as_str) == Some("session_meta") {
+                item.pointer_mut("/payload/multi_agent_version")
+                    .expect("session metadata should record the multi-agent version")
+                    .clone_from(&json!("v1"));
+            }
+            Ok(serde_json::to_string(&item)?)
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("\n");
+    std::fs::write(&rollout_path, format!("{legacy_rollout}\n"))?;
+
+    let resumed_response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-resumed"),
+            ev_assistant_message("msg-resumed", "resumed response"),
+            ev_completed("resp-resumed"),
+        ]),
+    )
+    .await;
+    let mut resume_builder = test_codex();
+    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
+    resumed.submit_turn("resume under V2").await?;
+
+    let request = resumed_response.single_request();
+    let body = request.body_json();
+    assert!(namespace_child_tool(&body, "agents", "spawn_agent").is_some());
+    assert!(namespace_child_tool(&body, "multi_agent_v1", "spawn_agent").is_none());
+    assert!(request.body_contains_text("legacy V1 context"));
+    assert!(request.body_contains_text("legacy response"));
+    Ok(())
+}
 
 fn decoded_body(request: &wiremock::Request) -> Option<Vec<u8>> {
     let is_zstd = request

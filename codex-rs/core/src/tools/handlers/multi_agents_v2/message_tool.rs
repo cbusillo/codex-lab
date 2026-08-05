@@ -45,7 +45,7 @@ pub(super) fn message_content(message: String) -> Result<String, FunctionCallErr
             "Empty message can't be sent to an agent".to_string(),
         ));
     }
-    Ok(message)
+    Ok(crate::session_prefix::bounded_completion_payload(&message))
 }
 
 /// Handles the shared MultiAgentV2 message flow for both `send_message` and `followup_task`.

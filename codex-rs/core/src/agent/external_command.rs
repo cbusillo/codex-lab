@@ -5,6 +5,8 @@ use crate::agent::external_diagnostics::ExternalAgentFailureKind;
 use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
 use crate::agent::external_diagnostics::classify_provider_failure_text;
 use crate::agent::external_diagnostics::redact_external_agent_status;
+#[cfg(all(test, unix))]
+use crate::agent::external_preflight::ExternalAgentPreflightOutputLimit;
 use crate::agent::external_preflight::antigravity_launch_dir;
 #[cfg(test)]
 use crate::agent::external_preflight::github_copilot_version_output;
@@ -236,7 +238,7 @@ async fn run_external_agent_inner(
         ));
     }
 
-    let message = render_external_agent_message(&launch.initial_operation);
+    let message = render_external_agent_message(&launch.initial_operation)?;
     let request_json = match launch.backend.protocol {
         ExternalCommandProtocol::Json => Some(
             serde_json::to_vec(&ExternalAgentRequest {
@@ -805,9 +807,9 @@ async fn send_completion_to_parent(
         .await;
 }
 
-fn render_external_agent_message(initial_operation: &Op) -> String {
+fn render_external_agent_message(initial_operation: &Op) -> Result<String, ExternalAgentRunError> {
     match initial_operation {
-        Op::UserInput { items, .. } => items
+        Op::UserInput { items, .. } => Ok(items
             .iter()
             .filter_map(|item| match item {
                 UserInput::Text { text, .. } => Some(text.clone()),
@@ -822,13 +824,21 @@ fn render_external_agent_message(initial_operation: &Op) -> String {
                 _ => None,
             })
             .collect::<Vec<_>>()
-            .join("\n"),
-        Op::InterAgentCommunication { communication } => communication
-            .encrypted_content
-            .clone()
-            .filter(|content| !content.is_empty())
-            .unwrap_or_else(|| communication.content.clone()),
-        _ => String::new(),
+            .join("\n")),
+        Op::InterAgentCommunication { communication } => {
+            if communication
+                .encrypted_content
+                .as_ref()
+                .is_some_and(|content| !content.is_empty())
+            {
+                return Err(ExternalAgentRunError::new(
+                    ExternalAgentFailureKind::UnsupportedMode,
+                    anyhow::anyhow!("external agents require plaintext task content"),
+                ));
+            }
+            Ok(communication.content.clone())
+        }
+        _ => Ok(String::new()),
     }
 }
 

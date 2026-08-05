@@ -40,6 +40,9 @@ mod followup_task;
 mod interrupt_agent;
 mod list_agents;
 mod message_tool;
+#[cfg(test)]
+#[path = "multi_agents_v2/message_tool_tests.rs"]
+mod message_tool_tests;
 mod send_message;
 mod spawn;
 pub(crate) mod wait;

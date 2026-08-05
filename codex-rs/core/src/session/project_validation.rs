@@ -75,6 +75,12 @@ enum ValidationCommandKind {
     Shellcheck,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValidationChangeScope {
+    GitVisibleFiles,
+    MayIncludeIgnoredFiles,
+}
+
 struct ValidationCommandPlan {
     kind: ValidationCommandKind,
     command: Vec<String>,
@@ -196,7 +202,15 @@ pub(crate) async fn run_project_validation(
         ));
     }
 
-    match initial_attempt_worktree_unchanged(&cwd, &attempt, &cancellation_token).await {
+    let change_scope = if configured_project_command.is_some() {
+        ValidationChangeScope::MayIncludeIgnoredFiles
+    } else {
+        ValidationChangeScope::GitVisibleFiles
+    };
+
+    match initial_attempt_worktree_unchanged(&cwd, &attempt, change_scope, &cancellation_token)
+        .await
+    {
         Some(true) => {
             return ProjectValidationRun::Skipped(skipped_event(
                 turn_context,
@@ -237,7 +251,9 @@ pub(crate) async fn run_project_validation(
         None
     };
 
-    match initial_attempt_worktree_unchanged(&cwd, &attempt, &cancellation_token).await {
+    match initial_attempt_worktree_unchanged(&cwd, &attempt, change_scope, &cancellation_token)
+        .await
+    {
         Some(true) => {
             return ProjectValidationRun::Skipped(skipped_event(
                 turn_context,
@@ -778,15 +794,19 @@ fn cargo_validation_cache_command(command: &[String]) -> Vec<String> {
 async fn initial_attempt_worktree_unchanged(
     cwd: &AbsolutePathBuf,
     attempt: &ProjectValidationAttempt,
+    change_scope: ValidationChangeScope,
     cancellation_token: &CancellationToken,
 ) -> Option<bool> {
     let ProjectValidationAttempt::Initial {
         worktree_at_turn_start: Some(worktree_at_turn_start),
-        model_used_tools: false,
+        model_used_tools,
     } = attempt
     else {
         return Some(false);
     };
+    if *model_used_tools && change_scope == ValidationChangeScope::MayIncludeIgnoredFiles {
+        return Some(false);
+    }
     let worktree = tokio::select! {
         _ = cancellation_token.cancelled() => return None,
         worktree = capture_worktree_fingerprint(cwd) => worktree,

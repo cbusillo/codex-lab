@@ -26,7 +26,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::submit_thread_settings;
-use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex_with_agents as test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -201,6 +201,7 @@ async fn remote_tool_mode_selector_overrides_feature_flags() -> Result<()> {
             codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
             codex_code_mode::WAIT_TOOL_NAME.to_string(),
             "request_user_input".to_string(),
+            MULTI_AGENT_V2_NAMESPACE.to_string(),
             // Hosted Responses tool.
             "web_search".to_string(),
         ]
@@ -363,7 +364,7 @@ async fn unsupported_code_mode_warning_is_emitted_each_turn() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn multi_agent_config_precedence_overrides_remote_model_selector() -> Result<()> {
+async fn mandatory_multi_agent_v2_overrides_remote_model_selector() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let mut v2_model = remote_model("test-multi-agent-v2");
@@ -373,10 +374,6 @@ async fn multi_agent_config_precedence_overrides_remote_model_selector() -> Resu
         config
             .features
             .enable(Feature::Collab)
-            .expect("test config should allow feature update");
-        config
-            .features
-            .disable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
     })
     .await?;
@@ -392,36 +389,26 @@ async fn multi_agent_config_precedence_overrides_remote_model_selector() -> Resu
 
     let mut v1_model = remote_model("test-multi-agent-v1");
     v1_model.multi_agent_version = Some(MultiAgentVersion::V1);
-    let v1_body = response_body_for_remote_model(v1_model, |config| {
+    let v2_body = response_body_for_remote_model(v1_model, |config| {
         config
             .features
             .enable(Feature::Collab)
             .expect("test config should allow feature update");
-        config
-            .features
-            .disable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
     })
     .await?;
-    assert!(tool_names(&v1_body).contains(&"multi_agent_v1".to_string()));
+    assert!(tool_names(&v2_body).contains(&MULTI_AGENT_V2_NAMESPACE.to_string()));
+    assert!(!tool_names(&v2_body).contains(&"multi_agent_v1".to_string()));
 
     let mut disabled_model = remote_model("test-multi-agent-disabled");
     disabled_model.multi_agent_version = Some(MultiAgentVersion::Disabled);
-    let v2_body = response_body_for_remote_model(disabled_model, |config| {
-        config.agents_enabled = false;
-        config
-            .features
-            .enable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
-    })
-    .await?;
+    let v2_body = response_body_for_remote_model(disabled_model, |_| {}).await?;
     assert!(tool_names(&v2_body).contains(&MULTI_AGENT_V2_NAMESPACE.to_string()));
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> Result<()> {
+async fn remote_multi_agent_selector_cannot_downgrade_mandatory_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = wiremock::MockServer::start().await;
@@ -457,7 +444,7 @@ async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> 
             models_mock.requests().len(),
             test.codex.multi_agent_version(),
         ),
-        (1, None)
+        (1, Some(MultiAgentVersion::V2))
     );
 
     submit_thread_settings(
@@ -468,7 +455,10 @@ async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> 
         },
     )
     .await?;
-    assert_eq!(test.codex.multi_agent_version(), None);
+    assert_eq!(
+        test.codex.multi_agent_version(),
+        Some(MultiAgentVersion::V2)
+    );
 
     test.codex
         .submit(Op::UserInput {

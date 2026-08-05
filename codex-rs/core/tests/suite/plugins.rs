@@ -464,7 +464,7 @@ async fn capability_sections_render_in_developer_message_in_order() -> Result<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn agent_turns_route_curated_plugin_skills_after_auth_switch() -> Result<()> {
+async fn agent_turns_route_curated_plugin_skills_from_execution_auth() -> Result<()> {
     const CHATGPT_CURATED_PLUGIN_SKILL: &str = "chatgpt-plugin:chatgpt-skill";
     const API_CURATED_PLUGIN_SKILL: &str = "api-plugin:api-skill";
     const CURATED_PLUGIN_SKILLS: &[&str] =
@@ -502,16 +502,16 @@ async fn agent_turns_route_curated_plugin_skills_after_auth_switch() -> Result<(
             target_auth: TargetAuth::ApiKey,
             target_model_provider_id: OPENAI_PROVIDER_ID,
             target_prompt: "api key target turn",
-            expected_target_loaded_plugin_skills: &[API_CURATED_PLUGIN_SKILL],
-            expected_target_skill_description: "api description before",
+            expected_target_loaded_plugin_skills: &[CHATGPT_CURATED_PLUGIN_SKILL],
+            expected_target_skill_description: "chatgpt description",
         },
         Fixture {
             name: "Bedrock API key",
             target_auth: TargetAuth::BedrockApiKey,
             target_model_provider_id: AMAZON_BEDROCK_PROVIDER_ID,
             target_prompt: "bedrock key target turn",
-            expected_target_loaded_plugin_skills: &[API_CURATED_PLUGIN_SKILL],
-            expected_target_skill_description: "api description before",
+            expected_target_loaded_plugin_skills: &[CHATGPT_CURATED_PLUGIN_SKILL],
+            expected_target_skill_description: "chatgpt description",
         },
         Fixture {
             name: "ambient Bedrock",

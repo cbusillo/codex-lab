@@ -8,6 +8,7 @@ pub(crate) mod provider_routing;
 mod registry;
 pub(crate) mod role;
 pub(crate) mod status;
+pub(crate) mod user_agent_intent;
 
 pub(crate) use codex_protocol::protocol::AgentStatus;
 pub(crate) use control::AgentControl;

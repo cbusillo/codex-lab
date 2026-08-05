@@ -56,6 +56,18 @@ fn default_enabled_features_are_stable() {
 }
 
 #[test]
+fn multi_agent_v2_is_enabled_by_default() {
+    assert!(Features::with_defaults().enabled(Feature::MultiAgentV2));
+}
+
+#[test]
+fn multi_agent_v2_cannot_be_disabled() {
+    let mut features = Features::with_defaults();
+    features.disable(Feature::MultiAgentV2);
+    assert!(features.enabled(Feature::MultiAgentV2));
+}
+
+#[test]
 fn removed_apps_mcp_path_override_shapes_are_ignored() {
     let features = [
         toml::from_str::<FeaturesToml>("apps_mcp_path_override = true")

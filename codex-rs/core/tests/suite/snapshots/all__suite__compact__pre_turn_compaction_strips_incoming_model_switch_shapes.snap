@@ -20,7 +20,7 @@ Scenario: Pre-turn compaction during model switch (without pre-sampling model-sw
 00:message/user:BEFORE_SWITCH_USER
 01:message/user:<COMPACTION_SUMMARY>\nPRETURN_SWITCH_SUMMARY
 02:message/developer[2]:
-    [01] <model_switch>\nThe user was previously using a different model....
+    [01] <model_switch><bounded_world_state_section section="63fde66b7c23...
     [02] <PERMISSIONS_INSTRUCTIONS>
 03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
 04:message/user:AFTER_SWITCH_USER

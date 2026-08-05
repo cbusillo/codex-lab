@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use crate::SkillInjections;
 use crate::account_switching::RateLimitSwitchState;
+use crate::agent::user_agent_intent::record_user_agent_intent;
 use crate::build_skill_injections;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
@@ -242,6 +243,7 @@ pub(crate) async fn run_turn(
     }
 
     let user_input = turn_user_input(&input);
+    record_user_agent_intent(turn_context.extension_data.as_ref(), &user_input);
     let (required_servers, mentioned_plugins) =
         match required_mcp_servers_for_input(&sess, turn_context.as_ref(), &user_input)
             .or_cancel(&cancellation_token)
@@ -341,6 +343,8 @@ pub(crate) async fn run_turn(
         } else {
             Vec::new()
         };
+        let pending_user_input = turn_user_input(&pending_input);
+        record_user_agent_intent(turn_context.extension_data.as_ref(), &pending_user_input);
 
         if run_hooks_and_record_inputs(&sess, &turn_context, &pending_input).await {
             break;
@@ -362,7 +366,6 @@ pub(crate) async fn run_turn(
                     .await?
             }
             None => {
-                let pending_user_input = turn_user_input(&pending_input);
                 let (required_servers, _) = required_mcp_servers_for_input(
                     &sess,
                     turn_context.as_ref(),

@@ -91,8 +91,10 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        Some(true)
+        None
     );
+    assert!(description.contains("you MUST set `agent_type` to its canonical selector"));
+    assert!(description.contains("must never be encoded only in `task_name`"));
     assert!(properties.contains_key("fork_turns"));
     assert!(properties.contains_key("task_kind"));
     assert!(properties.contains_key("task_size"));
@@ -331,7 +333,7 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        Some(true)
+        None
     );
     assert!(!properties.contains_key("interrupt"));
     assert!(!properties.contains_key("items"));
@@ -379,7 +381,7 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        Some(true)
+        None
     );
     assert!(!properties.contains_key("items"));
     assert_eq!(

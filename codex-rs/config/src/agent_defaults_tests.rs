@@ -75,9 +75,11 @@ fn gpt_codex_aliases_resolve() {
 
 #[test]
 fn claude_opus_aliases_resolve_to_current_opus() {
-    let opus = agent_model_spec("claude-opus").expect("opus alias present");
-    assert_eq!(opus.slug, "claude-opus-5");
-    assert_eq!(opus.model_args, &["--model", "claude-opus-5"]);
+    for alias in ["opus", "claude-opus"] {
+        let opus = agent_model_spec(alias).expect("opus alias present");
+        assert_eq!(opus.slug, "claude-opus-5");
+        assert_eq!(opus.model_args, &["--model", "claude-opus-5"]);
+    }
 
     for legacy in ["claude-opus-4.6", "claude-opus-4.7", "claude-opus-4.8"] {
         let legacy = agent_model_spec(legacy).expect("legacy opus alias present");
@@ -115,6 +117,20 @@ fn google_intent_aliases_resolve_to_antigravity() {
         assert_eq!(spec.slug, "antigravity");
         assert!(spec.model_args.is_empty());
     }
+}
+
+#[test]
+fn natural_language_aliases_resolve_to_their_canonical_agent() {
+    for (alias, expected_slug) in natural_language_agent_aliases() {
+        let spec = agent_model_spec(expected_slug).expect("canonical agent should exist");
+        assert_eq!(spec.slug, *expected_slug, "alias {alias}");
+    }
+
+    assert!(
+        natural_language_agent_aliases()
+            .iter()
+            .all(|(alias, _)| !matches!(*alias, "code" | "coder" | "google"))
+    );
 }
 
 #[test]

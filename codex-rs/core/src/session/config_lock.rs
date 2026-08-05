@@ -343,7 +343,7 @@ mod tests {
         assert!(matches!(
             multi_agent_v2,
             FeatureToml::Config(MultiAgentV2ConfigToml {
-                enabled: Some(false),
+                enabled: Some(true),
                 max_concurrent_threads_per_session: Some(_),
                 min_wait_timeout_ms: Some(_),
                 max_wait_timeout_ms: Some(_),
