@@ -75,6 +75,14 @@ pub async fn discover_external_agent_capabilities(
     capabilities
 }
 
+/// Returns the cached capability snapshot for `backend` in `workspace` without spawning a process.
+pub fn cached_external_agent_capabilities(
+    backend: &ExternalCommandAgentBackendConfig,
+    workspace: &Path,
+) -> Option<ExternalAgentCapabilities> {
+    cached_discovery(&ExternalAgentDiscoveryCacheKey::new(backend, workspace))
+}
+
 pub(crate) async fn preflight_external_agent_backend(
     agent_type: Option<&str>,
     backend: &ExternalCommandAgentBackendConfig,

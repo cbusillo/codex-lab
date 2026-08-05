@@ -1,6 +1,8 @@
 use super::*;
 use codex_core::config::permission_profile_catalog;
 use futures::StreamExt;
+use std::collections::HashMap;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub(crate) struct CatalogRequestProcessor {
@@ -11,6 +13,8 @@ pub(crate) struct CatalogRequestProcessor {
     pub(super) config: Arc<Config>,
     pub(super) config_manager: ConfigManager,
     pub(super) workspace_settings_cache: Arc<workspace_settings::WorkspaceSettingsCache>,
+    pub(super) active_capability_refreshes:
+        Arc<tokio::sync::Mutex<HashMap<String, Arc<CancellationToken>>>>,
 }
 
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
@@ -117,6 +121,7 @@ impl CatalogRequestProcessor {
             config,
             config_manager,
             workspace_settings_cache,
+            active_capability_refreshes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -705,3 +710,5 @@ impl CatalogRequestProcessor {
             .map_err(|err| internal_error(format!("failed to update skill settings: {err}")))
     }
 }
+
+mod external_agent_capabilities;

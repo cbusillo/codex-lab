@@ -1085,6 +1085,17 @@
       },
       "type": "object"
     },
+    "ExternalAgentCapabilitiesRefreshParams": {
+      "properties": {
+        "refreshId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "refreshId"
+      ],
+      "type": "object"
+    },
     "ExternalAgentConfigDetectParams": {
       "properties": {
         "cwds": {

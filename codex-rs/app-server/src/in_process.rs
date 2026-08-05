@@ -111,6 +111,7 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
         ServerNotification::TurnCompleted(_)
             | ServerNotification::ThreadSettingsUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
+            | ServerNotification::ExternalAgentCapabilitiesUpdated(_)
     )
 }
 
