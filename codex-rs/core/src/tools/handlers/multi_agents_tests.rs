@@ -2580,6 +2580,126 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_wait_agent_returns_when_all_children_are_already_terminal() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "boot worker",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("spawn worker");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker should resolve");
+    let worker_path = session
+        .services
+        .agent_control
+        .get_agent_metadata(agent_id)
+        .expect("worker metadata")
+        .agent_path
+        .expect("worker path");
+    let child_thread = manager
+        .get_thread(agent_id)
+        .await
+        .expect("child thread should exist");
+    let status = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let status = session.services.agent_control.get_status(agent_id).await;
+            if status != AgentStatus::PendingInit {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker should leave pending initialization");
+    let child_turn = child_thread.session.new_default_turn().await;
+    if !crate::agent::status::is_final(&status) {
+        child_thread
+            .session
+            .send_event(
+                child_turn.as_ref(),
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    turn_id: child_turn.sub_id.clone(),
+                    started_at: None,
+                    last_agent_message: Some("done".to_string()),
+                    error: None,
+                    completed_at: None,
+                    duration_ms: None,
+                    time_to_first_token_ms: None,
+                }),
+            )
+            .await;
+    }
+    session
+        .input_queue
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                worker_path,
+                AgentPath::root(),
+                Vec::new(),
+                "worker completed".to_string(),
+                /*trigger_turn*/ false,
+            ),
+            /*parent_turn_id*/ None,
+        )
+        .await;
+    assert!(session.input_queue.has_pending_mailbox_items().await);
+    let _ = session.input_queue.drain_mailbox_input_items().await;
+    assert!(!session.input_queue.has_pending_mailbox_items().await);
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(1),
+        WaitAgentHandlerV2::default().handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("terminal children should not wait for the requested timeout")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "All child agents are terminal.".to_string(),
+            timed_out: false,
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
 async fn multi_agent_v2_wait_agent_rejects_timeout_below_configured_min() {
     let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();

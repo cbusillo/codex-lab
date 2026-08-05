@@ -160,6 +160,79 @@ async fn interrupt_agent_cancels_and_releases_external_agent() {
     );
 }
 
+#[tokio::test]
+async fn direct_children_all_terminal_includes_completed_external_agents() {
+    let harness = AgentControlHarness::new().await;
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let backend = crate::config::ExternalCommandAgentBackendConfig {
+        command: "/bin/true".to_string(),
+        ..Default::default()
+    };
+    let provider = ExternalAgentProviderProvenance::new(
+        Some("fixture_external"),
+        &backend,
+        harness.config.cwd.as_path(),
+        /*is_read_only*/ true,
+        /*cli_version*/ None,
+    );
+    harness.control.state.register_external_agent(
+        child_thread_id,
+        parent_thread_id,
+        AgentStatus::Completed(Some("done".to_string())),
+        provider,
+    );
+
+    assert!(
+        harness
+            .control
+            .direct_children_all_terminal(parent_thread_id)
+            .await
+            .expect("external child status should resolve")
+    );
+    assert!(
+        !harness
+            .control
+            .direct_children_all_terminal(ThreadId::new())
+            .await
+            .expect("empty child set should resolve")
+    );
+}
+
+#[tokio::test]
+async fn direct_children_all_terminal_includes_persisted_unloaded_native_edges() {
+    let harness = AgentControlHarness::new().await;
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let state = harness
+        .control
+        .upgrade()
+        .expect("thread manager state should be available");
+    let agent_graph_store = state
+        .agent_graph_store()
+        .expect("test harness should provide an agent graph store");
+    agent_graph_store
+        .upsert_thread_spawn_edge(
+            parent_thread_id,
+            child_thread_id,
+            codex_agent_graph_store::ThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("persist thread-spawn edge");
+
+    assert_eq!(
+        harness.control.get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert!(
+        harness
+            .control
+            .direct_children_all_terminal(parent_thread_id)
+            .await
+            .expect("persisted child status should resolve")
+    );
+}
+
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,
