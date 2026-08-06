@@ -92,6 +92,7 @@ pub(crate) struct LiveAgent {
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
+    pub(crate) supports_followup_messages: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<ExternalAgentProviderProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +100,8 @@ pub(crate) struct ListedAgent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) duration_ms: Option<u64>,
 }
+
+pub(crate) const EXTERNAL_AGENT_FOLLOWUP_UNSUPPORTED: &str = "external command agents run a single task and do not support follow-up messages; wait for completion or spawn a new agent for additional work";
 
 /// Control-plane handle for multi-agent operations.
 /// `AgentControl` is held by each session (via `SessionServices`). It provides capability to
@@ -152,6 +155,20 @@ impl AgentControl {
         self.rollout_budget.as_ref()
     }
 
+    pub(crate) fn supports_followup_messages(&self, agent_id: ThreadId) -> bool {
+        !self.is_external_agent(agent_id)
+    }
+
+    pub(crate) fn ensure_followup_supported(&self, agent_id: ThreadId) -> CodexResult<()> {
+        if self.supports_followup_messages(agent_id) {
+            Ok(())
+        } else {
+            Err(CodexErr::UnsupportedOperation(
+                EXTERNAL_AGENT_FOLLOWUP_UNSUPPORTED.to_string(),
+            ))
+        }
+    }
+
     /// Send rich user input items to an existing agent thread.
     pub(crate) async fn send_input(
         &self,
@@ -159,11 +176,7 @@ impl AgentControl {
         input: Vec<UserInput>,
         parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
-        if self.state.external_agent_status(agent_id).is_some() {
-            return Err(CodexErr::UnsupportedOperation(
-                "external agents do not accept direct input after spawn".to_string(),
-            ));
-        }
+        self.ensure_followup_supported(agent_id)?;
         let state = self.upgrade()?;
         self.ensure_execution_capacity_for_turn_start(agent_id, /*starts_turn*/ true)
             .await?;
@@ -193,11 +206,7 @@ impl AgentControl {
         agent_communication_context: AgentCommunicationContext,
         parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
-        if self.state.external_agent_status(agent_id).is_some() {
-            return Err(CodexErr::UnsupportedOperation(
-                "external command agents do not accept follow-up messages".to_string(),
-            ));
-        }
+        self.ensure_followup_supported(agent_id)?;
         let state = self.upgrade()?;
         self.ensure_execution_capacity_for_turn_start(agent_id, communication.trigger_turn)
             .await?;
@@ -461,6 +470,7 @@ impl AgentControl {
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
                 agent_status: root_thread.agent_status().await,
+                supports_followup_messages: true,
                 provider: None,
                 failure: None,
                 duration_ms: None,
@@ -483,22 +493,24 @@ impl AgentControl {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
-            let (agent_status, provider, failure, duration_ms) =
+            let (agent_status, supports_followup_messages, provider, failure, duration_ms) =
                 if let Some(snapshot) = self.state.external_agent_snapshot(thread_id) {
                     (
                         snapshot.status,
+                        false,
                         Some(snapshot.provider),
                         snapshot.failure,
                         Some(snapshot.duration_ms),
                     )
                 } else if let Ok(thread) = state.get_thread(thread_id).await {
-                    (thread.agent_status().await, None, None, None)
+                    (thread.agent_status().await, true, None, None, None)
                 } else {
                     continue;
                 };
             agents.push(ListedAgent {
                 agent_name,
                 agent_status,
+                supports_followup_messages,
                 provider,
                 failure,
                 duration_ms,

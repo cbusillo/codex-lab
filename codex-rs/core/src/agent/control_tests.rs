@@ -161,6 +161,107 @@ async fn interrupt_agent_cancels_and_releases_external_agent() {
 }
 
 #[tokio::test]
+async fn external_followup_rejection_preserves_running_state_and_provenance() {
+    let harness = AgentControlHarness::new().await;
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let backend = crate::config::ExternalCommandAgentBackendConfig {
+        command: "/bin/true".to_string(),
+        launch_family: Some("claude".to_string()),
+        ..Default::default()
+    };
+    let provider = ExternalAgentProviderProvenance::new(
+        Some("claude-opus-5"),
+        &backend,
+        harness.config.cwd.as_path(),
+        /*is_read_only*/ true,
+        Some("1.2.3".to_string()),
+    );
+    let routing = crate::agent::provider_routing::ProviderRoutingSummary {
+        kind: crate::agent::provider_routing::ProviderRoutingKind::Explicit,
+        requested: Some("claude-opus-5".to_string()),
+        effective: "claude-opus-5".to_string(),
+        reason: "explicit test selection".to_string(),
+        skipped_candidates: Vec::new(),
+    };
+    let cancellation_token = harness.control.state.register_external_agent(
+        child_thread_id,
+        parent_thread_id,
+        AgentStatus::Running,
+        provider.clone(),
+    );
+    harness
+        .control
+        .persist_external_agent_run_started(
+            parent_thread_id,
+            child_thread_id,
+            Some("reviewer".to_string()),
+            &routing,
+            &provider,
+        )
+        .await;
+
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/reviewer").expect("agent path"),
+        Vec::new(),
+        "please follow up".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let communication_error = harness
+        .control
+        .send_inter_agent_communication(
+            child_thread_id,
+            communication,
+            AgentCommunicationContext::new(AgentCommunicationKind::Followup, parent_thread_id),
+            /*parent_turn_id*/ None,
+        )
+        .await
+        .expect_err("external follow-up should be rejected");
+    assert_matches!(
+        communication_error.details(),
+        CodexErrorDetails::UnsupportedOperation(message)
+            if message == EXTERNAL_AGENT_FOLLOWUP_UNSUPPORTED
+    );
+
+    let input_error = harness
+        .control
+        .send_input(
+            child_thread_id,
+            text_input("please follow up"),
+            /*parent_turn_id*/ None,
+        )
+        .await
+        .expect_err("external direct input should be rejected");
+    assert_matches!(
+        input_error.details(),
+        CodexErrorDetails::UnsupportedOperation(message)
+            if message == EXTERNAL_AGENT_FOLLOWUP_UNSUPPORTED
+    );
+    assert!(!cancellation_token.is_cancelled());
+    assert_eq!(
+        harness.control.get_status(child_thread_id).await,
+        AgentStatus::Running
+    );
+    assert!(!harness.control.supports_followup_messages(child_thread_id));
+
+    let state = harness
+        .control
+        .upgrade()
+        .expect("thread manager state should be available");
+    let runs = state
+        .agent_graph_store()
+        .expect("test harness should provide an agent graph store")
+        .list_external_agent_runs(parent_thread_id)
+        .await
+        .expect("external agent runs should load");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].terminal_state, None);
+    assert_eq!(runs[0].failure_kind, None);
+    assert_eq!(runs[0].failure_message, None);
+}
+
+#[tokio::test]
 async fn cancelled_external_agent_run_remains_durable_after_release() {
     let harness = AgentControlHarness::new().await;
     let parent_thread_id = ThreadId::new();
