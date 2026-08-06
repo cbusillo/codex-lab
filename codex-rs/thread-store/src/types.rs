@@ -346,6 +346,158 @@ pub struct ThreadPage {
     pub next_cursor: Option<String>,
 }
 
+pub const DEFAULT_RETENTION_PREVIEW_LIMIT: usize = 100;
+pub const MAX_RETENTION_PREVIEW_LIMIT: usize = 100;
+
+/// Parameters for a bounded, read-only rollout-retention preview.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionPreviewParams {
+    /// Maximum number of active and archived rollouts to return together.
+    pub limit: Option<usize>,
+    /// Opaque cursor returned by a previous preview call.
+    pub cursor: Option<String>,
+}
+
+/// Whether a rollout could be acted on by a later retention operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionDisposition {
+    Candidate,
+    Protected,
+}
+
+impl RetentionDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Protected => "protected",
+        }
+    }
+}
+
+/// Store collection containing a rollout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionCollection {
+    Active,
+    Archived,
+}
+
+impl RetentionCollection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Archived => "archived",
+        }
+    }
+}
+
+/// Read-only classification explaining why a rollout is eligible or protected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionReason {
+    ColdInactive,
+    ActiveRolloutLease,
+    ActiveWriter,
+    ForkReferenced,
+    ForkHistoryPointer,
+    AlreadyCompressed,
+    TooRecent,
+    CompressionDisabled,
+    ReferenceMetadataUncertain,
+    RolloutMetadataUncertain,
+    RolloutPathUnavailable,
+    LeaseStateUncertain,
+    WriterStateUncertain,
+    CompressionEstimateUnavailable,
+}
+
+impl RetentionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ColdInactive => "cold_inactive",
+            Self::ActiveRolloutLease => "active_rollout_lease",
+            Self::ActiveWriter => "active_writer",
+            Self::ForkReferenced => "fork_referenced",
+            Self::ForkHistoryPointer => "fork_history_pointer",
+            Self::AlreadyCompressed => "already_compressed",
+            Self::TooRecent => "too_recent",
+            Self::CompressionDisabled => "compression_disabled",
+            Self::ReferenceMetadataUncertain => "reference_metadata_uncertain",
+            Self::RolloutMetadataUncertain => "rollout_metadata_uncertain",
+            Self::RolloutPathUnavailable => "rollout_path_unavailable",
+            Self::LeaseStateUncertain => "lease_state_uncertain",
+            Self::WriterStateUncertain => "writer_state_uncertain",
+            Self::CompressionEstimateUnavailable => "compression_estimate_unavailable",
+        }
+    }
+}
+
+/// Action a later mutating retention operation could apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionAction {
+    Compress,
+    Keep,
+}
+
+impl RetentionAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compress => "compress",
+            Self::Keep => "keep",
+        }
+    }
+}
+
+/// One rollout in a retention preview.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionPreviewItem {
+    pub thread_id: ThreadId,
+    pub collection: RetentionCollection,
+    pub disposition: RetentionDisposition,
+    pub reason: RetentionReason,
+    pub current_storage_bytes: u64,
+    pub estimated_recoverable_bytes: u64,
+    pub proposed_action: RetentionAction,
+    pub proposed_path: Option<PathBuf>,
+    pub recovery_path: Option<PathBuf>,
+}
+
+/// Page-scoped byte and disposition totals.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionPreviewTotals {
+    pub candidate_count: usize,
+    pub protected_count: usize,
+    pub current_storage_bytes: u64,
+    pub estimated_recoverable_bytes: u64,
+}
+
+/// Bounded diagnostics for metadata that could not safely participate in eligibility decisions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionPreviewDiagnostics {
+    pub scanned_rollouts: usize,
+    pub unreadable_rollouts: usize,
+    pub duplicate_thread_ids: usize,
+    pub scan_truncated: bool,
+}
+
+/// Deterministic, preview-only retention report page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionPreviewPage {
+    pub schema_version: u32,
+    pub preview_only: bool,
+    pub items: Vec<RetentionPreviewItem>,
+    pub next_cursor: Option<String>,
+    pub page_totals: RetentionPreviewTotals,
+    pub diagnostics: RetentionPreviewDiagnostics,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredThreadSearchResult {
     pub thread: StoredThread,

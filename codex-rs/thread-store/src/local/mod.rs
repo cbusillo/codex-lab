@@ -8,6 +8,7 @@ mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
 mod read_thread;
+mod retention_preview;
 // This lands before the reader PRs that consume the shared lineage resolver.
 #[allow(dead_code)]
 mod rollout_lineage;
@@ -54,6 +55,8 @@ use crate::PreparedFork;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::RetentionPreviewPage;
+use crate::RetentionPreviewParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
 use crate::StoredModelContext;
@@ -507,6 +510,13 @@ impl ThreadStore for LocalThreadStore {
 
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
         Box::pin(async move { list_threads::list_threads(self, params).await })
+    }
+
+    fn retention_preview(
+        &self,
+        params: RetentionPreviewParams,
+    ) -> ThreadStoreFuture<'_, RetentionPreviewPage> {
+        Box::pin(async move { retention_preview::retention_preview(self, params).await })
     }
 
     fn supports_paginated_history_lists(&self) -> bool {

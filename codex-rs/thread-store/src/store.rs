@@ -21,6 +21,8 @@ use crate::PreparedFork;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::RetentionPreviewPage;
+use crate::RetentionPreviewParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
 use crate::StoredModelContext;
@@ -122,6 +124,21 @@ pub trait ThreadStore: Any + Send + Sync {
 
     /// Lists stored threads matching the supplied filters.
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage>;
+
+    /// Produces a bounded retention report without mutating thread or rollout state.
+    ///
+    /// Implementations may perform a bounded reference scan for every page. Callers should prefer
+    /// the default page size unless they need incremental output.
+    fn retention_preview(
+        &self,
+        _params: RetentionPreviewParams,
+    ) -> ThreadStoreFuture<'_, RetentionPreviewPage> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "retention_preview",
+            })
+        })
+    }
 
     /// Whether paginated threads can hydrate durable history through turn and item lists.
     fn supports_paginated_history_lists(&self) -> bool {
