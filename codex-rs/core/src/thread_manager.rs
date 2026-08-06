@@ -321,11 +321,36 @@ pub fn thread_store_from_config(
     config: &Config,
     state_db: Option<StateDbHandle>,
 ) -> Arc<dyn ThreadStore> {
+    thread_store_from_config_with_background_workers(config, state_db, BackgroundWorkers::Enabled)
+}
+
+/// Builds the configured thread store without starting background storage workers.
+///
+/// Read-only CLI commands use this path so loading the store cannot mutate rollout state.
+pub fn read_only_thread_store_from_config(
+    config: &Config,
+    state_db: Option<StateDbHandle>,
+) -> Arc<dyn ThreadStore> {
+    thread_store_from_config_with_background_workers(config, state_db, BackgroundWorkers::Disabled)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackgroundWorkers {
+    Enabled,
+    Disabled,
+}
+
+fn thread_store_from_config_with_background_workers(
+    config: &Config,
+    state_db: Option<StateDbHandle>,
+    background_workers: BackgroundWorkers,
+) -> Arc<dyn ThreadStore> {
     match &config.experimental_thread_store {
         ThreadStoreConfig::Local => {
-            if config
-                .features
-                .enabled(Feature::LocalThreadStoreCompression)
+            if background_workers == BackgroundWorkers::Enabled
+                && config
+                    .features
+                    .enabled(Feature::LocalThreadStoreCompression)
             {
                 codex_rollout::spawn_rollout_compression_worker(config.codex_home.to_path_buf());
             }

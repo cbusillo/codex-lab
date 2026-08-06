@@ -462,8 +462,7 @@ pub async fn open_rollout_line_reader(path: &Path) -> io::Result<RolloutLineRead
 }
 
 /// Returns the compressed `.jsonl.zst` path for a rollout path.
-#[cfg(test)]
-pub(crate) fn compressed_rollout_path(path: &Path) -> PathBuf {
+pub fn compressed_rollout_path(path: &Path) -> PathBuf {
     path::compressed_rollout_path(path)
 }
 

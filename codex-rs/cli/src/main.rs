@@ -59,6 +59,7 @@ mod marketplace_cmd;
 mod mcp_cmd;
 mod plugin_cmd;
 mod remote_control_cmd;
+mod retention_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
 mod state_db_recovery;
@@ -69,6 +70,7 @@ use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::remote_control_cmd::RemoteControlCommand;
+use crate::retention_cmd::RetentionCommand;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
@@ -190,6 +192,9 @@ enum Subcommand {
 
     /// Unarchive a saved session by id or session name.
     Unarchive(SessionArchiveCommand),
+
+    /// Preview local rollout-retention candidates without modifying session data.
+    Retention(RetentionCommand),
 
     /// Fork a previous interactive session (picker by default; use --last to fork the most recent).
     Fork(ForkCommand),
@@ -1372,6 +1377,22 @@ async fn cli_main(
             .await?;
             println!("{output}");
         }
+        Some(Subcommand::Retention(cmd)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "retention",
+            )?;
+            let loader_overrides =
+                loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
+            retention_cmd::run(
+                cmd,
+                root_config_overrides,
+                loader_overrides,
+                root_strict_config,
+            )
+            .await?;
+        }
         Some(Subcommand::Fork(ForkCommand {
             session_id,
             last,
@@ -1751,6 +1772,7 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Archive(_)
         | Subcommand::Delete(_)
         | Subcommand::Unarchive(_)
+        | Subcommand::Retention(_)
         | Subcommand::Fork(_)
         | Subcommand::Mcp(_)
         | Subcommand::Sandbox(_)
@@ -2319,6 +2341,7 @@ fn unsupported_subcommand_name_for_strict_config(
         | Some(Subcommand::Archive(_))
         | Some(Subcommand::Delete(_))
         | Some(Subcommand::Unarchive(_))
+        | Some(Subcommand::Retention(_))
         | Some(Subcommand::Fork(_))
         | Some(Subcommand::Doctor(_)) => None,
         Some(Subcommand::AppServer(app_server)) if app_server.subcommand.is_none() => None,
