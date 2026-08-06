@@ -2,11 +2,11 @@
 
 ## Planning
 
-- Treat [cbusillo/codex-lab#28](https://github.com/cbusillo/codex-lab/issues/28)
-  as the durable recovery point for Codex Lab MVP planning.
-- Use GitHub issues labeled `plan` and `plan:active` for active cross-session
-  work. Do not rely on local handoff files or local plan drafts as the source of
-  truth for GitHub-backed work.
+- Treat GitHub issues as the durable planning database. Use the GitHub planning
+  index and `plan` / `plan:active` state to discover the current roadmap and
+  workstream; do not hardcode a transient active issue as the recovery point.
+- Do not rely on local handoff files or local plan drafts as the source of truth
+  for GitHub-backed work.
 - For upstream refresh, fork synchronization, or convergence work, use the
   `$upstream-convergence` skill. Treat `upstream/convergence-policy.json`,
   `upstream/convergence-contracts.md`, and the repository-local convergence

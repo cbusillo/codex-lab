@@ -820,6 +820,8 @@ fn seed_completed_background_review(
             snapshot_commit: Some(head_sha.to_string()),
             head_at_launch: Some(head_sha.to_string()),
             worktree_diff_fingerprint: None,
+            current_turn: None,
+            build_provenance: None,
         },
         review_target: CoreReviewTarget::UncommittedChanges,
         started_at_unix_secs: SEEDED_STARTED_AT,

@@ -8,6 +8,7 @@ use codex_protocol::protocol::ReviewTarget;
 use pretty_assertions::assert_eq;
 
 use super::AutoReviewBudget;
+use super::AutoReviewCurrentTurnTarget;
 use super::AutoReviewDetailKind;
 use super::AutoReviewDiagnostics;
 use super::AutoReviewDispositionActor;
@@ -1610,7 +1611,7 @@ fn mark_superseded_by_fingerprint_requires_matching_review_target() -> anyhow::R
     store.save_run(&matching_turn_diff)?;
 
     let changed = store.mark_superseded_by_fingerprint_with_target(
-        "sha256:abc",
+        "sha256:second-turn",
         "new_run",
         Some("main"),
         Some("head-2"),
@@ -1628,6 +1629,102 @@ fn mark_superseded_by_fingerprint_requires_matching_review_target() -> anyhow::R
         store.load_run("matching_turn_diff")?.status,
         AutoReviewRunStatus::Superseded
     );
+    Ok(())
+}
+
+#[test]
+fn duplicate_identity_prefers_current_turn_diff_over_worktree_fingerprint() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let review_target = ReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:exact-turn".to_string(),
+    };
+    let mut stored_target = target_with_fingerprint("sha256:unrelated-worktree");
+    stored_target.current_turn = Some(sample_current_turn_target(
+        "turn/stored 1",
+        "sha256:exact-turn",
+    ));
+    let run = AutoReviewRun {
+        target: stored_target,
+        review_target: review_target.clone(),
+        ..sample_run("exact-turn", &sample_output(Vec::new()))
+    };
+    store.save_run(&run)?;
+    let mut active_target = target_with_fingerprint("sha256:different-worktree");
+    active_target.current_turn = Some(sample_current_turn_target(
+        "turn/active 2",
+        "sha256:exact-turn",
+    ));
+
+    let duplicate = store.find_duplicate_by_fingerprint_with_target_proof_and_filter(
+        "sha256:exact-turn",
+        Some(&active_target),
+        Some(&review_target),
+        |_| true,
+    )?;
+
+    assert_eq!(
+        duplicate.map(|duplicate| duplicate.run_id),
+        Some("exact-turn".to_string())
+    );
+    assert_eq!(
+        store.find_duplicate_by_fingerprint_with_target_proof_and_filter(
+            "sha256:unrelated-worktree",
+            Some(&active_target),
+            Some(&review_target),
+            |_| true,
+        )?,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn current_turn_target_tolerates_newer_persisted_fields() -> anyhow::Result<()> {
+    let target: AutoReviewCurrentTurnTarget = serde_json::from_value(serde_json::json!({
+        "turn_id": "tools/call 7",
+        "diff_fingerprint": "sha256:exact-turn",
+        "changed_path_count": 1,
+        "diff_bytes": 128,
+        "construction_error": null,
+        "newer_field": "ignored by older binaries"
+    }))?;
+
+    assert_eq!(target.turn_id, "tools/call 7");
+    Ok(())
+}
+
+#[test]
+fn current_turn_duplicate_does_not_cross_branch_target_proof() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let review_target = ReviewTarget::CurrentTurnDiff {
+        fingerprint: "sha256:exact-turn".to_string(),
+    };
+    let mut stored_target = sample_target("main", "head-2", "/repo");
+    stored_target.current_turn = Some(sample_current_turn_target("turn-main", "sha256:exact-turn"));
+    let run = AutoReviewRun {
+        target: stored_target,
+        review_target: review_target.clone(),
+        ..sample_run("stale-branch-turn", &sample_output(Vec::new()))
+    };
+    store.save_run(&run)?;
+    let mut active_target = sample_target("other-branch", "head-2", "/repo");
+    active_target.current_turn = Some(sample_current_turn_target(
+        "turn-other",
+        "sha256:exact-turn",
+    ));
+
+    let duplicate = store.find_duplicate_by_fingerprint_with_target_proof_and_filter(
+        "sha256:exact-turn",
+        Some(&active_target),
+        Some(&review_target),
+        |_| true,
+    )?;
+
+    assert_eq!(duplicate, None);
     Ok(())
 }
 
@@ -1838,6 +1935,16 @@ fn target_with_fingerprint(fingerprint: &str) -> AutoReviewRunTarget {
     }
 }
 
+fn sample_current_turn_target(turn_id: &str, fingerprint: &str) -> AutoReviewCurrentTurnTarget {
+    AutoReviewCurrentTurnTarget {
+        turn_id: turn_id.to_string(),
+        diff_fingerprint: Some(fingerprint.to_string()),
+        changed_path_count: Some(1),
+        diff_bytes: Some(128),
+        construction_error: None,
+    }
+}
+
 fn sample_target(branch: &str, head_sha: &str, worktree_path: &str) -> AutoReviewRunTarget {
     AutoReviewRunTarget {
         branch: Some(branch.to_string()),
@@ -1848,6 +1955,8 @@ fn sample_target(branch: &str, head_sha: &str, worktree_path: &str) -> AutoRevie
         snapshot_commit: None,
         head_at_launch: None,
         worktree_diff_fingerprint: None,
+        current_turn: None,
+        build_provenance: None,
     }
 }
 

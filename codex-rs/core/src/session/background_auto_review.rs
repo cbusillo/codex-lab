@@ -94,29 +94,31 @@ impl Session {
         };
         let turn_diff = turn_diff.and_then(non_empty_turn_diff);
         let turn_diff_fingerprint = turn_diff.as_deref().and_then(diff_fingerprint);
-        let after_fingerprint = background_review_fingerprint_for_cwd(&cwd).await;
-        let schedule_fingerprint = after_fingerprint.or_else(|| turn_diff_fingerprint.clone());
-        let schedule = {
+        let schedule = if let Some(fingerprint) = turn_diff_fingerprint.as_ref() {
             let mut state = self.state.lock().await;
             state
                 .background_auto_review
-                .complete_regular_turn_from_start(start, schedule_fingerprint)
+                .complete_regular_turn_from_exact_diff(start, fingerprint.clone())
+        } else {
+            let after_fingerprint = background_review_fingerprint_for_cwd(&cwd).await;
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .complete_regular_turn_from_start(start, after_fingerprint)
         };
         let Some(schedule) = schedule else {
             debug!(turn_id = %turn_context.sub_id, "background auto review skipped: clean, unchanged, or duplicate fingerprint");
             return;
         };
-        let Some(turn_diff) = turn_diff else {
-            debug!("background auto review skipped: current-turn diff unavailable");
-            return;
-        };
-        let Some(turn_diff_fingerprint) = turn_diff_fingerprint else {
-            debug!("background auto review skipped: current-turn diff unavailable");
-            return;
-        };
-        let review_target = ReviewTarget::CurrentTurnDiff {
-            fingerprint: turn_diff_fingerprint,
-        };
+        let exact_turn_target = turn_diff.as_ref().zip(turn_diff_fingerprint.as_ref());
+        let review_target = exact_turn_target.map_or_else(
+            || ReviewTarget::Custom {
+                instructions: "current-turn diff unavailable".to_string(),
+            },
+            |(_, fingerprint)| ReviewTarget::CurrentTurnDiff {
+                fingerprint: fingerprint.clone(),
+            },
+        );
         let model = turn_context
             .config
             .review_model
@@ -135,11 +137,54 @@ impl Session {
                 .map(|effort| effort.to_string()),
             /*prompt_token_estimate*/ None,
         )
-        .await
-        .with_background_budget(
-            turn_context.config.background_auto_review_budget.clone(),
-            turn_diff.len(),
-        );
+        .await;
+        let (persistence, target_construction_error) = match exact_turn_target {
+            Some((turn_diff, fingerprint)) => (
+                persistence
+                    .with_current_turn_target(
+                        turn_context.sub_id.clone(),
+                        turn_diff,
+                        fingerprint.clone(),
+                    )
+                    .with_background_budget(
+                        turn_context.config.background_auto_review_budget.clone(),
+                        turn_diff.len(),
+                    ),
+                None,
+            ),
+            None => {
+                let error_summary =
+                    "exact current-turn diff was unavailable; review scope was not widened"
+                        .to_string();
+                (
+                    persistence
+                        .with_unavailable_current_turn_target(
+                            turn_context.sub_id.clone(),
+                            error_summary.clone(),
+                        )
+                        .with_background_budget(
+                            turn_context.config.background_auto_review_budget.clone(),
+                            /*scope_bytes*/ 0,
+                        ),
+                    Some(error_summary),
+                )
+            }
+        };
+        if let Some(error_summary) = target_construction_error {
+            self.record_skipped_background_auto_review(
+                &persistence,
+                schedule.generation,
+                &schedule.fingerprint,
+                error_summary,
+            )
+            .await;
+            debug!("background auto review skipped: current-turn diff unavailable");
+            return;
+        }
+        let Some(turn_diff) = turn_diff else {
+            debug!("background auto review skipped: reviewable turn diff was lost");
+            return;
+        };
         if let Some(duplicate) = self
             .resolve_durable_background_auto_review_duplicate(&persistence)
             .await

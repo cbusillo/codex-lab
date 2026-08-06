@@ -2958,6 +2958,7 @@ dependencies = [
  "codex-utils-pty",
  "codex-utils-stream-parser",
  "codex-utils-string",
+ "codex-version",
  "codex-web-search-extension",
  "codex-windows-sandbox",
  "core_test_support",

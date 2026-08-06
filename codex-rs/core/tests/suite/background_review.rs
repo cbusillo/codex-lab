@@ -74,8 +74,8 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Background Review only schedules when the worktree fingerprint changes, so
-/// the turn has to run inside a real repository with a committed baseline.
+/// Background Review retains the worktree fingerprint as freshness evidence,
+/// so integration fixtures use a real repository with a committed baseline.
 fn create_git_repo() -> Result<TempDir> {
     let repo = TempDir::new()?;
     run_git(repo.path(), &["init", "-q", "-b", "main"])?;
@@ -269,6 +269,31 @@ async fn code_changing_turn_auto_triggers_background_review_and_no_op_turn_does_
     skip_if_no_network!(Ok(()));
 
     let repo = create_git_repo()?;
+    run_git(repo.path(), &["branch", "stale"])?;
+    std::fs::write(repo.path().join("main-only.txt"), "newer main history\n")?;
+    run_git(repo.path(), &["add", "main-only.txt"])?;
+    run_git(
+        repo.path(),
+        &[
+            "-c",
+            "user.name=Codex Test",
+            "-c",
+            "user.email=codex@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "advance main",
+        ],
+    )?;
+    run_git(repo.path(), &["checkout", "-q", "stale"])?;
+    std::fs::write(
+        repo.path().join("README.md"),
+        "initial\npreexisting tracked dirt marker\n",
+    )?;
+    std::fs::write(
+        repo.path().join("preexisting-untracked.txt"),
+        "preexisting untracked dirt marker\n",
+    )?;
     let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
     let server = responses::start_mock_server().await;
     let mut bodies = code_changing_turn_responses("turn1");
@@ -278,7 +303,7 @@ async fn code_changing_turn_auto_triggers_background_review_and_no_op_turn_does_
         responses::ev_completed("resp-review"),
     ]));
     bodies.push(assistant_only_turn_response("turn2"));
-    responses::mount_sse_sequence(&server, bodies).await;
+    let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
 
     let test = build_codex_in_repo(&server, cwd.clone(), /*budget*/ None).await?;
     Box::pin(submit_turn(&test.codex, &cwd, "add the feature")).await?;
@@ -323,6 +348,32 @@ async fn code_changing_turn_auto_triggers_background_review_and_no_op_turn_does_
     assert_eq!(run.review_target, statuses[0].review_target);
     assert_eq!(run.finding_count, 1);
     assert_eq!(run.error_summary, None);
+    assert_eq!(run.target.branch.as_deref(), Some("stale"));
+    assert!(run.target.worktree_diff_fingerprint.is_some());
+    assert!(run.target.build_provenance.is_some());
+    let current_turn = run
+        .target
+        .current_turn
+        .as_ref()
+        .context("current-turn identity must be durable")?;
+    let ReviewTarget::CurrentTurnDiff { fingerprint } = &run.review_target else {
+        unreachable!("background review target asserted above")
+    };
+    assert_eq!(
+        current_turn.diff_fingerprint.as_deref(),
+        Some(fingerprint.as_str())
+    );
+    assert_eq!(current_turn.changed_path_count, Some(1));
+    assert!(current_turn.diff_bytes.is_some_and(|bytes| bytes > 0));
+    assert_eq!(current_turn.construction_error, None);
+
+    let review_request = responses_mock
+        .last_request()
+        .context("background review request must be captured")?;
+    let review_input = serde_json::to_string(&review_request.input())?;
+    assert!(review_input.contains("feature.rs"));
+    assert!(!review_input.contains("preexisting tracked dirt marker"));
+    assert!(!review_input.contains("preexisting untracked dirt marker"));
 
     // A turn that leaves the worktree untouched must not schedule anything.
     Box::pin(submit_turn(
@@ -333,6 +384,70 @@ async fn code_changing_turn_auto_triggers_background_review_and_no_op_turn_does_
     .await?;
     Box::pin(assert_turn_schedules_no_background_review(&test.codex)).await;
     assert_eq!(single_run(&store).run_id, run_id);
+
+    Ok(())
+}
+
+/// A filesystem mutation that cannot produce an exact turn diff must end as a
+/// durable skip; it must never substitute the now-dirty whole worktree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_exact_turn_diff_persists_skip_without_launching_review() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let shell_arguments = serde_json::json!({
+        "command": "printf 'shell mutation\\n' > shell-created.txt",
+        "login": false,
+        "timeout_ms": 1_000,
+    });
+    let responses_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("resp-shell-tool"),
+                responses::ev_function_call(
+                    "call-shell",
+                    "shell_command",
+                    &serde_json::to_string(&shell_arguments)?,
+                ),
+                responses::ev_completed("resp-shell-tool"),
+            ]),
+            assistant_only_turn_response("shell-final"),
+        ],
+    )
+    .await;
+    let test = build_codex_in_repo(&server, cwd.clone(), /*budget*/ None).await?;
+
+    Box::pin(submit_turn(
+        &test.codex,
+        &cwd,
+        "create a file with the shell",
+    ))
+    .await?;
+    let statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Skipped,
+    ))
+    .await;
+
+    assert_eq!(responses_mock.requests().len(), 2, "review must not launch");
+    let run = single_run(&AutoReviewStore::for_scope(
+        test.codex_home_path(),
+        repo.path(),
+    ));
+    assert_eq!(run.status, AutoReviewRunStatus::Skipped);
+    assert_eq!(run.run_id, statuses[0].run_id);
+    assert_eq!(
+        run.error_summary.as_deref(),
+        Some("exact current-turn diff was unavailable; review scope was not widened")
+    );
+    assert!(
+        run.target
+            .current_turn
+            .is_some_and(|target| target.construction_error.is_some())
+    );
 
     Ok(())
 }
@@ -796,6 +911,8 @@ fn seed_background_review(
             snapshot_commit: None,
             head_at_launch: None,
             worktree_diff_fingerprint: None,
+            current_turn: None,
+            build_provenance: None,
         },
         review_target: ReviewTarget::UncommittedChanges,
         started_at_unix_secs: 1_700_000_000,

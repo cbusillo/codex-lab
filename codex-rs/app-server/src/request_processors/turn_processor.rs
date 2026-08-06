@@ -4,6 +4,7 @@ use codex_agent_extension::AgentRun;
 use codex_agent_extension::AgentRunner;
 use codex_app_server_protocol::BackgroundAutoReviewControlReason as ApiBackgroundAutoReviewControlReason;
 use codex_auto_review::AutoReviewBudget as CoreAutoReviewBudget;
+use codex_auto_review::AutoReviewBuildProvenance;
 use codex_auto_review::AutoReviewDiagnostics;
 use codex_auto_review::AutoReviewDispositionActor as CoreAutoReviewDispositionActor;
 use codex_auto_review::AutoReviewFindingDisposition as CoreAutoReviewFindingDisposition;
@@ -541,6 +542,8 @@ impl TurnRequestProcessor {
                 .as_ref()
                 .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
             worktree_diff_fingerprint,
+            current_turn: None,
+            build_provenance: Some(current_auto_review_build_provenance()),
         }
     }
 
@@ -2045,6 +2048,19 @@ impl TurnRequestProcessor {
             raw_events_enabled,
         )
         .await
+    }
+}
+
+fn current_auto_review_build_provenance() -> AutoReviewBuildProvenance {
+    let provenance = codex_version::build_provenance();
+    AutoReviewBuildProvenance {
+        schema_version: provenance.schema_version,
+        version: provenance.version,
+        source_commit: provenance.source_commit,
+        dirty_state: provenance.dirty_state.as_str().to_string(),
+        build_profile: provenance.build_profile,
+        build_channel: provenance.build_channel,
+        executable_path: provenance.executable_path,
     }
 }
 
