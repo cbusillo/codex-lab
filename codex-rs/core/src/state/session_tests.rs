@@ -30,6 +30,49 @@ fn background_auto_review_skips_unchanged_dirty_fingerprint() {
 }
 
 #[test]
+fn background_auto_review_exact_diff_ignores_preexisting_worktree_fingerprint() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn(
+        "turn-1".to_string(),
+        Some("sha256:preexisting-dirt".to_string()),
+    );
+    let start = state
+        .take_regular_turn_start("turn-1")
+        .expect("turn start must exist");
+
+    let schedule =
+        state.complete_regular_turn_from_exact_diff(start, "sha256:exact-turn-diff".to_string());
+
+    assert_eq!(
+        schedule,
+        Some(BackgroundAutoReviewSchedule {
+            generation: 1,
+            fingerprint: "sha256:exact-turn-diff".to_string(),
+        })
+    );
+}
+
+#[test]
+fn background_auto_review_exact_diff_survives_commit_during_turn() {
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn(
+        "turn-1".to_string(),
+        Some("sha256:clean-start-and-end".to_string()),
+    );
+    let start = state
+        .take_regular_turn_start("turn-1")
+        .expect("turn start must exist");
+
+    let schedule = state
+        .complete_regular_turn_from_exact_diff(start, "sha256:committed-turn-diff".to_string());
+
+    assert_eq!(
+        schedule.map(|schedule| schedule.fingerprint),
+        Some("sha256:committed-turn-diff".to_string())
+    );
+}
+
+#[test]
 fn background_auto_review_skips_stale_overlapping_turn_completion() {
     let mut state = BackgroundAutoReviewSchedulerState::default();
     state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));

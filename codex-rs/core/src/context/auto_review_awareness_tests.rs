@@ -434,6 +434,8 @@ fn sample_target(branch: &str, head_sha: &str, worktree_path: &str) -> AutoRevie
         snapshot_commit: None,
         head_at_launch: None,
         worktree_diff_fingerprint: None,
+        current_turn: None,
+        build_provenance: None,
     }
 }
 

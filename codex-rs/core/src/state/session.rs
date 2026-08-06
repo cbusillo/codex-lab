@@ -203,6 +203,24 @@ impl BackgroundAutoReviewSchedulerState {
         })
     }
 
+    pub(crate) fn complete_regular_turn_from_exact_diff(
+        &mut self,
+        start: BackgroundAutoReviewRegularTurnStart,
+        diff_fingerprint: String,
+    ) -> Option<BackgroundAutoReviewSchedule> {
+        // The exact turn diff is authoritative even when the turn committed its work and restored
+        // the worktree to the same fingerprint it had at turn start.
+        if start.generation != self.generation || self.has_pending_fingerprint(&diff_fingerprint) {
+            return None;
+        }
+
+        self.generation = self.generation.saturating_add(1);
+        Some(BackgroundAutoReviewSchedule {
+            generation: self.generation,
+            fingerprint: diff_fingerprint,
+        })
+    }
+
     fn has_pending_fingerprint(&self, fingerprint: &str) -> bool {
         self.pending_review
             .as_ref()

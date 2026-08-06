@@ -1434,10 +1434,51 @@ pub struct AutoReviewRunTarget {
     pub head_at_launch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_diff_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_turn: Option<AutoReviewCurrentTurnTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_provenance: Option<AutoReviewBuildProvenance>,
+}
+
+/// Immutable identity for the exact current-turn diff a Background Review was
+/// asked to review, or the bounded reason why that identity could not be built.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AutoReviewCurrentTurnTarget {
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_path_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub construction_error: Option<String>,
+}
+
+/// Build identity of the process that constructed an auto-review target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AutoReviewBuildProvenance {
+    pub schema_version: u32,
+    pub version: String,
+    pub source_commit: String,
+    pub dirty_state: String,
+    pub build_profile: String,
+    pub build_channel: String,
+    pub executable_path: String,
 }
 
 impl AutoReviewRunTarget {
     pub fn freshness(&self, active: &Self) -> AutoReviewFreshness {
+        self.freshness_with_worktree(active, /*compare_worktree_fingerprint*/ true)
+    }
+
+    fn freshness_with_worktree(
+        &self,
+        active: &Self,
+        compare_worktree_fingerprint: bool,
+    ) -> AutoReviewFreshness {
         if self.branch != active.branch || self.worktree_path != active.worktree_path {
             return AutoReviewFreshness::Detached;
         }
@@ -1456,7 +1497,9 @@ impl AutoReviewRunTarget {
         {
             return AutoReviewFreshness::Stale;
         }
-        if self.worktree_diff_fingerprint != active.worktree_diff_fingerprint {
+        if compare_worktree_fingerprint
+            && self.worktree_diff_fingerprint != active.worktree_diff_fingerprint
+        {
             return AutoReviewFreshness::Stale;
         }
         AutoReviewFreshness::Current
@@ -1589,14 +1632,16 @@ fn duplicate_target_matches_branch_head(
 }
 
 fn auto_review_run_diff_fingerprint(run: &AutoReviewRun) -> Option<&str> {
-    run.target
-        .worktree_diff_fingerprint
-        .as_deref()
-        .and_then(non_empty_str)
-        .or_else(|| match &run.review_target {
-            ReviewTarget::CurrentTurnDiff { fingerprint } => non_empty_str(fingerprint),
-            _ => None,
-        })
+    match &run.review_target {
+        ReviewTarget::CurrentTurnDiff { fingerprint } => non_empty_str(fingerprint),
+        _ => None,
+    }
+    .or_else(|| {
+        run.target
+            .worktree_diff_fingerprint
+            .as_deref()
+            .and_then(non_empty_str)
+    })
 }
 
 fn duplicate_target_is_reusable(
@@ -1604,8 +1649,31 @@ fn duplicate_target_is_reusable(
     active_target: Option<&AutoReviewRunTarget>,
 ) -> bool {
     active_target.is_none_or(|active_target| {
+        if matching_current_turn_diff(&run.target, active_target) {
+            return run.target.freshness_with_worktree(
+                active_target,
+                /*compare_worktree_fingerprint*/ false,
+            ) == AutoReviewFreshness::Current;
+        }
         run.target.freshness(active_target) == AutoReviewFreshness::Current
     })
+}
+
+fn matching_current_turn_diff(
+    previous: &AutoReviewRunTarget,
+    active: &AutoReviewRunTarget,
+) -> bool {
+    let previous = previous
+        .current_turn
+        .as_ref()
+        .and_then(|target| target.diff_fingerprint.as_deref())
+        .and_then(non_empty_str);
+    let active = active
+        .current_turn
+        .as_ref()
+        .and_then(|target| target.diff_fingerprint.as_deref())
+        .and_then(non_empty_str);
+    previous.is_some() && previous == active
 }
 
 fn non_empty_str(value: &str) -> Option<&str> {
@@ -1890,6 +1958,47 @@ fn validate_run(run: &AutoReviewRun) -> Result<()> {
         );
     }
     validate_safe_id(&run.run_id).context("auto review run_id")?;
+    if let Some(current_turn) = &run.target.current_turn {
+        match current_turn.construction_error.as_deref() {
+            Some(error) => {
+                if error.trim().is_empty()
+                    || current_turn.diff_fingerprint.is_some()
+                    || current_turn.changed_path_count.is_some()
+                    || current_turn.diff_bytes.is_some()
+                {
+                    anyhow::bail!(
+                        "auto review run {} has inconsistent unavailable current-turn target",
+                        run.run_id
+                    );
+                }
+            }
+            None => {
+                let Some(fingerprint) = current_turn.diff_fingerprint.as_deref() else {
+                    anyhow::bail!(
+                        "auto review run {} current-turn target is missing a diff fingerprint",
+                        run.run_id
+                    );
+                };
+                if current_turn.changed_path_count.is_none() || current_turn.diff_bytes.is_none() {
+                    anyhow::bail!(
+                        "auto review run {} current-turn target is missing bounded scope metadata",
+                        run.run_id
+                    );
+                }
+                if !matches!(
+                    &run.review_target,
+                    ReviewTarget::CurrentTurnDiff {
+                        fingerprint: review_fingerprint
+                    } if review_fingerprint == fingerprint
+                ) {
+                    anyhow::bail!(
+                        "auto review run {} current-turn target does not match its review target",
+                        run.run_id
+                    );
+                }
+            }
+        }
+    }
 
     if run.finding_digests.len() > run.finding_count {
         anyhow::bail!(

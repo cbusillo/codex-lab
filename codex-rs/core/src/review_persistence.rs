@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use codex_auto_review::AutoReviewBudget;
+use codex_auto_review::AutoReviewBuildProvenance;
+use codex_auto_review::AutoReviewCurrentTurnTarget;
 use codex_auto_review::AutoReviewDispositionActor;
 use codex_auto_review::AutoReviewDuplicateMatch;
 use codex_auto_review::AutoReviewFindingDisposition;
@@ -140,6 +142,37 @@ impl ReviewPersistenceContext {
         self
     }
 
+    pub(crate) fn with_current_turn_target(
+        mut self,
+        turn_id: String,
+        turn_diff: &str,
+        diff_fingerprint: String,
+    ) -> Self {
+        self.target.current_turn = Some(AutoReviewCurrentTurnTarget {
+            turn_id,
+            diff_fingerprint: Some(diff_fingerprint),
+            changed_path_count: Some(changed_path_count(turn_diff)),
+            diff_bytes: Some(turn_diff.len()),
+            construction_error: None,
+        });
+        self
+    }
+
+    pub(crate) fn with_unavailable_current_turn_target(
+        mut self,
+        turn_id: String,
+        construction_error: String,
+    ) -> Self {
+        self.target.current_turn = Some(AutoReviewCurrentTurnTarget {
+            turn_id,
+            diff_fingerprint: None,
+            changed_path_count: None,
+            diff_bytes: None,
+            construction_error: Some(construction_error),
+        });
+        self
+    }
+
     pub(crate) fn with_scope_bytes(mut self, scope_bytes: usize) -> Self {
         self.scope_bytes = Some(scope_bytes);
         self
@@ -163,11 +196,18 @@ impl ReviewPersistenceContext {
     }
 
     pub(crate) fn dedupe_diff_fingerprint(&self) -> Option<&str> {
-        self.worktree_diff_fingerprint()
-            .or(match &self.review_target {
-                ReviewTarget::CurrentTurnDiff { fingerprint } => Some(fingerprint.as_str()),
-                _ => None,
-            })
+        if self
+            .target
+            .current_turn
+            .as_ref()
+            .is_some_and(|target| target.construction_error.is_some())
+        {
+            return None;
+        }
+        match &self.review_target {
+            ReviewTarget::CurrentTurnDiff { fingerprint } => Some(fingerprint.as_str()),
+            _ => self.worktree_diff_fingerprint(),
+        }
     }
 
     pub(crate) fn review_target(&self) -> &ReviewTarget {
@@ -696,6 +736,13 @@ impl ReviewPersistenceContext {
     }
 }
 
+fn changed_path_count(turn_diff: &str) -> usize {
+    turn_diff
+        .lines()
+        .filter(|line| line.starts_with("diff --git "))
+        .count()
+}
+
 fn is_terminal_status(status: &AutoReviewRunStatus) -> bool {
     status.is_terminal()
 }
@@ -801,6 +848,21 @@ pub(crate) async fn collect_auto_review_target(
             .as_ref()
             .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
         worktree_diff_fingerprint,
+        current_turn: None,
+        build_provenance: Some(auto_review_build_provenance()),
+    }
+}
+
+fn auto_review_build_provenance() -> AutoReviewBuildProvenance {
+    let provenance = codex_version::build_provenance();
+    AutoReviewBuildProvenance {
+        schema_version: provenance.schema_version,
+        version: provenance.version,
+        source_commit: provenance.source_commit,
+        dirty_state: provenance.dirty_state.as_str().to_string(),
+        build_profile: provenance.build_profile,
+        build_channel: provenance.build_channel,
+        executable_path: provenance.executable_path,
     }
 }
 
@@ -817,6 +879,13 @@ mod tests {
     use codex_protocol::protocol::ReviewPersistence;
     use codex_protocol::protocol::TokenUsage;
     use tempfile::TempDir;
+
+    #[test]
+    fn changed_path_count_treats_a_rename_as_one_changed_file() {
+        let turn_diff = "diff --git a/old.rs b/new.rs\nsimilarity index 100%\nrename from old.rs\nrename to new.rs\n";
+
+        assert_eq!(changed_path_count(turn_diff), 1);
+    }
 
     #[tokio::test]
     async fn save_running_does_not_overwrite_terminal_run() {
@@ -1342,7 +1411,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_turn_diff_target_records_live_worktree_fingerprint() {
+    async fn current_turn_diff_target_separates_exact_turn_identity_from_preexisting_dirt() {
         let codex_home = TempDir::new().expect("create temp codex home");
         let cwd = TempDir::new().expect("create temp cwd");
         std::process::Command::new("git")
@@ -1378,18 +1447,114 @@ mod tests {
             .await
             .expect("dirty worktree fingerprint");
 
-        let target = collect_auto_review_target(
+        let turn_diff = "diff --git a/feature.rs b/feature.rs\nnew file mode 100644\n--- /dev/null\n+++ b/feature.rs\n@@ -0,0 +1 @@\n+feature\n";
+        let turn_diff_fingerprint =
+            codex_git_utils::diff_fingerprint(turn_diff).expect("turn diff fingerprint");
+        let persistence = ReviewPersistenceContext::new(
+            "current-turn-target".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::CurrentTurnDiff {
+                fingerprint: turn_diff_fingerprint.clone(),
+            },
             codex_home.path(),
             cwd.path(),
-            &ReviewTarget::CurrentTurnDiff {
-                fingerprint: "sha256:synthetic-turn-diff".to_string(),
-            },
+            Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
         )
-        .await;
+        .await
+        .with_current_turn_target(
+            "turn-123".to_string(),
+            turn_diff,
+            turn_diff_fingerprint.clone(),
+        )
+        .with_background_budget(
+            AutoReviewBudget {
+                max_scope_bytes: 1_000,
+                max_elapsed_ms: 1_000,
+                max_total_tokens: 1_000,
+                max_output_bytes: 1_000,
+                max_findings: 10,
+            },
+            turn_diff.len(),
+        );
 
         assert_eq!(
-            target.worktree_diff_fingerprint.as_deref(),
+            persistence.target().worktree_diff_fingerprint.as_deref(),
             Some(expected.as_str())
+        );
+        assert_eq!(
+            persistence.dedupe_diff_fingerprint(),
+            Some(turn_diff_fingerprint.as_str())
+        );
+        let current_turn = persistence
+            .target()
+            .current_turn
+            .as_ref()
+            .expect("current-turn target metadata");
+        assert_eq!(
+            current_turn,
+            &AutoReviewCurrentTurnTarget {
+                turn_id: "turn-123".to_string(),
+                diff_fingerprint: Some(turn_diff_fingerprint),
+                changed_path_count: Some(1),
+                diff_bytes: Some(turn_diff.len()),
+                construction_error: None,
+            }
+        );
+        assert!(persistence.target().build_provenance.is_some());
+
+        assert!(persistence.save_pending(codex_home.path()));
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let saved = store
+            .load_run("current-turn-target")
+            .expect("load persisted target before launch");
+        assert_eq!(saved.target, persistence.target().clone());
+        assert_eq!(
+            store
+                .load_run_state("current-turn-target")
+                .expect("load run state")
+                .expect("pending state")
+                .usage
+                .scope_bytes,
+            Some(turn_diff.len())
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_current_turn_target_persists_bounded_skipped_outcome() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let error =
+            "exact current-turn diff was unavailable; review scope was not widened".to_string();
+        let persistence = ReviewPersistenceContext::new(
+            "unavailable-current-turn".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::Custom {
+                instructions: "current-turn diff unavailable".to_string(),
+            },
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
+        )
+        .await
+        .with_unavailable_current_turn_target("turn-456".to_string(), error.clone());
+
+        assert!(persistence.save_skipped(codex_home.path(), error.clone()));
+        let saved = AutoReviewStore::for_scope(codex_home.path(), cwd.path())
+            .load_run("unavailable-current-turn")
+            .expect("load skipped target");
+
+        assert_eq!(saved.status, AutoReviewRunStatus::Skipped);
+        assert_eq!(saved.error_summary, Some(error.clone()));
+        assert_eq!(
+            saved
+                .target
+                .current_turn
+                .and_then(|target| target.construction_error),
+            Some(error)
         );
     }
 }
