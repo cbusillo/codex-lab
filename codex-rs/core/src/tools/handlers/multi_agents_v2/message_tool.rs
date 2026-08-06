@@ -79,6 +79,11 @@ pub(crate) async fn handle_message_string_tool(
             "Follow-up tasks can't target the root agent".to_string(),
         ));
     }
+    session
+        .services
+        .agent_control
+        .ensure_followup_supported(receiver_thread_id)
+        .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
     let receiver_agent_path = receiver_agent.agent_path.clone().ok_or_else(|| {
         FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
     })?;

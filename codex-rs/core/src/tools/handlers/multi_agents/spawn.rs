@@ -222,6 +222,10 @@ async fn handle_spawn_agent(
         )
         .await;
     let new_thread_id = result?.thread_id;
+    let supports_followup_messages = session
+        .services
+        .agent_control
+        .supports_followup_messages(new_thread_id);
     let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",
@@ -232,6 +236,7 @@ async fn handle_spawn_agent(
     Ok(SpawnAgentResult {
         agent_id: new_thread_id.to_string(),
         nickname,
+        supports_followup_messages,
     })
 }
 
@@ -257,6 +262,7 @@ struct SpawnAgentArgs {
 pub(crate) struct SpawnAgentResult {
     agent_id: String,
     nickname: Option<String>,
+    supports_followup_messages: bool,
 }
 
 impl ToolOutput for SpawnAgentResult {

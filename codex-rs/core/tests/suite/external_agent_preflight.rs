@@ -27,6 +27,8 @@ const AGENT_MESSAGE: &str = "reply without changing files";
 const SPAWN_CALL_ID: &str = "spawn-external-probe";
 const WAIT_CALL_ID: &str = "wait-external-probe";
 const LIST_CALL_ID: &str = "list-external-probe";
+const MESSAGE_CALL_ID: &str = "message-external-probe";
+const FOLLOWUP_CALL_ID: &str = "followup-external-probe";
 const ROLE: &str = "external_probe";
 const COLLABORATION_NAMESPACE: &str = "agents";
 const FOLLOW_UP_PROMPT: &str = "summarize what the external agent reported";
@@ -1048,16 +1050,166 @@ async fn external_command_agent_routes_through_spawn_agent_with_provider_provena
         json!({
             "agent_name": "/root/external_probe",
             "agent_status": { "completed": "external provider replied" },
+            "supports_followup_messages": false,
             "provider": {
                 "agent_type": ROLE,
                 "command": "sh",
                 "protocol": "raw_cli",
                 "mode": "write",
                 "workspace": workspace,
+                "capability_source": "not_probed",
+                "capability_freshness": "fresh",
             },
         })
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_external_agent_rejects_followup_without_cancellation() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let release = stub_dir.path().join("release.txt");
+    let backend = stub_cli(
+        &stub_dir,
+        "long-running-provider.sh",
+        &format!(
+            "while [ ! -f '{}' ]; do sleep 0.05; done\nprintf 'external provider replied\\n'\n",
+            release.display()
+        ),
+    );
+    let server = start_mock_server().await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &spawn_agent_arguments()?,
+            ),
+            ev_completed("resp-spawn"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, SPAWN_CALL_ID) && !body_contains(request, MESSAGE_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-message"),
+            ev_function_call_with_namespace(
+                MESSAGE_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "send_message",
+                &serde_json::to_string(&json!({
+                    "target": "/root/external_probe",
+                    "message": "please follow up",
+                }))?,
+            ),
+            ev_completed("resp-message"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, MESSAGE_CALL_ID) && !body_contains(request, FOLLOWUP_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-followup"),
+            ev_function_call_with_namespace(
+                FOLLOWUP_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "followup_task",
+                &serde_json::to_string(&json!({
+                    "target": "/root/external_probe",
+                    "message": "perform another task",
+                }))?,
+            ),
+            ev_completed("resp-followup"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, FOLLOWUP_CALL_ID) && !body_contains(request, LIST_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-list"),
+            ev_function_call_with_namespace(
+                LIST_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "list_agents",
+                "{}",
+            ),
+            ev_completed("resp-list"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, LIST_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_with_external_role(backend);
+    let test = builder.build(&server).await?;
+    test.submit_turn(PROMPT).await?;
+
+    let request = final_response.single_request();
+    let spawn_output_item = request.function_call_output(SPAWN_CALL_ID);
+    let spawn_output = spawn_output_item["output"]
+        .as_str()
+        .expect("spawn output string");
+    let spawn_output: Value = serde_json::from_str(spawn_output)?;
+    assert_eq!(spawn_output["supports_followup_messages"], false);
+
+    let message_output_item = request.function_call_output(MESSAGE_CALL_ID);
+    let message_output = message_output_item["output"]
+        .as_str()
+        .expect("message output string");
+    assert!(message_output.contains("do not support follow-up messages"));
+    assert!(!message_output.contains("not found"));
+    assert!(!message_output.contains("collab manager unavailable"));
+
+    let followup_output_item = request.function_call_output(FOLLOWUP_CALL_ID);
+    let followup_output = followup_output_item["output"]
+        .as_str()
+        .expect("follow-up output string");
+    assert!(followup_output.contains("do not support follow-up messages"));
+    assert!(!followup_output.contains("not found"));
+    assert!(!followup_output.contains("collab manager unavailable"));
+
+    let list_output_item = request.function_call_output(LIST_CALL_ID);
+    let list_output = list_output_item["output"]
+        .as_str()
+        .expect("list output string");
+    let listed: Value = serde_json::from_str(list_output)?;
+    let external_agent = listed["agents"]
+        .as_array()
+        .and_then(|agents| {
+            agents
+                .iter()
+                .find(|agent| agent["agent_name"] == "/root/external_probe")
+        })
+        .unwrap_or_else(|| panic!("external agent should remain listed: {listed}"));
+    assert_eq!(external_agent["agent_status"], "running");
+    assert_eq!(external_agent["supports_followup_messages"], false);
+
+    std::fs::write(release, "release")?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     Ok(())
 }
 

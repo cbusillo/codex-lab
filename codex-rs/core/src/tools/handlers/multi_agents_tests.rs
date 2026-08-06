@@ -1,8 +1,11 @@
 use super::*;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
+use crate::config::AgentRoleBackendConfig;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
+use crate::config::ExternalCommandAgentBackendConfig;
+use crate::config::ExternalCommandProtocol;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::step_context::StepContext;
@@ -27,6 +30,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -179,11 +183,26 @@ struct ListAgentsResult {
 struct ListedAgentResult {
     agent_name: String,
     agent_status: serde_json::Value,
+    supports_followup_messages: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct InterruptAgentResult {
     previous_status: AgentStatus,
+}
+
+#[test]
+fn collab_agent_error_preserves_unsupported_operation_detail() {
+    let agent_id = ThreadId::new();
+    let error = collab_agent_error(
+        agent_id,
+        CodexErr::UnsupportedOperation("specific capability error".to_string()),
+    );
+
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel("specific capability error".to_string())
+    );
 }
 
 #[tokio::test]
@@ -255,6 +274,7 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
     struct SpawnAgentResult {
         agent_id: String,
         nickname: Option<String>,
+        supports_followup_messages: bool,
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
@@ -299,6 +319,7 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
             .as_deref()
             .is_some_and(|nickname| !nickname.is_empty())
     );
+    assert!(result.supports_followup_messages);
     let snapshot = manager
         .get_thread(agent_id)
         .await
@@ -669,6 +690,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
     struct SpawnAgentResult {
         task_name: String,
         nickname: Option<String>,
+        supports_followup_messages: bool,
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
@@ -705,6 +727,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         serde_json::from_str(&content).expect("spawn result should parse");
     assert_eq!(spawn_result.task_name, "/root/test_process");
     assert_eq!(spawn_result.nickname, None);
+    assert!(spawn_result.supports_followup_messages);
 
     let child_thread_id = session
         .services
@@ -762,6 +785,128 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                         && !communication.trigger_turn
             )
     }));
+}
+
+#[tokio::test]
+async fn legacy_send_input_rejects_running_external_agent_before_reload_or_interrupt() {
+    let external_dir = tempfile::tempdir().expect("external agent temp dir");
+    let release_path = external_dir.path().join("release.txt");
+    let script_path = external_dir.path().join("external-agent.sh");
+    std::fs::write(
+        &script_path,
+        format!(
+            "if [ \"${{1:-}}\" = \"--version\" ]; then printf 'fixture 1.0\\n'; exit 0; fi\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nprintf 'done\\n'\n",
+            release_path.display()
+        ),
+    )
+    .expect("external agent script should be written");
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.agent_roles.insert(
+        "external-test".to_string(),
+        AgentRoleConfig {
+            description: Some("external test agent".to_string()),
+            backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                ExternalCommandAgentBackendConfig {
+                    command: format!("/bin/sh {}", script_path.display()),
+                    protocol: ExternalCommandProtocol::RawCli,
+                    timeout_ms: 5_000,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        },
+    );
+    set_turn_config(&mut turn, config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let mut spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "run until released",
+            "task_name": "external_test",
+            "agent_type": "external-test"
+        })),
+    );
+    spawn_invocation.source = crate::tools::context::ToolCallSource::DirectPlaintextMessage;
+    SpawnAgentHandlerV2::default()
+        .handle(spawn_invocation)
+        .await
+        .expect("external spawn should succeed");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.thread_id,
+            &turn.session_source,
+            "/root/external_test",
+        )
+        .await
+        .expect("external agent path should resolve");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if session.services.agent_control.get_status(agent_id).await == AgentStatus::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("external agent should start running");
+
+    let Err(error) = SendInputHandler
+        .handle(invocation(
+            session.clone(),
+            turn,
+            "send_input",
+            function_payload(json!({
+                "target": agent_id.to_string(),
+                "message": "redirect work",
+                "interrupt": true
+            })),
+        ))
+        .await
+    else {
+        panic!("external follow-up should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = error else {
+        panic!("external follow-up should return a model-facing error");
+    };
+    assert!(message.contains("do not support follow-up messages"));
+    assert_eq!(
+        session.services.agent_control.get_status(agent_id).await,
+        AgentStatus::Running
+    );
+
+    std::fs::write(release_path, "release").expect("external agent should be released");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                session.services.agent_control.get_status(agent_id).await,
+                AgentStatus::Completed(_)
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("external agent should complete after release");
 }
 
 #[tokio::test]
@@ -1124,6 +1269,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
+    assert!(worker.supports_followup_messages);
     assert_eq!(success, Some(true));
 }
 

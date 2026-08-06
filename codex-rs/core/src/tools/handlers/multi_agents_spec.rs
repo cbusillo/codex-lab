@@ -184,7 +184,7 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "send_input".to_string(),
-            description: "Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task."
+            description: "Send a message to an existing agent that reports supports_followup_messages=true. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task."
                 .to_string(),
             strict: false,
             defer_loading: None,
@@ -212,7 +212,7 @@ pub fn create_send_message_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "send_message".to_string(),
-        description: "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
+        description: "Send a message to an existing agent that reports supports_followup_messages=true. The message will be delivered promptly. Does not trigger a new turn."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -244,7 +244,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "followup_task".to_string(),
-        description: "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
+        description: "Send a follow-up task to an existing non-root target agent that reports supports_followup_messages=true and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -408,9 +408,13 @@ fn spawn_agent_output_schema_v1() -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
+            },
+            "supports_followup_messages": {
+                "type": "boolean",
+                "description": "Whether the spawned agent accepts messages after launch. followup_task also requires a non-root target."
             }
         },
-        "required": ["agent_id", "nickname"],
+        "required": ["agent_id", "nickname", "supports_followup_messages"],
         "additionalProperties": false
     })
 }
@@ -425,9 +429,13 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                     "type": "string",
                     "description": "Canonical task name for the spawned agent."
                 },
+                "supports_followup_messages": {
+                    "type": "boolean",
+                    "description": "Whether the spawned agent accepts messages after launch. followup_task also requires a non-root target."
+                },
                 "routing": routing
             },
-            "required": ["task_name", "routing"],
+            "required": ["task_name", "supports_followup_messages", "routing"],
             "additionalProperties": false
         });
     }
@@ -448,9 +456,13 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                 "type": "string",
                 "description": "Effective agent role selected for the spawned agent."
             },
+            "supports_followup_messages": {
+                "type": "boolean",
+                "description": "Whether the spawned agent accepts messages after launch. followup_task also requires a non-root target."
+            },
             "routing": routing
         },
-        "required": ["task_name", "nickname", "agent_type", "routing"],
+        "required": ["task_name", "nickname", "agent_type", "supports_followup_messages", "routing"],
         "additionalProperties": false
     })
 }
@@ -488,6 +500,10 @@ fn list_agents_output_schema() -> Value {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
                         },
+                        "supports_followup_messages": {
+                            "type": "boolean",
+                            "description": "Whether the agent accepts messages after launch. followup_task also requires a non-root target."
+                        },
                         "provider": provider,
                         "failure": failure,
                         "duration_ms": {
@@ -496,7 +512,7 @@ fn list_agents_output_schema() -> Value {
                             "description": "Elapsed external-agent runtime in milliseconds."
                         }
                     },
-                    "required": ["agent_name", "agent_status"],
+                    "required": ["agent_name", "agent_status", "supports_followup_messages"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."

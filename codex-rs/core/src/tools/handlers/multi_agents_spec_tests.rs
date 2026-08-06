@@ -129,7 +129,13 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema")["required"],
-        json!(["task_name", "nickname", "agent_type", "routing"])
+        json!([
+            "task_name",
+            "nickname",
+            "agent_type",
+            "supports_followup_messages",
+            "routing"
+        ])
     );
 }
 
@@ -365,7 +371,7 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
     assert_eq!(name, "followup_task");
     assert_eq!(
         description,
-        "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
+        "Send a follow-up task to an existing non-root target agent that reports supports_followup_messages=true and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
     );
     assert_eq!(
         parameters.schema_type,
@@ -461,7 +467,7 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
     );
     assert_eq!(
         output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status"])
+        json!(["agent_name", "agent_status", "supports_followup_messages"])
     );
 }
 

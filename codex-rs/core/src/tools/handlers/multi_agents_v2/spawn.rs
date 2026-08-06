@@ -190,6 +190,10 @@ async fn handle_spawn_agent(
     .await
     .map_err(collab_spawn_error)?;
     let new_thread_id = spawned_agent.thread_id;
+    let supports_followup_messages = session
+        .services
+        .agent_control
+        .supports_followup_messages(new_thread_id);
     let agent_snapshot = session
         .services
         .agent_control
@@ -227,6 +231,7 @@ async fn handle_spawn_agent(
     if hide_agent_metadata {
         Ok(SpawnAgentResult::HiddenMetadata {
             task_name,
+            supports_followup_messages,
             routing: routing.redacted_summary(),
         })
     } else {
@@ -234,6 +239,7 @@ async fn handle_spawn_agent(
             task_name,
             nickname,
             agent_type: routing.agent_type().to_string(),
+            supports_followup_messages,
             routing: routing.summary(),
         })
     }
@@ -514,10 +520,12 @@ pub(crate) enum SpawnAgentResult {
         task_name: String,
         nickname: Option<String>,
         agent_type: String,
+        supports_followup_messages: bool,
         routing: ProviderRoutingSummary,
     },
     HiddenMetadata {
         task_name: String,
+        supports_followup_messages: bool,
         routing: ProviderRoutingSummary,
     },
 }
