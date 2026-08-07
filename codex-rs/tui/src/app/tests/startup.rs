@@ -35,6 +35,24 @@ fn startup_waiting_gate_is_only_for_fresh_or_exit_session_selection() {
 }
 
 #[test]
+fn startup_auto_review_summary_fetch_is_only_for_resume() {
+    let resume = SessionSelection::Resume(crate::resume_picker::SessionTarget {
+        path: Some(PathBuf::from("/tmp/restore")),
+        thread_id: ThreadId::new(),
+    });
+    let fork = SessionSelection::Fork(crate::resume_picker::SessionTarget {
+        path: Some(PathBuf::from("/tmp/fork")),
+        thread_id: ThreadId::new(),
+    });
+
+    assert!(App::should_fetch_auto_review_summary_after_startup(&resume));
+    assert!(!App::should_fetch_auto_review_summary_after_startup(&fork));
+    assert!(!App::should_fetch_auto_review_summary_after_startup(
+        &SessionSelection::StartFresh
+    ));
+}
+
+#[test]
 fn startup_paused_goal_prompt_gate_is_only_for_quiet_resume() {
     let resume = SessionSelection::Resume(crate::resume_picker::SessionTarget {
         path: Some(PathBuf::from("/tmp/restore")),

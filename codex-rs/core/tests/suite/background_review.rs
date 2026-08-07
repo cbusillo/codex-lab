@@ -47,7 +47,10 @@ use pretty_assertions::assert_eq;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tempfile::TempDir;
 use wiremock::MockServer;
 
@@ -208,6 +211,23 @@ async fn submit_turn(codex: &CodexThread, cwd: &AbsolutePathBuf, text: &str) -> 
     Ok(())
 }
 
+async fn shutdown_thread(codex: &CodexThread) -> Result<()> {
+    codex.submit(Op::Shutdown).await?;
+    loop {
+        if matches!(codex.next_event().await?.msg, EventMsg::ShutdownComplete) {
+            return Ok(());
+        }
+    }
+}
+
+async fn wait_for_turn_complete(codex: &CodexThread) -> Result<()> {
+    loop {
+        if matches!(codex.next_event().await?.msg, EventMsg::TurnComplete(_)) {
+            return Ok(());
+        }
+    }
+}
+
 /// Drains the event stream until the background review reaches `terminal`,
 /// returning every background-review status seen along the way. Panics if the
 /// review leaks review-mode UI events, which background reviews must never do.
@@ -283,6 +303,515 @@ fn single_run(store: &AutoReviewStore) -> AutoReviewRun {
     let mut runs = store.list_runs().expect("list auto review runs");
     assert_eq!(runs.len(), 1, "expected exactly one auto review run");
     runs.remove(0)
+}
+
+fn in_flight_background_run(repo: &Path, run_id: &str) -> AutoReviewRun {
+    AutoReviewRun {
+        schema_version: SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        status: AutoReviewRunStatus::Running,
+        freshness: AutoReviewRunFreshness::Current,
+        source: AutoReviewRunSource::Background,
+        target: AutoReviewRunTarget {
+            branch: None,
+            head_sha: None,
+            base_sha: None,
+            worktree_path: Some(repo.to_path_buf()),
+            snapshot_epoch: None,
+            snapshot_commit: None,
+            head_at_launch: None,
+            worktree_diff_fingerprint: None,
+            current_turn: None,
+            build_provenance: None,
+        },
+        review_target: ReviewTarget::UncommittedChanges,
+        started_at_unix_secs: 1_700_000_000,
+        completed_at_unix_secs: None,
+        model: Some("mock-model".to_string()),
+        reasoning_effort: None,
+        prompt_token_estimate: None,
+        token_count: None,
+        saved_token_estimate: None,
+        superseded_by: None,
+        cancel_reason: None,
+        error_summary: None,
+        finding_count: 0,
+        finding_digests: Vec::new(),
+        omitted_finding_digest_count: 0,
+    }
+}
+
+/// A process restart must turn an in-flight durable Background Review into one
+/// concrete cancellation event instead of leaving the TUI in a running state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconciles_orphaned_background_review_into_cancelled_event() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let server = responses::start_mock_server().await;
+    let _initial_response = responses::mount_sse_sequence(
+        &server,
+        vec![responses::sse(vec![
+            responses::ev_response_created("resp-initial-owner"),
+            responses::ev_assistant_message("msg-initial-owner", "no changes needed"),
+            responses::ev_completed("resp-initial-owner"),
+        ])],
+    )
+    .await;
+    let config_cwd = cwd.clone();
+    let initial = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = config_cwd)
+            .build(&server),
+    )
+    .await?;
+    let owner_thread_id = initial.session_configured.thread_id.to_string();
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .context("initial thread must have a rollout path")?;
+    submit_turn(&initial.codex, &cwd, "inspect without changing files").await?;
+    wait_for_turn_complete(&initial.codex).await?;
+    shutdown_thread(&initial.codex).await?;
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let run = in_flight_background_run(repo.path(), "orphaned-background-review");
+    store.save_run(&run)?;
+    store.update_run_state(&run.run_id, |state| {
+        state.owner_thread_id = Some(owner_thread_id.clone());
+        Ok(())
+    })?;
+
+    let resumed_cwd = cwd.clone();
+    let mut resume_builder = test_codex().with_config(move |config| config.cwd = resumed_cwd);
+    let test =
+        Box::pin(resume_builder.resume(&server, Arc::clone(&codex_home), rollout_path)).await?;
+    assert_eq!(
+        test.session_configured.thread_id.to_string(),
+        owner_thread_id
+    );
+
+    let statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Cancelled,
+    ))
+    .await;
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].run_id, "orphaned-background-review");
+    assert_eq!(statuses[0].status, BackgroundAutoReviewStatus::Cancelled);
+    assert_eq!(
+        statuses[0].error_summary.as_deref(),
+        Some("background review did not survive process restart")
+    );
+
+    let reconciled = store.load_run("orphaned-background-review")?;
+    assert_eq!(reconciled.status, AutoReviewRunStatus::Lost);
+    assert_eq!(reconciled.freshness, AutoReviewRunFreshness::Lost);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconciles_ownerless_orphan_without_emitting_event() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let run = in_flight_background_run(repo.path(), "ownerless-orphan");
+    store.save_run(&run)?;
+
+    let server = responses::start_mock_server().await;
+    let config_cwd = cwd.clone();
+    let test = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = config_cwd)
+            .build(&server),
+    )
+    .await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, test.codex.next_event()).await {
+            Err(_) => break,
+            Ok(Ok(event)) => {
+                if let EventMsg::BackgroundAutoReviewStatus(status) = event.msg
+                    && status.run_id == run.run_id
+                {
+                    panic!("ownerless recovery event leaked into a fresh thread: {status:?}");
+                }
+            }
+            Ok(Err(err)) => panic!("background review event stream ended: {err}"),
+        }
+    }
+    assert_eq!(
+        store.load_run(&run.run_id)?.status,
+        AutoReviewRunStatus::Lost
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_preserves_recent_manual_reviews_and_reconciles_stale_legacy_review() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let mut run = in_flight_background_run(repo.path(), "live-manual-review");
+    run.source = AutoReviewRunSource::Manual;
+    store.save_run(&run)?;
+    store.update_run_state(&run.run_id, |state| {
+        state.owner_process_id = Some(std::process::id());
+        Ok(())
+    })?;
+    let mut legacy_run = in_flight_background_run(repo.path(), "legacy-manual-review");
+    legacy_run.source = AutoReviewRunSource::Manual;
+    legacy_run.started_at_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_secs()
+        .try_into()?;
+    store.save_run(&legacy_run)?;
+    let mut stale_legacy_run = in_flight_background_run(repo.path(), "stale-legacy-manual-review");
+    stale_legacy_run.source = AutoReviewRunSource::Manual;
+    stale_legacy_run.started_at_unix_secs = 1;
+    store.save_run(&stale_legacy_run)?;
+
+    let server = responses::start_mock_server().await;
+    let config_cwd = cwd.clone();
+    let _test = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = config_cwd)
+            .build(&server),
+    )
+    .await?;
+
+    let stored = store.load_run(&run.run_id)?;
+    assert_eq!(stored.status, AutoReviewRunStatus::Running);
+    assert_eq!(stored.error_summary, None);
+    let legacy_stored = store.load_run(&legacy_run.run_id)?;
+    assert_eq!(legacy_stored.status, AutoReviewRunStatus::Running);
+    assert_eq!(legacy_stored.error_summary, None);
+    let stale_legacy_stored = store.load_run(&stale_legacy_run.run_id)?;
+    assert_eq!(stale_legacy_stored.status, AutoReviewRunStatus::Lost);
+    assert_eq!(
+        stale_legacy_stored.error_summary.as_deref(),
+        Some("review did not survive process restart")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconciles_manual_review_owned_by_dead_process() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let mut run = in_flight_background_run(repo.path(), "dead-manual-review");
+    run.source = AutoReviewRunSource::Manual;
+    store.save_run(&run)?;
+    let mut child = Command::new("sh").arg("-c").arg("exit 0").spawn()?;
+    let dead_pid = child.id();
+    child.wait()?;
+    store.update_run_state(&run.run_id, |state| {
+        state.owner_process_id = Some(dead_pid);
+        Ok(())
+    })?;
+
+    let server = responses::start_mock_server().await;
+    let config_cwd = cwd.clone();
+    let _test = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = config_cwd)
+            .build(&server),
+    )
+    .await?;
+
+    let stored = store.load_run(&run.run_id)?;
+    assert_eq!(stored.status, AutoReviewRunStatus::Lost);
+    assert_eq!(
+        stored.error_summary.as_deref(),
+        Some("review did not survive process restart")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconciles_another_threads_orphan_without_emitting_event() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let server = responses::start_mock_server().await;
+    let owner_cwd = cwd.clone();
+    let owner = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = owner_cwd)
+            .build(&server),
+    )
+    .await?;
+    let owner_thread_id = owner.session_configured.thread_id.to_string();
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let run = in_flight_background_run(repo.path(), "other-thread-orphan");
+    store.save_run(&run)?;
+    store.update_run_state(&run.run_id, |state| {
+        state.owner_thread_id = Some(owner_thread_id);
+        Ok(())
+    })?;
+
+    let other_cwd = cwd.clone();
+    let other = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = other_cwd)
+            .build(&server),
+    )
+    .await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, other.codex.next_event()).await {
+            Err(_) => break,
+            Ok(Ok(event)) => {
+                if let EventMsg::BackgroundAutoReviewStatus(status) = event.msg
+                    && status.run_id == run.run_id
+                {
+                    panic!("foreign ownership routed recovery event: {status:?}");
+                }
+            }
+            Ok(Err(err)) => panic!("background review event stream ended: {err}"),
+        }
+    }
+    assert_eq!(
+        store.load_run(&run.run_id)?.status,
+        AutoReviewRunStatus::Lost
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_does_not_emit_recovery_when_owner_state_is_corrupt() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let run = in_flight_background_run(repo.path(), "corrupt-owner-state");
+    store.save_run(&run)?;
+    store.update_run_state(&run.run_id, |state| {
+        state.owner_thread_id = Some("unknown-owner".to_string());
+        Ok(())
+    })?;
+    let state_path = store
+        .runs_path()
+        .parent()
+        .context("auto review store root")?
+        .join("run-states")
+        .join(format!("{}.json", run.run_id));
+    std::fs::write(state_path, "{not valid json\n")?;
+
+    let server = responses::start_mock_server().await;
+    let config_cwd = cwd.clone();
+    let test = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = config_cwd)
+            .build(&server),
+    )
+    .await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, test.codex.next_event()).await {
+            Err(_) => break,
+            Ok(Ok(event)) => {
+                if let EventMsg::BackgroundAutoReviewStatus(status) = event.msg
+                    && status.run_id == run.run_id
+                {
+                    panic!("corrupt ownership state routed recovery event: {status:?}");
+                }
+            }
+            Ok(Err(err)) => panic!("background review event stream ended: {err}"),
+        }
+    }
+    assert_eq!(
+        store.load_run(&run.run_id)?.status,
+        AutoReviewRunStatus::Lost
+    );
+
+    Ok(())
+}
+
+/// Opening another live session for the same worktree must not mistake the
+/// first session's debouncing Pending review for a process-restart orphan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_preserves_a_pending_review_owned_by_another_live_session() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let server = responses::start_mock_server().await;
+    let _responses_mock =
+        responses::mount_sse_sequence(&server, code_changing_turn_responses("live-pending")).await;
+
+    let first_cwd = cwd.clone();
+    let first = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = first_cwd)
+            .build(&server),
+    )
+    .await?;
+    Box::pin(submit_turn(&first.codex, &cwd, "add the feature")).await?;
+    let pending = Box::pin(background_review_statuses_until(
+        &first.codex,
+        BackgroundAutoReviewStatus::Pending,
+    ))
+    .await;
+    let run_id = pending[0].run_id.clone();
+
+    let second_cwd = cwd.clone();
+    let _second = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = second_cwd)
+            .build(&server),
+    )
+    .await?;
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let run = store.load_run(&run_id)?;
+    assert_ne!(run.status, AutoReviewRunStatus::Lost);
+    assert_ne!(run.freshness, AutoReviewRunFreshness::Lost);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_turn_cancels_pending_review_and_releases_repo_lock() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let mut bodies = code_changing_turn_responses("first");
+    bodies.extend(code_changing_turn_responses_with_patch(
+        "second",
+        SEEDED_DEFECT_PATCH,
+    ));
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("resp-second-review"),
+        responses::ev_assistant_message("msg-second-review", &review_output_json(/*findings*/ 0)),
+        responses::ev_completed("resp-second-review"),
+    ]));
+    let _responses_mock = responses::mount_sse_sequence(&server, bodies).await;
+    let test = build_codex_in_repo(&server, cwd.clone(), /*budget*/ None).await?;
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the first feature")).await?;
+    let first_pending = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Pending,
+    ))
+    .await;
+    let first_run_id = first_pending[0].run_id.clone();
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the second feature")).await?;
+    let statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Completed,
+    ))
+    .await;
+    let cancelled = statuses
+        .iter()
+        .filter(|status| {
+            status.run_id == first_run_id && status.status == BackgroundAutoReviewStatus::Cancelled
+        })
+        .count();
+    assert_eq!(cancelled, 1, "pending run must terminate exactly once");
+    let completed = statuses
+        .iter()
+        .find(|status| status.status == BackgroundAutoReviewStatus::Completed)
+        .context("second background review must complete")?;
+    assert_ne!(completed.run_id, first_run_id);
+
+    let store = AutoReviewStore::for_scope(test.codex_home_path(), repo.path());
+    let first = store.load_run(&first_run_id)?;
+    assert_eq!(first.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(
+        first.cancel_reason.as_deref(),
+        Some("foreground_work_started")
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_turn_preserves_cancel_reason_for_running_review() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let _responses_mock =
+        responses::mount_sse_sequence(&server, code_changing_turn_responses("first-running")).await;
+    let test = build_codex_in_repo(&server, cwd.clone(), /*budget*/ None).await?;
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the first feature")).await?;
+    let first_statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Running,
+    ))
+    .await;
+    let first_run_id = first_statuses[0].run_id.clone();
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the second feature")).await?;
+    let cancelled_statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Cancelled,
+    ))
+    .await;
+    assert_eq!(cancelled_statuses[0].run_id, first_run_id);
+
+    let store = AutoReviewStore::for_scope(test.codex_home_path(), repo.path());
+    let first = store.load_run(&first_run_id)?;
+    assert_eq!(first.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(
+        first.cancel_reason.as_deref(),
+        Some("foreground_work_started")
+    );
+
+    Ok(())
 }
 
 /// Reproduces the August 1 mismatch with the repository review orchestrator
@@ -393,6 +922,11 @@ async fn orchestration_skill_is_suppressed_while_seeded_defect_is_detected() -> 
     let state = store
         .load_run_state(&run.run_id)?
         .context("completed review must persist bounded diagnostics")?;
+    assert_eq!(
+        state.owner_thread_id,
+        Some(test.session_configured.thread_id.to_string())
+    );
+    assert_eq!(state.owner_process_id, Some(std::process::id()));
     assert_eq!(state.usage.orchestration_skills_suppressed, Some(true));
     assert_eq!(state.usage.request_count, Some(1));
     assert!(

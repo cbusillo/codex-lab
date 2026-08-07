@@ -36,12 +36,26 @@ static AUTO_REVIEW_RUN_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) const AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY: &str =
     "review was interrupted before producing structured output";
+const AUTO_REVIEW_ERROR_SUMMARY_MAX_BYTES: usize = 4 * 1024;
+
+pub(crate) fn bounded_auto_review_error_summary(summary: String) -> String {
+    if summary.len() <= AUTO_REVIEW_ERROR_SUMMARY_MAX_BYTES {
+        return summary;
+    }
+    let marker = "…";
+    let mut end = AUTO_REVIEW_ERROR_SUMMARY_MAX_BYTES - marker.len();
+    while !summary.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{marker}", &summary[..end])
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ReviewPersistenceContext {
     run_id: String,
     source: AutoReviewRunSource,
     store_scope: PathBuf,
+    owner_thread_id: Option<String>,
     target: AutoReviewRunTarget,
     review_target: ReviewTarget,
     started_at_unix_secs: i64,
@@ -97,6 +111,7 @@ impl ReviewPersistenceContext {
                 ReviewPersistence::BackgroundAutoReview => AutoReviewRunSource::Background,
             },
             store_scope,
+            owner_thread_id: None,
             target,
             review_target,
             started_at_unix_secs: now_unix_secs(),
@@ -123,6 +138,11 @@ impl ReviewPersistenceContext {
 
     pub(crate) fn store_scope(&self) -> &Path {
         &self.store_scope
+    }
+
+    pub(crate) fn with_owner_thread_id(mut self, owner_thread_id: String) -> Self {
+        self.owner_thread_id = Some(owner_thread_id);
+        self
     }
 
     pub(crate) fn with_prompt_token_estimate(mut self, prompt_token_estimate: Option<u64>) -> Self {
@@ -422,6 +442,28 @@ impl ReviewPersistenceContext {
         )
     }
 
+    pub(crate) fn save_failed_with_usage(
+        &self,
+        codex_home: impl AsRef<Path>,
+        error_summary: String,
+        token_usage: Option<&TokenUsage>,
+        usage: AutoReviewUsage,
+    ) -> bool {
+        let codex_home = codex_home.as_ref();
+        self.save_run_with_metadata_and_state(
+            codex_home,
+            AutoReviewRunStatus::Failed,
+            /*output*/ None,
+            token_usage,
+            Some(error_summary),
+            AutoReviewRunFreshness::Current,
+            /*superseded_by*/ None,
+            /*cancel_reason*/ None,
+            /*saved_token_estimate*/ None,
+            move |state| merge_usage(&mut state.usage, usage),
+        )
+    }
+
     pub(crate) fn save_empty_output(
         &self,
         codex_home: impl AsRef<Path>,
@@ -706,6 +748,10 @@ impl ReviewPersistenceContext {
     ) -> bool {
         let store = AutoReviewStore::for_scope(codex_home, &self.store_scope);
         match store.update_run_state(&self.run_id, |state| {
+            if let Some(owner_thread_id) = &self.owner_thread_id {
+                state.owner_thread_id = Some(owner_thread_id.clone());
+            }
+            state.owner_process_id = Some(std::process::id());
             if let Some(budget) = &self.background_budget {
                 state.budget = Some(budget.clone());
             }
@@ -1601,5 +1647,52 @@ mod tests {
                 .and_then(|target| target.construction_error),
             Some(error)
         );
+    }
+
+    #[test]
+    fn auto_review_error_summary_is_utf8_safe_and_bounded() {
+        let summary = bounded_auto_review_error_summary("🙂".repeat(2_000));
+
+        assert!(summary.len() <= AUTO_REVIEW_ERROR_SUMMARY_MAX_BYTES);
+        assert!(summary.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn save_failed_with_usage_does_not_label_start_failure_as_empty_output() {
+        let codex_home = TempDir::new().expect("create temp codex home");
+        let cwd = TempDir::new().expect("create temp cwd");
+        let persistence = ReviewPersistenceContext::new(
+            "start-failed".to_string(),
+            ReviewPersistence::BackgroundAutoReview,
+            ReviewTarget::UncommittedChanges,
+            codex_home.path(),
+            cwd.path(),
+            Some("test-model".to_string()),
+            /*reasoning_effort*/ None,
+            /*prompt_token_estimate*/ None,
+        )
+        .await;
+        let usage = AutoReviewUsage {
+            elapsed_ms: Some(123),
+            ..Default::default()
+        };
+
+        assert!(persistence.save_failed_with_usage(
+            codex_home.path(),
+            "failed to start review conversation".to_string(),
+            /*token_usage*/ None,
+            usage,
+        ));
+
+        let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());
+        let run = store.load_run("start-failed").expect("load failed run");
+        let state = store
+            .load_run_state("start-failed")
+            .expect("load failed run state")
+            .expect("failed run state exists");
+        assert_eq!(run.status, AutoReviewRunStatus::Failed);
+        assert_eq!(run.cancel_reason, None);
+        assert_eq!(state.terminal_reason, None);
+        assert_eq!(state.usage.elapsed_ms, Some(123));
     }
 }

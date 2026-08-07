@@ -67,17 +67,33 @@ impl ChatWidget {
         &mut self,
         notification: codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
     ) {
-        let should_render_status = background_auto_review_status_needs_history(&notification);
-        if self.background_auto_review_status_updates_snapshot(&notification) {
+        let updates_snapshot = self.background_auto_review_status_updates_snapshot(&notification);
+        if updates_snapshot {
             self.review.current_background_review = Some(BackgroundAutoReviewSnapshot {
                 run_id: notification.run_id.clone(),
                 status: notification.status,
                 review_target: notification.review_target.clone(),
                 error_summary: notification.error_summary.clone(),
             });
+            let label = match notification.status {
+                codex_app_server_protocol::BackgroundAutoReviewStatus::Pending => {
+                    Some("Background review queued".to_string())
+                }
+                codex_app_server_protocol::BackgroundAutoReviewStatus::Running => {
+                    Some("Background review running".to_string())
+                }
+                codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
+                | codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
+                | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
+                | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
+                | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => None,
+            };
+            self.bottom_pane.set_background_review_label(label);
         }
-        if should_render_status {
-            self.add_to_history(history_cell::new_auto_review_status_cell(&notification));
+        if background_auto_review_status_is_terminal(notification.status) {
+            self.review
+                .pending_terminal_background_reviews
+                .insert(notification.run_id.clone(), notification);
         }
         self.request_redraw();
     }
@@ -87,16 +103,68 @@ impl ChatWidget {
         run_id: String,
         result: Result<codex_app_server_protocol::AutoReviewSummaryReadResponse, String>,
     ) {
+        let fallback = self
+            .review
+            .pending_terminal_background_reviews
+            .remove(&run_id);
+        if self
+            .review
+            .rendered_terminal_background_reviews
+            .contains(&run_id)
+        {
+            return;
+        }
         match result {
-            Ok(response) if auto_review_summary_contains_run(&response, &run_id) => {
-                self.add_to_history(history_cell::new_auto_review_summary_cell(&response));
+            Ok(response) => {
+                let current_matches = response.current.as_ref().is_some_and(|summary| {
+                    summary.run_id == run_id
+                        && background_auto_review_status_is_terminal(summary.status)
+                });
+                let latest_matches = response.latest.as_ref().is_some_and(|summary| {
+                    summary.run_id == run_id
+                        && background_auto_review_status_is_terminal(summary.status)
+                });
+                if current_matches {
+                    self.add_to_history(history_cell::new_auto_review_summary_cell(&response));
+                } else if latest_matches {
+                    let latest = response
+                        .latest
+                        .as_ref()
+                        .expect("latest match checked above");
+                    if latest.status
+                        == codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
+                        && latest.freshness
+                            != codex_app_server_protocol::AutoReviewFreshness::Current
+                    {
+                        self.add_to_history(history_cell::new_hidden_auto_review_run_summary_cell(
+                            latest,
+                            response.diagnostics.as_ref(),
+                        ));
+                    } else {
+                        self.add_to_history(history_cell::new_auto_review_run_summary_cell(
+                            latest,
+                            response.diagnostics.as_ref(),
+                        ));
+                    }
+                } else if let Some(fallback) = fallback.as_ref() {
+                    self.add_to_history(history_cell::new_auto_review_status_cell(fallback));
+                } else {
+                    return;
+                }
             }
-            Ok(_) => return,
+            Err(_) if fallback.is_some() => {
+                self.add_to_history(history_cell::new_auto_review_status_cell(
+                    fallback.as_ref().expect("fallback checked above"),
+                ));
+            }
             Err(err) if self.current_background_review_matches_run(&run_id) => {
                 self.add_to_history(history_cell::new_auto_review_summary_error_cell(err));
             }
             Err(_) => return,
         }
+        self.review
+            .rendered_terminal_background_reviews
+            .insert(run_id);
         self.request_redraw();
     }
 
@@ -224,37 +292,6 @@ impl ChatWidget {
             .current_background_review
             .as_ref()
             .is_some_and(|review| review.run_id == run_id)
-    }
-}
-
-fn auto_review_summary_contains_run(
-    response: &codex_app_server_protocol::AutoReviewSummaryReadResponse,
-    run_id: &str,
-) -> bool {
-    response
-        .current
-        .as_ref()
-        .is_some_and(|summary| summary.run_id == run_id)
-        || response
-            .latest
-            .as_ref()
-            .is_some_and(|summary| summary.run_id == run_id)
-}
-
-fn background_auto_review_status_needs_history(
-    notification: &codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
-) -> bool {
-    match notification.status {
-        codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => notification
-            .error_summary
-            .as_deref()
-            .is_some_and(|summary| !summary.trim().is_empty()),
-        codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Running
-        | codex_app_server_protocol::BackgroundAutoReviewStatus::Completed => false,
     }
 }
 

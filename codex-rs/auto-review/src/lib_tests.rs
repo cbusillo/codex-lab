@@ -663,10 +663,9 @@ fn orphan_reconciliation_recovers_when_index_is_missing() -> anyhow::Result<()> 
     })?;
     std::fs::remove_file(store.runs_path())?;
 
-    assert_eq!(
-        store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 3)?,
-        1
-    );
+    let reconciled =
+        store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 3)?;
+    assert_eq!(run_ids(reconciled), vec!["run_1".to_string()]);
 
     let run = store.load_run("run_1")?;
     assert_eq!(run.status, AutoReviewRunStatus::Lost);
@@ -1604,6 +1603,39 @@ fn mark_superseded_by_fingerprint_only_supersedes_clean_matching_scope() -> anyh
 }
 
 #[test]
+fn mark_superseded_by_fingerprint_respects_candidate_filter() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    for run_id in ["same-owner", "foreign-owner"] {
+        store.save_run(&AutoReviewRun {
+            target: target_with_fingerprint("sha256:abc"),
+            ..sample_run(run_id, &sample_output(Vec::new()))
+        })?;
+    }
+
+    let changed = store.mark_superseded_by_fingerprint_with_target_and_filter(
+        "sha256:abc",
+        "new_run",
+        Some("main"),
+        Some("head-2"),
+        /*active_review_target*/ None,
+        |run| run.run_id == "same-owner",
+    )?;
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        store.load_run("same-owner")?.status,
+        AutoReviewRunStatus::Superseded
+    );
+    assert_eq!(
+        store.load_run("foreign-owner")?.status,
+        AutoReviewRunStatus::Completed
+    );
+    Ok(())
+}
+
+#[test]
 fn mark_superseded_by_fingerprint_requires_matching_review_target() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;
@@ -1793,10 +1825,14 @@ fn reconcile_orphaned_in_flight_marks_lost() -> anyhow::Result<()> {
 
     let running = store.load_run("running")?;
     let completed = store.load_run("completed")?;
-    assert_eq!(changed, 1);
+    assert_eq!(run_ids(changed), vec!["running".to_string()]);
     assert_eq!(running.status, AutoReviewRunStatus::Lost);
     assert_eq!(running.freshness, AutoReviewRunFreshness::Lost);
     assert_eq!(running.completed_at_unix_secs, Some(99));
+    assert_eq!(
+        running.error_summary.as_deref(),
+        Some("review did not survive process restart")
+    );
     assert_eq!(completed.status, AutoReviewRunStatus::Completed);
     Ok(())
 }
@@ -1831,16 +1867,89 @@ fn reconcile_orphaned_in_flight_marks_manual_and_background_lost() -> anyhow::Re
     let manual = store.load_run("manual")?;
     let background = store.load_run("background")?;
     let live_manual = store.load_run("live_manual")?;
-    assert_eq!(changed, 2);
+    assert_eq!(
+        run_ids(changed),
+        vec!["background".to_string(), "manual".to_string()]
+    );
     assert_eq!(manual.status, AutoReviewRunStatus::Lost);
     assert_eq!(manual.freshness, AutoReviewRunFreshness::Lost);
     assert_eq!(manual.completed_at_unix_secs, Some(99));
+    assert_eq!(
+        manual.error_summary.as_deref(),
+        Some("review did not survive process restart")
+    );
     assert_eq!(background.status, AutoReviewRunStatus::Lost);
     assert_eq!(background.freshness, AutoReviewRunFreshness::Lost);
     assert_eq!(background.completed_at_unix_secs, Some(99));
+    assert_eq!(
+        background.error_summary.as_deref(),
+        Some("background review did not survive process restart")
+    );
     assert_eq!(live_manual.status, AutoReviewRunStatus::Running);
     assert_eq!(live_manual.freshness, AutoReviewRunFreshness::Current);
     assert_eq!(live_manual.completed_at_unix_secs, None);
+    Ok(())
+}
+
+#[test]
+fn reconcile_orphaned_in_flight_respects_source_filter() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let manual = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("manual", &sample_output(Vec::new()))
+    };
+    let background = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        source: AutoReviewRunSource::Background,
+        completed_at_unix_secs: None,
+        ..sample_run("background", &sample_output(Vec::new()))
+    };
+    store.save_run(&manual)?;
+    store.save_run(&background)?;
+
+    let changed = store.reconcile_orphaned_in_flight_with_filter(
+        std::iter::empty::<&str>(),
+        /*now_unix_secs*/ 99,
+        |run| run.source == AutoReviewRunSource::Background,
+    )?;
+
+    assert_eq!(run_ids(changed), vec!["background".to_string()]);
+    assert_eq!(
+        store.load_run("background")?.status,
+        AutoReviewRunStatus::Lost
+    );
+    assert_eq!(
+        store.load_run("manual")?.status,
+        AutoReviewRunStatus::Running
+    );
+    Ok(())
+}
+
+#[test]
+fn reconcile_orphaned_in_flight_preserves_existing_error_summary() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let run = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        error_summary: Some("provider disconnected".to_string()),
+        ..sample_run("manual_with_error", &sample_output(Vec::new()))
+    };
+    store.save_run(&run)?;
+
+    store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), /*now_unix_secs*/ 99)?;
+
+    assert_eq!(
+        store
+            .load_run("manual_with_error")?
+            .error_summary
+            .as_deref(),
+        Some("provider disconnected")
+    );
     Ok(())
 }
 

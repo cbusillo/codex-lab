@@ -333,6 +333,10 @@ fn pid_alive(pid: u32) -> bool {
     platform_pid_alive(pid)
 }
 
+pub fn review_owner_process_is_alive(pid: u32) -> bool {
+    pid_alive(pid)
+}
+
 #[cfg(windows)]
 fn platform_pid_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;

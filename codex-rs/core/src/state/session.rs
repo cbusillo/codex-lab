@@ -59,7 +59,24 @@ struct BackgroundAutoReviewRunning {
 struct BackgroundAutoReviewPending {
     generation: u64,
     fingerprint: String,
+    cancellation_token: CancellationToken,
     persistence: ReviewPersistenceContext,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BackgroundAutoReviewDisplacedPending {
+    pub(crate) generation: u64,
+    pub(crate) fingerprint: String,
+    pub(crate) cancellation_token: CancellationToken,
+    pub(crate) persistence: ReviewPersistenceContext,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BackgroundAutoReviewPendingRecord {
+    Rejected,
+    Recorded {
+        displaced: Option<BackgroundAutoReviewDisplacedPending>,
+    },
 }
 
 #[derive(Debug)]
@@ -235,17 +252,26 @@ impl BackgroundAutoReviewSchedulerState {
         &mut self,
         generation: u64,
         fingerprint: &str,
+        cancellation_token: CancellationToken,
         persistence: ReviewPersistenceContext,
-    ) -> bool {
+    ) -> BackgroundAutoReviewPendingRecord {
         if !self.is_current_schedule(generation) {
-            return false;
+            return BackgroundAutoReviewPendingRecord::Rejected;
         }
-        self.pending_review = Some(BackgroundAutoReviewPending {
+        let displaced = self.pending_review.replace(BackgroundAutoReviewPending {
             generation,
             fingerprint: fingerprint.to_string(),
+            cancellation_token,
             persistence,
         });
-        true
+        BackgroundAutoReviewPendingRecord::Recorded {
+            displaced: displaced.map(|previous| BackgroundAutoReviewDisplacedPending {
+                generation: previous.generation,
+                fingerprint: previous.fingerprint,
+                cancellation_token: previous.cancellation_token,
+                persistence: previous.persistence,
+            }),
+        }
     }
 
     pub(crate) fn record_started(
@@ -321,6 +347,7 @@ impl BackgroundAutoReviewSchedulerState {
         {
             self.generation = self.generation.saturating_add(1);
             return self.pending_review.take().map(|pending_review| {
+                pending_review.cancellation_token.cancel();
                 BackgroundAutoReviewControlledRun::Pending(BackgroundAutoReviewPendingHandle {
                     persistence: pending_review.persistence,
                 })
@@ -346,6 +373,7 @@ impl BackgroundAutoReviewSchedulerState {
         self.active_regular_turns.clear();
         BackgroundAutoReviewCancellation {
             pending_review: self.pending_review.take().map(|pending_review| {
+                pending_review.cancellation_token.cancel();
                 BackgroundAutoReviewPendingHandle {
                     persistence: pending_review.persistence,
                 }

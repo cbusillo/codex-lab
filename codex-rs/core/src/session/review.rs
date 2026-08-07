@@ -344,6 +344,7 @@ pub(super) async fn prepare_review_thread(
                     /*prompt_token_estimate*/ None,
                 )
                 .await
+                .with_owner_thread_id(sess.thread_id().to_string())
             }
             ReviewPersistenceSpec::Context(persistence) => *persistence,
         }

@@ -3,8 +3,11 @@ use crate::session::tests::make_session_configuration_for_tests;
 use crate::state::AutoCompactWindowSnapshot;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::ReviewPersistence;
+use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SpendControlLimitSnapshot;
 use pretty_assertions::assert_eq;
+use tempfile::TempDir;
 
 #[test]
 fn background_auto_review_schedules_only_changed_dirty_fingerprint() {
@@ -98,6 +101,70 @@ fn background_auto_review_remove_regular_turn_clears_pending_snapshot() {
         state.complete_regular_turn("turn-1", Some("sha256:new".to_string())),
         None
     );
+}
+
+#[tokio::test]
+async fn background_auto_review_record_pending_returns_displaced_review() {
+    let codex_home = TempDir::new().expect("create temp codex home");
+    let cwd = TempDir::new().expect("create temp cwd");
+    let mut state = BackgroundAutoReviewSchedulerState::default();
+    state.begin_regular_turn("turn-1".to_string(), Some("sha256:old".to_string()));
+    let schedule = state
+        .complete_regular_turn("turn-1", Some("sha256:new".to_string()))
+        .expect("changed turn should schedule");
+    let first = ReviewPersistenceContext::new(
+        "first-pending".to_string(),
+        ReviewPersistence::BackgroundAutoReview,
+        ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:new".to_string(),
+        },
+        codex_home.path(),
+        cwd.path(),
+        /*model*/ None,
+        /*reasoning_effort*/ None,
+        /*prompt_token_estimate*/ None,
+    )
+    .await;
+    let first_token = CancellationToken::new();
+    assert!(matches!(
+        state.record_pending(
+            schedule.generation,
+            &schedule.fingerprint,
+            first_token.clone(),
+            first,
+        ),
+        BackgroundAutoReviewPendingRecord::Recorded { displaced: None }
+    ));
+
+    let second = ReviewPersistenceContext::new(
+        "second-pending".to_string(),
+        ReviewPersistence::BackgroundAutoReview,
+        ReviewTarget::CurrentTurnDiff {
+            fingerprint: "sha256:newer".to_string(),
+        },
+        codex_home.path(),
+        cwd.path(),
+        /*model*/ None,
+        /*reasoning_effort*/ None,
+        /*prompt_token_estimate*/ None,
+    )
+    .await;
+    let BackgroundAutoReviewPendingRecord::Recorded {
+        displaced: Some(displaced),
+    } = state.record_pending(
+        schedule.generation,
+        "sha256:newer",
+        CancellationToken::new(),
+        second,
+    )
+    else {
+        panic!("replacement must return the displaced pending review");
+    };
+
+    assert_eq!(displaced.persistence.run_id(), "first-pending");
+    assert!(!first_token.is_cancelled());
+    displaced.cancellation_token.cancel();
+    assert!(first_token.is_cancelled());
 }
 
 #[tokio::test]

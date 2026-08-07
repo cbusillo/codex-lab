@@ -17,6 +17,7 @@ mod review_coord;
 pub use review_coord::ReviewCoordination;
 pub use review_coord::ReviewLockGuard;
 pub use review_coord::ReviewLockInfo;
+pub use review_coord::review_owner_process_is_alive;
 
 pub const SUMMARY_MAX_FINDINGS: usize = 20;
 pub const SUMMARY_MAX_FIELD_BYTES: usize = 240;
@@ -446,6 +447,28 @@ impl AutoReviewStore {
         active_head: Option<&str>,
         active_review_target: Option<&ReviewTarget>,
     ) -> Result<usize> {
+        self.mark_superseded_by_fingerprint_with_target_and_filter(
+            diff_fingerprint,
+            superseded_by,
+            active_branch,
+            active_head,
+            active_review_target,
+            |_| true,
+        )
+    }
+
+    pub fn mark_superseded_by_fingerprint_with_target_and_filter<F>(
+        &self,
+        diff_fingerprint: &str,
+        superseded_by: &str,
+        active_branch: Option<&str>,
+        active_head: Option<&str>,
+        active_review_target: Option<&ReviewTarget>,
+        mut is_eligible: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(&AutoReviewRun) -> bool,
+    {
         let fingerprint = diff_fingerprint.trim();
         if fingerprint.is_empty() {
             return Ok(0);
@@ -458,6 +481,7 @@ impl AutoReviewStore {
                 || !duplicate_target_matches_branch_head(&run, active_branch, active_head)
                 || active_review_target
                     .is_some_and(|active_review_target| run.review_target != *active_review_target)
+                || !is_eligible(&run)
             {
                 continue;
             }
@@ -470,10 +494,24 @@ impl AutoReviewStore {
         &self,
         live_run_ids: I,
         now_unix_secs: i64,
-    ) -> Result<usize>
+    ) -> Result<Vec<AutoReviewRun>>
     where
         I: IntoIterator,
         I::Item: AsRef<str>,
+    {
+        self.reconcile_orphaned_in_flight_with_filter(live_run_ids, now_unix_secs, |_| true)
+    }
+
+    pub fn reconcile_orphaned_in_flight_with_filter<I, F>(
+        &self,
+        live_run_ids: I,
+        now_unix_secs: i64,
+        mut is_eligible: F,
+    ) -> Result<Vec<AutoReviewRun>>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+        F: FnMut(&AutoReviewRun) -> bool,
     {
         let live_run_ids = live_run_ids
             .into_iter()
@@ -482,7 +520,7 @@ impl AutoReviewStore {
         let mut index = self.load_index_for_write()?;
         let mut changed = Vec::new();
         for run in &mut index.runs {
-            if !run.status.is_in_flight() {
+            if !run.status.is_in_flight() || !is_eligible(run) {
                 continue;
             }
             if live_run_ids.contains(&run.run_id) {
@@ -492,13 +530,22 @@ impl AutoReviewStore {
             run.freshness = AutoReviewRunFreshness::Lost;
             run.completed_at_unix_secs = Some(now_unix_secs);
             run.cancel_reason = Some("agent_missing_after_restart".to_string());
+            if run.error_summary.is_none() {
+                run.error_summary = Some(match run.source {
+                    AutoReviewRunSource::Background => {
+                        "background review did not survive process restart".to_string()
+                    }
+                    AutoReviewRunSource::Manual => {
+                        "review did not survive process restart".to_string()
+                    }
+                });
+            }
             changed.push(run.clone());
         }
-        let changed_count = changed.len();
-        for run in changed {
-            self.save_run(&run)?;
+        for run in &changed {
+            self.save_run(run)?;
         }
-        Ok(changed_count)
+        Ok(changed)
     }
 
     pub fn find_duplicate_by_fingerprint_with_target_proof_and_filter<F>(
@@ -1074,6 +1121,10 @@ pub struct AutoReviewRunState {
     pub schema_version: u32,
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_process_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<AutoReviewBudget>,
     #[serde(default)]
     pub usage: AutoReviewUsage,
@@ -1088,6 +1139,8 @@ impl AutoReviewRunState {
         Self {
             schema_version: RUN_STATE_SCHEMA_VERSION,
             run_id: run_id.into(),
+            owner_thread_id: None,
+            owner_process_id: None,
             budget: None,
             usage: AutoReviewUsage::default(),
             terminal_reason: None,

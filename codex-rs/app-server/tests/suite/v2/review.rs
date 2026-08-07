@@ -667,6 +667,42 @@ async fn auto_review_summary_detail_and_disposition_round_trip_over_persisted_ru
         }
     );
 
+    // Summary reads are thread-scoped even though durable runs share a
+    // worktree-scoped store.
+    store.update_run_state(SEEDED_RUN_ID, |state| {
+        state.owner_thread_id = Some("different-thread".to_string());
+        Ok(())
+    })?;
+    let foreign_summary: AutoReviewSummaryReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams {
+                thread_id: thread_id.clone(),
+            },
+        })
+        .await?;
+    assert_eq!(foreign_summary.current, None);
+    assert_eq!(foreign_summary.latest, None);
+    store.update_run_state(SEEDED_RUN_ID, |state| {
+        state.owner_thread_id = Some(thread_id.clone());
+        Ok(())
+    })?;
+    let alternate_spelling_summary: AutoReviewSummaryReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams {
+                thread_id: thread_id.to_uppercase(),
+            },
+        })
+        .await?;
+    assert_eq!(
+        alternate_spelling_summary
+            .current
+            .as_ref()
+            .map(|summary| summary.run_id.as_str()),
+        Some(SEEDED_RUN_ID)
+    );
+
     let detail: AutoReviewFindingDetailReadResponse = mcp
         .request(|request_id| ClientRequest::AutoReviewFindingDetailRead {
             request_id,
@@ -724,12 +760,39 @@ async fn auto_review_summary_detail_and_disposition_round_trip_over_persisted_ru
     let summary: AutoReviewSummaryReadResponse = mcp
         .request(|request_id| ClientRequest::AutoReviewSummaryRead {
             request_id,
-            params: AutoReviewSummaryReadParams { thread_id },
+            params: AutoReviewSummaryReadParams {
+                thread_id: thread_id.clone(),
+            },
         })
         .await?;
     assert_eq!(
         summary.current.and_then(|run| run.finding_disposition),
         Some(write.finding_disposition)
+    );
+
+    // Store reconciliation is covered in codex-auto-review. Seed its durable
+    // result directly here so this protocol mapping test cannot race the
+    // app-server's own startup recovery task.
+    let mut orphaned = store.load_run(SEEDED_RUN_ID)?;
+    orphaned.status = AutoReviewRunStatus::Lost;
+    orphaned.freshness = AutoReviewRunFreshness::Lost;
+    orphaned.completed_at_unix_secs = Some(SEEDED_COMPLETED_AT);
+    orphaned.cancel_reason = Some("agent_missing_after_restart".to_string());
+    orphaned.error_summary = Some("background review did not survive process restart".to_string());
+    store.save_run(&orphaned)?;
+
+    let summary: AutoReviewSummaryReadResponse = mcp
+        .request(|request_id| ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams { thread_id },
+        })
+        .await?;
+    let latest = summary.latest.expect("reconciled run summary");
+    assert_eq!(latest.status, BackgroundAutoReviewStatus::Cancelled);
+    assert_eq!(latest.freshness, AutoReviewFreshness::Stale);
+    assert_eq!(
+        latest.error_summary.as_deref(),
+        Some("background review did not survive process restart")
     );
 
     Ok(())

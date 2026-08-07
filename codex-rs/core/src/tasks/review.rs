@@ -31,6 +31,7 @@ use crate::config::Constrained;
 use crate::review_persistence::ReviewInterruptionStatus;
 use crate::review_persistence::ReviewPersistenceContext;
 use crate::review_persistence::SavedReviewInterruption;
+use crate::review_persistence::bounded_auto_review_error_summary;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -181,7 +182,7 @@ async fn run_review_task(
         cancellation_token.clone(),
         budget_gate.clone(),
     ));
-    let start_result: Result<Option<ReviewConversation>, ReviewExecution> =
+    let start_result: Result<Result<ReviewConversation, String>, ReviewExecution> =
         if let Some(budget) = &budget {
             let remaining = Duration::from_millis(budget.max_elapsed_ms)
                 .saturating_sub(review_started.elapsed());
@@ -205,9 +206,10 @@ async fn run_review_task(
         } else {
             Ok(start_conversation.await)
         };
+    let mut start_error_summary = None;
     let execution = match start_result {
         Err(execution) => execution,
-        Ok(Some(review_conversation)) => {
+        Ok(Ok(review_conversation)) => {
             Box::pin(execute_review_conversation(
                 session.clone(),
                 ctx.clone(),
@@ -220,7 +222,10 @@ async fn run_review_task(
             ))
             .await
         }
-        Ok(None) => {
+        Ok(Err(err)) => {
+            start_error_summary = Some(bounded_auto_review_error_summary(format!(
+                "failed to start review conversation: {err}"
+            )));
             let elapsed_ms = elapsed_millis(review_started.elapsed());
             let terminal_reason = budget.as_ref().and_then(|budget| {
                 elapsed_reaches_budget(elapsed_ms, budget)
@@ -269,8 +274,12 @@ async fn run_review_task(
                 .await;
             }
         } else if let Some(reason) = execution.terminal_reason {
-            let error_summary =
+            let mut error_summary =
                 background_review_budget_summary(reason, budget.as_ref(), &execution.usage);
+            if let Some(start_error_summary) = start_error_summary.as_deref() {
+                error_summary.push_str(" · ");
+                error_summary.push_str(start_error_summary);
+            }
             if persistence.save_budget_cancelled(
                 &codex_home,
                 reason,
@@ -292,6 +301,21 @@ async fn run_review_task(
                     session.clone_session(),
                     &persistence,
                     interruption,
+                )
+                .await;
+            }
+        } else if let Some(error_summary) = start_error_summary {
+            if persistence.save_failed_with_usage(
+                &codex_home,
+                error_summary.clone(),
+                execution.token_usage.as_ref(),
+                execution.usage,
+            ) {
+                send_background_auto_review_status(
+                    session.clone_session(),
+                    &persistence,
+                    BackgroundAutoReviewStatus::Failed,
+                    Some(error_summary),
                 )
                 .await;
             }
@@ -367,7 +391,7 @@ async fn start_review_conversation(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
     budget_gate: Option<BackgroundReviewBudgetGate>,
-) -> Option<ReviewConversation> {
+) -> Result<ReviewConversation, String> {
     let config = ctx.config.clone();
     let mut sub_agent_config = config.as_ref().clone();
     // Carry over review-only feature restrictions so the delegate cannot
@@ -411,7 +435,7 @@ async fn start_review_conversation(
     if let Some(budget_gate) = budget_gate.clone() {
         thread_extension_init.insert(budget_gate);
     }
-    (run_codex_thread_one_shot(
+    run_codex_thread_one_shot(
         sub_agent_config,
         session.auth_manager(),
         input,
@@ -423,13 +447,13 @@ async fn start_review_conversation(
         /*initial_history*/ None,
         thread_extension_init,
     )
-    .await)
-        .ok()
-        .map(|(session, io)| ReviewConversation {
-            session,
-            receiver: io.rx_event,
-            budget_gate,
-        })
+    .await
+    .map(|(session, io)| ReviewConversation {
+        session,
+        receiver: io.rx_event,
+        budget_gate,
+    })
+    .map_err(|err| err.to_string())
 }
 
 async fn process_review_events(

@@ -1,0 +1,17 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 123
+expression: "format!(\"QUEUED\\n{queued}\\nRUNNING\\n{running}\\nCOMPLETED\\n{completed}\")"
+---
+QUEUED
+› Ask Codex to do anything
+
+  gpt-5.6-sol default · /tmp/project · Background review queued
+RUNNING
+› Ask Codex to do anything
+
+  gpt-5.6-sol default · /tmp/project · Background review running
+COMPLETED
+› Ask Codex to do anything
+
+  gpt-5.6-sol default · /tmp/project

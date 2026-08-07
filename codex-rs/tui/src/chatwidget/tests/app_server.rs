@@ -94,11 +94,21 @@ async fn background_auto_review_transient_status_stays_quiet() {
     chat.handle_server_notification(
         background_auto_review_status_notification(
             "run-background-1",
+            BackgroundAutoReviewStatus::Pending,
+            /*error_summary*/ None,
+        ),
+        /*replay_kind*/ None,
+    );
+    let queued = render_bottom_popup(&chat, /*width*/ 80);
+    chat.handle_server_notification(
+        background_auto_review_status_notification(
+            "run-background-1",
             BackgroundAutoReviewStatus::Running,
             /*error_summary*/ None,
         ),
         /*replay_kind*/ None,
     );
+    let running = render_bottom_popup(&chat, /*width*/ 80);
     chat.handle_server_notification(
         background_auto_review_status_notification(
             "run-background-1",
@@ -107,8 +117,13 @@ async fn background_auto_review_transient_status_stays_quiet() {
         ),
         /*replay_kind*/ None,
     );
+    let completed = render_bottom_popup(&chat, /*width*/ 80);
 
     assert!(drain_insert_history(&mut rx).is_empty());
+    assert_chatwidget_snapshot!(
+        "background_auto_review_transient_footer",
+        format!("QUEUED\n{queued}\nRUNNING\n{running}\nCOMPLETED\n{completed}")
+    );
     let snapshot = chat
         .review
         .current_background_review
@@ -136,6 +151,11 @@ async fn background_auto_review_failure_renders_error_summary_snapshot() {
         ),
         /*replay_kind*/ None,
     );
+    assert!(drain_insert_history(&mut rx).is_empty());
+    chat.handle_auto_review_summary_loaded(
+        "run-background-failed".to_string(),
+        Err("summary request failed".to_string()),
+    );
 
     let rendered = drain_insert_history(&mut rx)
         .iter()
@@ -143,6 +163,381 @@ async fn background_auto_review_failure_renders_error_summary_snapshot() {
         .collect::<Vec<_>>()
         .join("");
     assert_chatwidget_snapshot!("background_auto_review_failure_history", rendered);
+}
+
+#[tokio::test]
+async fn background_auto_review_terminal_summary_renders_exactly_once() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.handle_server_notification(
+        background_auto_review_status_notification(
+            "run-background-completed",
+            BackgroundAutoReviewStatus::Completed,
+            /*error_summary*/ None,
+        ),
+        /*replay_kind*/ None,
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
+
+    let summary = AutoReviewRunSummary {
+        run_id: "run-background-completed".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 0,
+        omitted_findings: 0,
+        truncated: false,
+        content: String::new(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+    chat.handle_auto_review_summary_loaded(
+        "run-background-completed".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(summary.clone()),
+            current: Some(summary),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        }),
+    );
+    assert_eq!(drain_insert_history(&mut rx).len(), 1);
+
+    let duplicate_summary = AutoReviewRunSummary {
+        run_id: "run-background-completed".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 0,
+        omitted_findings: 0,
+        truncated: false,
+        content: String::new(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+    chat.handle_auto_review_summary_loaded(
+        "run-background-completed".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(duplicate_summary.clone()),
+            current: Some(duplicate_summary),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        }),
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn terminal_latest_run_does_not_rerender_a_different_current_summary() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.handle_server_notification(
+        background_auto_review_status_notification(
+            "run-background-superseded",
+            BackgroundAutoReviewStatus::Superseded,
+            Some("schedule was superseded before start"),
+        ),
+        /*replay_kind*/ None,
+    );
+
+    let current = AutoReviewRunSummary {
+        run_id: "run-background-current".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 1,
+        omitted_findings: 0,
+        truncated: false,
+        content: "current run finding must not render again".to_string(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+    let latest = AutoReviewRunSummary {
+        run_id: "run-background-superseded".to_string(),
+        status: BackgroundAutoReviewStatus::Superseded,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Stale,
+        started_at: 1_700_000_002_000,
+        completed_at: Some(1_700_000_003_000),
+        model: None,
+        error_summary: Some("schedule was superseded before start".to_string()),
+        rendered_findings: 1,
+        omitted_findings: 0,
+        truncated: false,
+        content: "terminal latest finding".to_string(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+
+    chat.handle_auto_review_summary_loaded(
+        "run-background-superseded".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(latest),
+            current: Some(current),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        }),
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(rendered.contains("schedule was superseded before start"));
+    assert!(!rendered.contains("current run finding must not render again"));
+}
+
+#[tokio::test]
+async fn stale_completed_latest_does_not_render_as_no_findings() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let current = AutoReviewRunSummary {
+        run_id: "run-background-current".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_002_000,
+        completed_at: Some(1_700_000_003_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 1,
+        omitted_findings: 0,
+        truncated: false,
+        content: "different current finding must not render".to_string(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+    let latest = AutoReviewRunSummary {
+        run_id: "run-background-stale".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Stale,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 0,
+        omitted_findings: 0,
+        truncated: false,
+        content: String::new(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+
+    chat.handle_auto_review_summary_loaded(
+        "run-background-stale".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(latest),
+            current: Some(current),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        }),
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(rendered.contains("Background Review has no current findings"));
+    assert!(rendered.contains("stale and hidden"));
+    assert!(rendered.contains("run-background-stale"));
+    assert!(!rendered.contains("found no findings"));
+    assert!(!rendered.contains("No findings."));
+    assert!(!rendered.contains("different current finding must not render"));
+}
+
+#[tokio::test]
+async fn resumed_background_auto_review_summary_renders_without_a_live_status() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let summary = AutoReviewRunSummary {
+        run_id: "run-background-resumed".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 0,
+        omitted_findings: 0,
+        truncated: false,
+        content: String::new(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+
+    chat.handle_auto_review_summary_loaded(
+        "run-background-resumed".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(summary.clone()),
+            current: Some(summary),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        }),
+    );
+
+    assert_eq!(drain_insert_history(&mut rx).len(), 1);
+}
+
+#[tokio::test]
+async fn resumed_in_flight_summary_does_not_suppress_its_terminal_result() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let running = AutoReviewRunSummary {
+        run_id: "run-background-resumed-running".to_string(),
+        status: BackgroundAutoReviewStatus::Running,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_000_000,
+        completed_at: None,
+        model: None,
+        error_summary: None,
+        rendered_findings: 0,
+        omitted_findings: 0,
+        truncated: false,
+        content: String::new(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+
+    chat.handle_auto_review_summary_loaded(
+        "run-background-resumed-running".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(running.clone()),
+            current: Some(running),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        }),
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
+    assert!(
+        !chat
+            .review
+            .rendered_terminal_background_reviews
+            .contains("run-background-resumed-running")
+    );
+
+    chat.handle_server_notification(
+        background_auto_review_status_notification(
+            "run-background-resumed-running",
+            BackgroundAutoReviewStatus::Completed,
+            /*error_summary*/ None,
+        ),
+        /*replay_kind*/ None,
+    );
+    let completed = AutoReviewRunSummary {
+        run_id: "run-background-resumed-running".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 0,
+        omitted_findings: 0,
+        truncated: false,
+        content: String::new(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+    chat.handle_auto_review_summary_loaded(
+        "run-background-resumed-running".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(completed.clone()),
+            current: Some(completed),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        }),
+    );
+    assert_eq!(drain_insert_history(&mut rx).len(), 1);
+}
+
+#[tokio::test]
+async fn resumed_terminal_latest_does_not_render_a_running_current_summary() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let running = AutoReviewRunSummary {
+        run_id: "run-background-running-current".to_string(),
+        status: BackgroundAutoReviewStatus::Running,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_002_000,
+        completed_at: None,
+        model: None,
+        error_summary: None,
+        rendered_findings: 0,
+        omitted_findings: 0,
+        truncated: false,
+        content: "running current must not render".to_string(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+    let latest = AutoReviewRunSummary {
+        run_id: "run-background-terminal-latest".to_string(),
+        status: BackgroundAutoReviewStatus::Completed,
+        source: AutoReviewRunSource::Background,
+        freshness: AutoReviewFreshness::Current,
+        started_at: 1_700_000_000_000,
+        completed_at: Some(1_700_000_001_000),
+        model: None,
+        error_summary: None,
+        rendered_findings: 1,
+        omitted_findings: 0,
+        truncated: false,
+        content: "terminal latest finding".to_string(),
+        budget: None,
+        usage: Default::default(),
+        terminal_reason: None,
+        finding_disposition: None,
+    };
+
+    chat.handle_auto_review_summary_loaded(
+        "run-background-terminal-latest".to_string(),
+        Ok(AutoReviewSummaryReadResponse {
+            latest: Some(latest),
+            current: Some(running),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        }),
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(rendered.contains("run-background-terminal-latest"));
+    assert!(rendered.contains("terminal latest finding"));
+    assert!(!rendered.contains("running current must not render"));
 }
 
 #[tokio::test]
@@ -208,6 +603,10 @@ async fn stale_terminal_auto_review_status_does_not_displace_current_run() {
             Some("superseded by newer-run"),
         ),
         /*replay_kind*/ None,
+    );
+    chat.handle_auto_review_summary_loaded(
+        "older-run".to_string(),
+        Err("summary request failed".to_string()),
     );
 
     let snapshot = chat
