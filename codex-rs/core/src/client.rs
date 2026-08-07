@@ -989,7 +989,7 @@ impl ModelClient {
             service_tier,
             prompt_cache_key,
             text,
-            max_output_tokens: prompt.max_output_tokens,
+            max_output_tokens: responses_max_output_tokens(provider, prompt),
             client_metadata: Some(responses_metadata.client_metadata()),
         };
         Ok(request)
@@ -1216,6 +1216,12 @@ impl ModelClient {
         }
         headers
     }
+}
+
+fn responses_max_output_tokens(provider: &codex_api::Provider, prompt: &Prompt) -> Option<u64> {
+    prompt
+        .max_output_tokens
+        .filter(|_| provider.supports_responses_max_output_tokens())
 }
 
 impl Drop for ModelClientSession {

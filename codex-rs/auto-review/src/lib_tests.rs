@@ -92,6 +92,7 @@ fn save_and_load_run_state_preserves_run_schema_compatibility() -> anyhow::Resul
         tool_output_tokens: Some(300),
         tool_output_limit_tokens: Some(4_096),
         response_output_limit_tokens: Some(8_192),
+        response_output_reservation_tokens: Some(128_000),
         orchestration_skills_suppressed: Some(true),
         output_bytes: Some(2_000),
         finding_count: Some(1),

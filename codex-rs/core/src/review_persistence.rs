@@ -819,6 +819,9 @@ fn merge_usage(current: &mut AutoReviewUsage, update: AutoReviewUsage) {
     if update.response_output_limit_tokens.is_some() {
         current.response_output_limit_tokens = update.response_output_limit_tokens;
     }
+    if update.response_output_reservation_tokens.is_some() {
+        current.response_output_reservation_tokens = update.response_output_reservation_tokens;
+    }
     if update.orchestration_skills_suppressed.is_some() {
         current.orchestration_skills_suppressed = update.orchestration_skills_suppressed;
     }

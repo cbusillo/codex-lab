@@ -5,6 +5,9 @@ use codex_tools::FreeformTool;
 use codex_tools::FreeformToolFormat;
 use codex_tools::ToolSpec;
 
+use crate::config::DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES;
+use crate::config::DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS;
+
 fn budget(max_total_tokens: u64) -> AutoReviewBudget {
     AutoReviewBudget {
         max_scope_bytes: 1_000_000,
@@ -48,6 +51,10 @@ fn reserves_bounded_headroom_and_caps_each_tool_output() {
     assert_eq!(usage.effective_total_token_limit, Some(240_000));
     assert_eq!(usage.accounting_tolerance_tokens, Some(10_000));
     assert_eq!(usage.tool_output_limit_tokens, Some(4_096));
+    assert_eq!(
+        usage.response_output_reservation_tokens,
+        Some(INTRINSIC_MODEL_OUTPUT_RESERVATION_TOKENS)
+    );
     assert_eq!(usage.orchestration_skills_suppressed, Some(true));
 }
 
@@ -59,10 +66,61 @@ fn default_output_bytes_bound_the_provider_response() {
     let mut request = prompt("inspect the diff");
 
     assert!(gate.authorize_request(&mut request, None, /*retry*/ false));
-    assert_eq!(request.max_output_tokens, Some(MAX_RESPONSE_OUTPUT_TOKENS));
+    assert_eq!(
+        request.max_output_tokens,
+        Some(MAX_REQUESTED_RESPONSE_OUTPUT_TOKENS)
+    );
     assert_eq!(
         gate.usage(None).response_output_limit_tokens,
-        Some(MAX_RESPONSE_OUTPUT_TOKENS)
+        Some(MAX_REQUESTED_RESPONSE_OUTPUT_TOKENS)
+    );
+}
+
+#[test]
+fn intrinsic_output_reservation_drives_the_projected_total() {
+    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 250_000));
+    let mut request = prompt("inspect the diff");
+
+    assert!(gate.authorize_request(&mut request, None, /*retry*/ false));
+    let usage = gate.usage(None);
+    assert_eq!(
+        usage.response_output_reservation_tokens,
+        Some(INTRINSIC_MODEL_OUTPUT_RESERVATION_TOKENS)
+    );
+    assert!(
+        usage
+            .projected_total_tokens
+            .is_some_and(|tokens| tokens > 138_000 && tokens <= 250_000)
+    );
+}
+
+#[test]
+fn intrinsic_output_reservation_rejects_an_unsound_total_budget() {
+    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 100_000));
+    let mut request = prompt("inspect the diff");
+
+    assert!(!gate.authorize_request(&mut request, None, /*retry*/ false));
+    assert!(gate.stopped());
+    assert!(
+        gate.usage(None)
+            .projected_total_tokens
+            .is_some_and(|tokens| tokens > 100_000)
+    );
+}
+
+#[test]
+fn default_budget_authorizes_the_maximum_default_scope() {
+    let gate = BackgroundReviewBudgetGate::new(AutoReviewBudget {
+        max_total_tokens: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS,
+        ..budget(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS)
+    });
+    let mut request = prompt(&"x".repeat(DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES));
+
+    assert!(gate.authorize_request(&mut request, None, /*retry*/ false));
+    assert!(
+        gate.usage(None)
+            .projected_total_tokens
+            .is_some_and(|tokens| tokens <= DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS)
     );
 }
 
@@ -136,7 +194,7 @@ fn rejects_request_when_consumed_and_projected_growth_cross_hard_ceiling() {
 
 #[test]
 fn unreported_retry_replaces_the_previous_projection_instead_of_stacking_it() {
-    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 10_000));
+    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 250_000));
     let mut request = prompt("inspect the diff");
 
     assert!(gate.authorize_request(
@@ -154,7 +212,7 @@ fn unreported_retry_replaces_the_previous_projection_instead_of_stacking_it() {
 
 #[test]
 fn cumulative_usage_resets_projection_across_multiple_requests() {
-    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 20_000));
+    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 250_000));
     let mut request = prompt("inspect the diff");
 
     assert!(gate.authorize_request(&mut request, None, /*retry*/ false));
@@ -201,14 +259,14 @@ fn cumulative_usage_resets_projection_across_multiple_requests() {
     assert!(
         usage
             .projected_total_tokens
-            .is_some_and(|tokens| tokens <= 20_000)
+            .is_some_and(|tokens| tokens <= 250_000)
     );
     assert!(!gate.stopped());
 }
 
 #[test]
 fn prunes_non_review_tools_before_estimating_the_registry() {
-    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 5_000));
+    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 250_000));
     let mut request = prompt("inspect the diff");
     request.tools = vec![
         freeform_tool("exec_command"),
@@ -226,7 +284,7 @@ fn prunes_non_review_tools_before_estimating_the_registry() {
 
 #[test]
 fn caps_provider_output_inside_the_hard_ceiling() {
-    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 10_000));
+    let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 250_000));
     let mut request = prompt("inspect the diff");
 
     assert!(gate.authorize_request(&mut request, None, /*retry*/ false));
@@ -238,7 +296,7 @@ fn caps_provider_output_inside_the_hard_ceiling() {
     assert!(
         usage
             .projected_total_tokens
-            .is_some_and(|tokens| tokens <= 10_000)
+            .is_some_and(|tokens| tokens <= 250_000)
     );
 }
 

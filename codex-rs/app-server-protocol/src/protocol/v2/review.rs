@@ -210,6 +210,8 @@ pub struct AutoReviewUsage {
     pub tool_output_limit_tokens: Option<usize>,
     #[ts(type = "number | null")]
     pub response_output_limit_tokens: Option<u64>,
+    #[ts(type = "number | null")]
+    pub response_output_reservation_tokens: Option<u64>,
     pub orchestration_skills_suppressed: Option<bool>,
     pub output_bytes: Option<usize>,
     pub finding_count: Option<usize>,

@@ -716,7 +716,7 @@ async fn background_review_caps_tool_output_and_rejects_projected_followup() -> 
     ]));
     let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
     let budget = AutoReviewBudget {
-        max_total_tokens: 20_000,
+        max_total_tokens: 150_000,
         ..generous_budget()
     };
     let test = build_codex_in_repo(&server, cwd.clone(), Some(budget.clone())).await?;
@@ -750,7 +750,7 @@ async fn background_review_caps_tool_output_and_rejects_projected_followup() -> 
     );
     assert!(run.error_summary.as_deref().is_some_and(|summary| {
         summary.contains("background_max_total_tokens")
-            && summary.contains("response reached its provider cap")
+            && summary.contains("fixed intrinsic response reservation")
     }));
     let state = store
         .load_run_state(&run.run_id)?
@@ -761,12 +761,21 @@ async fn background_review_caps_tool_output_and_rejects_projected_followup() -> 
     );
     assert_eq!(state.usage.total_tokens, Some(19_000));
     assert_eq!(state.usage.request_count, Some(1));
-    assert_eq!(state.usage.tool_output_limit_tokens, Some(625));
+    assert_eq!(state.usage.tool_output_limit_tokens, Some(4_096));
+    assert_eq!(
+        state.usage.response_output_reservation_tokens,
+        Some(128_000)
+    );
+    let tool_output_limit = state
+        .usage
+        .tool_output_limit_tokens
+        .and_then(|tokens| u64::try_from(tokens).ok())
+        .context("tool output limit must be recorded")?;
     assert!(
         state
             .usage
             .tool_output_tokens
-            .is_some_and(|tokens| tokens > 0 && tokens < 1_000),
+            .is_some_and(|tokens| tokens > 0 && tokens <= tool_output_limit + 1_024),
         "tool output must be truncated before follow-up projection: {:?}",
         state.usage.tool_output_tokens
     );
@@ -774,7 +783,7 @@ async fn background_review_caps_tool_output_and_rejects_projected_followup() -> 
         state
             .usage
             .projected_total_tokens
-            .is_some_and(|tokens| tokens > 20_000)
+            .is_some_and(|tokens| tokens > 150_000)
     );
 
     Ok(())
@@ -808,7 +817,7 @@ async fn background_review_output_limited_response_persists_token_budget_stop() 
     ]));
     let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
     let budget = AutoReviewBudget {
-        max_total_tokens: 50_000,
+        max_total_tokens: 250_000,
         ..generous_budget()
     };
     let test = build_codex_in_repo(&server, cwd.clone(), Some(budget)).await?;
@@ -834,7 +843,7 @@ async fn background_review_output_limited_response_persists_token_budget_stop() 
     );
     assert!(run.error_summary.as_deref().is_some_and(|summary| {
         summary.contains("background_max_total_tokens")
-            && summary.contains("response reached its provider cap")
+            && summary.contains("fixed intrinsic response reservation")
     }));
     let state = store
         .load_run_state(&run.run_id)?
@@ -846,6 +855,10 @@ async fn background_review_output_limited_response_persists_token_budget_stop() 
     assert_eq!(state.usage.request_count, Some(1));
     assert_eq!(state.usage.retry_count, Some(0));
     assert!(state.usage.response_output_limit_tokens.is_some());
+    assert_eq!(
+        state.usage.response_output_reservation_tokens,
+        Some(128_000)
+    );
 
     Ok(())
 }
@@ -893,7 +906,7 @@ async fn background_review_accounts_multiple_requests_without_projection_stackin
     ]));
     let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
     let budget = AutoReviewBudget {
-        max_total_tokens: 50_000,
+        max_total_tokens: 250_000,
         ..generous_budget()
     };
     let test = build_codex_in_repo(&server, cwd.clone(), Some(budget.clone())).await?;
@@ -926,6 +939,10 @@ async fn background_review_accounts_multiple_requests_without_projection_stackin
     assert_eq!(state.usage.request_count, Some(3));
     assert_eq!(state.usage.retry_count, Some(0));
     assert_eq!(state.usage.total_tokens, Some(9_000));
+    assert_eq!(
+        state.usage.response_output_reservation_tokens,
+        Some(128_000)
+    );
     assert!(
         state
             .usage

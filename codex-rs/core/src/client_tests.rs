@@ -9,6 +9,7 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::responses_max_output_tokens;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
@@ -114,6 +115,43 @@ fn test_model_client_with_thread_id(
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     )
+}
+
+fn test_api_provider(base_url: &str) -> codex_api::Provider {
+    codex_api::Provider {
+        name: "test".to_string(),
+        base_url: base_url.to_string(),
+        query_params: None,
+        headers: http::HeaderMap::new(),
+        retry: codex_api::RetryConfig {
+            max_attempts: 1,
+            base_delay: Duration::ZERO,
+            retry_429: false,
+            retry_5xx: false,
+            retry_transport: false,
+        },
+        stream_idle_timeout: Duration::ZERO,
+    }
+}
+
+#[test]
+fn response_output_limit_is_omitted_for_chatgpt_backend() {
+    let prompt = Prompt {
+        max_output_tokens: Some(4_096),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        responses_max_output_tokens(
+            &test_api_provider("https://chatgpt.com/backend-api/codex"),
+            &prompt,
+        ),
+        None
+    );
+    assert_eq!(
+        responses_max_output_tokens(&test_api_provider("https://api.openai.com/v1"), &prompt),
+        Some(4_096)
+    );
 }
 
 #[test]

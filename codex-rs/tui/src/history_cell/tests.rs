@@ -405,6 +405,7 @@ fn auto_review_token_budget_cancellation_snapshot() {
         tool_output_tokens: Some(611),
         tool_output_limit_tokens: Some(625),
         response_output_limit_tokens: Some(512),
+        response_output_reservation_tokens: Some(128_000),
         orchestration_skills_suppressed: Some(true),
         ..Default::default()
     };
@@ -420,7 +421,7 @@ fn auto_review_token_budget_cancellation_snapshot() {
     insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 100)).join("\n"), @"
 ✗ Background Review cancelled · run-token-budget
   cancelled · current · code-gpt-5.5 · stopped: token budget · elapsed 2s/5m · tokens 19k/19k effective (20k hard, 800 reserve, 20k projected) · scope 1KiB/1MiB · output ?/64KiB · findings ?/50 · Background review stopped before the next provider request; narrow the diff or increase background_max_total_tokens.
-  requests 1 · retries 1 · registry 2k tokens · registry tools pruned 4 · tool output 611/625 tokens · response cap 512 tokens · orchestration guidance suppressed
+  requests 1 · retries 1 · registry 2k tokens · registry tools pruned 4 · tool output 611/625 tokens · response request 512 tokens · response reserve 128k tokens · orchestration guidance suppressed
 ");
 }
 

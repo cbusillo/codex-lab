@@ -247,7 +247,10 @@ fn push_summary_budget_diagnostics(lines: &mut Vec<Line<'static>>, summary: &Aut
         ));
     }
     if let Some(tokens) = usage.response_output_limit_tokens {
-        details.push(format!("response cap {} tokens", display_count(tokens)));
+        details.push(format!("response request {} tokens", display_count(tokens)));
+    }
+    if let Some(tokens) = usage.response_output_reservation_tokens {
+        details.push(format!("response reserve {} tokens", display_count(tokens)));
     }
     if usage.orchestration_skills_suppressed == Some(true) {
         details.push("orchestration guidance suppressed".to_string());

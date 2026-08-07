@@ -1175,6 +1175,8 @@ pub struct AutoReviewUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_output_limit_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_output_reservation_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration_skills_suppressed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_bytes: Option<usize>,

@@ -118,7 +118,7 @@ fn budget_summaries_report_the_limit_that_was_hit() {
         summaries,
         [
             "background review exceeded elapsed budget: 6000 ms >= 5000 ms; retry after narrowing the review scope or increasing `auto_review.background_max_elapsed_seconds`".to_string(),
-            "background review stopped at its effective token budget: consumed 150 tokens, projected 180, effective ceiling 96, hard ceiling 100 (4 token accounting tolerance); retry with a narrower diff; increase `auto_review.background_max_total_tokens` when projected input reached the ceiling, or lower reasoning effort when the response reached its provider cap".to_string(),
+            "background review stopped at its effective token budget: consumed 150 tokens, projected 180, effective ceiling 96, hard ceiling 100 (4 token accounting tolerance); retry with a narrower diff or increase `auto_review.background_max_total_tokens`; the fixed intrinsic response reservation cannot be reduced for an individual request".to_string(),
             "background review exceeded output budget: 96 bytes > 64 bytes; retry with a narrower diff or increase `auto_review.background_max_output_bytes`".to_string(),
             "background review exceeded finding budget: 4 findings > 2 findings; retry with a narrower diff or increase `auto_review.background_max_findings`".to_string(),
             "background review stopped after exceeding its execution budget".to_string(),

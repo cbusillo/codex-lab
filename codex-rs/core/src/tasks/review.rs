@@ -776,7 +776,7 @@ fn background_review_budget_summary(
                 .projected_total_tokens
                 .unwrap_or_else(|| usage.total_tokens.unwrap_or_default());
             format!(
-                "background review stopped at its effective token budget: consumed {} tokens, projected {projected}, effective ceiling {effective_limit}, hard ceiling {} ({} token accounting tolerance); retry with a narrower diff; increase `auto_review.background_max_total_tokens` when projected input reached the ceiling, or lower reasoning effort when the response reached its provider cap",
+                "background review stopped at its effective token budget: consumed {} tokens, projected {projected}, effective ceiling {effective_limit}, hard ceiling {} ({} token accounting tolerance); retry with a narrower diff or increase `auto_review.background_max_total_tokens`; the fixed intrinsic response reservation cannot be reduced for an individual request",
                 usage.total_tokens.unwrap_or_default(),
                 budget.max_total_tokens,
                 usage.accounting_tolerance_tokens.unwrap_or_default()

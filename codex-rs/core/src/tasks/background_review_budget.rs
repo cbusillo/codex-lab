@@ -14,9 +14,8 @@ use crate::context_manager::estimate_item_token_count;
 /// Maximum estimation error tolerated after the effective token ceiling.
 ///
 /// Provider usage arrives only after a response completes. Background Review
-/// therefore combines a conservative input estimate, a provider-enforced
-/// response-output limit, and this reserve so an in-flight response remains
-/// within the configured hard ceiling even when accounting is reported late.
+/// therefore combines a conservative input estimate, intrinsic model-output
+/// headroom, and this reserve before authorizing each request.
 const ACCOUNTING_TOLERANCE_DIVISOR: u64 = 25;
 const MAX_ACCOUNTING_TOLERANCE_TOKENS: u64 = 10_000;
 const TOOL_OUTPUT_BUDGET_DIVISOR: u64 = 32;
@@ -33,8 +32,14 @@ const INPUT_ESTIMATE_SAFETY_FACTOR: u64 = 4;
 /// appearing in the visible review output. Reserve four times the visible
 /// output estimate so useful reasoning can complete within the byte budget.
 const RESPONSE_REASONING_HEADROOM_FACTOR: u64 = 4;
-/// Absolute provider response ceiling for one background-review request.
-const MAX_RESPONSE_OUTPUT_TOKENS: u64 = 65_536;
+/// Absolute response limit requested from providers that support it.
+const MAX_REQUESTED_RESPONSE_OUTPUT_TOKENS: u64 = 65_536;
+/// Current Codex reviewer models can emit up to 128k output tokens. This is a
+/// product contract that must move with the supported reviewer model catalog
+/// until model metadata exposes the intrinsic output ceiling directly. Reserve
+/// the full allowance because the ChatGPT Codex transport does not accept a
+/// lower wire-level response limit.
+const INTRINSIC_MODEL_OUTPUT_RESERVATION_TOKENS: u64 = 128_000;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackgroundReviewBudgetGate {
@@ -42,7 +47,8 @@ pub(crate) struct BackgroundReviewBudgetGate {
     effective_total_token_limit: u64,
     accounting_tolerance_tokens: u64,
     tool_output_limit_tokens: usize,
-    max_response_output_tokens: u64,
+    max_requested_response_output_tokens: u64,
+    response_output_reservation_tokens: u64,
     state: Arc<Mutex<BackgroundReviewBudgetGateState>>,
 }
 
@@ -83,18 +89,20 @@ impl BackgroundReviewBudgetGate {
             .max_total_tokens
             .div_ceil(TOOL_OUTPUT_BUDGET_DIVISOR)
             .clamp(1, MAX_TOOL_OUTPUT_TOKENS) as usize;
-        let max_response_output_tokens = approx_tokens_from_byte_count(budget.max_output_bytes)
-            .saturating_mul(RESPONSE_REASONING_HEADROOM_FACTOR)
-            .clamp(
-                MIN_USEFUL_RESPONSE_OUTPUT_TOKENS,
-                MAX_RESPONSE_OUTPUT_TOKENS,
-            );
+        let max_requested_response_output_tokens =
+            approx_tokens_from_byte_count(budget.max_output_bytes)
+                .saturating_mul(RESPONSE_REASONING_HEADROOM_FACTOR)
+                .clamp(
+                    MIN_USEFUL_RESPONSE_OUTPUT_TOKENS,
+                    MAX_REQUESTED_RESPONSE_OUTPUT_TOKENS,
+                );
         Self {
             budget,
             effective_total_token_limit,
             accounting_tolerance_tokens,
             tool_output_limit_tokens,
-            max_response_output_tokens,
+            max_requested_response_output_tokens,
+            response_output_reservation_tokens: INTRINSIC_MODEL_OUTPUT_RESERVATION_TOKENS,
             state: Arc::new(Mutex::new(BackgroundReviewBudgetGateState::default())),
         }
     }
@@ -136,19 +144,16 @@ impl BackgroundReviewBudgetGate {
                 .saturating_add(estimate.total_tokens)
         };
         let projected_input_tokens = consumed_tokens.saturating_add(next_unaccounted_tokens);
-        let minimum_projected_tokens = projected_input_tokens
-            .saturating_add(self.accounting_tolerance_tokens)
-            .saturating_add(MIN_USEFUL_RESPONSE_OUTPUT_TOKENS);
         let available_output_tokens = self
             .budget
             .max_total_tokens
             .saturating_sub(projected_input_tokens)
             .saturating_sub(self.accounting_tolerance_tokens);
         let response_output_limit_tokens = available_output_tokens
-            .min(self.max_response_output_tokens)
+            .min(self.max_requested_response_output_tokens)
             .min(prompt.max_output_tokens.unwrap_or(u64::MAX));
         let projected_total_tokens = projected_input_tokens
-            .saturating_add(response_output_limit_tokens)
+            .saturating_add(self.response_output_reservation_tokens)
             .saturating_add(self.accounting_tolerance_tokens);
         state.projected_total_tokens = Some(projected_total_tokens);
         state.tool_registry_tokens = state
@@ -158,10 +163,9 @@ impl BackgroundReviewBudgetGate {
             .tool_registry_pruned_count
             .saturating_add(pruned_tool_count);
         state.tool_output_tokens = state.tool_output_tokens.max(estimate.tool_output_tokens);
-        if minimum_projected_tokens > self.budget.max_total_tokens
+        if projected_total_tokens > self.budget.max_total_tokens
             || response_output_limit_tokens < MIN_USEFUL_RESPONSE_OUTPUT_TOKENS
         {
-            state.projected_total_tokens = Some(minimum_projected_tokens);
             state.stopped = true;
             return false;
         }
@@ -221,6 +225,7 @@ impl BackgroundReviewBudgetGate {
             tool_output_tokens: Some(state.tool_output_tokens),
             tool_output_limit_tokens: Some(self.tool_output_limit_tokens),
             response_output_limit_tokens: state.response_output_limit_tokens,
+            response_output_reservation_tokens: Some(self.response_output_reservation_tokens),
             orchestration_skills_suppressed: Some(true),
             ..Default::default()
         }
