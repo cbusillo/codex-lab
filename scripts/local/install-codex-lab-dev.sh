@@ -127,6 +127,14 @@ candidate="$("$python_bin" "$repo_root/scripts/local/codex_lab_provenance.py" \
 	--binary "$target_root/$target_subdir/codex-lab" \
 	--companion-binary "$target_root/$target_subdir/codex-code-mode-host" \
 	--artifact-root "$codex_lab_home/working")"
+candidate_dirty_state="$(basename "$(dirname "$(dirname "$candidate")")")"
+candidate_commit="$(basename "$(dirname "$(dirname "$(dirname "$candidate")")")")"
+source_common_dir="$(git -C "$repo_root" rev-parse --git-common-dir)"
+case "$source_common_dir" in
+/*) ;;
+*) source_common_dir="$repo_root/$source_common_dir" ;;
+esac
+source_repository_id="$(cd "$source_common_dir" && pwd -P)"
 
 tmp_path="$shim_path.tmp.$$"
 trap 'rm -f -- "$tmp_path"' EXIT INT TERM
@@ -137,9 +145,101 @@ $marker
 
 DEFAULT_CODEX_LAB_HOME='$(printf "%s" "$codex_lab_home" | sed "s/'/'\\\\''/g")'
 CANDIDATE='$(printf "%s" "$candidate" | sed "s/'/'\\\\''/g")'
+CANDIDATE_COMMIT='$(printf "%s" "$candidate_commit" | sed "s/'/'\\\\''/g")'
+CANDIDATE_DIRTY_STATE='$(printf "%s" "$candidate_dirty_state" | sed "s/'/'\\\\''/g")'
+SOURCE_CHECKOUT='$(printf "%s" "$repo_root" | sed "s/'/'\\\\''/g")'
+SOURCE_REPOSITORY_ID='$(printf "%s" "$source_repository_id" | sed "s/'/'\\\\''/g")'
+INSTALL_BIN_DIR='$(printf "%s" "$bin_dir" | sed "s/'/'\\\\''/g")'
+INSTALL_PROFILE='$(printf "%s" "$profile" | sed "s/'/'\\\\''/g")'
 
 export CODEX_LAB_HOME="\${CODEX_LAB_HOME:-\$DEFAULT_CODEX_LAB_HOME}"
 mkdir -p "\$CODEX_LAB_HOME"
+
+unset CODEX_LAB_PINNED_CANDIDATE_WARNING
+
+shell_quote() {
+  printf "'"
+  printf '%s' "\$1" | sed "s/'/'\"'\"'/g"
+  printf "'"
+}
+
+same_repository_checkout() {
+  checkout="\$1"
+  checkout_root="\$(git -C "\$checkout" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  common_dir="\$(git -C "\$checkout_root" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "\$common_dir" in
+    /*) ;;
+    *) common_dir="\$checkout_root/\$common_dir" ;;
+  esac
+  common_dir="\$(cd "\$common_dir" 2>/dev/null && pwd -P)" || return 1
+  [ "\$common_dir" = "\$SOURCE_REPOSITORY_ID" ] || return 1
+  EVIDENCE_CHECKOUT="\$checkout_root"
+}
+
+evidence_argument=''
+expect_evidence_argument=0
+for argument in "\$@"; do
+  if [ "\$expect_evidence_argument" -eq 1 ]; then
+    evidence_argument="\$argument"
+    expect_evidence_argument=0
+    continue
+  fi
+  case "\$argument" in
+    --) break ;;
+    -C|--cd) expect_evidence_argument=1 ;;
+    --cd=*) evidence_argument="\${argument#--cd=}" ;;
+  esac
+done
+
+EVIDENCE_CHECKOUT=''
+if command -v git >/dev/null 2>&1; then
+  if [ -n "\$evidence_argument" ]; then
+    same_repository_checkout "\$evidence_argument" || true
+  fi
+  if [ -z "\$EVIDENCE_CHECKOUT" ]; then
+    same_repository_checkout "\$PWD" || true
+  fi
+  if [ -z "\$EVIDENCE_CHECKOUT" ]; then
+    same_repository_checkout "\$SOURCE_CHECKOUT" || true
+  fi
+fi
+
+printf 'Pinned Codex Lab candidate: %s (%s)\n' "\$CANDIDATE_COMMIT" "\$CANDIDATE_DIRTY_STATE" >&2
+
+if [ -n "\$EVIDENCE_CHECKOUT" ]; then
+  evidence_commit="\$(git -C "\$EVIDENCE_CHECKOUT" rev-parse --verify HEAD 2>/dev/null || true)"
+  evidence_dirty_state=unavailable
+  if evidence_status="\$(git -C "\$EVIDENCE_CHECKOUT" status --porcelain --untracked-files=no 2>/dev/null)"; then
+    evidence_dirty_state=clean
+    if [ -n "\$evidence_status" ]; then
+      evidence_dirty_state=dirty
+    fi
+  fi
+
+  relationship=''
+  if [ -n "\$evidence_commit" ] && [ "\$evidence_commit" = "\$CANDIDATE_COMMIT" ]; then
+    if [ "\$evidence_dirty_state" = unavailable ]; then
+      relationship=''
+    elif [ "\$evidence_dirty_state" != "\$CANDIDATE_DIRTY_STATE" ]; then
+      relationship='matches the local source commit, but has different dirty provenance from'
+    fi
+  elif [ -n "\$evidence_commit" ] && git -C "\$EVIDENCE_CHECKOUT" cat-file -e "\$CANDIDATE_COMMIT^{commit}" 2>/dev/null; then
+    if git -C "\$EVIDENCE_CHECKOUT" merge-base --is-ancestor "\$CANDIDATE_COMMIT" "\$evidence_commit" 2>/dev/null; then
+      relationship='is older than'
+    elif git -C "\$EVIDENCE_CHECKOUT" merge-base --is-ancestor "\$evidence_commit" "\$CANDIDATE_COMMIT" 2>/dev/null; then
+      relationship='is newer than'
+    else
+      relationship='has diverged from'
+    fi
+  fi
+
+  if [ -n "\$relationship" ]; then
+    refresh_command="\$(shell_quote "\$EVIDENCE_CHECKOUT/scripts/local/install-codex-lab-dev.sh") --bin-dir \$(shell_quote "\$INSTALL_BIN_DIR") --codex-lab-home \$(shell_quote "\$DEFAULT_CODEX_LAB_HOME") --profile \$(shell_quote "\$INSTALL_PROFILE")"
+    CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) \$relationship local source \$evidence_commit (\$evidence_dirty_state) at \$EVIDENCE_CHECKOUT. Refresh: \$refresh_command"
+    export CODEX_LAB_PINNED_CANDIDATE_WARNING
+    printf 'warning: %s\n' "\$CODEX_LAB_PINNED_CANDIDATE_WARNING" >&2
+  fi
+fi
 
 if [ ! -x "\$CANDIDATE" ]; then
   echo "error: pinned Codex Lab candidate is unavailable: \$CANDIDATE" >&2
