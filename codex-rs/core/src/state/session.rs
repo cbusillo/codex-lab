@@ -63,6 +63,22 @@ struct BackgroundAutoReviewPending {
     persistence: ReviewPersistenceContext,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct BackgroundAutoReviewDisplacedPending {
+    pub(crate) generation: u64,
+    pub(crate) fingerprint: String,
+    pub(crate) cancellation_token: CancellationToken,
+    pub(crate) persistence: ReviewPersistenceContext,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BackgroundAutoReviewPendingRecord {
+    Rejected,
+    Recorded {
+        displaced: Option<BackgroundAutoReviewDisplacedPending>,
+    },
+}
+
 #[derive(Debug)]
 pub(crate) struct BackgroundAutoReviewCompletion {
     done: AtomicBool,
@@ -238,19 +254,24 @@ impl BackgroundAutoReviewSchedulerState {
         fingerprint: &str,
         cancellation_token: CancellationToken,
         persistence: ReviewPersistenceContext,
-    ) -> bool {
+    ) -> BackgroundAutoReviewPendingRecord {
         if !self.is_current_schedule(generation) {
-            return false;
+            return BackgroundAutoReviewPendingRecord::Rejected;
         }
-        if let Some(previous) = self.pending_review.replace(BackgroundAutoReviewPending {
+        let displaced = self.pending_review.replace(BackgroundAutoReviewPending {
             generation,
             fingerprint: fingerprint.to_string(),
             cancellation_token,
             persistence,
-        }) {
-            previous.cancellation_token.cancel();
+        });
+        BackgroundAutoReviewPendingRecord::Recorded {
+            displaced: displaced.map(|previous| BackgroundAutoReviewDisplacedPending {
+                generation: previous.generation,
+                fingerprint: previous.fingerprint,
+                cancellation_token: previous.cancellation_token,
+                persistence: previous.persistence,
+            }),
         }
-        true
     }
 
     pub(crate) fn record_started(

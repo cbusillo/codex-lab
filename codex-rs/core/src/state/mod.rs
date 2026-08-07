@@ -11,6 +11,7 @@ pub(crate) use auto_compact_window::AutoCompactWindowSnapshot;
 pub(crate) use service::SessionServices;
 pub(crate) use session::BackgroundAutoReviewActiveSnapshot;
 pub(crate) use session::BackgroundAutoReviewControlledRun;
+pub(crate) use session::BackgroundAutoReviewPendingRecord;
 pub(crate) use session::BackgroundAutoReviewRunningHandle;
 pub(crate) use session::BackgroundAutoReviewStart;
 pub(crate) use session::SessionState;

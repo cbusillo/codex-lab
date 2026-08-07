@@ -37,6 +37,7 @@ use crate::review_persistence::ReviewPersistenceContext;
 use crate::review_persistence::bounded_auto_review_error_summary;
 use crate::review_prompts::resolve_review_request;
 use crate::state::BackgroundAutoReviewControlledRun;
+use crate::state::BackgroundAutoReviewPendingRecord;
 use crate::state::BackgroundAutoReviewRunningHandle;
 use crate::turn_timing::now_unix_timestamp_ms;
 
@@ -250,7 +251,7 @@ impl Session {
             }
         };
         let pending_cancellation_token = tokio_util::sync::CancellationToken::new();
-        if !self
+        let displaced_pending = match self
             .record_pending_background_auto_review(
                 schedule.generation,
                 &schedule.fingerprint,
@@ -259,15 +260,28 @@ impl Session {
             )
             .await
         {
+            BackgroundAutoReviewPendingRecord::Rejected => {
+                self.record_superseded_background_auto_review(
+                    &persistence,
+                    schedule.generation,
+                    &schedule.fingerprint,
+                    "background auto review schedule was superseded before pending".to_string(),
+                )
+                .await;
+                debug!("background auto review skipped before debounce: schedule superseded");
+                return;
+            }
+            BackgroundAutoReviewPendingRecord::Recorded { displaced } => displaced,
+        };
+        if let Some(displaced) = displaced_pending {
             self.record_superseded_background_auto_review(
-                &persistence,
-                schedule.generation,
-                &schedule.fingerprint,
-                "background auto review schedule was superseded before pending".to_string(),
+                &displaced.persistence,
+                displaced.generation,
+                &displaced.fingerprint,
+                "background auto review was replaced by a newer pending schedule".to_string(),
             )
             .await;
-            debug!("background auto review skipped before debounce: schedule superseded");
-            return;
+            displaced.cancellation_token.cancel();
         }
         let codex_home = self.codex_home().await;
         if persistence.save_pending(codex_home) {
@@ -660,7 +674,7 @@ impl Session {
         fingerprint: &str,
         cancellation_token: tokio_util::sync::CancellationToken,
         persistence: ReviewPersistenceContext,
-    ) -> bool {
+    ) -> BackgroundAutoReviewPendingRecord {
         let mut state = self.state.lock().await;
         state.background_auto_review.record_pending(
             generation,
@@ -823,12 +837,19 @@ impl Session {
             let state = self.state.lock().await;
             state.background_auto_review.active_snapshot()
         };
+        let current_thread_id = self.thread_id().to_string();
         let duplicate = match store.find_duplicate_by_fingerprint_with_target_proof_and_filter(
             fingerprint,
             Some(persistence.target()),
             Some(persistence.review_target()),
             |duplicate| match duplicate.disposition {
-                AutoReviewDuplicateDisposition::ReuseTerminal => true,
+                AutoReviewDuplicateDisposition::ReuseTerminal => {
+                    background_auto_review_duplicate_is_visible_to_thread(
+                        &store,
+                        &duplicate.run_id,
+                        &current_thread_id,
+                    )
+                }
                 AutoReviewDuplicateDisposition::Adopt => {
                     active_run_ids.pending_run_id.as_deref() == Some(duplicate.run_id.as_str())
                         || active_run_ids.running_run_id.as_deref()
@@ -1117,6 +1138,24 @@ impl Session {
     pub(crate) async fn clear_background_auto_review_turn(self: &Arc<Self>, turn_id: &str) {
         let mut state = self.state.lock().await;
         state.background_auto_review.remove_regular_turn(turn_id);
+    }
+}
+
+fn background_auto_review_duplicate_is_visible_to_thread(
+    store: &AutoReviewStore,
+    run_id: &str,
+    current_thread_id: &str,
+) -> bool {
+    match store.load_run_state(run_id) {
+        Ok(Some(state)) => state
+            .owner_thread_id
+            .as_deref()
+            .is_none_or(|owner_thread_id| owner_thread_id == current_thread_id),
+        Ok(None) => true,
+        Err(err) => {
+            warn!(%run_id, error = %err, "ignoring background auto review duplicate with unreadable owner state");
+            false
+        }
     }
 }
 
