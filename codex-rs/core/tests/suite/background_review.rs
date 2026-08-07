@@ -49,6 +49,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tempfile::TempDir;
 use wiremock::MockServer;
 
@@ -461,7 +463,8 @@ async fn startup_reconciles_ownerless_orphan_without_emitting_event() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_preserves_live_and_legacy_manual_reviews() -> Result<()> {
+async fn startup_preserves_recent_manual_reviews_and_reconciles_stale_legacy_review() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let repo = create_git_repo()?;
@@ -477,7 +480,15 @@ async fn startup_preserves_live_and_legacy_manual_reviews() -> Result<()> {
     })?;
     let mut legacy_run = in_flight_background_run(repo.path(), "legacy-manual-review");
     legacy_run.source = AutoReviewRunSource::Manual;
+    legacy_run.started_at_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_secs()
+        .try_into()?;
     store.save_run(&legacy_run)?;
+    let mut stale_legacy_run = in_flight_background_run(repo.path(), "stale-legacy-manual-review");
+    stale_legacy_run.source = AutoReviewRunSource::Manual;
+    stale_legacy_run.started_at_unix_secs = 1;
+    store.save_run(&stale_legacy_run)?;
 
     let server = responses::start_mock_server().await;
     let config_cwd = cwd.clone();
@@ -495,6 +506,12 @@ async fn startup_preserves_live_and_legacy_manual_reviews() -> Result<()> {
     let legacy_stored = store.load_run(&legacy_run.run_id)?;
     assert_eq!(legacy_stored.status, AutoReviewRunStatus::Running);
     assert_eq!(legacy_stored.error_summary, None);
+    let stale_legacy_stored = store.load_run(&stale_legacy_run.run_id)?;
+    assert_eq!(stale_legacy_stored.status, AutoReviewRunStatus::Lost);
+    assert_eq!(
+        stale_legacy_stored.error_summary.as_deref(),
+        Some("review did not survive process restart")
+    );
     Ok(())
 }
 

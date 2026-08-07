@@ -45,6 +45,7 @@ use crate::turn_timing::now_unix_timestamp_ms;
 const BACKGROUND_AUTO_REVIEW_DEBOUNCE: Duration = Duration::from_secs(2);
 const BACKGROUND_AUTO_REVIEW_LOCK_RETRY: Duration = Duration::from_millis(500);
 const BACKGROUND_AUTO_REVIEW_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+const MANUAL_AUTO_REVIEW_RECOVERY_GRACE_SECS: i64 = 24 * 60 * 60;
 const BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON: &str = "background_auto_review_control";
 
 impl Session {
@@ -225,9 +226,9 @@ impl Session {
         {
             Ok(Some(guard)) => guard,
             Ok(None) => {
-                let error_summary =
-                    "another background auto review is already running for this worktree"
-                        .to_string();
+                let error_summary = "another background auto review is already queued or running \
+                                     for this worktree"
+                    .to_string();
                 self.record_skipped_background_auto_review(
                     &persistence,
                     schedule.generation,
@@ -628,18 +629,26 @@ impl Session {
                 };
                 let live_run_ids = live_run_id.into_iter().collect::<Vec<_>>();
                 let store = AutoReviewStore::for_scope(&recovery_codex_home, &scope);
+                let recovery_now_unix_secs = now_unix_timestamp_ms() / 1000;
                 let reconciled = match store.reconcile_orphaned_in_flight_with_filter(
                     live_run_ids.iter().map(String::as_str),
-                    now_unix_timestamp_ms() / 1000,
+                    recovery_now_unix_secs,
                     |run| match run.source {
                         AutoReviewRunSource::Background => true,
                         AutoReviewRunSource::Manual => match store.load_run_state(&run.run_id) {
-                            Ok(Some(state)) => state
-                                .owner_process_id
-                                .is_some_and(|pid| !review_owner_process_is_alive(pid)),
-                            // Legacy manual reviews have no durable liveness proof. Preserve them
-                            // rather than risking cancellation of a still-running review.
-                            Ok(None) => false,
+                            Ok(Some(state)) => match state.owner_process_id {
+                                Some(pid) => !review_owner_process_is_alive(pid),
+                                None => manual_auto_review_exceeds_recovery_grace(
+                                    run,
+                                    recovery_now_unix_secs,
+                                ),
+                            },
+                            // Legacy manual reviews have no durable liveness proof. Preserve recent
+                            // runs, but eventually reconcile crash orphans from pre-upgrade builds.
+                            Ok(None) => manual_auto_review_exceeds_recovery_grace(
+                                run,
+                                recovery_now_unix_secs,
+                            ),
                             Err(err) => {
                                 warn!(
                                     run_id = %run.run_id,
@@ -1204,6 +1213,13 @@ fn background_auto_review_duplicate_is_visible_to_thread(
             false
         }
     }
+}
+
+fn manual_auto_review_exceeds_recovery_grace(
+    run: &codex_auto_review::AutoReviewRun,
+    now_unix_secs: i64,
+) -> bool {
+    now_unix_secs.saturating_sub(run.started_at_unix_secs) >= MANUAL_AUTO_REVIEW_RECOVERY_GRACE_SECS
 }
 
 fn auto_review_run_id_from_lock_intent(intent: &str) -> Option<String> {

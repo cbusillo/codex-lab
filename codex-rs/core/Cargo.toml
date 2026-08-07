@@ -121,7 +121,6 @@ tokio = { workspace = true, features = [
     "process",
     "rt-multi-thread",
     "signal",
-    "test-util",
 ] }
 tokio-util = { workspace = true, features = ["rt"] }
 tokio-tungstenite = { workspace = true }
@@ -171,6 +170,7 @@ opentelemetry_sdk = { workspace = true, features = [
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 test-log = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
