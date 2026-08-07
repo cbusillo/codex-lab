@@ -1892,6 +1892,43 @@ fn reconcile_orphaned_in_flight_marks_manual_and_background_lost() -> anyhow::Re
 }
 
 #[test]
+fn reconcile_orphaned_in_flight_respects_source_filter() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    let manual = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        completed_at_unix_secs: None,
+        ..sample_run("manual", &sample_output(Vec::new()))
+    };
+    let background = AutoReviewRun {
+        status: AutoReviewRunStatus::Running,
+        source: AutoReviewRunSource::Background,
+        completed_at_unix_secs: None,
+        ..sample_run("background", &sample_output(Vec::new()))
+    };
+    store.save_run(&manual)?;
+    store.save_run(&background)?;
+
+    let changed = store.reconcile_orphaned_in_flight_with_filter(
+        std::iter::empty::<&str>(),
+        /*now_unix_secs*/ 99,
+        |run| run.source == AutoReviewRunSource::Background,
+    )?;
+
+    assert_eq!(run_ids(changed), vec!["background".to_string()]);
+    assert_eq!(
+        store.load_run("background")?.status,
+        AutoReviewRunStatus::Lost
+    );
+    assert_eq!(
+        store.load_run("manual")?.status,
+        AutoReviewRunStatus::Running
+    );
+    Ok(())
+}
+
+#[test]
 fn reconcile_orphaned_in_flight_preserves_existing_error_summary() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;

@@ -625,9 +625,10 @@ impl Session {
             let live_run_ids = live_run_id.into_iter().collect::<Vec<_>>();
             let store = AutoReviewStore::for_scope(&codex_home, &scope);
             let current_thread_id = self.thread_id().to_string();
-            let reconciled = match store.reconcile_orphaned_in_flight(
+            let reconciled = match store.reconcile_orphaned_in_flight_with_filter(
                 live_run_ids.iter().map(String::as_str),
                 now_unix_timestamp_ms() / 1000,
+                |run| run.source == AutoReviewRunSource::Background,
             ) {
                 Ok(reconciled) => reconciled,
                 Err(err) => {

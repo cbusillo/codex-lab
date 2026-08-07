@@ -461,6 +461,34 @@ async fn startup_reconciles_ownerless_orphan_without_emitting_event() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_does_not_reconcile_live_manual_review_without_liveness_proof() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let mut run = in_flight_background_run(repo.path(), "live-manual-review");
+    run.source = AutoReviewRunSource::Manual;
+    store.save_run(&run)?;
+
+    let server = responses::start_mock_server().await;
+    let config_cwd = cwd.clone();
+    let _test = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = config_cwd)
+            .build(&server),
+    )
+    .await?;
+
+    let stored = store.load_run(&run.run_id)?;
+    assert_eq!(stored.status, AutoReviewRunStatus::Running);
+    assert_eq!(stored.error_summary, None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_reconciles_another_threads_orphan_without_emitting_event() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

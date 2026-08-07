@@ -498,6 +498,20 @@ impl AutoReviewStore {
         I: IntoIterator,
         I::Item: AsRef<str>,
     {
+        self.reconcile_orphaned_in_flight_with_filter(live_run_ids, now_unix_secs, |_| true)
+    }
+
+    pub fn reconcile_orphaned_in_flight_with_filter<I, F>(
+        &self,
+        live_run_ids: I,
+        now_unix_secs: i64,
+        mut is_eligible: F,
+    ) -> Result<Vec<AutoReviewRun>>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+        F: FnMut(&AutoReviewRun) -> bool,
+    {
         let live_run_ids = live_run_ids
             .into_iter()
             .map(|run_id| run_id.as_ref().to_string())
@@ -505,7 +519,7 @@ impl AutoReviewStore {
         let mut index = self.load_index_for_write()?;
         let mut changed = Vec::new();
         for run in &mut index.runs {
-            if !run.status.is_in_flight() {
+            if !run.status.is_in_flight() || !is_eligible(run) {
                 continue;
             }
             if live_run_ids.contains(&run.run_id) {
