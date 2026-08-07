@@ -34,8 +34,15 @@ class InstallCodexLabDevTest(unittest.TestCase):
             cwd=checkout,
             check=True,
         )
+        source_state = checkout / "source-state.txt"
+        source_state.write_text("base\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=checkout, check=True)
-        subprocess.run(["git", "commit", "-q", "-m", "test"], cwd=checkout, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=checkout, check=True)
+        source_state.write_text("candidate\n", encoding="utf-8")
+        subprocess.run(["git", "add", "source-state.txt"], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "candidate"], cwd=checkout, check=True
+        )
         source_commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
         ).strip()
@@ -72,6 +79,8 @@ class InstallCodexLabDevTest(unittest.TestCase):
                     }))
                 else:
                     print(f"candidate={executable}")
+                    if warning := os.environ.get("CODEX_LAB_PINNED_CANDIDATE_WARNING"):
+                        print(f"startup_warning={warning}")
                 EOF
                 chmod +x "$CARGO_TARGET_DIR/debug/codex-lab"
                 cat >"$CARGO_TARGET_DIR/debug/codex-code-mode-host" <<'EOF'
@@ -140,9 +149,11 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertNotIn("CODEX_HOME", contents)
             self.assertIn(str(lab_home), contents)
             self.assertIn(str((lab_home / "working" / "dogfood").resolve()), contents)
-            self.assertNotIn(str(checkout), contents)
+            self.assertIn(str(checkout), contents)
             self.assertNotIn("cargo", contents)
             self.assertNotIn("python", contents.lower())
+            self.assertIn("SOURCE_REPOSITORY_ID", contents)
+            self.assertIn("CODEX_LAB_PINNED_CANDIDATE_WARNING", contents)
             self.assertIn("Installed Codex Lab dev launcher", install.stdout)
             self.assertIn("Pinned dogfood candidate", install.stdout)
             self.assertEqual(
@@ -175,6 +186,8 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
             self.assertIn("candidate=", launch.stdout)
+            self.assertIn("Pinned Codex Lab candidate:", launch.stderr)
+            self.assertNotIn("warning:", launch.stderr)
             self.assertTrue(runtime_home.is_dir())
             self.assertEqual(
                 (root / "cargo.log").read_text(encoding="utf-8"), "build\n"
@@ -183,6 +196,211 @@ class InstallCodexLabDevTest(unittest.TestCase):
             companion = candidate.parent / "codex-code-mode-host"
             self.assertTrue(companion.is_file())
             self.assertFalse(companion.stat().st_mode & 0o222)
+
+    def test_warns_when_explicit_source_checkout_is_newer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            evidence = root / "newer evidence"
+            subprocess.run(["git", "branch", "evidence"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "worktree", "add", "-q", str(evidence), "evidence"],
+                cwd=checkout,
+                check=True,
+            )
+            (evidence / "source-state.txt").write_text("newer\n", encoding="utf-8")
+            subprocess.run(["git", "add", "source-state.txt"], cwd=evidence, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "newer"], cwd=evidence, check=True
+            )
+            newer_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=evidence, text=True
+            ).strip()
+
+            launch = subprocess.run(
+                [str(launcher), "-C", str(evidence)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn(" is older than local source ", launch.stderr)
+            self.assertIn(newer_commit, launch.stderr)
+            self.assertIn(
+                f"'{evidence.resolve()}/scripts/local/install-codex-lab-dev.sh'",
+                launch.stderr,
+            )
+            self.assertIn("--profile 'dev'", launch.stderr)
+            self.assertIn("startup_warning=Pinned Codex Lab candidate", launch.stdout)
+
+            passthrough = subprocess.run(
+                [str(launcher), "--", "-C", str(evidence)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(passthrough.returncode, 0, passthrough.stderr)
+            self.assertNotIn("warning:", passthrough.stderr)
+
+    def test_warns_when_candidate_is_newer_than_source_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            subprocess.run(
+                ["git", "checkout", "-q", "--detach", "HEAD^"],
+                cwd=checkout,
+                check=True,
+            )
+            older_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+            ).strip()
+
+            launch = subprocess.run(
+                [str(launcher)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn(" is newer than local source ", launch.stderr)
+            self.assertIn(older_commit, launch.stderr)
+
+    def test_warns_when_source_checkout_diverged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "diverged", "HEAD^"],
+                cwd=checkout,
+                check=True,
+            )
+            (checkout / "source-state.txt").write_text("diverged\n", encoding="utf-8")
+            subprocess.run(["git", "add", "source-state.txt"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "diverged"],
+                cwd=checkout,
+                check=True,
+            )
+
+            launch = subprocess.run(
+                [str(launcher)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn(" has diverged from local source ", launch.stderr)
+
+    def test_warns_when_matching_source_checkout_is_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            (checkout / "source-state.txt").write_text("dirty\n", encoding="utf-8")
+
+            launch = subprocess.run(
+                [str(launcher)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn(
+                "matches the local source commit, but has different dirty provenance from",
+                launch.stderr,
+            )
+            self.assertIn("(dirty)", launch.stderr)
+
+    def test_ignores_unrelated_checkout_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            unrelated = root / "unrelated"
+            unrelated.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=unrelated, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "Unrelated"],
+                cwd=unrelated,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "unrelated@example.invalid"],
+                cwd=unrelated,
+                check=True,
+            )
+            (unrelated / "file").write_text("unrelated\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=unrelated, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "unrelated"],
+                cwd=unrelated,
+                check=True,
+            )
+
+            launch = subprocess.run(
+                [str(launcher), "-C", str(unrelated)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertNotIn("warning:", launch.stderr)
+            self.assertNotIn(str(unrelated), launch.stderr)
+
+    def test_ignores_cached_origin_main_when_checkout_head_is_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            tree = subprocess.check_output(
+                ["git", "rev-parse", "HEAD^{tree}"], cwd=checkout, text=True
+            ).strip()
+            cached_remote_commit = subprocess.run(
+                ["git", "commit-tree", tree, "-p", "HEAD"],
+                cwd=checkout,
+                input="cached remote\n",
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "update-ref", "refs/remotes/origin/main", cached_remote_commit],
+                cwd=checkout,
+                check=True,
+            )
+
+            launch = subprocess.run(
+                [str(launcher)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertNotIn("warning:", launch.stderr)
+            self.assertNotIn(cached_remote_commit, launch.stderr)
 
     def test_failed_reinstall_preserves_existing_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:

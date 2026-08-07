@@ -160,6 +160,7 @@ pub(crate) mod onboarding;
 mod oss_selection;
 mod pager_overlay;
 mod permission_compat;
+mod pinned_candidate_warning;
 pub(crate) mod public_widgets;
 mod render;
 mod resize_reflow_cap;
@@ -1768,6 +1769,11 @@ async fn run_ratatui_app(
         find_codex_home().ok().map(AbsolutePathBuf::into_path_buf),
     ) {
         config.startup_warnings.push(w);
+    }
+    if let Some(warning) = pinned_candidate_warning::from_env_value(
+        std::env::var_os(pinned_candidate_warning::ENV_VAR).as_deref(),
+    ) {
+        config.startup_warnings.push(warning);
     }
 
     set_default_client_residency_requirement(config.enforce_residency.value());
