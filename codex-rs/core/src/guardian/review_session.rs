@@ -680,6 +680,7 @@ async fn spawn_guardian_review_session(
         initial_history,
         GitEnrichmentPolicy::Skip,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve,
+        codex_extension_api::ExtensionDataInit::default(),
     ))
     .await?;
 

@@ -1037,9 +1037,16 @@ fn non_empty_turn_diff(diff: String) -> Option<String> {
 
 fn background_auto_review_turn_diff_prompt(turn_diff: &str) -> String {
     format!(
-        "Review only the following unified diff from the just-completed turn. Do not review \
-         unrelated pre-existing staged, unstaged, or untracked worktree changes except where \
-         necessary to understand this diff. Provide prioritized findings.\n\n```diff\n{}\n```",
+        "You are the sole reviewer for this bounded Background Review. Review directly with the \
+         read-only file, search, and shell tools available in this thread. Do not delegate, spawn \
+         agents, or read/follow repository skills whose workflow requires unavailable agents. \
+         Keep every command narrowly targeted and rely on truncated output rather than broad \
+         registries or repository-wide dumps.\n\nReview only the following unified diff from the \
+         just-completed turn. This captured diff is the authoritative target; do not widen scope \
+         to unrelated pre-existing staged, unstaged, or untracked worktree changes except where \
+         necessary to understand a changed line. Return prioritized, actionable findings. If \
+         bounded evidence is insufficient, return an honest explanation and a concrete \
+         remediation instead of attempting unavailable orchestration.\n\n```diff\n{}\n```",
         turn_diff.trim()
     )
 }
@@ -1052,14 +1059,15 @@ fn background_auto_review_size_limit_summary(
     let diff_byte_count = turn_diff.len();
     if diff_byte_count > max_bytes {
         return Some(format!(
-            "diff exceeds background review size limit: {diff_byte_count} bytes > {max_bytes} bytes"
+            "diff exceeds background review size limit: {diff_byte_count} bytes > {max_bytes} bytes; retry with a narrower turn or increase `auto_review.background_max_diff_bytes`"
         ));
     }
     let scope_byte_count = resolved_prompt?.len();
     (scope_byte_count > max_bytes).then(|| {
         format!(
             "auto review scope exceeds configured background review size limit: scope is \
-             {scope_byte_count} bytes, diff is {diff_byte_count} bytes (limit {max_bytes} bytes)"
+             {scope_byte_count} bytes, diff is {diff_byte_count} bytes (limit {max_bytes} bytes); \
+             retry with a narrower turn or increase `auto_review.background_max_diff_bytes`"
         )
     })
 }

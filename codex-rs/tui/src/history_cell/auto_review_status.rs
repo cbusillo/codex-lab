@@ -165,11 +165,10 @@ fn push_summary_metadata(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRun
         spans.push(" · ".dim());
         spans.push(
             Span::from(format!(
-                "elapsed {}/{} · tokens {}/{} · scope {}/{} · output {}/{} · findings {}/{}",
+                "elapsed {}/{} · {} · scope {}/{} · output {}/{} · findings {}/{}",
                 display_optional_duration(summary.usage.elapsed_ms),
                 display_duration(budget.max_elapsed_ms),
-                display_optional_count(summary.usage.total_tokens),
-                display_count(budget.max_total_tokens),
+                token_budget_label(summary),
                 display_optional_bytes(summary.usage.scope_bytes),
                 display_bytes(budget.max_scope_bytes),
                 display_optional_bytes(summary.usage.output_bytes),
@@ -194,6 +193,74 @@ fn push_summary_metadata(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRun
         spans.push(Span::from(error_summary.to_string()).red());
     }
     lines.push(Line::from(spans));
+    push_summary_budget_diagnostics(lines, summary);
+}
+
+fn token_budget_label(summary: &AutoReviewRunSummary) -> String {
+    let Some(budget) = summary.budget.as_ref() else {
+        return String::new();
+    };
+    let consumed = display_optional_count(summary.usage.total_tokens);
+    let hard = display_count(budget.max_total_tokens);
+    let Some(effective) = summary.usage.effective_total_token_limit else {
+        return format!("tokens {consumed}/{hard}");
+    };
+    let mut details = vec![format!("{hard} hard")];
+    if let Some(tolerance) = summary.usage.accounting_tolerance_tokens {
+        details.push(format!("{} reserve", display_count(tolerance)));
+    }
+    if let Some(projected) = summary.usage.projected_total_tokens {
+        details.push(format!("{} projected", display_count(projected)));
+    }
+    format!(
+        "tokens {consumed}/{} effective ({})",
+        display_count(effective),
+        details.join(", ")
+    )
+}
+
+fn push_summary_budget_diagnostics(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRunSummary) {
+    let usage = &summary.usage;
+    let mut details = Vec::new();
+    if let Some(request_count) = usage.request_count {
+        details.push(format!("requests {request_count}"));
+    }
+    if let Some(retry_count) = usage.retry_count.filter(|count| *count > 0) {
+        details.push(format!("retries {retry_count}"));
+    }
+    if let Some(tokens) = usage.tool_registry_tokens {
+        details.push(format!("registry {} tokens", display_count(tokens)));
+    }
+    if let Some(pruned_count) = usage.tool_registry_pruned_count.filter(|count| *count > 0) {
+        details.push(format!("registry tools pruned {pruned_count}"));
+    }
+    if let Some(tokens) = usage.tool_output_tokens {
+        let limit = usage
+            .tool_output_limit_tokens
+            .and_then(|limit| u64::try_from(limit).ok())
+            .map(display_count)
+            .unwrap_or_else(|| "?".to_string());
+        details.push(format!(
+            "tool output {}/{} tokens",
+            display_count(tokens),
+            limit
+        ));
+    }
+    if let Some(tokens) = usage.response_output_limit_tokens {
+        details.push(format!("response request {} tokens", display_count(tokens)));
+    }
+    if let Some(tokens) = usage.response_output_reservation_tokens {
+        details.push(format!("response reserve {} tokens", display_count(tokens)));
+    }
+    if usage.orchestration_skills_suppressed == Some(true) {
+        details.push("orchestration guidance suppressed".to_string());
+    }
+    if !details.is_empty() {
+        lines.push(Line::from(vec![
+            "  ".into(),
+            Span::from(details.join(" · ")).dim(),
+        ]));
+    }
 }
 
 fn push_summary_content(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRunSummary) {

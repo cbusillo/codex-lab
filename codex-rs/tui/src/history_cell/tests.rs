@@ -11,10 +11,13 @@ use crate::render::highlight::MAX_HIGHLIGHT_LINE_BYTES;
 use crate::session_state::ThreadSessionState;
 use crate::wrapping::word_wrap_lines;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AutoReviewBudget;
 use codex_app_server_protocol::AutoReviewFreshness;
 use codex_app_server_protocol::AutoReviewRunSource;
 use codex_app_server_protocol::AutoReviewRunSummary;
 use codex_app_server_protocol::AutoReviewSummaryReadResponse;
+use codex_app_server_protocol::AutoReviewTerminalReason;
+use codex_app_server_protocol::AutoReviewUsage;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::McpAuthStatus;
 use codex_app_server_protocol::ProjectValidationSkipReason;
@@ -364,6 +367,61 @@ fn auto_review_summary_findings_snapshot() {
   completed · current · code-gpt-5.5 · 1 omitted · truncated
   [P1] Fix request ordering
   The resumed turn can miss sandbox propagation.
+");
+}
+
+#[test]
+fn auto_review_token_budget_cancellation_snapshot() {
+    let mut summary = auto_review_summary(
+        "run-token-budget",
+        AutoReviewFreshness::Current,
+        /*rendered_findings*/ 0,
+        "",
+    );
+    summary.status = BackgroundAutoReviewStatus::Cancelled;
+    summary.terminal_reason = Some(AutoReviewTerminalReason::BudgetTotalTokens);
+    summary.error_summary = Some(
+        "Background review stopped before the next provider request; narrow the diff or increase background_max_total_tokens."
+            .to_string(),
+    );
+    summary.budget = Some(AutoReviewBudget {
+        max_scope_bytes: 1_048_576,
+        max_elapsed_ms: 300_000,
+        max_total_tokens: 20_000,
+        max_output_bytes: 65_536,
+        max_findings: 50,
+    });
+    summary.usage = AutoReviewUsage {
+        scope_bytes: Some(1_024),
+        elapsed_ms: Some(2_000),
+        total_tokens: Some(19_000),
+        effective_total_token_limit: Some(19_200),
+        accounting_tolerance_tokens: Some(800),
+        projected_total_tokens: Some(20_431),
+        request_count: Some(1),
+        retry_count: Some(1),
+        tool_registry_tokens: Some(2_048),
+        tool_registry_pruned_count: Some(4),
+        tool_output_tokens: Some(611),
+        tool_output_limit_tokens: Some(625),
+        response_output_limit_tokens: Some(512),
+        response_output_reservation_tokens: Some(128_000),
+        orchestration_skills_suppressed: Some(true),
+        ..Default::default()
+    };
+    let response = AutoReviewSummaryReadResponse {
+        latest: Some(summary.clone()),
+        current: Some(summary),
+        status_counts: Vec::new(),
+        diagnostics: None,
+    };
+
+    let cell = new_auto_review_summary_cell(&response);
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 100)).join("\n"), @"
+✗ Background Review cancelled · run-token-budget
+  cancelled · current · code-gpt-5.5 · stopped: token budget · elapsed 2s/5m · tokens 19k/19k effective (20k hard, 800 reserve, 20k projected) · scope 1KiB/1MiB · output ?/64KiB · findings ?/50 · Background review stopped before the next provider request; narrow the diff or increase background_max_total_tokens.
+  requests 1 · retries 1 · registry 2k tokens · registry tools pruned 4 · tool output 611/625 tokens · response request 512 tokens · response reserve 128k tokens · orchestration guidance suppressed
 ");
 }
 

@@ -11,7 +11,9 @@ fn background_auto_review_size_limit_summary_prefers_raw_diff_limit() {
 
     assert_eq!(
         summary.as_deref(),
-        Some("diff exceeds background review size limit: 6 bytes > 5 bytes")
+        Some(
+            "diff exceeds background review size limit: 6 bytes > 5 bytes; retry with a narrower turn or increase `auto_review.background_max_diff_bytes`"
+        )
     );
 }
 
@@ -24,7 +26,8 @@ fn background_auto_review_size_limit_summary_catches_wrapped_scope_limit() {
         summary.as_deref(),
         Some(
             "auto review scope exceeds configured background review size limit: scope is 6 \
-             bytes, diff is 3 bytes (limit 5 bytes)"
+             bytes, diff is 3 bytes (limit 5 bytes); retry with a narrower turn or increase \
+             `auto_review.background_max_diff_bytes`"
         )
     );
 }

@@ -87,6 +87,7 @@ pub(crate) async fn run_codex_thread_interactive(
     initial_history: Option<InitialHistory>,
     git_enrichment_policy: GitEnrichmentPolicy,
     windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
+    thread_extension_init: codex_extension_api::ExtensionDataInit,
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
     let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
@@ -133,7 +134,7 @@ pub(crate) async fn run_codex_thread_interactive(
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         parent_trace: None,
         environment_selections: parent_ctx.environments.to_selections(),
-        thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
+        thread_extension_init,
         supports_openai_form_elicitation: parent_session
             .services
             .supports_openai_form_elicitation
@@ -215,6 +216,7 @@ pub(crate) async fn run_codex_thread_one_shot(
     subagent_source: SubAgentSource,
     final_output_json_schema: Option<Value>,
     initial_history: Option<InitialHistory>,
+    thread_extension_init: codex_extension_api::ExtensionDataInit,
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
     // Use a child token so we can stop the delegate after completion without
     // requiring the caller to cancel the parent token.
@@ -230,6 +232,7 @@ pub(crate) async fn run_codex_thread_one_shot(
         initial_history,
         GitEnrichmentPolicy::Fresh,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+        thread_extension_init,
     ))
     .await?;
 

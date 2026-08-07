@@ -8124,6 +8124,30 @@
       },
       "AutoReviewUsage": {
         "properties": {
+          "accountingToleranceTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cachedInputTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "effectiveTotalTokenLimit": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "elapsedMs": {
             "format": "uint64",
             "minimum": 0.0,
@@ -8140,7 +8164,69 @@
               "null"
             ]
           },
+          "inputTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "orchestrationSkillsSuppressed": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "outputBytes": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outputTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "projectedTotalTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "requestCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "responseOutputLimitTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "responseOutputReservationTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "retryCount": {
             "format": "uint",
             "minimum": 0.0,
             "type": [
@@ -8150,6 +8236,38 @@
           },
           "scopeBytes": {
             "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "toolOutputLimitTokens": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "toolOutputTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "toolRegistryPrunedCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "toolRegistryTokens": {
+            "format": "uint64",
             "minimum": 0.0,
             "type": [
               "integer",
