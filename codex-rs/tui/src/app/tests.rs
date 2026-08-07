@@ -39,6 +39,42 @@ use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
 use assert_matches::assert_matches;
 
+#[tokio::test]
+async fn pinned_candidate_warning_is_emitted_as_client_local_history_cell() -> Result<()> {
+    let codex_home = tempdir()?;
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await?;
+    let warning = "Pinned Codex Lab candidate abc (clean) is older than local source def (clean).";
+    config.startup_warnings.push(warning.to_string());
+    assert!(
+        crate::app_server_config_warnings(&config).is_empty(),
+        "launcher-owned warning must not also arrive through embedded app-server notifications"
+    );
+    let (app_event_tx, mut app_event_rx) = unbounded_channel();
+    let app_event_tx = AppEventSender::new(app_event_tx);
+
+    emit_pinned_candidate_warning(&app_event_tx, &config);
+
+    let cell = match app_event_rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected InsertHistoryCell event, got {other:?}"),
+    };
+    let rendered = cell
+        .display_lines(/*width*/ 120)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains(warning));
+    assert!(
+        app_event_rx.try_recv().is_err(),
+        "warning should be emitted exactly once"
+    );
+    Ok(())
+}
+
 use crate::app_command::AppCommand as Op;
 use crate::app_event::ConsolidationScrollbackReflow;
 use crate::diff_model::FileChange;

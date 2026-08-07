@@ -158,7 +158,9 @@ mkdir -p "\$CODEX_LAB_HOME"
 unset CODEX_LAB_PINNED_CANDIDATE_WARNING
 
 shell_quote() {
-  printf "'%s'" "\$(printf '%s' "\$1" | sed "s/'/'\\\\''/g")"
+  printf "'"
+  printf '%s' "\$1" | sed "s/'/'\"'\"'/g"
+  printf "'"
 }
 
 same_repository_checkout() {

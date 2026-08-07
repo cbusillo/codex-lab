@@ -202,7 +202,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
             root = Path(temp_dir_name)
             checkout, _, _, environment, _ = self.install_fake_candidate(root)
             launcher = root / "bin with spaces" / "codex-lab"
-            evidence = root / "newer evidence"
+            evidence = root / "newer's evidence"
             subprocess.run(["git", "branch", "evidence"], cwd=checkout, check=True)
             subprocess.run(
                 ["git", "worktree", "add", "-q", str(evidence), "evidence"],
@@ -230,10 +230,15 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertEqual(launch.returncode, 0, launch.stderr)
             self.assertIn(" is older than local source ", launch.stderr)
             self.assertIn(newer_commit, launch.stderr)
-            self.assertIn(
-                f"'{evidence.resolve()}/scripts/local/install-codex-lab-dev.sh'",
-                launch.stderr,
+            refresh_command = launch.stderr.split("Refresh: ", maxsplit=1)[1].strip()
+            self.assertIn("newer'\"'\"'s evidence", refresh_command)
+            refresh_syntax = subprocess.run(
+                ["/bin/sh", "-n", "-c", refresh_command],
+                capture_output=True,
+                text=True,
+                check=False,
             )
+            self.assertEqual(refresh_syntax.returncode, 0, refresh_syntax.stderr)
             self.assertIn("--profile 'dev'", launch.stderr)
             self.assertIn("startup_warning=Pinned Codex Lab candidate", launch.stdout)
 

@@ -105,6 +105,15 @@ pub(super) fn emit_project_config_warnings(app_event_tx: &AppEventSender, config
     )));
 }
 
+pub(super) fn emit_pinned_candidate_warning(app_event_tx: &AppEventSender, config: &Config) {
+    let Some(warning) = crate::pinned_candidate_warning::find_in(&config.startup_warnings) else {
+        return;
+    };
+    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+        history_cell::new_warning_event(warning.to_string()),
+    )));
+}
+
 pub(super) fn emit_system_bwrap_warning(app_event_tx: &AppEventSender, config: &Config) {
     let Some(message) =
         codex_sandboxing::system_bwrap_warning(config.permissions.permission_profile())

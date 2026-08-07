@@ -544,16 +544,7 @@ where
     F: FnOnce(InProcessClientStartArgs) -> Fut,
     Fut: Future<Output = std::io::Result<InProcessAppServerClient>>,
 {
-    let config_warnings = config
-        .startup_warnings
-        .iter()
-        .map(|warning| ConfigWarningNotification {
-            summary: warning.clone(),
-            details: None,
-            path: None,
-            range: None,
-        })
-        .collect();
+    let config_warnings = app_server_config_warnings(&config);
     let client = start_client(InProcessClientStartArgs {
         arg0_paths,
         config: Arc::new(config),
@@ -579,6 +570,33 @@ where
     .await
     .wrap_err("failed to start embedded app server")?;
     Ok(client)
+}
+
+pub(crate) fn app_server_config_warnings(config: &Config) -> Vec<ConfigWarningNotification> {
+    config
+        .startup_warnings
+        .iter()
+        .filter(|warning| !pinned_candidate_warning::is_valid(warning))
+        .map(|warning| ConfigWarningNotification {
+            summary: warning.clone(),
+            details: None,
+            path: None,
+            range: None,
+        })
+        .collect()
+}
+
+fn add_pinned_candidate_warning(config: &mut Config, value: Option<&std::ffi::OsStr>) {
+    let Some(warning) = pinned_candidate_warning::from_env_value(value) else {
+        return;
+    };
+    if !config
+        .startup_warnings
+        .iter()
+        .any(|existing| existing == &warning)
+    {
+        config.startup_warnings.push(warning);
+    }
 }
 
 async fn shutdown_app_server_if_present(app_server: Option<AppServerSession>) {
@@ -1770,11 +1788,10 @@ async fn run_ratatui_app(
     ) {
         config.startup_warnings.push(w);
     }
-    if let Some(warning) = pinned_candidate_warning::from_env_value(
+    add_pinned_candidate_warning(
+        &mut config,
         std::env::var_os(pinned_candidate_warning::ENV_VAR).as_deref(),
-    ) {
-        config.startup_warnings.push(warning);
-    }
+    );
 
     set_default_client_residency_requirement(config.enforce_residency.value());
     let should_show_trust_screen = should_show_trust_screen(&config);
