@@ -58,6 +58,16 @@ pub(crate) fn new_auto_review_summary_cell(
     PlainHistoryCell::new(lines)
 }
 
+pub(crate) fn new_auto_review_run_summary_cell(
+    summary: &AutoReviewRunSummary,
+    diagnostics: Option<&AutoReviewDiagnosticsSummary>,
+) -> PlainHistoryCell {
+    let mut lines = Vec::new();
+    push_current_summary_lines(&mut lines, summary);
+    push_diagnostics(&mut lines, diagnostics);
+    PlainHistoryCell::new(lines)
+}
+
 pub(crate) fn new_auto_review_summary_error_cell(error: String) -> PlainHistoryCell {
     PlainHistoryCell::new(vec![Line::from(vec![
         "✗ ".red(),

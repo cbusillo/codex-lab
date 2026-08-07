@@ -962,6 +962,8 @@ impl App {
                 &initial_prompt,
                 &initial_images,
             );
+        let should_fetch_auto_review_summary_after_startup =
+            Self::should_fetch_auto_review_summary_after_startup(&session_selection);
         let thread_and_widget_started_at = Instant::now();
         let pending_startup_thread_start = matches!(
             &session_selection,
@@ -1173,6 +1175,9 @@ See the Codex keymap documentation for supported actions and examples."
             }
             app.enqueue_primary_thread_session(started.session, started.turns)
                 .await?;
+            if should_fetch_auto_review_summary_after_startup {
+                app.fetch_latest_auto_review_summary(&app_server, thread_id);
+            }
             if should_prompt_for_paused_goal_after_startup_resume {
                 app.maybe_prompt_resume_paused_goal_after_resume(&mut app_server, thread_id)
                     .await;

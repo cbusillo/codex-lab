@@ -31,6 +31,8 @@ const TOKEN_ACTIVITY_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(/*secs*/ 15);
 const RATE_LIMIT_RESET_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(/*secs*/ 15);
+const AUTO_REVIEW_SUMMARY_FETCH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(/*secs*/ 15);
 const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(/*millis*/ 2000);
 
@@ -96,9 +98,42 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            let result = fetch_auto_review_summary(request_handle, thread_id)
-                .await
-                .map_err(|err| err.to_string());
+            let result = tokio::time::timeout(
+                AUTO_REVIEW_SUMMARY_FETCH_TIMEOUT,
+                fetch_auto_review_summary(request_handle, thread_id),
+            )
+            .await
+            .map_err(|_| "review/summary/read timed out in TUI".to_string())
+            .and_then(|result| result.map_err(|err| err.to_string()));
+            app_event_tx.send(AppEvent::AutoReviewSummaryLoaded {
+                thread_id,
+                run_id,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn fetch_latest_auto_review_summary(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                AUTO_REVIEW_SUMMARY_FETCH_TIMEOUT,
+                fetch_auto_review_summary(request_handle, thread_id),
+            )
+            .await
+            .map_err(|_| "review/summary/read timed out in TUI".to_string())
+            .and_then(|result| result.map_err(|err| err.to_string()));
+            let run_id = result
+                .as_ref()
+                .ok()
+                .and_then(latest_terminal_background_auto_review_run_id)
+                .map(str::to_string)
+                .unwrap_or_default();
             app_event_tx.send(AppEvent::AutoReviewSummaryLoaded {
                 thread_id,
                 run_id,
@@ -906,6 +941,30 @@ pub(super) async fn fetch_auto_review_summary(
         .wrap_err("review/summary/read failed in TUI")
 }
 
+fn auto_review_summary_status_is_terminal(
+    status: codex_app_server_protocol::BackgroundAutoReviewStatus,
+) -> bool {
+    !matches!(
+        status,
+        codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
+            | codex_app_server_protocol::BackgroundAutoReviewStatus::Running
+    )
+}
+
+fn latest_terminal_background_auto_review_run_id(
+    response: &AutoReviewSummaryReadResponse,
+) -> Option<&str> {
+    response
+        .current
+        .iter()
+        .chain(response.latest.iter())
+        .find(|summary| {
+            summary.source == codex_app_server_protocol::AutoReviewRunSource::Background
+                && auto_review_summary_status_is_terminal(summary.status)
+        })
+        .map(|summary| summary.run_id.as_str())
+}
+
 pub(super) async fn fetch_connectors_list(
     request_handle: AppServerRequestHandle,
     force_refetch: bool,
@@ -1341,6 +1400,10 @@ pub(super) fn mcp_inventory_maps_from_statuses(statuses: Vec<McpServerStatus>) -
 mod tests {
     use super::*;
     use crate::app::test_support::make_test_app;
+    use codex_app_server_protocol::AutoReviewFreshness;
+    use codex_app_server_protocol::AutoReviewRunSource;
+    use codex_app_server_protocol::AutoReviewRunSummary;
+    use codex_app_server_protocol::BackgroundAutoReviewStatus;
     use codex_app_server_protocol::PluginMarketplaceEntry;
     use codex_protocol::mcp::Tool;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -1348,6 +1411,72 @@ mod tests {
 
     fn test_absolute_path(path: &str) -> AbsolutePathBuf {
         AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
+    }
+
+    fn auto_review_summary(
+        run_id: &str,
+        source: AutoReviewRunSource,
+        status: BackgroundAutoReviewStatus,
+    ) -> AutoReviewRunSummary {
+        AutoReviewRunSummary {
+            run_id: run_id.to_string(),
+            status,
+            source,
+            freshness: AutoReviewFreshness::Current,
+            started_at: 1,
+            completed_at: Some(2),
+            model: None,
+            error_summary: None,
+            rendered_findings: 0,
+            omitted_findings: 0,
+            truncated: false,
+            content: String::new(),
+            budget: None,
+            usage: Default::default(),
+            terminal_reason: None,
+            finding_disposition: None,
+        }
+    }
+
+    #[test]
+    fn resume_summary_selection_ignores_manual_and_running_reviews() {
+        let response = AutoReviewSummaryReadResponse {
+            current: Some(auto_review_summary(
+                "manual-complete",
+                AutoReviewRunSource::Manual,
+                BackgroundAutoReviewStatus::Completed,
+            )),
+            latest: Some(auto_review_summary(
+                "background-failed",
+                AutoReviewRunSource::Background,
+                BackgroundAutoReviewStatus::Failed,
+            )),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        };
+        assert_eq!(
+            latest_terminal_background_auto_review_run_id(&response),
+            Some("background-failed")
+        );
+
+        let response = AutoReviewSummaryReadResponse {
+            current: Some(auto_review_summary(
+                "background-running",
+                AutoReviewRunSource::Background,
+                BackgroundAutoReviewStatus::Running,
+            )),
+            latest: Some(auto_review_summary(
+                "manual-complete",
+                AutoReviewRunSource::Manual,
+                BackgroundAutoReviewStatus::Completed,
+            )),
+            status_counts: Vec::new(),
+            diagnostics: None,
+        };
+        assert_eq!(
+            latest_terminal_background_auto_review_run_id(&response),
+            None
+        );
     }
 
     #[test]

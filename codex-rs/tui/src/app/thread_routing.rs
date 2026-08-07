@@ -1587,6 +1587,12 @@ impl App {
         )
     }
 
+    pub(super) fn should_fetch_auto_review_summary_after_startup(
+        session_selection: &SessionSelection,
+    ) -> bool {
+        matches!(session_selection, SessionSelection::Resume(_))
+    }
+
     pub(super) fn should_prompt_for_paused_goal_after_startup_resume(
         session_selection: &SessionSelection,
         initial_prompt: &Option<String>,

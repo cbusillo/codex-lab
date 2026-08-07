@@ -1829,6 +1829,12 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn set_background_review_label(&mut self, label: Option<String>) {
+        if self.composer.set_background_review_label(label) {
+            self.request_redraw();
+        }
+    }
+
     pub(crate) fn set_side_conversation_context_label(&mut self, label: Option<String>) {
         if self.composer.set_side_conversation_context_label(label) {
             self.request_redraw();

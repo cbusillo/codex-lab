@@ -470,7 +470,7 @@ impl AutoReviewStore {
         &self,
         live_run_ids: I,
         now_unix_secs: i64,
-    ) -> Result<usize>
+    ) -> Result<Vec<AutoReviewRun>>
     where
         I: IntoIterator,
         I::Item: AsRef<str>,
@@ -492,13 +492,22 @@ impl AutoReviewStore {
             run.freshness = AutoReviewRunFreshness::Lost;
             run.completed_at_unix_secs = Some(now_unix_secs);
             run.cancel_reason = Some("agent_missing_after_restart".to_string());
+            if run.error_summary.is_none() {
+                run.error_summary = Some(match run.source {
+                    AutoReviewRunSource::Background => {
+                        "background review did not survive process restart".to_string()
+                    }
+                    AutoReviewRunSource::Manual => {
+                        "review did not survive process restart".to_string()
+                    }
+                });
+            }
             changed.push(run.clone());
         }
-        let changed_count = changed.len();
-        for run in changed {
-            self.save_run(&run)?;
+        for run in &changed {
+            self.save_run(run)?;
         }
-        Ok(changed_count)
+        Ok(changed)
     }
 
     pub fn find_duplicate_by_fingerprint_with_target_proof_and_filter<F>(
@@ -1074,6 +1083,8 @@ pub struct AutoReviewRunState {
     pub schema_version: u32,
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<AutoReviewBudget>,
     #[serde(default)]
     pub usage: AutoReviewUsage,
@@ -1088,6 +1099,7 @@ impl AutoReviewRunState {
         Self {
             schema_version: RUN_STATE_SCHEMA_VERSION,
             run_id: run_id.into(),
+            owner_thread_id: None,
             budget: None,
             usage: AutoReviewUsage::default(),
             terminal_reason: None,

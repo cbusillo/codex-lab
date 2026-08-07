@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use codex_auto_review::AutoReviewDuplicateDisposition;
 use codex_auto_review::AutoReviewDuplicateMatch;
+use codex_auto_review::AutoReviewRunSource;
 use codex_auto_review::AutoReviewStore;
 use codex_auto_review::AutoReviewTerminalReason;
 use codex_auto_review::AutoReviewUsage;
@@ -15,6 +16,9 @@ use codex_git_utils::get_worktree_diff_fingerprint;
 use codex_protocol::protocol::BackgroundAutoReviewControlAction;
 use codex_protocol::protocol::BackgroundAutoReviewControlReason;
 use codex_protocol::protocol::BackgroundAutoReviewStatus;
+use codex_protocol::protocol::BackgroundAutoReviewStatusEvent;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
@@ -30,6 +34,7 @@ use super::session::Session;
 use super::turn_context::TurnContext;
 use crate::review_persistence::AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY;
 use crate::review_persistence::ReviewPersistenceContext;
+use crate::review_persistence::bounded_auto_review_error_summary;
 use crate::review_prompts::resolve_review_request;
 use crate::state::BackgroundAutoReviewControlledRun;
 use crate::state::BackgroundAutoReviewRunningHandle;
@@ -137,7 +142,8 @@ impl Session {
                 .map(|effort| effort.to_string()),
             /*prompt_token_estimate*/ None,
         )
-        .await;
+        .await
+        .with_owner_thread_id(self.thread_id().to_string());
         let (persistence, target_construction_error) = match exact_turn_target {
             Some((turn_diff, fingerprint)) => (
                 persistence
@@ -203,15 +209,57 @@ impl Session {
             );
             return;
         }
+        // Acquire the repo-scoped coordination lock before persisting Pending.
+        // This is the cross-process liveness marker for the entire debounce
+        // window; a second process can therefore distinguish a live queued run
+        // from a restart orphan.
+        let coordination =
+            ReviewCoordination::for_scope(codex_home.as_ref(), persistence.store_scope());
+        let review_lock_guard = match acquire_background_auto_review_lock(
+            &coordination,
+            format!("background_auto_review:{}", persistence.run_id()),
+        )
+        .await
+        {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
+                let error_summary =
+                    "another background auto review is already running for this worktree"
+                        .to_string();
+                self.record_skipped_background_auto_review(
+                    &persistence,
+                    schedule.generation,
+                    &schedule.fingerprint,
+                    error_summary,
+                )
+                .await;
+                debug!("background auto review skipped: review lock is held");
+                return;
+            }
+            Err(err) => {
+                let error_summary = format!("failed to acquire background auto review lock: {err}");
+                self.record_skipped_background_auto_review(
+                    &persistence,
+                    schedule.generation,
+                    &schedule.fingerprint,
+                    error_summary,
+                )
+                .await;
+                warn!(error = %err, "failed to acquire background auto review lock");
+                return;
+            }
+        };
+        let pending_cancellation_token = tokio_util::sync::CancellationToken::new();
         if !self
             .record_pending_background_auto_review(
                 schedule.generation,
                 &schedule.fingerprint,
+                pending_cancellation_token.clone(),
                 persistence.clone(),
             )
             .await
         {
-            self.record_skipped_background_auto_review(
+            self.record_superseded_background_auto_review(
                 &persistence,
                 schedule.generation,
                 &schedule.fingerprint,
@@ -236,7 +284,10 @@ impl Session {
 
         let sess = Arc::clone(&self);
         tokio::spawn(async move {
-            tokio::time::sleep(BACKGROUND_AUTO_REVIEW_DEBOUNCE).await;
+            tokio::select! {
+                () = tokio::time::sleep(BACKGROUND_AUTO_REVIEW_DEBOUNCE) => {}
+                () = pending_cancellation_token.cancelled() => return,
+            }
             if !sess
                 .is_current_background_auto_review_schedule(
                     schedule.generation,
@@ -244,7 +295,7 @@ impl Session {
                 )
                 .await
             {
-                sess.record_skipped_background_auto_review(
+                sess.record_superseded_background_auto_review(
                     &persistence,
                     schedule.generation,
                     &schedule.fingerprint,
@@ -260,6 +311,8 @@ impl Session {
                 schedule.fingerprint,
                 persistence,
                 turn_diff,
+                coordination,
+                review_lock_guard,
             )
             .await;
         });
@@ -270,6 +323,9 @@ impl Session {
         generation: u64,
         _fingerprint: &str,
     ) -> bool {
+        // Generation is the scheduling authority. The fingerprint is carried
+        // by callers for pending-state cleanup, but comparing it here would
+        // change the existing last-started-generation supersession contract.
         let state = self.state.lock().await;
         state.background_auto_review.is_current_schedule(generation)
     }
@@ -281,6 +337,8 @@ impl Session {
         fingerprint: String,
         persistence: ReviewPersistenceContext,
         turn_diff: String,
+        coordination: ReviewCoordination,
+        review_lock_guard: ReviewLockGuard,
     ) {
         if self.input_queue.has_trigger_turn_mailbox_items().await
             || self.active_turn.lock().await.is_some()
@@ -298,6 +356,13 @@ impl Session {
         }
 
         let Some(cwd) = turn_context.environments.single_local_environment_cwd() else {
+            self.record_skipped_background_auto_review(
+                &persistence,
+                generation,
+                &fingerprint,
+                "background auto review requires exactly one local worktree".to_string(),
+            )
+            .await;
             debug!("background auto review skipped: no single local worktree");
             return;
         };
@@ -331,6 +396,16 @@ impl Session {
         let resolved = match resolve_review_request(review_request, &cwd) {
             Ok(resolved) => resolved,
             Err(err) => {
+                let error_summary = bounded_auto_review_error_summary(format!(
+                    "failed to resolve background review request: {err}"
+                ));
+                self.record_failed_background_auto_review(
+                    &persistence,
+                    generation,
+                    &fingerprint,
+                    error_summary,
+                )
+                .await;
                 warn!(error = %err, "background auto review request resolution failed");
                 return;
             }
@@ -372,42 +447,7 @@ impl Session {
             .await;
             return;
         }
-        let coordination =
-            ReviewCoordination::for_scope(self.codex_home().await, persistence.store_scope());
-        let review_lock_guard = match acquire_background_auto_review_lock(
-            &coordination,
-            format!("background_auto_review:{}", persistence.run_id()),
-        )
-        .await
-        {
-            Ok(Some(guard)) => guard,
-            Ok(None) => {
-                let error_summary =
-                    "another background auto review is already running for this worktree"
-                        .to_string();
-                self.record_skipped_background_auto_review(
-                    &persistence,
-                    generation,
-                    &fingerprint,
-                    error_summary,
-                )
-                .await;
-                debug!("background auto review skipped: review lock is held");
-                return;
-            }
-            Err(err) => {
-                let error_summary = format!("failed to acquire background auto review lock: {err}");
-                self.record_skipped_background_auto_review(
-                    &persistence,
-                    generation,
-                    &fingerprint,
-                    error_summary,
-                )
-                .await;
-                warn!(error = %err, "failed to acquire background auto review lock");
-                return;
-            }
-        };
+        let prepared_persistence = persistence.clone();
         let prepared = prepare_review_thread(
             Arc::clone(self),
             Arc::clone(&turn_context.config),
@@ -420,6 +460,13 @@ impl Session {
         )
         .await;
         let Some(persistence) = prepared.task.persistence_context() else {
+            self.record_failed_background_auto_review(
+                &prepared_persistence,
+                generation,
+                &fingerprint,
+                "prepared background review lost its persistence context".to_string(),
+            )
+            .await;
             debug!("background auto review skipped after prepare: missing persistence context");
             return;
         };
@@ -452,17 +499,27 @@ impl Session {
         {
             Ok(Some(started_review)) => started_review,
             Ok(None) => {
-                let error_summary =
-                    "background auto review schedule was superseded or foreground work became \
-                     active before start"
-                        .to_string();
-                self.record_skipped_background_auto_review(
-                    &persistence,
-                    generation,
-                    &fingerprint,
-                    error_summary,
-                )
-                .await;
+                if self
+                    .is_current_background_auto_review_schedule(generation, &fingerprint)
+                    .await
+                {
+                    self.record_skipped_background_auto_review(
+                        &persistence,
+                        generation,
+                        &fingerprint,
+                        "foreground work became active before background auto review could start"
+                            .to_string(),
+                    )
+                    .await;
+                } else {
+                    self.record_superseded_background_auto_review(
+                        &persistence,
+                        generation,
+                        &fingerprint,
+                        "background auto review schedule was superseded before start".to_string(),
+                    )
+                    .await;
+                }
                 debug!(
                     "background auto review skipped after prepare: schedule superseded or \
                      foreground work active"
@@ -508,7 +565,7 @@ impl Session {
         );
     }
 
-    pub(crate) async fn recover_auto_review_after_restart(&self) {
+    pub(crate) async fn recover_auto_review_after_restart(&self) -> Vec<Event> {
         let (codex_home, scopes) = {
             let state = self.state.lock().await;
             if state
@@ -516,7 +573,7 @@ impl Session {
                 .session_source
                 .is_non_root_agent()
             {
-                return;
+                return Vec::new();
             }
             let mut scopes = vec![state.session_configuration.cwd().clone()];
             scopes.extend(
@@ -528,6 +585,7 @@ impl Session {
             );
             (state.session_configuration.codex_home().clone(), scopes)
         };
+        let mut events = Vec::new();
         let mut seen_scopes = HashSet::new();
         for cwd in scopes {
             let scope =
@@ -548,26 +606,68 @@ impl Session {
                     continue;
                 }
             };
+            let live_run_ids = live_run_id.into_iter().collect::<Vec<_>>();
             let store = AutoReviewStore::for_scope(&codex_home, &scope);
-            if let Err(err) = store.reconcile_orphaned_in_flight(
-                live_run_id.iter().map(String::as_str),
+            let current_thread_id = self.thread_id().to_string();
+            let reconciled = match store.reconcile_orphaned_in_flight(
+                live_run_ids.iter().map(String::as_str),
                 now_unix_timestamp_ms() / 1000,
             ) {
-                warn!(error = %err, "failed to reconcile durable auto review runs");
+                Ok(reconciled) => reconciled,
+                Err(err) => {
+                    warn!(error = %err, "failed to reconcile durable auto review runs");
+                    continue;
+                }
+            };
+            for run in reconciled
+                .into_iter()
+                .filter(|run| run.source == AutoReviewRunSource::Background)
+            {
+                let belongs_to_this_thread = match store.load_run_state(&run.run_id) {
+                    Ok(Some(state)) => state
+                        .owner_thread_id
+                        .is_none_or(|owner_thread_id| owner_thread_id == current_thread_id),
+                    Ok(None) => true,
+                    Err(err) => {
+                        warn!(
+                            run_id = %run.run_id,
+                            error = %err,
+                            "failed to route recovered auto review event to its owning thread"
+                        );
+                        false
+                    }
+                };
+                if !belongs_to_this_thread {
+                    continue;
+                }
+                events.push(Event {
+                    id: run.run_id.clone(),
+                    msg: EventMsg::BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent {
+                        run_id: run.run_id,
+                        status: BackgroundAutoReviewStatus::Cancelled,
+                        review_target: run.review_target,
+                        error_summary: run.error_summary,
+                    }),
+                });
             }
         }
+        events
     }
 
     async fn record_pending_background_auto_review(
         &self,
         generation: u64,
         fingerprint: &str,
+        cancellation_token: tokio_util::sync::CancellationToken,
         persistence: ReviewPersistenceContext,
     ) -> bool {
         let mut state = self.state.lock().await;
-        state
-            .background_auto_review
-            .record_pending(generation, fingerprint, persistence)
+        state.background_auto_review.record_pending(
+            generation,
+            fingerprint,
+            cancellation_token,
+            persistence,
+        )
     }
 
     async fn record_skipped_background_auto_review(
@@ -589,6 +689,60 @@ impl Session {
                 Arc::clone(self),
                 persistence,
                 BackgroundAutoReviewStatus::Skipped,
+                Some(error_summary),
+            )
+            .await;
+        }
+    }
+
+    async fn record_superseded_background_auto_review(
+        self: &Arc<Self>,
+        persistence: &ReviewPersistenceContext,
+        generation: u64,
+        fingerprint: &str,
+        error_summary: String,
+    ) {
+        let codex_home = self.codex_home().await;
+        {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .clear_pending_review(generation, fingerprint);
+        }
+        if persistence.save_superseded_with_summary(
+            codex_home,
+            error_summary.clone(),
+            /*superseded_by*/ None,
+        ) {
+            record_background_review_status(
+                Arc::clone(self),
+                persistence,
+                BackgroundAutoReviewStatus::Superseded,
+                Some(error_summary),
+            )
+            .await;
+        }
+    }
+
+    async fn record_failed_background_auto_review(
+        self: &Arc<Self>,
+        persistence: &ReviewPersistenceContext,
+        generation: u64,
+        fingerprint: &str,
+        error_summary: String,
+    ) {
+        let codex_home = self.codex_home().await;
+        {
+            let mut state = self.state.lock().await;
+            state
+                .background_auto_review
+                .clear_pending_review(generation, fingerprint);
+        }
+        if persistence.save_failed(codex_home, error_summary.clone(), /*token_usage*/ None) {
+            record_background_review_status(
+                Arc::clone(self),
+                persistence,
+                BackgroundAutoReviewStatus::Failed,
                 Some(error_summary),
             )
             .await;
@@ -757,19 +911,27 @@ impl Session {
     pub(crate) async fn cancel_background_auto_review(self: &Arc<Self>) {
         self.cancel_background_auto_review_with_summary(
             AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+            "thread_closing",
         )
         .await;
     }
 
     pub(crate) async fn cancel_background_auto_review_for_foreground_work(self: &Arc<Self>) {
-        self.cancel_background_auto_review_with_summary(background_auto_review_control_summary(
-            &BackgroundAutoReviewControlAction::Cancel,
-            &BackgroundAutoReviewControlReason::ForegroundWorkStarted,
-        ))
+        self.cancel_background_auto_review_with_summary(
+            background_auto_review_control_summary(
+                &BackgroundAutoReviewControlAction::Cancel,
+                &BackgroundAutoReviewControlReason::ForegroundWorkStarted,
+            ),
+            "foreground_work_started",
+        )
         .await;
     }
 
-    async fn cancel_background_auto_review_with_summary(self: &Arc<Self>, error_summary: String) {
+    async fn cancel_background_auto_review_with_summary(
+        self: &Arc<Self>,
+        error_summary: String,
+        cancel_reason: &str,
+    ) {
         let cancellation = {
             let mut state = self.state.lock().await;
             state
@@ -780,7 +942,11 @@ impl Session {
         if let Some(pending_review) = cancellation.pending_review
             && pending_review
                 .persistence
-                .save_cancelled_with_summary(&codex_home, error_summary.clone())
+                .save_cancelled_with_summary_and_reason(
+                    &codex_home,
+                    error_summary.clone(),
+                    cancel_reason.to_string(),
+                )
         {
             record_background_review_status(
                 Arc::clone(self),
@@ -820,7 +986,11 @@ impl Session {
                 let saved = match action {
                     BackgroundAutoReviewControlAction::Cancel => pending_review
                         .persistence
-                        .save_cancelled_with_summary(codex_home, error_summary.clone()),
+                        .save_cancelled_with_summary_and_reason(
+                            codex_home,
+                            error_summary.clone(),
+                            BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON.to_string(),
+                        ),
                     BackgroundAutoReviewControlAction::Supersede => {
                         pending_review.persistence.save_superseded_with_summary(
                             codex_home,

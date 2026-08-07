@@ -59,6 +59,7 @@ struct BackgroundAutoReviewRunning {
 struct BackgroundAutoReviewPending {
     generation: u64,
     fingerprint: String,
+    cancellation_token: CancellationToken,
     persistence: ReviewPersistenceContext,
 }
 
@@ -235,16 +236,20 @@ impl BackgroundAutoReviewSchedulerState {
         &mut self,
         generation: u64,
         fingerprint: &str,
+        cancellation_token: CancellationToken,
         persistence: ReviewPersistenceContext,
     ) -> bool {
         if !self.is_current_schedule(generation) {
             return false;
         }
-        self.pending_review = Some(BackgroundAutoReviewPending {
+        if let Some(previous) = self.pending_review.replace(BackgroundAutoReviewPending {
             generation,
             fingerprint: fingerprint.to_string(),
+            cancellation_token,
             persistence,
-        });
+        }) {
+            previous.cancellation_token.cancel();
+        }
         true
     }
 
@@ -321,6 +326,7 @@ impl BackgroundAutoReviewSchedulerState {
         {
             self.generation = self.generation.saturating_add(1);
             return self.pending_review.take().map(|pending_review| {
+                pending_review.cancellation_token.cancel();
                 BackgroundAutoReviewControlledRun::Pending(BackgroundAutoReviewPendingHandle {
                     persistence: pending_review.persistence,
                 })
@@ -346,6 +352,7 @@ impl BackgroundAutoReviewSchedulerState {
         self.active_regular_turns.clear();
         BackgroundAutoReviewCancellation {
             pending_review: self.pending_review.take().map(|pending_review| {
+                pending_review.cancellation_token.cancel();
                 BackgroundAutoReviewPendingHandle {
                     persistence: pending_review.persistence,
                 }

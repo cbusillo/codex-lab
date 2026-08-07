@@ -2459,6 +2459,7 @@ impl App {
                     .await
                 {
                     Ok(()) => {
+                        self.fetch_latest_auto_review_summary(app_server, resumed_thread_id);
                         self.backfill_loaded_subagent_threads(app_server).await;
                         if let Some(summary) = summary {
                             let mut lines: Vec<Line<'static>> = Vec::new();

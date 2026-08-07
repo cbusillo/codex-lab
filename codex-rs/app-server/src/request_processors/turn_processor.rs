@@ -1814,7 +1814,8 @@ impl TurnRequestProcessor {
         params: AutoReviewSummaryReadParams,
     ) -> Result<AutoReviewSummaryReadResponse, JSONRPCErrorError> {
         let AutoReviewSummaryReadParams { thread_id } = params;
-        let (_, thread) = self.load_thread(&thread_id).await?;
+        let (canonical_thread_id, thread) = self.load_thread(&thread_id).await?;
+        let canonical_thread_id = canonical_thread_id.to_string();
         let active_review_target = CoreReviewTarget::UncommittedChanges;
         let active_target = self.auto_review_target_for_thread(thread.as_ref()).await;
         let store_scope = active_target
@@ -1825,6 +1826,24 @@ impl TurnRequestProcessor {
         let runs = store
             .list_runs()
             .map_err(|err| internal_error(format!("failed to list auto review runs: {err}")))?;
+        let runs = runs
+            .into_iter()
+            .filter(|run| match store.load_run_state(&run.run_id) {
+                Ok(Some(state)) => state
+                    .owner_thread_id
+                    .is_none_or(|owner_thread_id| owner_thread_id == canonical_thread_id),
+                // Legacy records predate thread ownership and remain visible.
+                Ok(None) => true,
+                Err(err) => {
+                    tracing::warn!(
+                        run_id = %run.run_id,
+                        error = %err,
+                        "excluding auto review summary with unreadable thread ownership"
+                    );
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
 
         let projection =
             AutoReviewLedgerProjection::from_runs(&runs, &active_target, &active_review_target);
