@@ -24,6 +24,7 @@ use codex_auto_review::AutoReviewTerminalReason;
 use codex_auto_review::SCHEMA_VERSION;
 use codex_auto_review::finding_digests;
 use codex_core::CodexThread;
+use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::BackgroundAutoReviewStatus;
@@ -58,6 +59,7 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 const NO_SCHEDULE_WINDOW: Duration = Duration::from_secs(6);
 
 const ADD_FEATURE_PATCH: &str = "*** Begin Patch\n*** Add File: feature.rs\n+pub fn feature() -> u32 {\n+    7\n+}\n*** End Patch\n";
+const SEEDED_DEFECT_PATCH: &str = "*** Begin Patch\n*** Add File: average.rs\n+pub fn average(total: u64, count: u64) -> u64 {\n+    total / count\n+}\n*** End Patch\n";
 
 fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new("git")
@@ -124,10 +126,14 @@ fn review_output_json(findings: usize) -> String {
 /// The two model responses a single `apply_patch` turn consumes: the tool call,
 /// then the follow-up that closes the turn.
 fn code_changing_turn_responses(tag: &str) -> Vec<String> {
+    code_changing_turn_responses_with_patch(tag, ADD_FEATURE_PATCH)
+}
+
+fn code_changing_turn_responses_with_patch(tag: &str, patch: &str) -> Vec<String> {
     vec![
         responses::sse(vec![
             responses::ev_response_created(&format!("resp-{tag}-tool")),
-            responses::ev_apply_patch_custom_tool_call(&format!("call-{tag}"), ADD_FEATURE_PATCH),
+            responses::ev_apply_patch_custom_tool_call(&format!("call-{tag}"), patch),
             responses::ev_completed(&format!("resp-{tag}-tool")),
         ]),
         responses::sse(vec![
@@ -136,6 +142,25 @@ fn code_changing_turn_responses(tag: &str) -> Vec<String> {
             responses::ev_completed(&format!("resp-{tag}-final")),
         ]),
     ]
+}
+
+fn seeded_defect_review_output(path: &Path) -> String {
+    serde_json::json!({
+        "findings": [{
+            "title": "[P1] Guard the zero-count average",
+            "body": "Calling average with count == 0 panics; handle the empty case before dividing.",
+            "confidence_score": 0.99,
+            "priority": 1,
+            "code_location": {
+                "absolute_file_path": path.join("average.rs"),
+                "line_range": {"start": 2, "end": 2}
+            }
+        }],
+        "overall_correctness": "patch is incorrect",
+        "overall_explanation": "The new helper panics for an empty input.",
+        "overall_confidence_score": 0.99
+    })
+    .to_string()
 }
 
 fn assistant_only_turn_response(tag: &str) -> String {
@@ -258,6 +283,135 @@ fn single_run(store: &AutoReviewStore) -> AutoReviewRun {
     let mut runs = store.list_runs().expect("list auto review runs");
     assert_eq!(runs.len(), 1, "expected exactly one auto review run");
     runs.remove(0)
+}
+
+/// Reproduces the August 1 mismatch with the repository review orchestrator
+/// present while the detached child has no collaboration tools. The bounded
+/// direct-review contract must still preserve #571's exact diff and publish the
+/// seeded actionable defect instead of following the unavailable workflow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orchestration_skill_is_suppressed_while_seeded_defect_is_detected() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let skill_dir = repo.path().join(".codex/skills/code-review");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: code-review\ndescription: Run a final code review\n---\n\nUse subagents to review code.\n",
+    )?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let mut bodies = code_changing_turn_responses_with_patch("seeded", SEEDED_DEFECT_PATCH);
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("resp-seeded-review"),
+        responses::ev_assistant_message(
+            "msg-seeded-review",
+            &seeded_defect_review_output(repo.path()),
+        ),
+        responses::ev_completed("resp-seeded-review"),
+    ]));
+    let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
+
+    let config_cwd = cwd.clone();
+    let test = Box::pin(
+        test_codex()
+            .with_config(move |config| {
+                config.cwd = config_cwd;
+                config
+                    .features
+                    .enable(Feature::CodeMode)
+                    .expect("enable code mode for mismatch reproduction");
+                config
+                    .features
+                    .enable(Feature::CodeModeOnly)
+                    .expect("enable code-mode registry for mismatch reproduction");
+            })
+            .build(&server),
+    )
+    .await?;
+    Box::pin(submit_turn(&test.codex, &cwd, "add the average helper")).await?;
+
+    let statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Completed,
+    ))
+    .await;
+    let store = AutoReviewStore::for_scope(test.codex_home_path(), repo.path());
+    let run = single_run(&store);
+    assert_eq!(run.run_id, statuses[0].run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Completed);
+    assert_eq!(run.finding_count, 1);
+    assert_eq!(
+        run.finding_digests[0].title,
+        "[P1] Guard the zero-count average"
+    );
+    assert!(matches!(
+        run.review_target,
+        ReviewTarget::CurrentTurnDiff { .. }
+    ));
+    assert_eq!(
+        run.target
+            .current_turn
+            .as_ref()
+            .and_then(|target| target.diff_fingerprint.as_deref()),
+        match &run.review_target {
+            ReviewTarget::CurrentTurnDiff { fingerprint } => Some(fingerprint.as_str()),
+            _ => None,
+        }
+    );
+
+    let requests = responses_mock.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected foreground tool/final plus review"
+    );
+    let review_body = requests[2].body_json();
+    let review_body_text = review_body.to_string();
+    assert!(review_body_text.contains("You are the sole reviewer"));
+    assert!(review_body_text.contains("average.rs"));
+    assert!(!review_body_text.contains("Use subagents to review code"));
+    assert!(
+        review_body["max_output_tokens"]
+            .as_u64()
+            .is_some_and(|limit| limit > 0),
+        "review request must carry a provider output cap: {review_body:?}"
+    );
+    let tools = review_body["tools"]
+        .as_array()
+        .context("review request must contain a bounded tool registry")?;
+    assert!(
+        tools.iter().all(|tool| {
+            !matches!(
+                tool.get("name").and_then(serde_json::Value::as_str),
+                Some("spawn_agent" | "exec" | "wait")
+            )
+        }),
+        "review exposed unavailable orchestration or code-mode tools: {tools:?}"
+    );
+
+    let state = store
+        .load_run_state(&run.run_id)?
+        .context("completed review must persist bounded diagnostics")?;
+    assert_eq!(state.usage.orchestration_skills_suppressed, Some(true));
+    assert_eq!(state.usage.request_count, Some(1));
+    assert!(
+        state
+            .usage
+            .tool_registry_tokens
+            .is_some_and(|tokens| tokens < generous_budget().max_total_tokens / 10)
+    );
+    assert!(
+        state
+            .usage
+            .tool_output_limit_tokens
+            .is_some_and(|tokens| tokens <= 4_096)
+    );
+    assert!(state.usage.effective_total_token_limit.is_some());
+    assert!(state.usage.accounting_tolerance_tokens.is_some());
+
+    Ok(())
 }
 
 /// A regular turn that edits the worktree must schedule, launch, and durably
@@ -474,7 +628,9 @@ async fn background_review_over_finding_budget_persists_terminal_run() -> Result
     );
     assert_eq!(
         run.error_summary.as_deref(),
-        Some("background review exceeded finding budget: 2 findings > 1 findings")
+        Some(
+            "background review exceeded finding budget: 2 findings > 1 findings; retry with a narrower diff or increase `auto_review.background_max_findings`"
+        )
     );
     assert_eq!(
         run.finding_count, 0,
@@ -514,7 +670,7 @@ async fn background_review_over_output_budget_persists_terminal_run() -> Result<
         run.error_summary.as_deref(),
         Some(
             format!(
-                "background review exceeded output budget: {} bytes > 16 bytes",
+                "background review exceeded output budget: {} bytes > 16 bytes; retry with a narrower diff or increase `auto_review.background_max_output_bytes`",
                 output.len()
             )
             .as_str()
@@ -525,6 +681,266 @@ async fn background_review_over_output_budget_persists_terminal_run() -> Result<
         Some(AutoReviewTerminalReason::BudgetOutput)
     );
     assert_eq!(run.usage_finding_count, None);
+
+    Ok(())
+}
+
+/// Provider usage is cumulative but arrives only after a response. A large
+/// tool result must be truncated before it is considered for the next prompt,
+/// and that follow-up must be rejected before sampling when the projected
+/// cumulative total would cross the configured hard ceiling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_review_caps_tool_output_and_rejects_projected_followup() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let command = if cfg!(windows) {
+        "for ($i=1; $i -le 100000; $i++) { Write-Output $i }"
+    } else {
+        "seq 1 100000"
+    };
+    let shell_arguments = serde_json::json!({
+        "command": command,
+        "timeout_ms": 5_000,
+    });
+    let mut bodies = code_changing_turn_responses("token-cap");
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("resp-review-tool"),
+        responses::ev_function_call(
+            "call-review-shell",
+            "shell_command",
+            &serde_json::to_string(&shell_arguments)?,
+        ),
+        responses::ev_completed_with_tokens("resp-review-tool", 19_000),
+    ]));
+    let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
+    let budget = AutoReviewBudget {
+        max_total_tokens: 20_000,
+        ..generous_budget()
+    };
+    let test = build_codex_in_repo(&server, cwd.clone(), Some(budget.clone())).await?;
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the feature")).await?;
+    let statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Cancelled,
+    ))
+    .await;
+    assert_eq!(
+        responses_mock.requests().len(),
+        3,
+        "projected over-budget follow-up must not reach the provider"
+    );
+    let review_request = responses_mock.requests()[2].body_json();
+    assert!(
+        review_request["max_output_tokens"]
+            .as_u64()
+            .is_some_and(|limit| limit < budget.max_total_tokens),
+        "review response must be capped below the total budget: {review_request:?}"
+    );
+
+    let store = AutoReviewStore::for_scope(test.codex_home_path(), repo.path());
+    let run = single_run(&store);
+    assert_eq!(run.run_id, statuses[0].run_id);
+    assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(
+        run.cancel_reason.as_deref(),
+        Some(AutoReviewTerminalReason::BudgetTotalTokens.cancel_reason())
+    );
+    assert!(
+        run.error_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("background_max_total_tokens"))
+    );
+    let state = store
+        .load_run_state(&run.run_id)?
+        .context("token-stopped run must persist projected diagnostics")?;
+    assert_eq!(
+        state.terminal_reason,
+        Some(AutoReviewTerminalReason::BudgetTotalTokens)
+    );
+    assert_eq!(state.usage.total_tokens, Some(19_000));
+    assert_eq!(state.usage.request_count, Some(1));
+    assert_eq!(state.usage.tool_output_limit_tokens, Some(625));
+    assert!(
+        state
+            .usage
+            .tool_output_tokens
+            .is_some_and(|tokens| tokens > 0 && tokens < 1_000),
+        "tool output must be truncated before follow-up projection: {:?}",
+        state.usage.tool_output_tokens
+    );
+    assert!(
+        state
+            .usage
+            .projected_total_tokens
+            .is_some_and(|tokens| tokens > 20_000)
+    );
+
+    Ok(())
+}
+
+/// Hitting the provider-side response cap is a budget stop, not a retryable
+/// transport failure. Persist the structured token remediation without
+/// resending an output-limited prompt or degrading to an empty-output error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_review_output_limited_response_persists_token_budget_stop() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let mut bodies = code_changing_turn_responses("response-output-limit");
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("resp-review-output-limited"),
+        serde_json::json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp-review-output-limited",
+                "object": "response",
+                "status": "incomplete",
+                "error": null,
+                "incomplete_details": {
+                    "reason": "max_output_tokens"
+                }
+            }
+        }),
+    ]));
+    let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
+    let budget = AutoReviewBudget {
+        max_total_tokens: 50_000,
+        ..generous_budget()
+    };
+    let test = build_codex_in_repo(&server, cwd.clone(), Some(budget)).await?;
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the feature")).await?;
+    Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Cancelled,
+    ))
+    .await;
+
+    assert_eq!(
+        responses_mock.requests().len(),
+        3,
+        "output-limited review request must not be retried"
+    );
+    let store = AutoReviewStore::for_scope(test.codex_home_path(), repo.path());
+    let run = single_run(&store);
+    assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(
+        run.cancel_reason.as_deref(),
+        Some(AutoReviewTerminalReason::BudgetTotalTokens.cancel_reason())
+    );
+    assert!(
+        run.error_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("background_max_total_tokens"))
+    );
+    let state = store
+        .load_run_state(&run.run_id)?
+        .context("output-limited review must persist token diagnostics")?;
+    assert_eq!(
+        state.terminal_reason,
+        Some(AutoReviewTerminalReason::BudgetTotalTokens)
+    );
+    assert_eq!(state.usage.request_count, Some(1));
+    assert_eq!(state.usage.retry_count, Some(0));
+    assert!(state.usage.response_output_limit_tokens.is_some());
+
+    Ok(())
+}
+
+/// Cumulative provider usage must replace each request's conservative
+/// projection so a useful multi-tool review can complete without stacking the
+/// same repeated prompt three times.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_review_accounts_multiple_requests_without_projection_stacking() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let shell_arguments = serde_json::json!({
+        "command": if cfg!(windows) { "Write-Output inspected" } else { "echo inspected" },
+        "timeout_ms": 5_000,
+    });
+    let mut bodies = code_changing_turn_responses("multi-request-budget");
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("resp-review-tool-1"),
+        responses::ev_function_call(
+            "call-review-shell-1",
+            "shell_command",
+            &serde_json::to_string(&shell_arguments)?,
+        ),
+        responses::ev_completed_with_tokens("resp-review-tool-1", 2_000),
+    ]));
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("resp-review-tool-2"),
+        responses::ev_function_call(
+            "call-review-shell-2",
+            "shell_command",
+            &serde_json::to_string(&shell_arguments)?,
+        ),
+        responses::ev_completed_with_tokens("resp-review-tool-2", 3_000),
+    ]));
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("resp-review-final"),
+        responses::ev_assistant_message(
+            "msg-review-final",
+            &seeded_defect_review_output(repo.path()),
+        ),
+        responses::ev_completed_with_tokens("resp-review-final", 4_000),
+    ]));
+    let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
+    let budget = AutoReviewBudget {
+        max_total_tokens: 50_000,
+        ..generous_budget()
+    };
+    let test = build_codex_in_repo(&server, cwd.clone(), Some(budget.clone())).await?;
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the feature")).await?;
+    Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Completed,
+    ))
+    .await;
+
+    let requests = responses_mock.requests();
+    assert_eq!(
+        requests.len(),
+        5,
+        "expected two foreground and three review requests"
+    );
+    for request in &requests[2..] {
+        assert!(
+            request.body_json()["max_output_tokens"].as_u64().is_some(),
+            "every review request must carry a provider output cap"
+        );
+    }
+    let store = AutoReviewStore::for_scope(test.codex_home_path(), repo.path());
+    let run = single_run(&store);
+    assert_eq!(run.status, AutoReviewRunStatus::Completed);
+    let state = store
+        .load_run_state(&run.run_id)?
+        .context("multi-request review must persist accounting diagnostics")?;
+    assert_eq!(state.usage.request_count, Some(3));
+    assert_eq!(state.usage.retry_count, Some(0));
+    assert_eq!(state.usage.total_tokens, Some(9_000));
+    assert!(
+        state
+            .usage
+            .total_tokens
+            .is_some_and(|tokens| tokens <= budget.max_total_tokens)
+    );
+    assert!(
+        state
+            .usage
+            .projected_total_tokens
+            .is_some_and(|tokens| tokens <= budget.max_total_tokens)
+    );
 
     Ok(())
 }

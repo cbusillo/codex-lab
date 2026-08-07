@@ -214,6 +214,7 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
             /*initial_history*/ None,
             crate::session::GitEnrichmentPolicy::Fresh,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+            codex_extension_api::ExtensionDataInit::default(),
         ),
     )
     .await

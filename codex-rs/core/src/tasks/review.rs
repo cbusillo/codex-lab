@@ -41,6 +41,7 @@ use codex_protocol::user_input::UserInput;
 use super::SessionTask;
 use super::SessionTaskContext;
 use super::SessionTaskResult;
+use super::background_review_budget::BackgroundReviewBudgetGate;
 
 const BACKGROUND_AUTO_REVIEW_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -58,6 +59,7 @@ struct ReviewExecution {
 struct ReviewConversation {
     session: Arc<Session>,
     receiver: async_channel::Receiver<Event>,
+    budget_gate: Option<BackgroundReviewBudgetGate>,
 }
 
 impl ReviewTask {
@@ -168,6 +170,7 @@ async fn run_review_task(
         .as_ref()
         .and_then(ReviewPersistenceContext::background_budget)
         .cloned();
+    let budget_gate = budget.clone().map(BackgroundReviewBudgetGate::new);
     let codex_home = session.codex_home().await;
 
     // Start sub-codex conversation and get the receiver for events.
@@ -176,6 +179,7 @@ async fn run_review_task(
         ctx.clone(),
         user_input,
         cancellation_token.clone(),
+        budget_gate.clone(),
     ));
     let start_result: Result<Option<ReviewConversation>, ReviewExecution> =
         if let Some(budget) = &budget {
@@ -189,10 +193,11 @@ async fn run_review_task(
                     Err(ReviewExecution {
                         output: None,
                         token_usage: None,
-                        usage: AutoReviewUsage {
-                            elapsed_ms: Some(elapsed_millis(review_started.elapsed())),
-                            ..Default::default()
-                        },
+                        usage: review_usage(
+                            /*token_usage*/ None,
+                            budget_gate.as_ref(),
+                            elapsed_millis(review_started.elapsed()),
+                        ),
                         terminal_reason: Some(AutoReviewTerminalReason::BudgetElapsed),
                     })
                 }
@@ -224,10 +229,7 @@ async fn run_review_task(
             ReviewExecution {
                 output: None,
                 token_usage: None,
-                usage: AutoReviewUsage {
-                    elapsed_ms: Some(elapsed_ms),
-                    ..Default::default()
-                },
+                usage: review_usage(/*token_usage*/ None, budget_gate.as_ref(), elapsed_ms),
                 terminal_reason,
             }
         }
@@ -364,6 +366,7 @@ async fn start_review_conversation(
     ctx: Arc<TurnContext>,
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
+    budget_gate: Option<BackgroundReviewBudgetGate>,
 ) -> Option<ReviewConversation> {
     let config = ctx.config.clone();
     let mut sub_agent_config = config.as_ref().clone();
@@ -378,6 +381,22 @@ async fn start_review_conversation(
     let _ = sub_agent_config.features.disable(Feature::SpawnCsv);
     let _ = sub_agent_config.features.disable(Feature::Collab);
     sub_agent_config.agents_enabled = false;
+    if let Some(budget_gate) = budget_gate.as_ref() {
+        let _ = sub_agent_config.features.disable(Feature::CodeModeOnly);
+        let _ = sub_agent_config.features.disable(Feature::CodeMode);
+        let _ = sub_agent_config.features.disable(Feature::Apps);
+        let _ = sub_agent_config.features.disable(Feature::EnableMcpApps);
+        sub_agent_config.include_skill_instructions = false;
+        sub_agent_config.orchestrator_skills_enabled = false;
+        sub_agent_config.include_apps_instructions = false;
+        sub_agent_config.mcp_servers = Constrained::allow_only(Default::default());
+        sub_agent_config.tool_output_token_limit = Some(
+            sub_agent_config
+                .tool_output_token_limit
+                .unwrap_or(usize::MAX)
+                .min(budget_gate.tool_output_limit_tokens()),
+        );
+    }
 
     // Set explicit review rubric for the sub-agent
     sub_agent_config.base_instructions = Some(crate::REVIEW_PROMPT.to_string());
@@ -388,6 +407,10 @@ async fn start_review_conversation(
         .clone()
         .unwrap_or_else(|| ctx.model_info.slug.clone());
     sub_agent_config.model = Some(model);
+    let mut thread_extension_init = codex_extension_api::ExtensionDataInit::new();
+    if let Some(budget_gate) = budget_gate.clone() {
+        thread_extension_init.insert(budget_gate);
+    }
     (run_codex_thread_one_shot(
         sub_agent_config,
         session.auth_manager(),
@@ -398,12 +421,14 @@ async fn start_review_conversation(
         SubAgentSource::Review,
         /*final_output_json_schema*/ None,
         /*initial_history*/ None,
+        thread_extension_init,
     )
     .await)
         .ok()
         .map(|(session, io)| ReviewConversation {
             session,
             receiver: io.rx_event,
+            budget_gate,
         })
 }
 
@@ -491,12 +516,12 @@ async fn execute_review_conversation(
     if budget.is_some_and(|budget| elapsed_exceeds_budget(elapsed_ms, budget)) {
         return ReviewExecution {
             output: None,
-            token_usage,
-            usage: AutoReviewUsage {
-                elapsed_ms: Some(elapsed_ms),
-                total_tokens,
-                ..Default::default()
-            },
+            token_usage: token_usage.clone(),
+            usage: review_usage(
+                token_usage.as_ref(),
+                review_conversation.budget_gate.as_ref(),
+                elapsed_ms,
+            ),
             terminal_reason: Some(AutoReviewTerminalReason::BudgetElapsed),
         };
     }
@@ -505,24 +530,41 @@ async fn execute_review_conversation(
     }) {
         return ReviewExecution {
             output: None,
-            token_usage,
-            usage: AutoReviewUsage {
-                elapsed_ms: Some(elapsed_ms),
-                total_tokens,
-                ..Default::default()
-            },
+            token_usage: token_usage.clone(),
+            usage: review_usage(
+                token_usage.as_ref(),
+                review_conversation.budget_gate.as_ref(),
+                elapsed_ms,
+            ),
+            terminal_reason: Some(AutoReviewTerminalReason::BudgetTotalTokens),
+        };
+    }
+    if raw_output.is_none()
+        && review_conversation
+            .budget_gate
+            .as_ref()
+            .is_some_and(BackgroundReviewBudgetGate::stopped)
+    {
+        return ReviewExecution {
+            output: None,
+            token_usage: token_usage.clone(),
+            usage: review_usage(
+                token_usage.as_ref(),
+                review_conversation.budget_gate.as_ref(),
+                elapsed_ms,
+            ),
             terminal_reason: Some(AutoReviewTerminalReason::BudgetTotalTokens),
         };
     }
     let Some(raw_output) = raw_output else {
         return ReviewExecution {
             output: None,
-            token_usage,
-            usage: AutoReviewUsage {
-                elapsed_ms: Some(elapsed_ms),
-                total_tokens,
-                ..Default::default()
-            },
+            token_usage: token_usage.clone(),
+            usage: review_usage(
+                token_usage.as_ref(),
+                review_conversation.budget_gate.as_ref(),
+                elapsed_ms,
+            ),
             terminal_reason: None,
         };
     };
@@ -530,13 +572,14 @@ async fn execute_review_conversation(
     if budget.is_some_and(|budget| raw_output_exceeds_budget(&raw_output, budget)) {
         return ReviewExecution {
             output: None,
-            token_usage,
-            usage: AutoReviewUsage {
-                elapsed_ms: Some(elapsed_ms),
-                total_tokens,
-                output_bytes: Some(output_bytes),
-                ..Default::default()
-            },
+            token_usage: token_usage.clone(),
+            usage: review_usage_with_output(
+                token_usage.as_ref(),
+                review_conversation.budget_gate.as_ref(),
+                elapsed_ms,
+                Some(output_bytes),
+                /*finding_count*/ None,
+            ),
             terminal_reason: Some(AutoReviewTerminalReason::BudgetOutput),
         };
     }
@@ -545,27 +588,27 @@ async fn execute_review_conversation(
     if budget.is_some_and(|budget| findings_exceed_budget(&output, budget)) {
         return ReviewExecution {
             output: None,
-            token_usage,
-            usage: AutoReviewUsage {
-                elapsed_ms: Some(elapsed_ms),
-                total_tokens,
-                output_bytes: Some(output_bytes),
-                finding_count: Some(finding_count),
-                ..Default::default()
-            },
+            token_usage: token_usage.clone(),
+            usage: review_usage_with_output(
+                token_usage.as_ref(),
+                review_conversation.budget_gate.as_ref(),
+                elapsed_ms,
+                Some(output_bytes),
+                Some(finding_count),
+            ),
             terminal_reason: Some(AutoReviewTerminalReason::BudgetFindingCount),
         };
     }
     ReviewExecution {
         output: Some(output),
-        token_usage,
-        usage: AutoReviewUsage {
-            elapsed_ms: Some(elapsed_ms),
-            total_tokens,
-            output_bytes: Some(output_bytes),
-            finding_count: Some(finding_count),
-            ..Default::default()
-        },
+        token_usage: token_usage.clone(),
+        usage: review_usage_with_output(
+            token_usage.as_ref(),
+            review_conversation.budget_gate.as_ref(),
+            elapsed_ms,
+            Some(output_bytes),
+            Some(finding_count),
+        ),
         terminal_reason: None,
     }
 }
@@ -588,11 +631,11 @@ async fn wait_for_review_budget(
             .await
             .map(|info| info.total_token_usage);
         let total_tokens = token_usage.as_ref().and_then(review_token_count);
-        let usage = AutoReviewUsage {
-            elapsed_ms: Some(elapsed_ms),
-            total_tokens,
-            ..Default::default()
-        };
+        let usage = review_usage(
+            token_usage.as_ref(),
+            review_conversation.budget_gate.as_ref(),
+            elapsed_ms,
+        );
         if let Some(persistence) = persistence
             && (elapsed_ms.saturating_sub(last_persisted_elapsed_ms)
                 >= elapsed_millis(BACKGROUND_AUTO_REVIEW_PROGRESS_INTERVAL)
@@ -610,6 +653,18 @@ async fn wait_for_review_budget(
                 terminal_reason: Some(AutoReviewTerminalReason::BudgetElapsed),
             };
         }
+        if review_conversation
+            .budget_gate
+            .as_ref()
+            .is_some_and(|gate| gate.observe_usage(token_usage.as_ref()))
+        {
+            return ReviewExecution {
+                output: None,
+                token_usage,
+                usage,
+                terminal_reason: Some(AutoReviewTerminalReason::BudgetTotalTokens),
+            };
+        }
         if total_tokens.is_some_and(|total_tokens| total_tokens_reach_budget(total_tokens, budget))
         {
             return ReviewExecution {
@@ -620,6 +675,45 @@ async fn wait_for_review_budget(
             };
         }
     }
+}
+
+fn review_usage(
+    token_usage: Option<&TokenUsage>,
+    budget_gate: Option<&BackgroundReviewBudgetGate>,
+    elapsed_ms: u64,
+) -> AutoReviewUsage {
+    review_usage_with_output(
+        token_usage,
+        budget_gate,
+        elapsed_ms,
+        /*output_bytes*/ None,
+        /*finding_count*/ None,
+    )
+}
+
+fn review_usage_with_output(
+    token_usage: Option<&TokenUsage>,
+    budget_gate: Option<&BackgroundReviewBudgetGate>,
+    elapsed_ms: u64,
+    output_bytes: Option<usize>,
+    finding_count: Option<usize>,
+) -> AutoReviewUsage {
+    let mut usage = budget_gate
+        .map(|gate| gate.usage(token_usage))
+        .unwrap_or_default();
+    usage.elapsed_ms = Some(elapsed_ms);
+    usage.total_tokens = token_usage.and_then(review_token_count);
+    usage.input_tokens = token_usage.and_then(|usage| positive_tokens(usage.input_tokens));
+    usage.cached_input_tokens =
+        token_usage.and_then(|usage| positive_tokens(usage.cached_input_tokens));
+    usage.output_tokens = token_usage.and_then(|usage| positive_tokens(usage.output_tokens));
+    usage.output_bytes = output_bytes;
+    usage.finding_count = finding_count;
+    usage
+}
+
+fn positive_tokens(tokens: i64) -> Option<u64> {
+    u64::try_from(tokens).ok().filter(|tokens| *tokens > 0)
 }
 
 fn review_token_count(token_usage: &TokenUsage) -> Option<u64> {
@@ -670,22 +764,31 @@ fn background_review_budget_summary(
     };
     match reason {
         AutoReviewTerminalReason::BudgetElapsed => format!(
-            "background review exceeded elapsed budget: {} ms >= {} ms",
+            "background review exceeded elapsed budget: {} ms >= {} ms; retry after narrowing the review scope or increasing `auto_review.background_max_elapsed_seconds`",
             usage.elapsed_ms.unwrap_or_default(),
             budget.max_elapsed_ms
         ),
-        AutoReviewTerminalReason::BudgetTotalTokens => format!(
-            "background review exceeded token budget: {} tokens >= {} tokens",
-            usage.total_tokens.unwrap_or_default(),
-            budget.max_total_tokens
-        ),
+        AutoReviewTerminalReason::BudgetTotalTokens => {
+            let effective_limit = usage
+                .effective_total_token_limit
+                .unwrap_or(budget.max_total_tokens);
+            let projected = usage
+                .projected_total_tokens
+                .unwrap_or_else(|| usage.total_tokens.unwrap_or_default());
+            format!(
+                "background review stopped at its effective token budget: consumed {} tokens, projected {projected}, effective ceiling {effective_limit}, hard ceiling {} ({} token accounting tolerance); retry with a narrower diff or increase `auto_review.background_max_total_tokens`",
+                usage.total_tokens.unwrap_or_default(),
+                budget.max_total_tokens,
+                usage.accounting_tolerance_tokens.unwrap_or_default()
+            )
+        }
         AutoReviewTerminalReason::BudgetOutput => format!(
-            "background review exceeded output budget: {} bytes > {} bytes",
+            "background review exceeded output budget: {} bytes > {} bytes; retry with a narrower diff or increase `auto_review.background_max_output_bytes`",
             usage.output_bytes.unwrap_or_default(),
             budget.max_output_bytes
         ),
         AutoReviewTerminalReason::BudgetFindingCount => format!(
-            "background review exceeded finding budget: {} findings > {} findings",
+            "background review exceeded finding budget: {} findings > {} findings; retry with a narrower diff or increase `auto_review.background_max_findings`",
             usage.finding_count.unwrap_or_default(),
             budget.max_findings
         ),

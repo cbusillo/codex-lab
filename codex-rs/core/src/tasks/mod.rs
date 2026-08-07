@@ -1,3 +1,4 @@
+mod background_review_budget;
 mod compact;
 mod lifecycle;
 mod regular;
@@ -52,6 +53,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::WarningEvent;
 
+pub(crate) use background_review_budget::BackgroundReviewBudgetGate;
 use codex_features::Feature;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;

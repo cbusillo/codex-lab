@@ -1149,6 +1149,34 @@ pub struct AutoReviewUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_total_token_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_tolerance_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_registry_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_registry_pruned_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_limit_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_output_limit_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration_skills_suppressed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finding_count: Option<usize>,

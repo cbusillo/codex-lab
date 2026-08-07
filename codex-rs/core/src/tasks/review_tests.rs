@@ -97,6 +97,9 @@ fn budget_summaries_report_the_limit_that_was_hit() {
     let usage = AutoReviewUsage {
         elapsed_ms: Some(6_000),
         total_tokens: Some(150),
+        effective_total_token_limit: Some(96),
+        accounting_tolerance_tokens: Some(4),
+        projected_total_tokens: Some(180),
         output_bytes: Some(96),
         finding_count: Some(4),
         ..Default::default()
@@ -114,10 +117,10 @@ fn budget_summaries_report_the_limit_that_was_hit() {
     assert_eq!(
         summaries,
         [
-            "background review exceeded elapsed budget: 6000 ms >= 5000 ms".to_string(),
-            "background review exceeded token budget: 150 tokens >= 100 tokens".to_string(),
-            "background review exceeded output budget: 96 bytes > 64 bytes".to_string(),
-            "background review exceeded finding budget: 4 findings > 2 findings".to_string(),
+            "background review exceeded elapsed budget: 6000 ms >= 5000 ms; retry after narrowing the review scope or increasing `auto_review.background_max_elapsed_seconds`".to_string(),
+            "background review stopped at its effective token budget: consumed 150 tokens, projected 180, effective ceiling 96, hard ceiling 100 (4 token accounting tolerance); retry with a narrower diff or increase `auto_review.background_max_total_tokens`".to_string(),
+            "background review exceeded output budget: 96 bytes > 64 bytes; retry with a narrower diff or increase `auto_review.background_max_output_bytes`".to_string(),
+            "background review exceeded finding budget: 4 findings > 2 findings; retry with a narrower diff or increase `auto_review.background_max_findings`".to_string(),
             "background review stopped after exceeding its execution budget".to_string(),
         ]
     );

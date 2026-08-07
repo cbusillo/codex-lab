@@ -1484,6 +1484,7 @@ pub(crate) fn build_prompt(
         output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
             &turn_context.session_source,
         ),
+        max_output_tokens: None,
     }
 }
 
@@ -1549,12 +1550,29 @@ async fn run_sampling_request(
         {
             codex_protocol::models::bound_executed_tool_calls_for_prompt(&mut prompt_input);
         }
-        let prompt = build_prompt(
+        let mut prompt = build_prompt(
             prompt_input,
             router.as_ref(),
             turn_context.as_ref(),
             base_instructions.clone(),
         );
+        if let Some(budget_gate) = sess
+            .services
+            .thread_extension_data
+            .get::<crate::tasks::BackgroundReviewBudgetGate>()
+        {
+            let token_usage = sess
+                .token_usage_info()
+                .await
+                .map(|info| info.total_token_usage);
+            if !budget_gate.authorize_request(
+                &mut prompt,
+                token_usage.as_ref(),
+                /*retry*/ retries > 0,
+            ) {
+                return Err(CodexErr::TurnAborted);
+            }
+        }
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1595,6 +1613,19 @@ async fn run_sampling_request(
 
         if original_input.is_none() {
             original_input = Some(original_prompt_input);
+        }
+
+        if matches!(
+            err.details(),
+            CodexErrorDetails::Stream(message)
+                if message == "Incomplete response returned, reason: max_output_tokens"
+        ) && let Some(budget_gate) = sess
+            .services
+            .thread_extension_data
+            .get::<crate::tasks::BackgroundReviewBudgetGate>()
+        {
+            budget_gate.stop_for_response_output_limit();
+            return Err(CodexErr::TurnAborted);
         }
 
         if !err.is_retryable() {

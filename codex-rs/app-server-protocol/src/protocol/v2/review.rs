@@ -188,6 +188,29 @@ pub struct AutoReviewUsage {
     pub elapsed_ms: Option<u64>,
     #[ts(type = "number | null")]
     pub total_tokens: Option<u64>,
+    #[ts(type = "number | null")]
+    pub input_tokens: Option<u64>,
+    #[ts(type = "number | null")]
+    pub cached_input_tokens: Option<u64>,
+    #[ts(type = "number | null")]
+    pub output_tokens: Option<u64>,
+    #[ts(type = "number | null")]
+    pub effective_total_token_limit: Option<u64>,
+    #[ts(type = "number | null")]
+    pub accounting_tolerance_tokens: Option<u64>,
+    #[ts(type = "number | null")]
+    pub projected_total_tokens: Option<u64>,
+    pub request_count: Option<usize>,
+    pub retry_count: Option<usize>,
+    #[ts(type = "number | null")]
+    pub tool_registry_tokens: Option<u64>,
+    pub tool_registry_pruned_count: Option<usize>,
+    #[ts(type = "number | null")]
+    pub tool_output_tokens: Option<u64>,
+    pub tool_output_limit_tokens: Option<usize>,
+    #[ts(type = "number | null")]
+    pub response_output_limit_tokens: Option<u64>,
+    pub orchestration_skills_suppressed: Option<bool>,
     pub output_bytes: Option<usize>,
     pub finding_count: Option<usize>,
 }

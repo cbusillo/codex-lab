@@ -780,6 +780,48 @@ fn merge_usage(current: &mut AutoReviewUsage, update: AutoReviewUsage) {
     if update.total_tokens.is_some() {
         current.total_tokens = update.total_tokens;
     }
+    if update.input_tokens.is_some() {
+        current.input_tokens = update.input_tokens;
+    }
+    if update.cached_input_tokens.is_some() {
+        current.cached_input_tokens = update.cached_input_tokens;
+    }
+    if update.output_tokens.is_some() {
+        current.output_tokens = update.output_tokens;
+    }
+    if update.effective_total_token_limit.is_some() {
+        current.effective_total_token_limit = update.effective_total_token_limit;
+    }
+    if update.accounting_tolerance_tokens.is_some() {
+        current.accounting_tolerance_tokens = update.accounting_tolerance_tokens;
+    }
+    if update.projected_total_tokens.is_some() {
+        current.projected_total_tokens = update.projected_total_tokens;
+    }
+    if update.request_count.is_some() {
+        current.request_count = update.request_count;
+    }
+    if update.retry_count.is_some() {
+        current.retry_count = update.retry_count;
+    }
+    if update.tool_registry_tokens.is_some() {
+        current.tool_registry_tokens = update.tool_registry_tokens;
+    }
+    if update.tool_registry_pruned_count.is_some() {
+        current.tool_registry_pruned_count = update.tool_registry_pruned_count;
+    }
+    if update.tool_output_tokens.is_some() {
+        current.tool_output_tokens = update.tool_output_tokens;
+    }
+    if update.tool_output_limit_tokens.is_some() {
+        current.tool_output_limit_tokens = update.tool_output_limit_tokens;
+    }
+    if update.response_output_limit_tokens.is_some() {
+        current.response_output_limit_tokens = update.response_output_limit_tokens;
+    }
+    if update.orchestration_skills_suppressed.is_some() {
+        current.orchestration_skills_suppressed = update.orchestration_skills_suppressed;
+    }
     if update.output_bytes.is_some() {
         current.output_bytes = update.output_bytes;
     }
