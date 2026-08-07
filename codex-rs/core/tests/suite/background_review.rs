@@ -372,11 +372,10 @@ async fn orchestration_skill_is_suppressed_while_seeded_defect_is_detected() -> 
     assert!(review_body_text.contains("You are the sole reviewer"));
     assert!(review_body_text.contains("average.rs"));
     assert!(!review_body_text.contains("Use subagents to review code"));
-    assert!(
-        review_body["max_output_tokens"]
-            .as_u64()
-            .is_some_and(|limit| limit > 0),
-        "review request must carry a provider output cap: {review_body:?}"
+    assert_eq!(
+        review_body["max_output_tokens"].as_u64(),
+        Some(65_536),
+        "review request must carry a provider output cap bounded by the review output budget: {review_body:?}"
     );
     let tools = review_body["tools"]
         .as_array()
@@ -749,11 +748,10 @@ async fn background_review_caps_tool_output_and_rejects_projected_followup() -> 
         run.cancel_reason.as_deref(),
         Some(AutoReviewTerminalReason::BudgetTotalTokens.cancel_reason())
     );
-    assert!(
-        run.error_summary
-            .as_deref()
-            .is_some_and(|summary| summary.contains("background_max_total_tokens"))
-    );
+    assert!(run.error_summary.as_deref().is_some_and(|summary| {
+        summary.contains("background_max_total_tokens")
+            && summary.contains("response reached its provider cap")
+    }));
     let state = store
         .load_run_state(&run.run_id)?
         .context("token-stopped run must persist projected diagnostics")?;
@@ -834,11 +832,10 @@ async fn background_review_output_limited_response_persists_token_budget_stop() 
         run.cancel_reason.as_deref(),
         Some(AutoReviewTerminalReason::BudgetTotalTokens.cancel_reason())
     );
-    assert!(
-        run.error_summary
-            .as_deref()
-            .is_some_and(|summary| summary.contains("background_max_total_tokens"))
-    );
+    assert!(run.error_summary.as_deref().is_some_and(|summary| {
+        summary.contains("background_max_total_tokens")
+            && summary.contains("response reached its provider cap")
+    }));
     let state = store
         .load_run_state(&run.run_id)?
         .context("output-limited review must persist token diagnostics")?;

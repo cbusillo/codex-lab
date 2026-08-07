@@ -6,6 +6,7 @@ use codex_auto_review::AutoReviewUsage;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_utils_output_truncation::approx_token_count;
+use codex_utils_output_truncation::approx_tokens_from_byte_count;
 
 use crate::client_common::Prompt;
 use crate::context_manager::estimate_item_token_count;
@@ -28,6 +29,12 @@ const MIN_USEFUL_RESPONSE_OUTPUT_TOKENS: u64 = 1_024;
 /// result by four treats each visible byte as a token, providing a conservative
 /// upper bound for text and serialized request content.
 const INPUT_ESTIMATE_SAFETY_FACTOR: u64 = 4;
+/// Reasoning tokens count against the provider response ceiling without
+/// appearing in the visible review output. Reserve four times the visible
+/// output estimate so useful reasoning can complete within the byte budget.
+const RESPONSE_REASONING_HEADROOM_FACTOR: u64 = 4;
+/// Absolute provider response ceiling for one background-review request.
+const MAX_RESPONSE_OUTPUT_TOKENS: u64 = 65_536;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackgroundReviewBudgetGate {
@@ -35,6 +42,7 @@ pub(crate) struct BackgroundReviewBudgetGate {
     effective_total_token_limit: u64,
     accounting_tolerance_tokens: u64,
     tool_output_limit_tokens: usize,
+    max_response_output_tokens: u64,
     state: Arc<Mutex<BackgroundReviewBudgetGateState>>,
 }
 
@@ -75,11 +83,18 @@ impl BackgroundReviewBudgetGate {
             .max_total_tokens
             .div_ceil(TOOL_OUTPUT_BUDGET_DIVISOR)
             .clamp(1, MAX_TOOL_OUTPUT_TOKENS) as usize;
+        let max_response_output_tokens = approx_tokens_from_byte_count(budget.max_output_bytes)
+            .saturating_mul(RESPONSE_REASONING_HEADROOM_FACTOR)
+            .clamp(
+                MIN_USEFUL_RESPONSE_OUTPUT_TOKENS,
+                MAX_RESPONSE_OUTPUT_TOKENS,
+            );
         Self {
             budget,
             effective_total_token_limit,
             accounting_tolerance_tokens,
             tool_output_limit_tokens,
+            max_response_output_tokens,
             state: Arc::new(Mutex::new(BackgroundReviewBudgetGateState::default())),
         }
     }
@@ -129,8 +144,9 @@ impl BackgroundReviewBudgetGate {
             .max_total_tokens
             .saturating_sub(projected_input_tokens)
             .saturating_sub(self.accounting_tolerance_tokens);
-        let response_output_limit_tokens =
-            available_output_tokens.min(prompt.max_output_tokens.unwrap_or(u64::MAX));
+        let response_output_limit_tokens = available_output_tokens
+            .min(self.max_response_output_tokens)
+            .min(prompt.max_output_tokens.unwrap_or(u64::MAX));
         let projected_total_tokens = projected_input_tokens
             .saturating_add(response_output_limit_tokens)
             .saturating_add(self.accounting_tolerance_tokens);

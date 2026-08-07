@@ -33,6 +33,13 @@ fn prompt(text: &str) -> Prompt {
     }
 }
 
+fn budget_with_output_bytes(max_total_tokens: u64, max_output_bytes: usize) -> AutoReviewBudget {
+    AutoReviewBudget {
+        max_output_bytes,
+        ..budget(max_total_tokens)
+    }
+}
+
 #[test]
 fn reserves_bounded_headroom_and_caps_each_tool_output() {
     let gate = BackgroundReviewBudgetGate::new(budget(/*max_total_tokens*/ 250_000));
@@ -42,6 +49,46 @@ fn reserves_bounded_headroom_and_caps_each_tool_output() {
     assert_eq!(usage.accounting_tolerance_tokens, Some(10_000));
     assert_eq!(usage.tool_output_limit_tokens, Some(4_096));
     assert_eq!(usage.orchestration_skills_suppressed, Some(true));
+}
+
+#[test]
+fn default_output_bytes_bound_the_provider_response() {
+    let gate = BackgroundReviewBudgetGate::new(budget_with_output_bytes(
+        /*max_total_tokens*/ 250_000, /*max_output_bytes*/ 65_536,
+    ));
+    let mut request = prompt("inspect the diff");
+
+    assert!(gate.authorize_request(&mut request, None, /*retry*/ false));
+    assert_eq!(request.max_output_tokens, Some(MAX_RESPONSE_OUTPUT_TOKENS));
+    assert_eq!(
+        gate.usage(None).response_output_limit_tokens,
+        Some(MAX_RESPONSE_OUTPUT_TOKENS)
+    );
+}
+
+#[test]
+fn smaller_output_budget_tightens_the_provider_response() {
+    let gate = BackgroundReviewBudgetGate::new(budget_with_output_bytes(
+        /*max_total_tokens*/ 250_000, /*max_output_bytes*/ 4_096,
+    ));
+    let mut request = prompt("inspect the diff");
+
+    assert!(gate.authorize_request(&mut request, None, /*retry*/ false));
+    assert_eq!(request.max_output_tokens, Some(4_096));
+}
+
+#[test]
+fn output_budget_below_a_useful_response_preserves_the_existing_output_check() {
+    let gate = BackgroundReviewBudgetGate::new(budget_with_output_bytes(
+        /*max_total_tokens*/ 250_000, /*max_output_bytes*/ 4,
+    ));
+    let mut request = prompt("inspect the diff");
+
+    assert!(gate.authorize_request(&mut request, None, /*retry*/ false));
+    assert_eq!(
+        request.max_output_tokens,
+        Some(MIN_USEFUL_RESPONSE_OUTPUT_TOKENS)
+    );
 }
 
 #[test]
