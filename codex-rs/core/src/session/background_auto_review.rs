@@ -309,6 +309,7 @@ impl Session {
                 )
                 .await
             {
+                drop(review_lock_guard);
                 sess.record_superseded_background_auto_review(
                     &persistence,
                     schedule.generation,
@@ -639,10 +640,10 @@ impl Session {
                 .filter(|run| run.source == AutoReviewRunSource::Background)
             {
                 let belongs_to_this_thread = match store.load_run_state(&run.run_id) {
-                    Ok(Some(state)) => state
-                        .owner_thread_id
-                        .is_none_or(|owner_thread_id| owner_thread_id == current_thread_id),
-                    Ok(None) => true,
+                    Ok(Some(state)) => {
+                        state.owner_thread_id.as_deref() == Some(current_thread_id.as_str())
+                    }
+                    Ok(None) => false,
                     Err(err) => {
                         warn!(
                             run_id = %run.run_id,

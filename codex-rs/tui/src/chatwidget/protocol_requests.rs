@@ -127,13 +127,25 @@ impl ChatWidget {
                 if current_matches {
                     self.add_to_history(history_cell::new_auto_review_summary_cell(&response));
                 } else if latest_matches {
-                    self.add_to_history(history_cell::new_auto_review_run_summary_cell(
-                        response
-                            .latest
-                            .as_ref()
-                            .expect("latest match checked above"),
-                        response.diagnostics.as_ref(),
-                    ));
+                    let latest = response
+                        .latest
+                        .as_ref()
+                        .expect("latest match checked above");
+                    if latest.status
+                        == codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
+                        && latest.freshness
+                            != codex_app_server_protocol::AutoReviewFreshness::Current
+                    {
+                        self.add_to_history(history_cell::new_hidden_auto_review_run_summary_cell(
+                            latest,
+                            response.diagnostics.as_ref(),
+                        ));
+                    } else {
+                        self.add_to_history(history_cell::new_auto_review_run_summary_cell(
+                            latest,
+                            response.diagnostics.as_ref(),
+                        ));
+                    }
                 } else if let Some(fallback) = fallback.as_ref() {
                     self.add_to_history(history_cell::new_auto_review_status_cell(fallback));
                 } else {

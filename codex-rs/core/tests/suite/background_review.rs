@@ -209,6 +209,23 @@ async fn submit_turn(codex: &CodexThread, cwd: &AbsolutePathBuf, text: &str) -> 
     Ok(())
 }
 
+async fn shutdown_thread(codex: &CodexThread) -> Result<()> {
+    codex.submit(Op::Shutdown).await?;
+    loop {
+        if matches!(codex.next_event().await?.msg, EventMsg::ShutdownComplete) {
+            return Ok(());
+        }
+    }
+}
+
+async fn wait_for_turn_complete(codex: &CodexThread) -> Result<()> {
+    loop {
+        if matches!(codex.next_event().await?.msg, EventMsg::TurnComplete(_)) {
+            return Ok(());
+        }
+    }
+}
+
 /// Drains the event stream until the background review reaches `terminal`,
 /// returning every background-review status seen along the way. Panics if the
 /// review leaks review-mode UI events, which background reviews must never do.
@@ -331,21 +348,50 @@ async fn startup_reconciles_orphaned_background_review_into_cancelled_event() ->
     let repo = create_git_repo()?;
     let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
     let codex_home = Arc::new(TempDir::new()?);
-    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
-    store.save_run(&in_flight_background_run(
-        repo.path(),
-        "orphaned-background-review",
-    ))?;
-
     let server = responses::start_mock_server().await;
+    let _initial_response = responses::mount_sse_sequence(
+        &server,
+        vec![responses::sse(vec![
+            responses::ev_response_created("resp-initial-owner"),
+            responses::ev_assistant_message("msg-initial-owner", "no changes needed"),
+            responses::ev_completed("resp-initial-owner"),
+        ])],
+    )
+    .await;
     let config_cwd = cwd.clone();
-    let test = Box::pin(
+    let initial = Box::pin(
         test_codex()
             .with_home(Arc::clone(&codex_home))
             .with_config(move |config| config.cwd = config_cwd)
             .build(&server),
     )
     .await?;
+    let owner_thread_id = initial.session_configured.thread_id.to_string();
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .context("initial thread must have a rollout path")?;
+    submit_turn(&initial.codex, &cwd, "inspect without changing files").await?;
+    wait_for_turn_complete(&initial.codex).await?;
+    shutdown_thread(&initial.codex).await?;
+
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let run = in_flight_background_run(repo.path(), "orphaned-background-review");
+    store.save_run(&run)?;
+    store.update_run_state(&run.run_id, |state| {
+        state.owner_thread_id = Some(owner_thread_id.clone());
+        Ok(())
+    })?;
+
+    let resumed_cwd = cwd.clone();
+    let mut resume_builder = test_codex().with_config(move |config| config.cwd = resumed_cwd);
+    let test =
+        Box::pin(resume_builder.resume(&server, Arc::clone(&codex_home), rollout_path)).await?;
+    assert_eq!(
+        test.session_configured.thread_id.to_string(),
+        owner_thread_id
+    );
 
     let statuses = Box::pin(background_review_statuses_until(
         &test.codex,
@@ -363,6 +409,53 @@ async fn startup_reconciles_orphaned_background_review_into_cancelled_event() ->
     let reconciled = store.load_run("orphaned-background-review")?;
     assert_eq!(reconciled.status, AutoReviewRunStatus::Lost);
     assert_eq!(reconciled.freshness, AutoReviewRunFreshness::Lost);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconciles_ownerless_orphan_without_emitting_event() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let run = in_flight_background_run(repo.path(), "ownerless-orphan");
+    store.save_run(&run)?;
+
+    let server = responses::start_mock_server().await;
+    let config_cwd = cwd.clone();
+    let test = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = config_cwd)
+            .build(&server),
+    )
+    .await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, test.codex.next_event()).await {
+            Err(_) => break,
+            Ok(Ok(event)) => {
+                if let EventMsg::BackgroundAutoReviewStatus(status) = event.msg
+                    && status.run_id == run.run_id
+                {
+                    panic!("ownerless recovery event leaked into a fresh thread: {status:?}");
+                }
+            }
+            Ok(Err(err)) => panic!("background review event stream ended: {err}"),
+        }
+    }
+    assert_eq!(
+        store.load_run(&run.run_id)?.status,
+        AutoReviewRunStatus::Lost
+    );
 
     Ok(())
 }

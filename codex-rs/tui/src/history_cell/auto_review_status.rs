@@ -68,6 +68,16 @@ pub(crate) fn new_auto_review_run_summary_cell(
     PlainHistoryCell::new(lines)
 }
 
+pub(crate) fn new_hidden_auto_review_run_summary_cell(
+    summary: &AutoReviewRunSummary,
+    diagnostics: Option<&AutoReviewDiagnosticsSummary>,
+) -> PlainHistoryCell {
+    let mut lines = Vec::new();
+    push_hidden_summary_lines(&mut lines, summary);
+    push_diagnostics(&mut lines, diagnostics);
+    PlainHistoryCell::new(lines)
+}
+
 pub(crate) fn new_auto_review_summary_error_cell(error: String) -> PlainHistoryCell {
     PlainHistoryCell::new(vec![Line::from(vec![
         "✗ ".red(),
@@ -109,29 +119,7 @@ fn push_no_current_summary_lines(
     response: &AutoReviewSummaryReadResponse,
 ) {
     if let Some(latest) = response.latest.as_ref() {
-        lines.push(Line::from(vec![
-            "○ ".dim(),
-            "Background Review has no current findings".bold(),
-            " · latest ".dim(),
-            Span::from(freshness_label(latest.freshness)).dim(),
-            " · ".dim(),
-            Span::from(latest.run_id.clone()).dim(),
-        ]));
-        push_summary_metadata(lines, latest);
-        let hidden_reason = match latest.freshness {
-            AutoReviewFreshness::Current => {
-                "Latest review output is hidden because it does not apply to this review target."
-                    .to_string()
-            }
-            AutoReviewFreshness::Stale | AutoReviewFreshness::Detached => format!(
-                "Latest review output is {} and hidden because it no longer matches this worktree.",
-                freshness_label(latest.freshness)
-            ),
-        };
-        lines.push(Line::from(vec![
-            "  ".into(),
-            Span::from(hidden_reason).dim(),
-        ]));
+        push_hidden_summary_lines(lines, latest);
     } else {
         lines.push(Line::from(vec![
             "✔ ".green(),
@@ -139,6 +127,32 @@ fn push_no_current_summary_lines(
         ]));
     }
     push_status_counts(lines, &response.status_counts);
+}
+
+fn push_hidden_summary_lines(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRunSummary) {
+    lines.push(Line::from(vec![
+        "○ ".dim(),
+        "Background Review has no current findings".bold(),
+        " · latest ".dim(),
+        Span::from(freshness_label(summary.freshness)).dim(),
+        " · ".dim(),
+        Span::from(summary.run_id.clone()).dim(),
+    ]));
+    push_summary_metadata(lines, summary);
+    let hidden_reason = match summary.freshness {
+        AutoReviewFreshness::Current => {
+            "Latest review output is hidden because it does not apply to this review target."
+                .to_string()
+        }
+        AutoReviewFreshness::Stale | AutoReviewFreshness::Detached => format!(
+            "Latest review output is {} and hidden because it no longer matches this worktree.",
+            freshness_label(summary.freshness)
+        ),
+    };
+    lines.push(Line::from(vec![
+        "  ".into(),
+        Span::from(hidden_reason).dim(),
+    ]));
 }
 
 fn push_summary_metadata(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRunSummary) {
