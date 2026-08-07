@@ -751,6 +751,7 @@ impl ReviewPersistenceContext {
             if let Some(owner_thread_id) = &self.owner_thread_id {
                 state.owner_thread_id = Some(owner_thread_id.clone());
             }
+            state.owner_process_id = Some(std::process::id());
             if let Some(budget) = &self.background_budget {
                 state.budget = Some(budget.clone());
             }

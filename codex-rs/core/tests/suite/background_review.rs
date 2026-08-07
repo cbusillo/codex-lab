@@ -461,7 +461,7 @@ async fn startup_reconciles_ownerless_orphan_without_emitting_event() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_does_not_reconcile_live_manual_review_without_liveness_proof() -> Result<()> {
+async fn startup_preserves_live_and_legacy_manual_reviews() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let repo = create_git_repo()?;
@@ -471,6 +471,13 @@ async fn startup_does_not_reconcile_live_manual_review_without_liveness_proof() 
     let mut run = in_flight_background_run(repo.path(), "live-manual-review");
     run.source = AutoReviewRunSource::Manual;
     store.save_run(&run)?;
+    store.update_run_state(&run.run_id, |state| {
+        state.owner_process_id = Some(std::process::id());
+        Ok(())
+    })?;
+    let mut legacy_run = in_flight_background_run(repo.path(), "legacy-manual-review");
+    legacy_run.source = AutoReviewRunSource::Manual;
+    store.save_run(&legacy_run)?;
 
     let server = responses::start_mock_server().await;
     let config_cwd = cwd.clone();
@@ -485,6 +492,48 @@ async fn startup_does_not_reconcile_live_manual_review_without_liveness_proof() 
     let stored = store.load_run(&run.run_id)?;
     assert_eq!(stored.status, AutoReviewRunStatus::Running);
     assert_eq!(stored.error_summary, None);
+    let legacy_stored = store.load_run(&legacy_run.run_id)?;
+    assert_eq!(legacy_stored.status, AutoReviewRunStatus::Running);
+    assert_eq!(legacy_stored.error_summary, None);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconciles_manual_review_owned_by_dead_process() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let codex_home = Arc::new(TempDir::new()?);
+    let store = AutoReviewStore::for_scope(codex_home.path(), repo.path());
+    let mut run = in_flight_background_run(repo.path(), "dead-manual-review");
+    run.source = AutoReviewRunSource::Manual;
+    store.save_run(&run)?;
+    let mut child = Command::new("sh").arg("-c").arg("exit 0").spawn()?;
+    let dead_pid = child.id();
+    child.wait()?;
+    store.update_run_state(&run.run_id, |state| {
+        state.owner_process_id = Some(dead_pid);
+        Ok(())
+    })?;
+
+    let server = responses::start_mock_server().await;
+    let config_cwd = cwd.clone();
+    let _test = Box::pin(
+        test_codex()
+            .with_home(Arc::clone(&codex_home))
+            .with_config(move |config| config.cwd = config_cwd)
+            .build(&server),
+    )
+    .await?;
+
+    let stored = store.load_run(&run.run_id)?;
+    assert_eq!(stored.status, AutoReviewRunStatus::Lost);
+    assert_eq!(
+        stored.error_summary.as_deref(),
+        Some("review did not survive process restart")
+    );
     Ok(())
 }
 
@@ -860,6 +909,7 @@ async fn orchestration_skill_is_suppressed_while_seeded_defect_is_detected() -> 
         state.owner_thread_id,
         Some(test.session_configured.thread_id.to_string())
     );
+    assert_eq!(state.owner_process_id, Some(std::process::id()));
     assert_eq!(state.usage.orchestration_skills_suppressed, Some(true));
     assert_eq!(state.usage.request_count, Some(1));
     assert!(

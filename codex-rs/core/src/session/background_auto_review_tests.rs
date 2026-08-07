@@ -93,7 +93,7 @@ fn background_auto_review_duplicate_visibility_respects_thread_ownership() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn background_auto_review_lock_retry_outlasts_pending_debounce_handoff() {
     let codex_home = TempDir::new().expect("create temp codex home");
     let scope = TempDir::new().expect("create temp scope");

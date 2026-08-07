@@ -10,6 +10,7 @@ use codex_auto_review::AutoReviewTerminalReason;
 use codex_auto_review::AutoReviewUsage;
 use codex_auto_review::ReviewCoordination;
 use codex_auto_review::ReviewLockGuard;
+use codex_auto_review::review_owner_process_is_alive;
 use codex_git_utils::diff_fingerprint;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_worktree_diff_fingerprint;
@@ -609,54 +610,85 @@ impl Session {
             if !seen_scopes.insert(scope.clone()) {
                 continue;
             }
-            let coordination = ReviewCoordination::for_scope(&codex_home, &scope);
-            if let Err(err) = coordination.clear_stale_lock_if_dead() {
-                warn!(error = %err, "failed to clear stale background auto review lock");
-                continue;
-            }
-            let live_run_id = match coordination.read_lock_info() {
-                Ok(Some(lock_info)) => auto_review_run_id_from_lock_intent(&lock_info.intent),
-                Ok(None) => None,
-                Err(err) => {
-                    warn!(error = %err, "failed to read background auto review lock");
-                    continue;
-                }
-            };
-            let live_run_ids = live_run_id.into_iter().collect::<Vec<_>>();
-            let store = AutoReviewStore::for_scope(&codex_home, &scope);
             let current_thread_id = self.thread_id().to_string();
-            let reconciled = match store.reconcile_orphaned_in_flight_with_filter(
-                live_run_ids.iter().map(String::as_str),
-                now_unix_timestamp_ms() / 1000,
-                |run| run.source == AutoReviewRunSource::Background,
-            ) {
-                Ok(reconciled) => reconciled,
-                Err(err) => {
-                    warn!(error = %err, "failed to reconcile durable auto review runs");
-                    continue;
+            let recovery_codex_home = codex_home.clone();
+            let recovered_background_runs = match tokio::task::spawn_blocking(move || {
+                let coordination = ReviewCoordination::for_scope(&recovery_codex_home, &scope);
+                if let Err(err) = coordination.clear_stale_lock_if_dead() {
+                    warn!(error = %err, "failed to clear stale background auto review lock");
+                    return None;
                 }
-            };
-            for run in reconciled
-                .into_iter()
-                .filter(|run| run.source == AutoReviewRunSource::Background)
-            {
-                let belongs_to_this_thread = match store.load_run_state(&run.run_id) {
-                    Ok(Some(state)) => {
-                        state.owner_thread_id.as_deref() == Some(current_thread_id.as_str())
-                    }
-                    Ok(None) => false,
+                let live_run_id = match coordination.read_lock_info() {
+                    Ok(Some(lock_info)) => auto_review_run_id_from_lock_intent(&lock_info.intent),
+                    Ok(None) => None,
                     Err(err) => {
-                        warn!(
-                            run_id = %run.run_id,
-                            error = %err,
-                            "failed to route recovered auto review event to its owning thread"
-                        );
-                        false
+                        warn!(error = %err, "failed to read background auto review lock");
+                        return None;
                     }
                 };
-                if !belongs_to_this_thread {
+                let live_run_ids = live_run_id.into_iter().collect::<Vec<_>>();
+                let store = AutoReviewStore::for_scope(&recovery_codex_home, &scope);
+                let reconciled = match store.reconcile_orphaned_in_flight_with_filter(
+                    live_run_ids.iter().map(String::as_str),
+                    now_unix_timestamp_ms() / 1000,
+                    |run| match run.source {
+                        AutoReviewRunSource::Background => true,
+                        AutoReviewRunSource::Manual => match store.load_run_state(&run.run_id) {
+                            Ok(Some(state)) => state
+                                .owner_process_id
+                                .is_some_and(|pid| !review_owner_process_is_alive(pid)),
+                            // Legacy manual reviews have no durable liveness proof. Preserve them
+                            // rather than risking cancellation of a still-running review.
+                            Ok(None) => false,
+                            Err(err) => {
+                                warn!(
+                                    run_id = %run.run_id,
+                                    error = %err,
+                                    "preserving manual auto review with unreadable owner state"
+                                );
+                                false
+                            }
+                        },
+                    },
+                ) {
+                    Ok(reconciled) => reconciled,
+                    Err(err) => {
+                        warn!(error = %err, "failed to reconcile durable auto review runs");
+                        return None;
+                    }
+                };
+                Some(
+                    reconciled
+                        .into_iter()
+                        .filter(|run| run.source == AutoReviewRunSource::Background)
+                        .filter(|run| match store.load_run_state(&run.run_id) {
+                            Ok(Some(state)) => {
+                                state.owner_thread_id.as_deref()
+                                    == Some(current_thread_id.as_str())
+                            }
+                            Ok(None) => false,
+                            Err(err) => {
+                                warn!(
+                                    run_id = %run.run_id,
+                                    error = %err,
+                                    "failed to route recovered auto review event to its owning thread"
+                                );
+                                false
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .await
+            {
+                Ok(Some(recovered_background_runs)) => recovered_background_runs,
+                Ok(None) => continue,
+                Err(err) => {
+                    warn!(error = %err, "background auto review recovery task failed");
                     continue;
                 }
+            };
+            for run in recovered_background_runs {
                 events.push(Event {
                     id: run.run_id.clone(),
                     msg: EventMsg::BackgroundAutoReviewStatus(BackgroundAutoReviewStatusEvent {

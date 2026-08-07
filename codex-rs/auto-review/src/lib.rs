@@ -17,6 +17,7 @@ mod review_coord;
 pub use review_coord::ReviewCoordination;
 pub use review_coord::ReviewLockGuard;
 pub use review_coord::ReviewLockInfo;
+pub use review_coord::review_owner_process_is_alive;
 
 pub const SUMMARY_MAX_FINDINGS: usize = 20;
 pub const SUMMARY_MAX_FIELD_BYTES: usize = 240;
@@ -1122,6 +1123,8 @@ pub struct AutoReviewRunState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_process_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<AutoReviewBudget>,
     #[serde(default)]
     pub usage: AutoReviewUsage,
@@ -1137,6 +1140,7 @@ impl AutoReviewRunState {
             schema_version: RUN_STATE_SCHEMA_VERSION,
             run_id: run_id.into(),
             owner_thread_id: None,
+            owner_process_id: None,
             budget: None,
             usage: AutoReviewUsage::default(),
             terminal_reason: None,
